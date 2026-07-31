@@ -3,6 +3,7 @@
 import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, KeyboardEvent } from "react";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import { clearDraft, getDraft, setDraft, type ChatDraftImage } from "@/lib/draft-store";
+import { applySlashSelection, findSlashQuery } from "@/lib/slash-command";
 import {
   MAX_ATTACHED_IMAGE_BYTES,
   MAX_ATTACHED_IMAGES,
@@ -40,6 +41,8 @@ interface Props {
   modelNames?: Record<string, string>;
   modelList?: { id: string; name: string; provider: string }[];
   modelError?: string | null;
+  /** Diagnostics from resolving `enabledModels`, e.g. a pattern that matched nothing. */
+  modelScopeWarnings?: string[];
   onModelChange?: (provider: string, modelId: string) => void;
   onCompact?: () => void;
   onAbortCompaction?: () => void;
@@ -63,9 +66,16 @@ interface Props {
   soundEnabled?: boolean;
   onSoundToggle?: () => void;
   onAudioUnlock?: () => void;
+  notificationEnabled?: boolean;
+  notificationPermission?: NotificationPermission | "unsupported";
+  onNotificationToggle?: () => void;
   draftKey?: string;
   /** Session working directory — enables the @ file autocomplete menu */
   cwd?: string | null;
+  /** 新会话可选的 worktree 列表；已有会话不显示此选择器。 */
+  newSessionWorktrees?: { path: string; branch: string | null; isMain: boolean }[];
+  newSessionCwd?: string | null;
+  onNewSessionCwdChange?: (cwd: string) => void;
 }
 
 export interface ChatInputHandle {
@@ -79,6 +89,7 @@ const TOOL_PRESETS = ["off", "default", "full"] as const;
 const TOOL_PRESET_MAP: Record<"off" | "default" | "full", "none" | "default" | "full"> = { off: "none", default: "default", full: "full" };
 const COMPOSITION_END_ENTER_GRACE_MS = 100;
 const MODEL_FILTER_THRESHOLD = 8;
+const TEXTAREA_MAX_HEIGHT = 200;
 const MODEL_OPTION_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
 function compareModelOptions(a: ModelOption, b: ModelOption): number {
@@ -212,8 +223,8 @@ function QueuedMessageRow({ kind, text }: { kind: "steer" | "follow-up"; text: s
   );
 }
 
-export function ModelErrorBanner({ error }: { error?: string | null }) {
-  if (!error) return null;
+function ModelNoticeBanner({ tone, title, body }: { tone: "error" | "warning"; title: string; body: string }) {
+  const color = tone === "error" ? "239,68,68" : "234,179,8";
   return (
     <div
       role="alert"
@@ -225,10 +236,10 @@ export function ModelErrorBanner({ error }: { error?: string | null }) {
         marginBottom: 8,
         padding: "7px 10px",
         overflowY: "auto",
-        border: "1px solid rgba(239,68,68,0.3)",
+        border: `1px solid rgba(${color},0.3)`,
         borderRadius: 6,
-        background: "rgba(239,68,68,0.07)",
-        color: "#ef4444",
+        background: `rgba(${color},0.07)`,
+        color: `rgb(${color})`,
         fontSize: 11,
         lineHeight: 1.45,
       }}
@@ -250,24 +261,44 @@ export function ModelErrorBanner({ error }: { error?: string | null }) {
         <line x1="12" y1="17" x2="12.01" y2="17" />
       </svg>
       <div style={{ minWidth: 0 }}>
-        <div style={{ fontWeight: 600 }}>Model error</div>
-        <div style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{error}</div>
+        <div style={{ fontWeight: 600 }}>{title}</div>
+        <div style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{body}</div>
       </div>
     </div>
   );
 }
 
+export function ModelErrorBanner({ error }: { error?: string | null }) {
+  if (!error) return null;
+  return <ModelNoticeBanner tone="error" title="Model error" body={error} />;
+}
+
+/** Surfaces `enabledModels` patterns that matched nothing, so a typo is visible (#307). */
+export function ModelScopeWarningBanner({ warnings }: { warnings?: string[] }) {
+  if (!warnings || warnings.length === 0) return null;
+  return (
+    <ModelNoticeBanner
+      tone="warning"
+      title={warnings.length > 1 ? "Model scope warnings" : "Model scope warning"}
+      body={warnings.join("\n")}
+    />
+  );
+}
+
 export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, onModelChange,
+  onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, modelScopeWarnings, onModelChange,
   onCompact, onAbortCompaction, isCompacting, compactError, compactResult, toolPreset, onToolPresetChange,
   thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap,
   retryInfo, queuedMessages, inputHistory = [], onRecallQueue,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   onBuiltinCommand,
-  soundEnabled, onSoundToggle, onAudioUnlock,
+  soundEnabled, onSoundToggle, onAudioUnlock, notificationEnabled, notificationPermission, onNotificationToggle,
   onPromptWithStreamingBehavior,
   draftKey,
   cwd,
+  newSessionWorktrees,
+  newSessionCwd,
+  onNewSessionCwdChange,
 }: Props, ref) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
@@ -286,6 +317,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const bashExcluded = bashMode && trimmedValue.startsWith("!!");
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
+  const [slashCursor, setSlashCursor] = useState<number | null>(null);
   const [atQuery, setAtQuery] = useState<AtQueryMatch | null>(null);
   const [atMenuOpen, setAtMenuOpen] = useState(false);
   const [atActiveIndex, setAtActiveIndex] = useState(0);
@@ -315,8 +347,26 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const valueRef = useRef(value);
   const attachedImagesRef = useRef(attachedImages);
   const pendingImageCountRef = useRef(0);
+  const resizeFrameRef = useRef<number | null>(null);
+  const textareaAtMaxHeightRef = useRef(false);
   valueRef.current = value;
   attachedImagesRef.current = attachedImages;
+
+  const resizeTextarea = useCallback((force = false) => {
+    const ta = textareaRef.current;
+    if (!ta || (!force && textareaAtMaxHeightRef.current)) return;
+    if (resizeFrameRef.current !== null) cancelAnimationFrame(resizeFrameRef.current);
+    resizeFrameRef.current = requestAnimationFrame(() => {
+      resizeFrameRef.current = null;
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      if (!force && textarea.scrollHeight <= textarea.clientHeight) return;
+      if (force) textarea.style.height = "auto";
+      const height = Math.min(textarea.scrollHeight, TEXTAREA_MAX_HEIGHT);
+      textarea.style.height = `${height}px`;
+      textareaAtMaxHeightRef.current = textarea.scrollHeight > TEXTAREA_MAX_HEIGHT;
+    });
+  }, []);
 
   useImperativeHandle(ref, () => ({
     insertIfEmpty(text: string) {
@@ -440,6 +490,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     clearImages();
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
+      textareaAtMaxHeightRef.current = false;
     }
   }, [clearImages, draftKey]);
 
@@ -474,14 +525,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, [draftKey]);
 
   useEffect(() => {
-    const ta = textareaRef.current;
-    if (!ta) return;
-    ta.style.height = "auto";
-    if (value) ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
-  }, [value]);
+    resizeTextarea(true);
+  }, [draftKey, resizeTextarea]);
 
   useEffect(() => {
     return () => {
+      if (resizeFrameRef.current !== null) cancelAnimationFrame(resizeFrameRef.current);
       attachedImagesRef.current.forEach(revokeImagePreview);
     };
   }, []);
@@ -502,13 +551,15 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     clearInput();
   }, [value, attachedImages, isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock]);
 
-  const slashQuery = value.startsWith("/") && !/\s/.test(value.slice(1))
-    ? value.slice(1).toLowerCase()
-    : null;
+  const slashInputEnd = Math.min(slashCursor ?? value.length, value.length);
+  const slashInputPrefix = value.slice(0, slashInputEnd);
+  const slash = findSlashQuery(slashInputPrefix);
+  const slashQuery = slash?.query ?? null;
 
   const filteredSlashCommands = (() => {
     if (slashQuery === null) return [];
-    const commands = [...(isStreaming ? [] : BUILTIN_SLASH_COMMANDS), ...(slashCommands ?? [])];
+    const commands = [...(isStreaming ? [] : BUILTIN_SLASH_COMMANDS), ...(slashCommands ?? [])]
+      .filter((command) => !slash?.inline || command.source === "skill");
     return [...commands]
       .filter((command) => {
         const name = command.name.toLowerCase();
@@ -710,19 +761,26 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, []);
 
   const applySlashCommand = useCallback((command: SlashCommandPaletteItem) => {
-    const nextValue = `/${command.name} `;
+    const inputEnd = Math.min(slashCursor ?? value.length, value.length);
+    const inputPrefix = value.slice(0, inputEnd);
+    const activeSlash = findSlashQuery(inputPrefix);
+    if (!activeSlash) return;
+    const selectedPrefix = applySlashSelection(inputPrefix, activeSlash, command.name);
+    const nextValue = selectedPrefix + value.slice(inputEnd);
+    const nextCursor = selectedPrefix.length;
     setValue(nextValue);
+    setSlashCursor(nextCursor);
     setSlashMenuOpen(false);
     setSlashActiveIndex(0);
     requestAnimationFrame(() => {
       const ta = textareaRef.current;
       if (!ta) return;
       ta.focus();
-      ta.setSelectionRange(nextValue.length, nextValue.length);
+      ta.setSelectionRange(nextCursor, nextCursor);
       ta.style.height = "auto";
       ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
     });
-  }, []);
+  }, [slashCursor, value]);
 
   const sendQueued = useCallback((mode: "steer" | "followup") => {
     const msg = value.trim();
@@ -910,12 +968,15 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     [isStreaming, onSteer, onFollowUp, onAbort, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value]
   );
 
-  const handleInput = useCallback(() => {
-    const ta = textareaRef.current;
-    if (!ta) return;
-    ta.style.height = "auto";
-    ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
-  }, []);
+  const handleInput = useCallback((event: React.FormEvent<HTMLTextAreaElement>) => {
+    const inputType = (event.nativeEvent as InputEvent).inputType ?? "";
+    // 达到最大高度后，普通输入不会改变控件尺寸；删除、换行和粘贴时才重新测量。
+    const mayShrinkOrReflow = inputType.startsWith("delete")
+      || inputType === "insertLineBreak"
+      || inputType === "insertParagraph"
+      || inputType === "insertFromPaste";
+    resizeTextarea(mayShrinkOrReflow);
+  }, [resizeTextarea]);
 
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
     const items = Array.from(e.clipboardData?.items ?? []);
@@ -1056,6 +1117,24 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       />
       <div style={{ maxWidth: 820, margin: "0 auto" }}>
         <ModelErrorBanner error={modelError} />
+        <ModelScopeWarningBanner warnings={modelScopeWarnings} />
+        {newSessionWorktrees && newSessionWorktrees.length > 1 && (
+          <label style={{ display: "flex", alignItems: "center", gap: 7, margin: "0 0 6px 4px", color: "var(--text-muted)", fontSize: 11 }}>
+            <span aria-hidden="true">⌘</span>
+            <select
+              aria-label="选择 worktree"
+              value={newSessionCwd ?? cwd ?? ""}
+              onChange={(event) => onNewSessionCwdChange?.(event.target.value)}
+              style={{ minWidth: 0, maxWidth: "100%", border: 0, outline: 0, background: "transparent", color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 11, cursor: "pointer" }}
+            >
+              {newSessionWorktrees.map((worktree) => (
+                <option key={worktree.path} value={worktree.path}>
+                  {worktree.branch ?? worktree.path}{worktree.isMain ? " · 主分支" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         {/* Queued steering / follow-up messages (delivered by pi on upcoming turns) */}
         {((queuedMessages?.steering.length ?? 0) + (queuedMessages?.followUp.length ?? 0)) > 0 && (
           <div style={{
@@ -1150,6 +1229,26 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               <polyline points="20 6 9 17 4 12" />
             </svg>
             {compactResultText}
+          </div>
+        )}
+        {compactError && (
+          <div
+            role="alert"
+            style={{
+              marginBottom: 8,
+              padding: "7px 10px",
+              background: "rgba(239,68,68,0.07)",
+              border: "1px solid rgba(239,68,68,0.3)",
+              borderRadius: 6,
+              color: "#ef4444",
+              fontFamily: "var(--font-mono)",
+              fontSize: 12,
+              lineHeight: 1.5,
+              whiteSpace: "pre-wrap",
+              overflowWrap: "anywhere",
+            }}
+          >
+            {compactError}
           </div>
         )}
         {/* Image previews */}
@@ -1517,11 +1616,15 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             value={value}
             onChange={(e) => {
               setValue(e.target.value);
+              const textarea = e.currentTarget;
+              // 某些移动端/自动填充输入事件会在光标更新前触发 change。
+              requestAnimationFrame(() => setSlashCursor(textarea.selectionStart));
               setHistoryMenuOpen(false);
               updateAtQuery(e.target.value, e.target.selectionStart);
             }}
             onSelect={(e) => {
               const el = e.currentTarget;
+              setSlashCursor(el.selectionStart);
               updateAtQuery(el.value, el.selectionStart);
             }}
             onKeyDown={handleKeyDown}
@@ -2091,18 +2194,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             )}
 
             {!isStreaming && onCompact && (
-              <div style={{ position: "relative" }}>
-                {compactError && (
-                  <div style={{
-                    position: "absolute", bottom: "calc(100% + 6px)", right: 0,
-                    background: "#1f2937", color: "#f87171",
-                    fontSize: 11, padding: "4px 8px", borderRadius: 5,
-                    whiteSpace: "nowrap", pointerEvents: "none",
-                    boxShadow: "0 2px 8px rgba(0,0,0,0.2)", zIndex: 50,
-                  }}>
-                    {compactError}
-                  </div>
-                )}
+              <div>
                 <button
                   onClick={isCompacting ? onAbortCompaction : onCompact}
                   disabled={isStreaming && !isCompacting}
@@ -2212,6 +2304,50 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                     <line x1="17" y1="9" x2="23" y2="15" />
                   </svg>
                 )}
+              </button>
+            )}
+            {onNotificationToggle !== undefined && notificationPermission !== "unsupported" && (
+              <button
+                onClick={onNotificationToggle}
+                title={notificationEnabled
+                  ? t("chat.disableNotification")
+                  : notificationPermission === "denied"
+                    ? t("chat.notificationBlocked")
+                    : t("chat.enableNotification")}
+                aria-label={notificationEnabled
+                  ? t("chat.disableNotification")
+                  : notificationPermission === "denied"
+                    ? t("chat.notificationBlocked")
+                    : t("chat.enableNotification")}
+                style={{
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  width: 32,
+                  height: 32,
+                  padding: 0,
+                  background: "none",
+                  border: "none",
+                  borderRadius: 9,
+                  color: notificationEnabled ? "var(--text-muted)" : "var(--text-dim)",
+                  cursor: "pointer",
+                  opacity: notificationEnabled ? 1 : 0.55,
+                  transition: "background 0.12s, color 0.12s, opacity 0.12s",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = "var(--bg-hover)";
+                  e.currentTarget.style.color = "var(--text)";
+                  e.currentTarget.style.opacity = "1";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = "none";
+                  e.currentTarget.style.color = notificationEnabled ? "var(--text-muted)" : "var(--text-dim)";
+                  e.currentTarget.style.opacity = notificationEnabled ? "1" : "0.55";
+                }}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9" />
+                  <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+                  {!notificationEnabled && <line x1="4" y1="4" x2="20" y2="20" />}
+                </svg>
               </button>
             )}
             {isMobile && controlsMenuOpen && (

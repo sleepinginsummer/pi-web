@@ -5,8 +5,10 @@ import { MarkdownBody } from "./MarkdownBody";
 import { copyText } from "@/lib/clipboard";
 import { useI18n } from "@/hooks/useI18n";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
-import { isEmptyThinkingBlock } from "@/lib/message-display";
+import { getAssistantErrorMessage, isEmptyThinkingBlock } from "@/lib/message-display";
 import { parseUnifiedPatch, type SplitDiffCell } from "@/lib/patch";
+import { parseSkillMessage } from "@/lib/skill-block";
+import { getLongUserMessageStats } from "@/lib/long-user-message";
 import type {
   AgentMessage,
   UserMessage,
@@ -23,6 +25,18 @@ import type {
 
 const MAX_THINKING_CACHE_ENTRIES = 100;
 const thinkingContentCache = new Map<string, Promise<string>>();
+
+function downloadTextFile(content: string): void {
+  const url = URL.createObjectURL(new Blob([content], { type: "text/plain;charset=utf-8" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "prompt.txt";
+  link.style.display = "none";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
 
 function loadThinkingContent(sessionId: string, entryId: string, blockIndex: number): Promise<string> {
   const key = `${sessionId}:${entryId}:${blockIndex}`;
@@ -151,6 +165,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
   const { t } = useI18n();
   const [hovered, setHovered] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [longMessageExpanded, setLongMessageExpanded] = useState(false);
 
   const content =
     typeof message.content === "string"
@@ -159,6 +174,12 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
           .filter((b): b is TextContent => b.type === "text")
           .map((b) => b.text)
           .join("\n");
+  const skillMessage = parseSkillMessage(content);
+  const displayContent = skillMessage?.userMessage ?? (skillMessage ? "" : content);
+  const skillCommand = skillMessage
+    ? `${skillMessage.skills.map((skill) => `/skill:${skill.name}`).join(" ")}${skillMessage.userMessage ? ` ${skillMessage.userMessage}` : ""}`
+    : null;
+  const longMessageStats = getLongUserMessageStats(displayContent);
 
   const imageBlocks: ImageContent[] =
     typeof message.content === "string"
@@ -170,7 +191,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
   const canNavigate = !!prevAssistantEntryId && !!onNavigate;
 
   const copyContent = () => {
-    copyText(content).then(() => {
+    copyText(skillCommand ?? content).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     });
@@ -222,7 +243,53 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
               })}
             </div>
           )}
-          {content && <MarkdownBody className="markdown-user-message" cwd={cwd} onOpenFile={onOpenFile}>{content}</MarkdownBody>}
+          {skillMessage && (
+            <div style={{ fontFamily: "var(--font-mono)", fontSize: 13, fontWeight: 600, marginBottom: displayContent ? 6 : 0 }}>
+              {skillMessage.skills.map((skill) => <div key={`${skill.name}:${skill.location}`}>[skill] {skill.name}</div>)}
+            </div>
+          )}
+          {displayContent && longMessageStats.compact ? (
+            <div style={{ minWidth: 0 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 9, minHeight: 34 }}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0, color: "var(--text-muted)" }}>
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z" />
+                  <path d="M14 2v6h6" />
+                  <path d="M8 13h8M8 17h6" />
+                </svg>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 600 }}>prompt.txt</div>
+                  <div style={{ color: "var(--text-dim)", fontSize: 11 }}>
+                    {t("chat.longMessageStats", {
+                      characters: longMessageStats.characters.toLocaleString(),
+                      lines: longMessageStats.lines.toLocaleString(),
+                    })}
+                  </div>
+                </div>
+                <button type="button" onClick={() => setLongMessageExpanded((expanded) => !expanded)} style={{ padding: "3px 7px", border: "none", background: "none", color: "var(--accent)", cursor: "pointer", fontSize: 11, whiteSpace: "nowrap" }}>
+                  {t(longMessageExpanded ? "chat.collapseLongMessage" : "chat.viewLongMessage")}
+                </button>
+                <button type="button" onClick={copyContent} title={t("i18n.copyMessage")} aria-label={t("i18n.copyMessage")} style={{ display: "flex", width: 26, height: 26, alignItems: "center", justifyContent: "center", padding: 0, border: "none", background: "none", color: copied ? "var(--accent)" : "var(--text-muted)", cursor: "pointer" }}>
+                  {copied ? (
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg>
+                  ) : (
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
+                  )}
+                </button>
+                <button type="button" onClick={() => downloadTextFile(displayContent)} title={t("i18n.downloadFile")} aria-label={t("i18n.downloadFile")} style={{ display: "flex", width: 26, height: 26, alignItems: "center", justifyContent: "center", padding: 0, border: "none", background: "none", color: "var(--text-muted)", cursor: "pointer" }}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M12 3v12" /><path d="m7 10 5 5 5-5" /><path d="M5 21h14" />
+                  </svg>
+                </button>
+              </div>
+              {longMessageExpanded && (
+                <pre style={{ maxHeight: 420, margin: "8px 0 0", paddingTop: 8, overflow: "auto", borderTop: "1px solid rgba(59,130,246,0.16)", whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.55 }}>
+                  {displayContent}
+                </pre>
+              )}
+            </div>
+          ) : displayContent ? (
+            <MarkdownBody className="markdown-user-message" cwd={cwd} onOpenFile={onOpenFile}>{displayContent}</MarkdownBody>
+          ) : null}
         </div>
 
       </div>
@@ -278,7 +345,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
             }}>
               {canNavigate && (
                 <button
-                  onClick={() => { onNavigate!(prevAssistantEntryId!); onEditContent?.(content); }}
+                  onClick={() => { onNavigate!(prevAssistantEntryId!); onEditContent?.(skillCommand ?? content); }}
                    title={t("i18n.editFromHereTitle")}
                   style={{
                     display: "flex", alignItems: "center", gap: 4,
@@ -367,6 +434,7 @@ function AssistantMessageView({
     .map((block, originalIndex) => ({ block, originalIndex }))
     .filter(({ block }) => !isEmptyThinkingBlock(block, { isStreaming }));
   const blocks = blockItems.map(({ block }) => block);
+  const providerError = getAssistantErrorMessage(message, { isStreaming });
   const [hovered, setHovered] = useState(false);
   const [copied, setCopied] = useState(false);
   const streamStartRef = useRef<number | null>(null);
@@ -470,7 +538,7 @@ function AssistantMessageView({
     return () => clearInterval(id);
   }, [isStreaming]);
 
-  if (blocks.length === 0 && !isStreaming) return null;
+  if (blocks.length === 0 && !isStreaming && !providerError) return null;
 
   return (
     <div
@@ -531,6 +599,27 @@ function AssistantMessageView({
           <BlockView key={`${entryId ?? "stream"}-${originalIndex}`} block={block} toolResults={toolResults} isStreaming={isStreaming} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} />
         ))}
       </div>
+
+      {providerError && (
+        <div
+          role="alert"
+          style={{
+            marginTop: blocks.length > 0 ? 8 : 0,
+            padding: "7px 10px",
+            border: "1px solid rgba(239,68,68,0.3)",
+            borderRadius: 6,
+            background: "rgba(239,68,68,0.07)",
+            color: "#ef4444",
+            fontFamily: "var(--font-mono)",
+            fontSize: 12,
+            lineHeight: 1.5,
+            whiteSpace: "pre-wrap",
+            overflowWrap: "anywhere",
+          }}
+        >
+          Error: {providerError}
+        </div>
+      )}
 
       <div style={{
         display: "flex", alignItems: "center", gap: 8, marginTop: 4,
