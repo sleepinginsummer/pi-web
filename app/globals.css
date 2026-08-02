@@ -83,7 +83,15 @@ html, body {
 }
 
 body {
+  height: 100vh;
   height: 100dvh;
+  overflow: hidden;
+}
+
+/* 根布局容器：vh 回退保证不支持 dvh 的浏览器/WebView 高度正确，
+   否则 body 可滚动，顶栏会被滚出视口（对话变长后尤其明显）。 */
+.app-shell-root {
+  height: 100vh;
 }
 
 ::-webkit-scrollbar {

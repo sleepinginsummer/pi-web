@@ -84,6 +84,10 @@ export function AppShell() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const [mobileSidebarReady, setMobileSidebarReady] = useState(false);
+  // 动态视口高度：精确跟随浏览器工具条/键盘/旋转后的可见区域。
+  // 100dvh/vh 在部分手机浏览器（尤其工具条展开时）不可靠，
+  // 会导致根容器偏高、底部输入栏（模型选择/更多按钮行）被裁掉。
+  const [viewportHeight, setViewportHeight] = useState<number | null>(null);
   const sidebarWidthRef = useRef(SIDEBAR_DEFAULT_WIDTH);
   const rightPanelWidthRef = useRef(RIGHT_PANEL_FALLBACK_WIDTH);
   const getResponsiveRightPanelWidth = useCallback(
@@ -144,6 +148,28 @@ export function AppShell() {
   }, [isMobile]);
   useEffect(() => {
     setMobileSidebarReady(true);
+  }, []);
+
+  // 跟随可见视口高度：resize / orientationchange / visualViewport 变化时更新。
+  // 用 rAF 节流避免工具条动画期间高频 setState。
+  useEffect(() => {
+    let raf = 0;
+    const update = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        setViewportHeight(window.innerHeight);
+      });
+    };
+    update();
+    window.addEventListener("resize", update);
+    window.addEventListener("orientationchange", update);
+    window.visualViewport?.addEventListener("resize", update);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("resize", update);
+      window.removeEventListener("orientationchange", update);
+      window.visualViewport?.removeEventListener("resize", update);
+    };
   }, []);
   useEffect(() => {
     if (!rightPanelOpen) return;
@@ -321,6 +347,14 @@ export function AppShell() {
       ?? (selectedSession ? (selectedSession.projectRoot ?? selectedSession.cwd) : null);
     activeProjectRootRef.current = newProject;
 
+    // Selecting an existing session updates the sidebar cwd in a separate
+    // effect. That notification can arrive after selectedSession has changed;
+    // never interpret the session's own cwd synchronization as a request to
+    // close the session and open a blank new-session view.
+    if (selectedSession?.cwd === cwd) {
+      return;
+    }
+
     // Keep the project identity in sync during the initial URL restore without
     // remounting the just-created or restored chat.
     if (suppressCwdBumpRef.current) {
@@ -443,6 +477,10 @@ export function AppShell() {
     setExplorerRefreshKey((k) => k + 1);
   }, []);
 
+  // 每条消息落盘后刷新会话列表（useAgentSession 内部已节流）
+  const handleSessionListRefresh = useCallback(() => {
+    setRefreshKey((k) => k + 1);
+  }, []);
   const handleAutoName = useCallback(async () => {
     const sessionId = selectedSession?.id;
     if (!sessionId || autoNameStatus.kind === "naming") return;
@@ -800,7 +838,10 @@ export function AppShell() {
         }
       }
     `}</style>
-    <div style={{ display: "flex", height: "100dvh", overflow: "hidden", background: "var(--bg)" }}>
+    <div
+      className="app-shell-root"
+      style={{ display: "flex", height: viewportHeight ?? "100dvh", overflow: "hidden", background: "var(--bg)" }}
+    >
       {/* Mobile overlay backdrop */}
       <div
         className={`sidebar-overlay-backdrop${mobileSidebarReady ? "" : " sidebar-mobile-pending"}`}
@@ -1511,6 +1552,7 @@ export function AppShell() {
         }}
               onAgentEnd={handleAgentEnd}
               onSessionCreated={handleSessionCreated}
+              onSessionListRefresh={handleSessionListRefresh}
               onSessionForked={handleSessionForked}
               modelsRefreshKey={modelsRefreshKey}
               chatInputRef={chatInputRef}
