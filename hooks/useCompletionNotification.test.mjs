@@ -31,6 +31,11 @@ test("completion notifications are also sent while the app is focused", () => {
   assert.match(hookSource, /new Notification\(title, options\)/);
 });
 
+test("re-notifies when a session notification replaces the previous one", () => {
+  assert.match(hookSource, /tag: sessionId \? `pi-session-\$\{sessionId\}`/);
+  assert.match(hookSource, /renotify: true/);
+});
+
 test("exposes a session notification sender for completion and input requests", () => {
   assert.match(hookSource, /const notifySession = useCallback/);
   assert.match(hookSource, /notifySession,/);

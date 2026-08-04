@@ -6,6 +6,8 @@ const STORAGE_KEY = "pi-notification-enabled";
 const PROMPT_DISMISSED_KEY = "pi-notification-prompt-dismissed";
 
 type CompletionNotificationPermission = NotificationPermission | "unsupported";
+// 当前 TypeScript DOM 声明未包含已被浏览器实现的 renotify 标准选项。
+type CompletionNotificationOptions = NotificationOptions & { renotify: boolean };
 
 function getPermission(): CompletionNotificationPermission {
   if (typeof window === "undefined" || !("Notification" in window)) return "unsupported";
@@ -63,11 +65,13 @@ export function useCompletionNotification() {
     if (!enabledRef.current || Notification.permission !== "granted") return;
 
     const url = sessionId ? `/?session=${encodeURIComponent(sessionId)}` : "/";
-    const options: NotificationOptions = {
+    const options: CompletionNotificationOptions = {
       body,
       icon: "/icons/icon-192.png",
       badge: "/icons/icon-192.png",
       tag: sessionId ? `pi-session-${sessionId}` : "pi-session-complete",
+      // 同一会话复用 tag 时仍要求系统重新提示，避免完成通知只更新不提醒。
+      renotify: true,
       data: { url },
     };
 
