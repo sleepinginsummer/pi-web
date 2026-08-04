@@ -4,6 +4,7 @@ import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, f
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import type { SkillsResponse } from "@/lib/api-types";
 import { clearDraft, getDraft, setDraft, type ChatDraftImage } from "@/lib/draft-store";
+import { applySlashSelection, findSlashQuery } from "@/lib/slash-command";
 import {
   MAX_ATTACHED_IMAGE_BYTES,
   MAX_ATTACHED_IMAGES,
@@ -30,7 +31,8 @@ interface ModelOption {
 }
 
 interface Props {
-  onSend: (message: string, images?: AttachedImage[]) => void;
+  // 返回 false 表示当前状态未接收消息，保留草稿避免用户输入丢失。
+  onSend: (message: string, images?: AttachedImage[]) => boolean | void | Promise<boolean | void>;
   onAbort: () => void;
   onSteer?: (message: string, images?: AttachedImage[]) => void;
   onFollowUp?: (message: string, images?: AttachedImage[]) => void;
@@ -66,9 +68,16 @@ interface Props {
   soundEnabled?: boolean;
   onSoundToggle?: () => void;
   onAudioUnlock?: () => void;
+  notificationEnabled?: boolean;
+  notificationPermission?: NotificationPermission | "unsupported";
+  onNotificationToggle?: () => void;
   draftKey?: string;
   /** Session working directory — enables the @ file autocomplete menu */
   cwd?: string | null;
+  /** 新会话可选的 worktree 列表；已有会话不显示此选择器。 */
+  newSessionWorktrees?: { path: string; branch: string | null; isMain: boolean }[];
+  newSessionCwd?: string | null;
+  onNewSessionCwdChange?: (cwd: string) => void;
 }
 
 export interface ChatInputHandle {
@@ -82,6 +91,7 @@ const TOOL_PRESETS = ["off", "default", "full"] as const;
 const TOOL_PRESET_MAP: Record<"off" | "default" | "full", "none" | "default" | "full"> = { off: "none", default: "default", full: "full" };
 const COMPOSITION_END_ENTER_GRACE_MS = 100;
 const MODEL_FILTER_THRESHOLD = 8;
+const TEXTAREA_MAX_HEIGHT = 200;
 const MODEL_OPTION_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
 function compareModelOptions(a: ModelOption, b: ModelOption): number {
@@ -318,10 +328,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   retryInfo, queuedMessages, inputHistory = [], onRecallQueue,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   onBuiltinCommand,
-  soundEnabled, onSoundToggle, onAudioUnlock,
+  soundEnabled, onSoundToggle, onAudioUnlock, notificationEnabled, notificationPermission, onNotificationToggle,
   onPromptWithStreamingBehavior,
   draftKey,
   cwd,
+  newSessionWorktrees,
+  newSessionCwd,
+  onNewSessionCwdChange,
 }: Props, ref) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
@@ -340,6 +353,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const bashExcluded = bashMode && trimmedValue.startsWith("!!");
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
+  const [slashCursor, setSlashCursor] = useState<number | null>(null);
   const [atQuery, setAtQuery] = useState<AtQueryMatch | null>(null);
   const [atMenuOpen, setAtMenuOpen] = useState(false);
   const [atActiveIndex, setAtActiveIndex] = useState(0);
@@ -376,8 +390,26 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const valueRef = useRef(value);
   const attachedImagesRef = useRef(attachedImages);
   const pendingImageCountRef = useRef(0);
+  const resizeFrameRef = useRef<number | null>(null);
+  const textareaAtMaxHeightRef = useRef(false);
   valueRef.current = value;
   attachedImagesRef.current = attachedImages;
+
+  const resizeTextarea = useCallback((force = false) => {
+    const ta = textareaRef.current;
+    if (!ta || (!force && textareaAtMaxHeightRef.current)) return;
+    if (resizeFrameRef.current !== null) cancelAnimationFrame(resizeFrameRef.current);
+    resizeFrameRef.current = requestAnimationFrame(() => {
+      resizeFrameRef.current = null;
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      if (!force && textarea.scrollHeight <= textarea.clientHeight) return;
+      if (force) textarea.style.height = "auto";
+      const height = Math.min(textarea.scrollHeight, TEXTAREA_MAX_HEIGHT);
+      textarea.style.height = `${height}px`;
+      textareaAtMaxHeightRef.current = textarea.scrollHeight > TEXTAREA_MAX_HEIGHT;
+    });
+  }, []);
 
   useImperativeHandle(ref, () => ({
     insertIfEmpty(text: string) {
@@ -493,19 +525,23 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, []);
 
   const clearInput = useCallback(() => {
+    valueRef.current = "";
     setValue("");
     setAtQuery(null);
     setHistoryMenuOpen(false);
     if (draftKey) clearDraft(draftKey);
     if (draftKeyRef.current && draftKeyRef.current !== draftKey) clearDraft(draftKeyRef.current);
+    attachedImagesRef.current = [];
     clearImages();
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
+      textareaAtMaxHeightRef.current = false;
     }
   }, [clearImages, draftKey]);
 
   useEffect(() => {
-    if (!draftKey || draftKeyRef.current !== draftKey) return;
+    // 发送清空或切换草稿 key 时，跳过已排队的旧 render effect，避免旧输入回写。
+    if (!draftKey || draftKeyRef.current !== draftKey || valueRef.current !== value) return;
     setDraft(draftKey, {
       value,
       images: attachedImages.map(imageToDraftImage),
@@ -535,14 +571,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, [draftKey]);
 
   useEffect(() => {
-    const ta = textareaRef.current;
-    if (!ta) return;
-    ta.style.height = "auto";
-    if (value) ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
-  }, [value]);
+    resizeTextarea(true);
+  }, [draftKey, resizeTextarea]);
 
   useEffect(() => {
     return () => {
+      if (resizeFrameRef.current !== null) cancelAnimationFrame(resizeFrameRef.current);
       attachedImagesRef.current.forEach(revokeImagePreview);
     };
   }, []);
@@ -559,17 +593,19 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         return;
       }
     }
-    onSend(msg, attachedImages.length ? attachedImages : undefined);
-    clearInput();
+    const accepted = await onSend(msg, attachedImages.length ? attachedImages : undefined);
+    if (accepted !== false) clearInput();
   }, [value, attachedImages, isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock]);
 
-  const slashQuery = value.startsWith("/") && !/\s/.test(value.slice(1))
-    ? value.slice(1).toLowerCase()
-    : null;
+  const slashInputEnd = Math.min(slashCursor ?? value.length, value.length);
+  const slashInputPrefix = value.slice(0, slashInputEnd);
+  const slash = findSlashQuery(slashInputPrefix);
+  const slashQuery = slash?.query ?? null;
 
   const filteredSlashCommands = (() => {
     if (slashQuery === null) return [];
-    const commands = [...(isStreaming ? [] : BUILTIN_SLASH_COMMANDS), ...(slashCommands ?? [])];
+    const commands = [...(isStreaming ? [] : BUILTIN_SLASH_COMMANDS), ...(slashCommands ?? [])]
+      .filter((command) => !slash?.inline || command.source === "skill");
     return [...commands]
       .filter((command) => {
         const name = command.name.toLowerCase();
@@ -763,19 +799,26 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, []);
 
   const applySlashCommand = useCallback((command: SlashCommandPaletteItem) => {
-    const nextValue = `/${command.name} `;
+    const inputEnd = Math.min(slashCursor ?? value.length, value.length);
+    const inputPrefix = value.slice(0, inputEnd);
+    const activeSlash = findSlashQuery(inputPrefix);
+    if (!activeSlash) return;
+    const selectedPrefix = applySlashSelection(inputPrefix, activeSlash, command.name);
+    const nextValue = selectedPrefix + value.slice(inputEnd);
+    const nextCursor = selectedPrefix.length;
     setValue(nextValue);
+    setSlashCursor(nextCursor);
     setSlashMenuOpen(false);
     setSlashActiveIndex(0);
     requestAnimationFrame(() => {
       const ta = textareaRef.current;
       if (!ta) return;
       ta.focus();
-      ta.setSelectionRange(nextValue.length, nextValue.length);
+      ta.setSelectionRange(nextCursor, nextCursor);
       ta.style.height = "auto";
       ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
     });
-  }, []);
+  }, [slashCursor, value]);
 
   const sendQueued = useCallback((mode: "steer" | "followup") => {
     const msg = value.trim();
@@ -963,12 +1006,15 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     [isStreaming, onSteer, onFollowUp, onAbort, slashMenuOpen, slashQuery, displayedSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value]
   );
 
-  const handleInput = useCallback(() => {
-    const ta = textareaRef.current;
-    if (!ta) return;
-    ta.style.height = "auto";
-    ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
-  }, []);
+  const handleInput = useCallback((event: React.FormEvent<HTMLTextAreaElement>) => {
+    const inputType = (event.nativeEvent as InputEvent).inputType ?? "";
+    // 达到最大高度后，普通输入不会改变控件尺寸；删除、换行和粘贴时才重新测量。
+    const mayShrinkOrReflow = inputType.startsWith("delete")
+      || inputType === "insertLineBreak"
+      || inputType === "insertParagraph"
+      || inputType === "insertFromPaste";
+    resizeTextarea(mayShrinkOrReflow);
+  }, [resizeTextarea]);
 
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
     const items = Array.from(e.clipboardData?.items ?? []);
@@ -1137,6 +1183,23 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       <div style={{ maxWidth: 820, margin: "0 auto" }}>
         <ModelErrorBanner error={modelError} />
         <ModelScopeWarningBanner warnings={modelScopeWarnings} />
+        {newSessionWorktrees && newSessionWorktrees.length > 0 && (
+          <label style={{ display: "flex", alignItems: "center", gap: 7, margin: "0 0 6px 4px", color: "var(--text-muted)", fontSize: 11 }}>
+            <span aria-hidden="true">⌘</span>
+            <select
+              aria-label="选择 worktree"
+              value={newSessionCwd ?? cwd ?? ""}
+              onChange={(event) => onNewSessionCwdChange?.(event.target.value)}
+              style={{ minWidth: 0, maxWidth: "100%", border: 0, outline: 0, background: "transparent", color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 11, cursor: "pointer" }}
+            >
+              {newSessionWorktrees.map((worktree) => (
+                <option key={worktree.path} value={worktree.path}>
+                  {worktree.branch ?? worktree.path}{worktree.isMain ? " · 主分支" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         {/* Queued steering / follow-up messages (delivered by pi on upcoming turns) */}
         {((queuedMessages?.steering.length ?? 0) + (queuedMessages?.followUp.length ?? 0)) > 0 && (
           <div style={{
@@ -1634,11 +1697,15 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             value={value}
             onChange={(e) => {
               setValue(e.target.value);
+              const textarea = e.currentTarget;
+              // 某些移动端/自动填充输入事件会在光标更新前触发 change。
+              requestAnimationFrame(() => setSlashCursor(textarea.selectionStart));
               setHistoryMenuOpen(false);
               updateAtQuery(e.target.value, e.target.selectionStart);
             }}
             onSelect={(e) => {
               const el = e.currentTarget;
+              setSlashCursor(el.selectionStart);
               updateAtQuery(el.value, el.selectionStart);
             }}
             onKeyDown={handleKeyDown}
@@ -2252,7 +2319,34 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             )}
 
             {isStreaming && (
-              <button
+              <>
+                {/* 流式时只读展示当前思考强度（不可修改） */}
+                {thinkingLevel !== undefined && (
+                  <div
+                    title={t("chat.currentReasoning", { level: thinkingDisplayLabel })}
+                    style={{
+                      display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
+                      padding: isMobile ? "0 6px" : "8px 12px",
+                      height: 32,
+                      background: "var(--bg-hover)",
+                      border: "1px solid var(--border)",
+                      borderRadius: 9,
+                      color: "var(--text-muted)",
+                      fontSize: 12,
+                      whiteSpace: "nowrap",
+                      userSelect: "none",
+                      cursor: "default",
+                    }}
+                  >
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M9.5 2A5.5 5.5 0 0 0 4 7.5c0 1.7.78 3.21 2 4.21V14a1 1 0 0 0 1 1h5a1 1 0 0 0 1-1v-2.29c1.22-1 2-2.51 2-4.21A5.5 5.5 0 0 0 9.5 2z" />
+                      <line x1="7" y1="18" x2="12" y2="18" />
+                      <line x1="8" y1="21" x2="11" y2="21" />
+                    </svg>
+                    {(!isMobile || controlsMenuOpen) && <span style={{ whiteSpace: "nowrap" }}>{thinkingDisplayLabel}</span>}
+                  </div>
+                )}
+                <button
                 onClick={onAbort}
                  title={t("chat.stopAgent")}
                 style={{
@@ -2276,6 +2370,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 </svg>
                  {t("chat.stop")}
               </button>
+              </>
             )}
 
             {onSoundToggle !== undefined && (
@@ -2320,6 +2415,50 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                     <line x1="17" y1="9" x2="23" y2="15" />
                   </svg>
                 )}
+              </button>
+            )}
+            {onNotificationToggle !== undefined && notificationPermission !== "unsupported" && (
+              <button
+                onClick={onNotificationToggle}
+                title={notificationEnabled
+                  ? t("chat.disableNotification")
+                  : notificationPermission === "denied"
+                    ? t("chat.notificationBlocked")
+                    : t("chat.enableNotification")}
+                aria-label={notificationEnabled
+                  ? t("chat.disableNotification")
+                  : notificationPermission === "denied"
+                    ? t("chat.notificationBlocked")
+                    : t("chat.enableNotification")}
+                style={{
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  width: 32,
+                  height: 32,
+                  padding: 0,
+                  background: "none",
+                  border: "none",
+                  borderRadius: 9,
+                  color: notificationEnabled ? "var(--text-muted)" : "var(--text-dim)",
+                  cursor: "pointer",
+                  opacity: notificationEnabled ? 1 : 0.55,
+                  transition: "background 0.12s, color 0.12s, opacity 0.12s",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = "var(--bg-hover)";
+                  e.currentTarget.style.color = "var(--text)";
+                  e.currentTarget.style.opacity = "1";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = "none";
+                  e.currentTarget.style.color = notificationEnabled ? "var(--text-muted)" : "var(--text-dim)";
+                  e.currentTarget.style.opacity = notificationEnabled ? "1" : "0.55";
+                }}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9" />
+                  <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+                  {!notificationEnabled && <line x1="4" y1="4" x2="20" y2="20" />}
+                </svg>
               </button>
             )}
             {isMobile && controlsMenuOpen && (

@@ -51,7 +51,15 @@ function streamReducer(state: StreamingState, action: StreamAction): StreamingSt
       return state;
   }
 }
-
+type DetachedSubagentMode = "auto-resume" | "next-turn";
+export interface DetachedSubagentStatus {
+  id: string;
+  agent: string;
+  task: string;
+  mode: DetachedSubagentMode;
+  state: "running" | "completed" | "failed";
+  error?: string;
+}
 interface AgentEvent {
   type: string;
   [key: string]: unknown;
@@ -78,6 +86,96 @@ type AgentStateResponse = {
   extensionWidgets?: ExtensionWidgetItem[];
   queuedMessages?: { steering?: string[]; followUp?: string[] } | null;
 };
+
+// ChatWindow instances are replaced when the user switches sessions. Keep the
+// latest in-memory messages briefly at module scope so a running session can
+// be rendered immediately again before its JSONL file catches up.
+const liveSessionMessages = new Map<string, AgentMessage[]>();
+
+function contentText(content: string | Array<{ type: string; text?: string }>): string {
+  if (typeof content === "string") return content;
+  return content.map((block) => block.type === "text" ? block.text ?? "" : "").join("\n");
+}
+
+function completedDetachedSubagentIds(message: AgentMessage): string[] {
+  if (message.role !== "custom" || message.customType !== "pi-subagent-completion") return [];
+  const details = message.details as {
+    agentId?: unknown;
+    completions?: Array<{ agentId?: unknown }>;
+  } | undefined;
+  if (typeof details?.agentId === "string") return [details.agentId];
+  return details?.completions
+    ?.map((completion) => completion.agentId)
+    .filter((agentId): agentId is string => typeof agentId === "string") ?? [];
+}
+function pendingDetachedSubagentIds(messages: AgentMessage[]): Set<string> {
+  const pending = new Set<string>();
+  for (const message of messages) {
+    if (message.role === "toolResult" && message.toolName === "subagent_spawn" && !message.isError) {
+      const text = contentText(message.content);
+      const agentId = text.match(/\b(sa_[0-9a-f-]+)\b/i)?.[1];
+      if (agentId) pending.add(agentId);
+      continue;
+    }
+    for (const agentId of completedDetachedSubagentIds(message)) pending.delete(agentId);
+  }
+  return pending;
+}
+
+function deriveDetachedSubagentStatuses(messages: AgentMessage[]): DetachedSubagentStatus[] {
+  const statuses = new Map<string, DetachedSubagentStatus>();
+  const completedAt = new Map<string, number>();
+  for (const [messageIndex, message] of messages.entries()) {
+    if (message.role === "assistant") {
+      for (const [agentId, index] of completedAt) {
+        if (messageIndex > index) statuses.delete(agentId);
+      }
+      for (const block of message.content) {
+        if (block.type !== "toolCall" || block.toolName !== "subagent_spawn") continue;
+        const input = block.input as { agent?: unknown; task?: unknown } | undefined;
+        const agent = typeof input?.agent === "string" ? input.agent : "unknown";
+        const task = typeof input?.task === "string" ? input.task : "";
+        statuses.set(block.toolCallId, { id: block.toolCallId, agent, task, mode: "next-turn", state: "running" });
+      }
+    }
+    if (message.role === "toolResult" && message.toolName === "subagent_spawn") {
+      const text = contentText(message.content);
+      const detailAgent = message.details as { agent?: { id?: unknown } } | undefined;
+      const agentId = typeof detailAgent?.agent?.id === "string"
+        ? detailAgent.agent.id
+        : text.match(/\b(sa_[0-9a-f-]+)\b/i)?.[1];
+      const status = statuses.get(message.toolCallId);
+      if (!status) continue;
+      statuses.delete(message.toolCallId);
+      if (message.isError || !agentId) continue;
+      status.id = agentId;
+      status.mode = text.includes("auto-resume will request synthesis") ? "auto-resume" : "next-turn";
+      statuses.set(status.id, status);
+    }
+    if (message.role === "toolResult" && message.toolName === "subagent_inspect") {
+      const details = message.details as { runs?: Array<{ id?: unknown; state?: unknown }> } | undefined;
+      for (const run of details?.runs ?? []) {
+        if (typeof run.id !== "string" || (run.state !== "completed" && run.state !== "failed")) continue;
+        const status = statuses.get(run.id);
+        if (!status) continue;
+        status.state = run.state;
+        completedAt.set(run.id, messageIndex);
+      }
+    }
+    for (const agentId of completedDetachedSubagentIds(message)) {
+      const status = statuses.get(agentId);
+      if (!status) continue;
+      const details = message.role === "custom" ? message.details as { state?: unknown; completions?: Array<{ agentId?: unknown; state?: unknown }> } | undefined : undefined;
+      const completionState = typeof details?.state === "string"
+        ? details.state
+        : details?.completions?.find((item) => item.agentId === agentId)?.state;
+      status.state = completionState === "completed" ? "completed" : "failed";
+      completedAt.set(agentId, messageIndex);
+    }
+  }
+  return [...statuses.values()];
+}
+
 
 export interface QueuedMessages {
   steering: string[];
@@ -143,6 +241,8 @@ export interface UseAgentSessionOptions {
   newSessionCwd: string | null;
   onAgentEnd?: () => void;
   onSessionCreated?: (session: SessionInfo) => void;
+  // 每条消息落盘（message_end）后通知父组件刷新会话列表，让新会话尽快出现在侧边栏
+  onSessionListRefresh?: () => void;
   onSessionForked?: (newSessionId: string) => void;
   modelsRefreshKey?: number;
   chatInputRef?: React.RefObject<ChatInputHandle | null>;
@@ -159,12 +259,14 @@ const USER_SCROLL_INTENT_MS = 1200;
 const PROMPT_SETTLE_INITIAL_DELAY_MS = 800;
 const PROMPT_SETTLE_POLL_MS = 600;
 const PROMPT_SETTLE_MAX_MS = 20_000;
+// 父轮结束后，扩展可能异步注入一轮新的 agent run（例如后台子代理完成）。
 const EVENT_STREAM_IDLE_GRACE_MS = 30_000;
 const AGENT_STATE_RECONCILE_MS = 15_000;
 const BASH_STATE_RECONCILE_MS = 1_000;
-const EVENT_STREAM_CONNECT_TIMEOUT_MS = 5_000;
+// AgentSession 冷启动可能包含模型、扩展和资源初始化，5 秒不足以覆盖正常启动耗时。
+const EVENT_STREAM_CONNECT_TIMEOUT_MS = 15_000;
 const MAX_NOTICES = 5;
-const NOTICE_VISIBLE_MS = 5000;
+const NOTICE_VISIBLE_MS = 2500;
 const NOTICE_EXIT_ANIMATION_MS = 180;
 const SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " ", "Space", "Spacebar"]);
 
@@ -173,12 +275,6 @@ type EventStreamConnectionStatus = "connected" | "timeout" | "closed";
 type EventStreamConnectionResult = {
   status: EventStreamConnectionStatus;
   source: EventSource;
-};
-
-type EventStreamConnectionAttempt = {
-  source: EventSource;
-  promise: Promise<EventStreamConnectionResult>;
-  pending: boolean;
 };
 
 class EventStreamConnectionError extends Error {
@@ -332,7 +428,7 @@ type SlashCommandsResponse = {
 
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
-    session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked,
+    session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionListRefresh, onSessionForked,
     modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
   } = opts;
 
@@ -373,28 +469,34 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [noticeState, dispatchNotice] = useReducer(noticeReducer, { visible: [], pending: [] });
   const [sessionStatsOverride, setSessionStatsOverride] = useState<SessionStatsInfo | null>(null);
   const [extensionDialog, setExtensionDialog] = useState<ExtensionUiDialogRequest | null>(null);
+  // 同步弹窗状态：settlement 判定需要知道当前是否有 dialog 在等用户输入
+  const extensionDialogRef = useRef<ExtensionUiDialogRequest | null>(null);
   const [extensionCustomUi, setExtensionCustomUi] = useState<ExtensionUiCustomRequest | null>(null);
   const [extensionStatuses, setExtensionStatuses] = useState<ExtensionStatusItem[]>([]);
   const [extensionWidgets, setExtensionWidgets] = useState<ExtensionWidgetItem[]>([]);
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessages>({ steering: [], followUp: [] });
+  const detachedSubagentStatuses = useMemo(() => deriveDetachedSubagentStatuses(messages), [messages]);
+
+  useEffect(() => {
+    const sid = sessionIdRef.current;
+    if (!sid || messages.length === 0) return;
+    liveSessionMessages.set(sid, messages);
+  }, [messages]);
 
   const eventSourceRef = useRef<EventSource | null>(null);
-  const eventSourceSessionIdRef = useRef<string | null>(null);
-  const eventConnectionAttemptRef = useRef<EventStreamConnectionAttempt | null>(null);
   const eventStreamGraceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const eventStreamGraceGenerationRef = useRef(0);
-  const eventStreamGraceActiveRef = useRef(false);
+  // detached 子代理可能跨越多个父轮，必须按 agentId 保持到对应 completion 到达。
+  const pendingDetachedSubagentIdsRef = useRef(new Set<string>());
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
   const agentRunningRef = useRef(false);
-  const sdkAgentActiveRef = useRef(false);
-  const rpcPromptPendingRef = useRef(false);
-  const notifiedPromptRunIdRef = useRef(-1);
   const bashRunningRef = useRef(false);
   const bashRecoveryIdRef = useRef(0);
   const handleAgentEventRef = useRef<((event: AgentEvent) => void) | null>(null);
   const initialScrollDoneRef = useRef(false);
   const lastUserMsgRef = useRef<HTMLDivElement | null>(null);
   const pendingScrollToUserRef = useRef(false);
+  const pendingScrollToRunningEndRef = useRef(false);
   const completionScrollAllowedRef = useRef(true);
   const executeBashRef = useRef<(command: string, excludeFromContext: boolean) => Promise<void> | undefined>(undefined);
   const userScrollIntentUntilRef = useRef(0);
@@ -407,6 +509,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const thinkingLevelOverrideRef = useRef<Exclude<ThinkingLevelOption, "auto"> | null>(null);
   const promptRunIdRef = useRef(0);
   const optimisticUserMessageKeyRef = useRef<string | null>(null);
+  // 每条消息完成时刷新列表的节流：避免流式多事件导致连续全量扫描
+  const sessionListRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // waitForPromptSettlement 定义在 respondToExtensionUi 之后，通过 ref 解耦调用
+  const waitForPromptSettlementRef = useRef<((sid: string, runId?: number) => Promise<void>) | null>(null);
 
   const setToolPresetState = opts.setToolPreset ?? setToolPreset;
 
@@ -472,7 +578,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (sessionIdRef.current !== sid) return null;
       setData(d);
       setActiveLeafId(d.leafId);
-      setMessages(d.context.messages);
+      const cachedMessages = liveSessionMessages.get(sid);
+      const loadedMessages = cachedMessages && cachedMessages.length > d.context.messages.length
+        ? cachedMessages
+        : d.context.messages;
+      pendingDetachedSubagentIdsRef.current = pendingDetachedSubagentIds(loadedMessages);
+      setMessages(loadedMessages);
       setEntryIds(d.context.entryIds ?? []);
       setCurrentModelOverride(null);
       setError(null);
@@ -632,37 +743,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [ensureNewSession]);
 
-  const cancelEventStreamGrace = useCallback(() => {
-    eventStreamGraceGenerationRef.current += 1;
-    eventStreamGraceActiveRef.current = false;
-    if (eventStreamGraceTimerRef.current) {
-      clearTimeout(eventStreamGraceTimerRef.current);
-      eventStreamGraceTimerRef.current = null;
-    }
-  }, []);
-
   const closeEvents = useCallback(() => {
     eventSourceRef.current?.close();
     eventSourceRef.current = null;
-    eventSourceSessionIdRef.current = null;
-    eventConnectionAttemptRef.current = null;
   }, []);
 
   const connectEvents = useCallback((sid: string): Promise<EventStreamConnectionResult> => {
     closeEvents();
     const es = new EventSource(`/api/agent/${encodeURIComponent(sid)}/events`);
     eventSourceRef.current = es;
-    eventSourceSessionIdRef.current = sid;
 
-    const promise = new Promise<EventStreamConnectionResult>((resolve) => {
+    return new Promise((resolve) => {
       let settled = false;
       const settle = (status: EventStreamConnectionStatus) => {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
-        if (eventConnectionAttemptRef.current?.source === es) {
-          eventConnectionAttemptRef.current.pending = false;
-        }
         resolve({ status, source: es });
       };
       const timeout = setTimeout(() => settle("timeout"), EVENT_STREAM_CONNECT_TIMEOUT_MS);
@@ -680,21 +776,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (es.readyState === EventSource.CLOSED) {
           // Fatal error (404/500/content-type mismatch): browser won't
           // auto-reconnect. Settle the Promise and manually reconnect for
-          // already-running sessions or an active idle grace window.
+          // already-running sessions.
           settle("closed");
-          if (eventSourceRef.current === es && (agentRunningRef.current || eventStreamGraceActiveRef.current)) {
+          if (eventSourceRef.current === es && agentRunningRef.current) {
             eventSourceRef.current = null;
-            eventSourceSessionIdRef.current = null;
-            eventConnectionAttemptRef.current = null;
-            const reconnectGeneration = eventStreamGraceGenerationRef.current;
             setTimeout(() => {
-              if (
-                reconnectGeneration === eventStreamGraceGenerationRef.current
-                && !eventSourceRef.current
-                && (agentRunningRef.current || eventStreamGraceActiveRef.current)
-              ) {
-                void connectEvents(sid);
-              }
+              if (agentRunningRef.current) void connectEvents(sid);
             }, 1000);
           }
         }
@@ -703,26 +790,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // connection must be ready before they continue.
       };
     });
-    eventConnectionAttemptRef.current = { source: es, promise, pending: true };
-    return promise;
   }, [closeEvents]);
 
   const ensureEventsConnected = useCallback(async (sid: string) => {
-    const current = eventSourceRef.current;
-    if (current && eventSourceSessionIdRef.current === sid) {
-      if (current.readyState === EventSource.OPEN) return;
-      const attempt = eventConnectionAttemptRef.current;
-      if (attempt?.source === current && attempt.pending) {
-        await attempt.promise;
-        if (eventSourceRef.current === current && current.readyState === EventSource.OPEN) return;
-      }
-    }
-
     const result = await connectEvents(sid);
     if (result.status === "connected" || result.source.readyState === EventSource.OPEN) return;
     if (eventSourceRef.current === result.source) eventSourceRef.current = null;
-    if (eventSourceSessionIdRef.current === sid) eventSourceSessionIdRef.current = null;
-    if (eventConnectionAttemptRef.current?.source === result.source) eventConnectionAttemptRef.current = null;
     result.source.close();
     throw new EventStreamConnectionError(result.status);
   }, [connectEvents]);
@@ -733,6 +806,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   ) => {
     const sid = sessionIdRef.current;
     setExtensionDialog((current) => current?.id === request.id ? null : current);
+    if (extensionDialogRef.current?.id === request.id) extensionDialogRef.current = null;
     if (!sid) return;
     try {
       await sendAgentCommand(sid, {
@@ -742,6 +816,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       });
     } catch (e) {
       console.error("Failed to send extension UI response:", e);
+    }
+    // dialog 已关闭：重新检查服务器状态 —— 扩展可能已恢复运行（保持流式），
+    // 也可能确实结束（此时补一次结束判定，避免 UI 一直停在运行态）
+    if (agentRunningRef.current) {
+      void waitForPromptSettlementRef.current?.(sid);
     }
   }, []);
 
@@ -772,6 +851,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     });
   }, []);
 
+  const dismissNotice = useCallback((id: string) => {
+    dispatchNotice({ type: "remove", id });
+  }, []);
+
   const handleExtensionUiRequest = useCallback((request: ExtensionUiRequest) => {
     switch (request.method) {
       case "select":
@@ -779,6 +862,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "input":
       case "editor":
         setExtensionDialog(request);
+        extensionDialogRef.current = request;
         break;
       case "notify": {
         addNotice({
@@ -823,103 +907,65 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [addNotice, opts.chatInputRef]);
 
-  const settleUiStage = useCallback(() => {
-    const wasRunning = agentRunningRef.current;
-    agentRunningRef.current = false;
-    setAgentRunning(false);
-    setAgentPhase(null);
-    setRetryInfo(null);
-    dispatch({ type: "end" });
-    return wasRunning;
+  const cancelEventStreamGrace = useCallback(() => {
+    eventStreamGraceGenerationRef.current += 1;
+    if (eventStreamGraceTimerRef.current) {
+      clearTimeout(eventStreamGraceTimerRef.current);
+      eventStreamGraceTimerRef.current = null;
+    }
   }, []);
 
-  const notifyPromptStage = useCallback((runId: number) => {
-    if (notifiedPromptRunIdRef.current === runId) return false;
-    notifiedPromptRunIdRef.current = runId;
-    onAgentEnd?.();
-    return true;
-  }, [onAgentEnd]);
-
-  const scheduleEventStreamClose = useCallback((sid: string) => {
-    cancelEventStreamGrace();
-    eventStreamGraceActiveRef.current = true;
-    const generation = eventStreamGraceGenerationRef.current;
-
-    const checkServerIdle = async () => {
-      if (
-        generation !== eventStreamGraceGenerationRef.current
-        || sessionIdRef.current !== sid
-        || !eventStreamGraceActiveRef.current
-      ) return;
-
-      try {
-        const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json() as { running?: boolean; state?: AgentStateResponse };
-        if (
-          generation !== eventStreamGraceGenerationRef.current
-          || sessionIdRef.current !== sid
-          || !eventStreamGraceActiveRef.current
-        ) return;
-
-        const state = data.state;
-        const promptActive = Boolean(data.running && state && (state.isStreaming || state.isPromptRunning));
-        if (promptActive) {
-          eventStreamGraceActiveRef.current = false;
-          eventStreamGraceTimerRef.current = null;
-          sdkAgentActiveRef.current = Boolean(state?.isStreaming);
-          rpcPromptPendingRef.current = Boolean(state?.isPromptRunning);
-          agentRunningRef.current = true;
-          setAgentRunning(true);
-          setAgentPhase(state?.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
-          return;
-        }
-
-        if (data.running && state?.isCompacting) {
-          setIsCompacting(true);
-          eventStreamGraceTimerRef.current = setTimeout(() => void checkServerIdle(), PROMPT_SETTLE_POLL_MS);
-          return;
-        }
-
-        eventStreamGraceActiveRef.current = false;
-        eventStreamGraceTimerRef.current = null;
-        closeEvents();
-      } catch {
-        // Keep the stream alive while state cannot be verified.
-        if (
-          generation !== eventStreamGraceGenerationRef.current
-          || sessionIdRef.current !== sid
-          || !eventStreamGraceActiveRef.current
-        ) return;
-        eventStreamGraceTimerRef.current = setTimeout(() => void checkServerIdle(), PROMPT_SETTLE_POLL_MS);
-      }
-    };
-
-    eventStreamGraceTimerRef.current = setTimeout(() => void checkServerIdle(), EVENT_STREAM_IDLE_GRACE_MS);
-  }, [cancelEventStreamGrace, closeEvents]);
-
-  const finishPromptWithoutStream = useCallback(async (sid: string | null = sessionIdRef.current, runId = promptRunIdRef.current) => {
+  const finishPromptWithoutStream = useCallback(async (sid: string | null = sessionIdRef.current, runId?: number) => {
     // Bail out before loadSession too: a stale finish for a previous run
     // must not overwrite the messages of the run currently streaming.
-    if (promptRunIdRef.current !== runId) return;
+    if (runId !== undefined && promptRunIdRef.current !== runId) return;
+    cancelEventStreamGrace();
     try {
       if (sid) await loadSession(sid);
     } finally {
-      if (promptRunIdRef.current !== runId) return;
-      const promptWasPending = rpcPromptPendingRef.current;
-      const agentWasActive = sdkAgentActiveRef.current;
-      rpcPromptPendingRef.current = false;
-      sdkAgentActiveRef.current = false;
+      if (runId !== undefined && promptRunIdRef.current !== runId) return;
+      const wasRunning = agentRunningRef.current;
+      agentRunningRef.current = false;
+      if (pendingDetachedSubagentIdsRef.current.size === 0) closeEvents();
       optimisticUserMessageKeyRef.current = null;
-      const wasRunning = settleUiStage();
-      if (promptWasPending) {
-        notifyPromptStage(runId);
-      } else if (agentWasActive && wasRunning) {
-        onAgentEnd?.();
-      }
-      if (sid) scheduleEventStreamClose(sid);
+      if (!wasRunning) return;
+      setAgentRunning(false);
+      setAgentPhase(null);
+      setRetryInfo(null);
+      dispatch({ type: "end" });
+      onAgentEnd?.();
     }
-  }, [loadSession, notifyPromptStage, onAgentEnd, scheduleEventStreamClose, settleUiStage]);
+  }, [cancelEventStreamGrace, closeEvents, loadSession, onAgentEnd]);
+
+  const scheduleEventStreamClose = useCallback((sid: string, runId?: number) => {
+    cancelEventStreamGrace();
+    const generation = eventStreamGraceGenerationRef.current;
+    const checkServerIdle = async () => {
+      if (generation !== eventStreamGraceGenerationRef.current || sessionIdRef.current !== sid) return;
+      try {
+        const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
+        if (!res.ok) return;
+        const data = await res.json() as { running?: boolean; state?: AgentStateResponse };
+        const state = data.state;
+        const subagentsActive = Boolean(state?.extensionStatuses?.some((status) => status.key === "subagents"));
+        const busy = Boolean(data.running && state && (state.isStreaming || state.isPromptRunning || state.isCompacting));
+        if (busy || subagentsActive || pendingDetachedSubagentIdsRef.current.size > 0) {
+          eventStreamGraceTimerRef.current = setTimeout(() => void checkServerIdle(), PROMPT_SETTLE_POLL_MS);
+          return;
+        }
+        await finishPromptWithoutStream(sid, runId);
+      } catch {
+        // 状态不可达时继续保留 SSE，避免后台完成消息无监听者。
+        eventStreamGraceTimerRef.current = setTimeout(() => void checkServerIdle(), PROMPT_SETTLE_POLL_MS);
+      }
+    };
+    eventStreamGraceTimerRef.current = setTimeout(() => void checkServerIdle(), EVENT_STREAM_IDLE_GRACE_MS);
+  }, [cancelEventStreamGrace, finishPromptWithoutStream]);
+
+  const settleIdleSession = useCallback((sid: string, runId?: number) => {
+    // 父轮结束只收口主代理 UI；detached 子代理由底部状态区独立展示。
+    void finishPromptWithoutStream(sid, runId);
+  }, [finishPromptWithoutStream]);
 
   const waitForPromptSettlement = useCallback(async (sid: string, runId?: number) => {
     await delay(PROMPT_SETTLE_INITIAL_DELAY_MS);
@@ -927,13 +973,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
     while (agentRunningRef.current && Date.now() - startedAt < PROMPT_SETTLE_MAX_MS) {
       if (runId !== undefined && promptRunIdRef.current !== runId) return;
+      // 扩展 dialog（ask 弹窗）在等用户输入时，服务器视角的 prompt 可能已结束
+      // （prompt() resolve），但会话并未真正结束：用户响应后扩展会恢复。
+      // 此时结束 UI 会出现“弹窗还开着但会话已结束、没有 stop 按钮”的错乱。
+      if (extensionDialogRef.current) return;
       try {
         const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
         if (res.ok) {
           const data = await res.json() as { running?: boolean; state?: AgentStateResponse };
           const state = data.state;
           if (!data.running || !state || (!state.isStreaming && !state.isPromptRunning)) {
-            await finishPromptWithoutStream(sid, runId);
+            settleIdleSession(sid, runId);
             return;
           }
         }
@@ -942,7 +992,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       await delay(PROMPT_SETTLE_POLL_MS);
     }
-  }, [finishPromptWithoutStream]);
+  }, [settleIdleSession]);
+  waitForPromptSettlementRef.current = waitForPromptSettlement;
 
   const waitForBashSettlement = useCallback(async (sid: string) => {
     const recoveryId = bashRecoveryIdRef.current + 1;
@@ -997,17 +1048,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const busy = data.running && state
         && (state.isStreaming || state.isPromptRunning || state.isCompacting);
       if (busy || !agentRunningRef.current) return;
+      // 扩展 dialog（ask 弹窗）等待用户输入时服务器可能已 idle，但会话并未
+      // 真正结束：此时结束 UI 会出现“弹窗还在但会话已结束、没有 stop”的错乱。
+      if (extensionDialogRef.current) return;
       if (state) {
         if (state.contextUsage !== undefined) setContextUsage(state.contextUsage ?? null);
         if (state.systemPrompt !== undefined) setSystemPrompt(state.systemPrompt ?? null);
         if (state.extensionStatuses !== undefined) setExtensionStatuses(state.extensionStatuses ?? []);
         if (state.extensionWidgets !== undefined) setExtensionWidgets(state.extensionWidgets ?? []);
       }
-      await finishPromptWithoutStream(sid, runId);
+      settleIdleSession(sid, runId);
     } catch {
       // Network still down — the next poll / visibility / online tick retries.
     }
-  }, [finishPromptWithoutStream]);
+  }, [settleIdleSession]);
 
   // Recovery net for missed SSE events: while the agent is running, verify
   // against the server periodically and whenever the tab returns to the
@@ -1041,7 +1095,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     switch (event.type) {
       case "agent_start":
         cancelEventStreamGrace();
-        sdkAgentActiveRef.current = true;
         agentRunningRef.current = true;
         setAgentRunning(true);
         setAgentPhase({ kind: "waiting_model" });
@@ -1050,7 +1103,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "agent_end":
         // One logical prompt can emit multiple agent_end events before retrying,
         // compacting, or continuing messages queued by extension handlers.
-        // Keep the stream open until prompt_done/agent_settled and the idle grace.
+        // Keep the stream open until prompt_done and server-idle settlement.
         if (!agentRunningRef.current) break;
         setAgentPhase(null);
         setRetryInfo(null);
@@ -1071,40 +1124,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             .catch(() => {});
         }
         break;
-      case "agent_settled": {
-        const agentWasActive = sdkAgentActiveRef.current;
-        sdkAgentActiveRef.current = false;
-        if (!agentWasActive || rpcPromptPendingRef.current) break;
-
-        const sid = sessionIdRef.current;
-        const wasRunning = settleUiStage();
-        setIsCompacting(false);
-        if (sid) {
-          void loadSession(sid);
-          scheduleEventStreamClose(sid);
-        }
-        if (wasRunning) onAgentEnd?.();
-        break;
-      }
+      case "agent_settled":
       case "prompt_done":
-        {
-          const runId = promptRunIdRef.current;
-          const promptWasPending = rpcPromptPendingRef.current;
-          rpcPromptPendingRef.current = false;
-          optimisticUserMessageKeyRef.current = null;
-          const firstNotification = notifyPromptStage(runId);
-          if (!promptWasPending && !firstNotification) break;
-
-          const sid = sessionIdRef.current;
-          if (sid) void loadSession(sid);
-          // An extension-injected agent may already have started before the
-          // command's prompt_done. Keep that active stage visible and let its
-          // agent_settled event perform the next completion transition.
-          if (!sdkAgentActiveRef.current) {
-            settleUiStage();
-            if (sid) scheduleEventStreamClose(sid);
-          }
-        }
+        if (!agentRunningRef.current || !sessionIdRef.current) break;
+        settleIdleSession(sessionIdRef.current, promptRunIdRef.current);
         break;
       case "prompt_error":
         addNotice({ type: "error", message: (event.errorMessage as string | undefined) ?? "Command failed" });
@@ -1132,11 +1155,36 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
       case "message_end": {
-        // Same late-event guard: after reconcile finished this run,
-        // loadSession already loaded this message from the session file —
-        // appending it again would duplicate it.
-        if (!agentRunningRef.current) break;
         const completed = event.message as AgentMessage | undefined;
+        // detached completion 可能在父轮结束后到达，状态区仍必须消费。
+        if (!agentRunningRef.current && completed?.role !== "custom") break;
+        // 消息落盘后让侧边栏刷新列表（节流 1s）。新会话的 .jsonl 在第一条
+        // assistant 消息之后的 entry 才真正写入，此时刷新才能扫到它。
+        if (!sessionListRefreshTimerRef.current) {
+          sessionListRefreshTimerRef.current = setTimeout(() => {
+            sessionListRefreshTimerRef.current = null;
+          }, 1000);
+          onSessionListRefresh?.();
+        }
+        if (completed?.role === "toolResult" && completed.toolName === "subagent_spawn" && !completed.isError) {
+          const text = contentText(completed.content);
+          const detailAgent = completed.details as { agent?: { id?: unknown } } | undefined;
+          const agentId = typeof detailAgent?.agent?.id === "string"
+            ? detailAgent.agent.id
+            : text.match(/\b(sa_[0-9a-f-]+)\b/i)?.[1];
+          if (agentId) pendingDetachedSubagentIdsRef.current.add(agentId);
+        }
+        const completedSubagentIds = completed ? completedDetachedSubagentIds(completed) : [];
+        const inspectedTerminalIds = completed?.role === "toolResult" && completed.toolName === "subagent_inspect"
+          ? ((completed.details as { runs?: Array<{ id?: unknown; state?: unknown }> } | undefined)?.runs ?? [])
+              .filter((run) => typeof run.id === "string" && (run.state === "completed" || run.state === "failed"))
+              .map((run) => run.id as string)
+          : [];
+        const terminalSubagentIds = [...new Set([...completedSubagentIds, ...inspectedTerminalIds])];
+        for (const agentId of terminalSubagentIds) pendingDetachedSubagentIdsRef.current.delete(agentId);
+        if (!agentRunningRef.current && terminalSubagentIds.length > 0 && sessionIdRef.current) {
+          scheduleEventStreamClose(sessionIdRef.current);
+        }
         if (completed && completed.role === "user") {
           // Delivered steering/follow-up messages surface here as user
           // messages. The run's initial prompt also emits one, but handleSend
@@ -1215,27 +1263,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as ExtensionUiRequest);
         break;
     }
-  }, [addNotice, cancelEventStreamGrace, handleExtensionUiRequest, loadSession, notifyPromptStage, onAgentEnd, scheduleEventStreamClose, settleUiStage]);
+  }, [addNotice, cancelEventStreamGrace, handleExtensionUiRequest, loadSession, onSessionListRefresh, scheduleEventStreamClose, settleIdleSession]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
     const trimmedMessage = message.trim();
-    if (!trimmedMessage && !images?.length) return;
-    if (agentRunningRef.current || bashRunningRef.current) return;
+    if (!trimmedMessage && !images?.length) return false;
+    // UI 状态可能晚于异步扩展启动的 agent_start；此时不可吞掉用户输入。
+    if (agentRunningRef.current || bashRunningRef.current) return false;
     const isSlashCommandPrompt = !images?.length && trimmedMessage.startsWith("/");
 
     const isBashCommand = !images?.length && trimmedMessage.startsWith("!");
     if (isBashCommand) {
       const isExcluded = trimmedMessage.startsWith("!!");
       const bashCmd = (isExcluded ? trimmedMessage.slice(2) : trimmedMessage.slice(1)).trim();
-      if (!bashCmd) return;
+      if (!bashCmd) return false;
       await executeBashRef.current?.(bashCmd, isExcluded);
-      return;
+      return true;
     }
-
     const promptRunId = promptRunIdRef.current + 1;
-    cancelEventStreamGrace();
-    rpcPromptPendingRef.current = true;
 
     const imageBlocks = images?.map((img) => ({ type: "image" as const, source: { type: "base64" as const, media_type: img.mimeType, data: img.data } }));
     const userMsg: AgentMessage = {
@@ -1295,16 +1341,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (isSlashCommandPrompt && sentSessionId) {
         void waitForPromptSettlement(sentSessionId, promptRunId);
       }
+      return Boolean(sentSessionId);
     } catch (e) {
-      console.error("Failed to send message:", e);
       // A failed prompt POST is ambiguous: the server may have accepted it
       // before the response connection was lost. Keep SSE alive until the
       // server confirms idle so a real run cannot continue unseen.
       if (promptRequestStarted && sentSessionId) {
         void waitForPromptSettlement(sentSessionId, promptRunId);
-        return;
+        // 请求已发出但响应失败时，服务端可能已受理；保留原有的乐观提交行为。
+        return true;
       }
-      rpcPromptPendingRef.current = false;
       agentRunningRef.current = false;
       closeEvents();
       if (e instanceof EventStreamConnectionError) {
@@ -1327,8 +1373,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setAgentRunning(false);
       setAgentPhase(null);
       dispatch({ type: "end" });
+      return false;
     }
-  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, cancelEventStreamGrace, closeEvents, opts.chatInputRef]);
+  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, closeEvents, opts.chatInputRef]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
     if (agentRunningRef.current || bashRunningRef.current) return;
@@ -1369,6 +1416,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       return;
     }
+    // 中止会话后不再等待用户输入，关闭挂起的 dialog 弹窗
+    setExtensionDialog(null);
+    extensionDialogRef.current = null;
     try {
       await sendAgentCommand(sid, { type: "abort" });
     } catch (e) {
@@ -1682,7 +1732,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
     ignoreProgrammaticScrollUntilRef.current = Date.now() + PROGRAMMATIC_SCROLL_IGNORE_MS;
-    messagesEndRef.current?.scrollIntoView({ behavior });
+    messagesEndRef.current?.scrollIntoView({ behavior, block: "end" });
   }, []);
 
   const scrollUserMsgToTop = useCallback(() => {
@@ -1717,8 +1767,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (agentState?.running) {
           loadTools(session.id);
           if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {
-            sdkAgentActiveRef.current = Boolean(agentState.state.isStreaming);
-            rpcPromptPendingRef.current = Boolean(agentState.state.isPromptRunning);
+            pendingScrollToRunningEndRef.current = true;
             agentRunningRef.current = true;
             setAgentRunning(true);
             setAgentPhase(agentState.state.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
@@ -1743,11 +1792,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (agentState.state.extensionWidgets !== undefined) setExtensionWidgets(agentState.state.extensionWidgets ?? []);
           if (agentState.state.queuedMessages !== undefined) setQueuedMessages(normalizeQueuedMessages(agentState.state.queuedMessages));
         }
+        if (!agentRunningRef.current && pendingDetachedSubagentIdsRef.current.size > 0) {
+          // 刷新后只恢复后台监听，不能把 detached 子代理显示成主代理思考。
+          void connectEvents(session.id);
+        }
       });
     }
     return () => {
       bashRecoveryIdRef.current += 1;
-      cancelEventStreamGrace();
       closeEvents();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1790,6 +1842,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         pendingScrollToUserRef.current = false;
         initialScrollDoneRef.current = true;
         scrollUserMsgToTop();
+      } else if (pendingScrollToRunningEndRef.current) {
+        pendingScrollToRunningEndRef.current = false;
+        initialScrollDoneRef.current = true;
+        scrollToBottom("instant");
       } else if (!initialScrollDoneRef.current) {
         initialScrollDoneRef.current = true;
         scrollToBottom("instant");
@@ -1842,7 +1898,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
     isCompacting, compactError, compactResult, currentModel, displayModel, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
-    notices: noticeState.visible, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
+    notices: noticeState.visible, dismissNotice, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, detachedSubagentStatuses, respondToExtensionUi, sendExtensionCustomInput,
     isAutoModelSelection: isNew && newSessionModel === null,
     agentPhase,
     isNew,

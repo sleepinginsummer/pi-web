@@ -11,7 +11,10 @@ import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ExtensionStatusBar } from "./ExtensionStatusBar";
 import { useI18n } from "@/hooks/useI18n";
 import { useAgentSession, type AgentPhase, type NoticeItem } from "@/hooks/useAgentSession";
+import { DetachedSubagentStatusPanel } from "./DetachedSubagentStatusPanel";
 import { useAudio } from "@/hooks/useAudio";
+import { useCompletionNotification } from "@/hooks/useCompletionNotification";
+import notificationStyles from "./CompletionNotificationPrompt.module.css";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import type { SessionStatsInfo } from "@/lib/pi-types";
@@ -28,6 +31,7 @@ interface Props {
   newSessionCwd: string | null;
   onAgentEnd?: () => void;
   onSessionCreated?: (session: SessionInfo) => void;
+  onSessionListRefresh?: () => void;
   onSessionForked?: (newSessionId: string) => void;
   modelsRefreshKey?: number;
   chatInputRef?: React.RefObject<ChatInputHandle | null>;
@@ -37,9 +41,10 @@ interface Props {
   onSessionStatsPanelOpen?: () => void;
   onContextUsageChange?: (usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => void;
   onOpenFile?: (filePath: string) => void;
+  onNewSessionCwdChange?: (cwd: string) => void;
 }
 
-function phaseLabel(phase: AgentPhase, t: (key: string, params?: Record<string, string | number>) => string): string | null {
+function phaseLabel(phase: AgentPhase, t: (key: string, params?: Record<string, string | number>) => string): string {
   if (phase?.kind === "running_tools") {
     const names = phase.tools.map((t) => t.name);
     if (names.length === 0) return t("chat.runningTool");
@@ -49,7 +54,7 @@ function phaseLabel(phase: AgentPhase, t: (key: string, params?: Record<string, 
   }
   if (phase?.kind === "waiting_model") return t("chat.waitingModel");
   if (phase?.kind === "running_command") return t("chat.runningCommand");
-  return null;
+  return t("chat.thinking");
 }
 
 const CHAT_MINIMAP_WIDTH = 36;
@@ -85,6 +90,25 @@ function getUserInputText(message: AgentMessage): string | null {
     .join("\n")
     .trim();
   return text.length > 0 ? text : null;
+}
+
+function compactNotificationText(text: string, maxLength: number): string {
+  const compact = text.replace(/\s+/g, " ").trim();
+  return compact.length > maxLength ? `${compact.slice(0, maxLength)}…` : compact;
+}
+
+function getAssistantNotificationPreview(messages: AgentMessage[]): string {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message.role !== "assistant") continue;
+    const text = splitFinalAssistantBlocks(message as AssistantMessage).answerBlocks
+      .filter((block): block is Extract<AssistantContentBlock, { type: "text" }> => block.type === "text")
+      .map((block) => block.text)
+      .join(" ");
+    const preview = compactNotificationText(text, 80);
+    if (preview) return preview;
+  }
+  return "";
 }
 
 function countToolCalls(messages: AgentMessage[], indices: number[]): number {
@@ -170,9 +194,13 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, children, t }: { mes
   );
 }
 
-export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile }: Props) {
+export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onNewSessionCwdChange }: Props) {
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
+  const {
+    notificationEnabled, notificationPermission, showNotificationPrompt,
+    onNotificationToggle, dismissNotificationPrompt, notifySession,
+  } = useCompletionNotification();
   const isMobile = useIsMobile();
 
   // Wrap onAgentEnd to play the completion sound. This is more reliable than
@@ -183,13 +211,22 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
   playDoneSoundRef.current = playDoneSound;
   const soundEnabledRef = useRef(soundEnabled);
   soundEnabledRef.current = soundEnabled;
-  const soundedExtensionDialogIdRef = useRef<string | null>(null);
+  const notifySessionRef = useRef(notifySession);
+  notifySessionRef.current = notifySession;
+  const notificationSessionIdRef = useRef<string | null>(session?.id ?? null);
+  const notificationTitleRef = useRef("");
+  const notificationPreviewRef = useRef("");
   const wrappedOnAgentEnd = useCallback(() => {
     if (soundEnabledRef.current) {
       playDoneSoundRef.current();
     }
+    void notifySessionRef.current(
+      notificationTitleRef.current || t("i18n.newSession"),
+      notificationPreviewRef.current || t("chat.notificationDoneBody"),
+      notificationSessionIdRef.current,
+    );
     onAgentEnd?.();
-  }, [onAgentEnd]);
+  }, [onAgentEnd, t]);
 
   // 稳定化 onEditContent 引用，配合 React.memo 防止历史消息重渲染
   const handleEditContent = useCallback((content: string) => {
@@ -202,7 +239,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
-    notices, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
+    notices, dismissNotice, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, detachedSubagentStatuses, respondToExtensionUi, sendExtensionCustomInput,
     isAutoModelSelection,
     agentPhase,
     isNew,
@@ -214,16 +251,38 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     handleBuiltinSlashCommand,
     handleToolPresetChange, handleThinkingLevelChange, loadSlashCommands,
   } = useAgentSession({
-    session, newSessionCwd, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionForked,
+    session, newSessionCwd, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionListRefresh, onSessionForked,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
   });
-  const sessionBusy = agentRunning || bashRunning;
-
+  notificationSessionIdRef.current = sessionIdRef.current ?? session?.id ?? null;
+  notificationTitleRef.current = compactNotificationText(
+    session?.name || session?.firstMessage || t("i18n.newSession"),
+    48,
+  );
+  notificationPreviewRef.current = getAssistantNotificationPreview(messages);
+  const notifiedExtensionDialogIdRef = useRef<string | null>(null);
+  const notifiedExtensionCustomUiIdRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!extensionDialog || soundedExtensionDialogIdRef.current === extensionDialog.id) return;
-    soundedExtensionDialogIdRef.current = extensionDialog.id;
-    playDoneSoundRef.current();
-  }, [extensionDialog]);
+    if (!extensionDialog || notifiedExtensionDialogIdRef.current === extensionDialog.id) return;
+    notifiedExtensionDialogIdRef.current = extensionDialog.id;
+    void notifySessionRef.current(
+      compactNotificationText(extensionDialog.title, 48) || t("chat.notificationAttentionTitle"),
+      extensionDialog.method === "confirm"
+        ? compactNotificationText(extensionDialog.message, 80) || t("chat.notificationAttentionBody")
+        : t("chat.notificationAttentionBody"),
+      notificationSessionIdRef.current,
+    );
+  }, [extensionDialog, t]);
+  useEffect(() => {
+    if (!extensionCustomUi || extensionCustomUi.closed || notifiedExtensionCustomUiIdRef.current === extensionCustomUi.id) return;
+    notifiedExtensionCustomUiIdRef.current = extensionCustomUi.id;
+    void notifySessionRef.current(
+      t("chat.notificationAttentionTitle"),
+      t("chat.notificationAttentionBody"),
+      notificationSessionIdRef.current,
+    );
+  }, [extensionCustomUi, t]);
+  const sessionBusy = agentRunning || bashRunning;
 
   // Register the abort handler for the global Esc shortcut
   useEffect(() => {
@@ -331,6 +390,29 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
 
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
   const messageCwd = session?.cwd ?? newSessionCwd ?? undefined;
+  const [newSessionWorktrees, setNewSessionWorktrees] = useState<{ path: string; branch: string | null; isMain: boolean }[]>([]);
+
+  // 新会话引导区：π Pi Web 正下方显示当前文件夹名
+  const newSessionFolderName = (() => {
+    if (!newSessionCwd) return null;
+    return newSessionCwd.split(/[\\/]/).filter(Boolean).pop() ?? newSessionCwd;
+  })();
+  useEffect(() => {
+    if (session || !newSessionCwd) {
+      setNewSessionWorktrees([]);
+      return;
+    }
+    const controller = new AbortController();
+    fetch(`/api/worktrees?cwd=${encodeURIComponent(newSessionCwd)}`, { signal: controller.signal })
+      .then((response) => response.ok ? response.json() as Promise<{ worktrees?: typeof newSessionWorktrees }> : Promise.reject(new Error(`HTTP ${response.status}`)))
+      .then((data) => setNewSessionWorktrees(data.worktrees ?? []))
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        console.error("加载新会话 worktree 失败", error);
+        setNewSessionWorktrees([]);
+      });
+    return () => controller.abort();
+  }, [newSessionCwd, session]);
 
   const availableThinkingLevels = displayModelValue
     ? (modelThinkingLevels[`${displayModelValue.provider}:${displayModelValue.modelId}`] ?? null)
@@ -378,8 +460,14 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
       soundEnabled={soundEnabled}
       onSoundToggle={onSoundToggle}
       onAudioUnlock={unlockAudio}
+      notificationEnabled={notificationEnabled}
+      notificationPermission={notificationPermission}
+      onNotificationToggle={onNotificationToggle}
       draftKey={session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : undefined)}
       cwd={session?.cwd ?? newSessionCwd}
+      newSessionWorktrees={!session ? newSessionWorktrees : undefined}
+      newSessionCwd={!session ? newSessionCwd : undefined}
+      onNewSessionCwdChange={onNewSessionCwdChange}
     />
   );
 
@@ -404,13 +492,28 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
 
   return (
     <div
-      className="relative flex h-full min-w-0 flex-col overflow-hidden"
-      style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
+      className="relative flex h-full flex-col overflow-hidden"
       onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
+      {showNotificationPrompt && (
+        <aside className={notificationStyles.prompt} role="dialog" aria-labelledby="completion-notification-title">
+          <div className={notificationStyles.copy}>
+            <strong id="completion-notification-title">{t("chat.notificationPromptTitle")}</strong>
+            <span>{t("chat.notificationPromptBody")}</span>
+          </div>
+          <div className={notificationStyles.actions}>
+            <button type="button" className={notificationStyles.laterButton} onClick={dismissNotificationPrompt}>
+              {t("chat.notificationPromptLater")}
+            </button>
+            <button type="button" className={notificationStyles.enableButton} onClick={onNotificationToggle}>
+              {t("chat.notificationPromptEnable")}
+            </button>
+          </div>
+        </aside>
+      )}
       {isDragOver && !sessionBusy && (
         <div className="pointer-events-none absolute inset-0 z-50 flex animate-[drop-zone-in_0.15s_ease_both] items-center justify-center bg-[rgba(37,99,235,0.06)] backdrop-blur-[1px]">
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
@@ -472,9 +575,32 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                 fontFamily: "var(--font-mono)",
               }}
             >
-              <div style={{ display: "flex", alignItems: "baseline", gap: 10, minWidth: 0, flex: 1, lineHeight: 1.4, overflow: "hidden" }}>
-                <span style={{ fontSize: 28, fontWeight: 700, letterSpacing: 0, color: "var(--text)", flexShrink: 0, whiteSpace: "nowrap" }}>π</span>
-                <span style={{ fontSize: 22, color: "var(--text)", fontWeight: 700, letterSpacing: 0, flexShrink: 0, whiteSpace: "nowrap" }}>Pi Web</span>
+              <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0, flex: 1, lineHeight: 1.4, overflow: "hidden" }}>
+                <div style={{ display: "flex", alignItems: "baseline", gap: 10, minWidth: 0, overflow: "hidden" }}>
+                  <span style={{ fontSize: 28, fontWeight: 700, letterSpacing: 0, color: "var(--text)", flexShrink: 0, whiteSpace: "nowrap" }}>π</span>
+                  <span style={{ fontSize: 22, color: "var(--text)", fontWeight: 700, letterSpacing: 0, flexShrink: 0, whiteSpace: "nowrap" }}>Pi Web</span>
+                </div>
+                {newSessionFolderName && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 5, minWidth: 0, overflow: "hidden" }}>
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                    </svg>
+                    <span
+                      title={newSessionCwd ?? undefined}
+                      style={{
+                        fontSize: 12,
+                        color: "var(--text-muted)",
+                        letterSpacing: "-0.01em",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                        minWidth: 0,
+                      }}
+                    >
+                      {newSessionFolderName}
+                    </span>
+                  </div>
+                )}
               </div>
               <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2, flexShrink: 0 }}>
                 <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
@@ -485,13 +611,13 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                 </span>
               </div>
             </div>
-            <NoticeShelf notices={notices} align="right" />
+            <NoticeShelf notices={notices} onDismiss={dismissNotice} align="right" />
             {chatInputElement}
           </div>
         </div>
       ) : (
       <>
-      <div className="relative flex min-w-0 flex-1 overflow-hidden">
+      <div className="relative flex flex-1 overflow-hidden">
         <div
           style={{
             position: "absolute",
@@ -504,12 +630,12 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
           }}
         >
           <div style={{ maxWidth: 820, margin: "0 auto" }}>
-            <NoticeShelf notices={notices} floating align="right" />
+            <NoticeShelf notices={notices} onDismiss={dismissNotice} floating align="right" />
           </div>
         </div>
-        <div ref={scrollContainerRef} className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto pt-4 [scrollbar-width:none]">
-          <div style={{ minWidth: 0, padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
-            <div style={{ width: "100%", minWidth: 0, maxWidth: 820, margin: "0 auto" }}>
+        <div ref={scrollContainerRef} className="flex-1 overflow-y-auto pt-4 [scrollbar-width:none]">
+          <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
+            <div style={{ maxWidth: 820, margin: "0 auto" }}>
               <ExtensionWidgets widgets={aboveEditorWidgets} />
 
             {(() => {
@@ -520,15 +646,8 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                 }
               }
 
-              let lastUserIdx = -1;
-              for (let i = messages.length - 1; i >= 0; i--) {
-                if (messages[i].role === "user") { lastUserIdx = i; break; }
-              }
-              // Anchor for live-tail detection: the last user message, or a
-              // compaction summary when compaction has replaced it mid-turn.
-              // Computed independently from lastUserIdx (which is kept for the
-              // scroll-to-user ref) because a compaction summary can sit after
-              // the last user message and anchor the still-streaming segment.
+              // Anchor for live-tail detection and scroll positioning: the last
+              // user message, or a compaction summary when compaction replaced it.
               let lastAnchorIdx = -1;
               for (let i = messages.length - 1; i >= 0; i--) {
                 if (isGroupAnchor(messages[i])) { lastAnchorIdx = i; break; }
@@ -544,7 +663,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
 
               const attachVisibleRef = (idx: number, refIndex: number) => (el: HTMLDivElement | null) => {
                 messageRefs.current[refIndex] = el;
-                if (idx === lastUserIdx) { (lastUserMsgRef as { current: HTMLDivElement | null }).current = el; }
+                if (idx === lastAnchorIdx) { (lastUserMsgRef as { current: HTMLDivElement | null }).current = el; }
               };
 
               const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean } = {}): ReactNode => {
@@ -589,6 +708,13 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                     sessionId={session?.id ?? sessionIdRef.current ?? undefined}
                   />
                 );
+                if (idx === lastAnchorIdx && (!isVisible || currentRefIdx === undefined)) {
+                  return (
+                    <div key={`${keyPrefix}-${idx}`} ref={(el) => { (lastUserMsgRef as { current: HTMLDivElement | null }).current = el; }}>
+                      {view}
+                    </div>
+                  );
+                }
                 if (!isVisible || options.attachRef === false || currentRefIdx === undefined) return view;
                 return (
                   <div key={`${keyPrefix}-${idx}`} ref={attachVisibleRef(idx, currentRefIdx)}>
@@ -598,6 +724,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
               };
 
               const rendered: ReactNode[] = [];
+              let liveTailStartIndex: number | null = null;
               for (let idx = 0; idx < messages.length;) {
                 const msg = messages[idx];
                 if (!isGroupAnchor(msg)) {
@@ -622,6 +749,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
 
                 const isLiveTail = (sessionBusy || streamState.isStreaming) && endIdx === messages.length && userIdx === lastAnchorIdx;
                 if (isLiveTail) {
+                  liveTailStartIndex = rendered.length;
                   for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
                     rendered.push(renderMessage(renderIdx));
                   }
@@ -679,7 +807,13 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                 }
                 idx = endIdx;
               }
-              const { startIndex, hasMore } = getVisibleRenderWindow(rendered.length, visibleCount);
+              const window = getVisibleRenderWindow(rendered.length, visibleCount);
+              // 运行中的单轮会话可能包含超过一页的工具消息。必须连同该轮锚点一起渲染，
+              // 否则定位引用会被分页裁掉，恢复会话时只能滚进底部预留的空白区域。
+              const startIndex = liveTailStartIndex === null
+                ? window.startIndex
+                : Math.min(window.startIndex, liveTailStartIndex);
+              const hasMore = startIndex > 0;
               return (
                 <>
                   {hasMore && (
@@ -695,7 +829,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
               <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} />
             )}
 
-            {agentRunning && !streamState.streamingMessage && agentPhase && (
+            {agentRunning && !streamState.streamingMessage && (
               <div className="py-2 text-[13px] text-text-muted">
                 <span className="animate-[pulse_1.5s_infinite]">{phaseLabel(agentPhase, t)}</span>
               </div>
@@ -719,11 +853,11 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
               />
             )}
 
+            <div ref={messagesEndRef} />
+
             {agentRunning && (
               <div style={{ height: scrollContainerRef.current ? scrollContainerRef.current.clientHeight : "80vh" }} />
             )}
-
-            <div ref={messagesEndRef} />
             </div>
           </div>
         </div>
@@ -749,6 +883,9 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
             <ExtensionWidgets widgets={belowEditorWidgets} />
           </div>
         </div>
+        {detachedSubagentStatuses.length > 0 && (
+          <DetachedSubagentStatusPanel statuses={detachedSubagentStatuses} t={t} />
+        )}
         {chatInputElement}
         <ExtensionStatusBar statuses={extensionStatuses} />
       </div>
@@ -757,7 +894,6 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     </div>
   );
 }
-
 function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; lines: string[] }> }) {
   if (widgets.length === 0) return null;
   return (
@@ -784,7 +920,8 @@ function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; lines: st
   );
 }
 
-function NoticeShelf({ notices, floating = false, align = "left" }: { notices: NoticeItem[]; floating?: boolean; align?: "left" | "right" }) {
+function NoticeShelf({ notices, onDismiss, floating = false, align = "left" }: { notices: NoticeItem[]; onDismiss: (id: string) => void; floating?: boolean; align?: "left" | "right" }) {
+  const { t } = useI18n();
   if (notices.length === 0) return null;
   return (
     <div
@@ -793,6 +930,7 @@ function NoticeShelf({ notices, floating = false, align = "left" }: { notices: N
         flexDirection: "column",
         alignItems: align === "right" ? "flex-end" : "stretch",
         marginBottom: floating ? 0 : 10,
+        pointerEvents: "auto",
       }}
     >
       {notices.map((notice, index) => {
@@ -804,8 +942,11 @@ function NoticeShelf({ notices, floating = false, align = "left" }: { notices: N
               ? "#10b981"
               : "var(--accent)";
         return (
-          <div
+          <button
             key={notice.id}
+            type="button"
+            onClick={() => onDismiss(notice.id)}
+            title={t("i18n.close")}
             className="notice-shelf-item"
             style={{
               display: "flex",
@@ -832,6 +973,8 @@ function NoticeShelf({ notices, floating = false, align = "left" }: { notices: N
                 ? "notice-shelf-out 0.18s ease-in forwards"
                 : "notice-shelf-in 0.18s ease-out both",
               padding: "0 12px",
+              cursor: "pointer",
+              textAlign: "left",
             }}
           >
             <span
@@ -846,7 +989,7 @@ function NoticeShelf({ notices, floating = false, align = "left" }: { notices: N
             <span style={{ padding: "14px 0", minWidth: 0, maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               {notice.message}
             </span>
-          </div>
+          </button>
         );
       })}
     </div>

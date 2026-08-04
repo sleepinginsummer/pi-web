@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFile } from "node:fs/promises";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createJiti } from "jiti";
@@ -96,4 +97,95 @@ test("renders compact errors above the input as a wrapping alert", () => {
   assert.match(html, /&lt;html&gt;request forbidden&lt;\/html&gt;/);
   assert.match(html, /white-space:pre-wrap/);
   assert.ok(html.indexOf('role="alert"') < html.indexOf("<textarea"));
+});
+
+test("renders the worktree selector only for a new session", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(
+      I18nProvider,
+      null,
+      React.createElement(ChatInput, {
+        onSend() {},
+        onAbort() {},
+        isStreaming: false,
+        cwd: "/repo",
+        newSessionCwd: "/repo-wt",
+        newSessionWorktrees: [
+          { path: "/repo", branch: "main", isMain: true },
+          { path: "/repo-wt", branch: "feature/test", isMain: false },
+        ],
+      }),
+    ),
+  );
+  assert.match(html, /选择 worktree/);
+  assert.match(html, /feature\/test/);
+});
+
+const thinkingBaseProps = {
+  onSend() {}, onAbort() {}, isStreaming: false,
+  model: "test-model", modelNames: [], modelList: [], modelError: null, modelScopeWarnings: [],
+  onModelChange() {}, thinkingLevel: "high", onThinkingLevelChange() {},
+  availableThinkingLevels: null, thinkingLevelMap: null,
+};
+
+test("streaming shows read-only thinking badge before Stop", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(I18nProvider, null,
+      React.createElement(ChatInput, { ...thinkingBaseProps, isStreaming: true })),
+  );
+  const badgeIndex = html.indexOf(">high</span>");
+  assert.ok(badgeIndex > -1, "badge should show current thinking level");
+  const stopIndex = html.indexOf(">Stop<");
+  assert.ok(stopIndex > -1, "stop button should render");
+  assert.ok(stopIndex > badgeIndex, "badge should appear before stop button");
+  const badgeOpen = html.lastIndexOf("<div", badgeIndex);
+  const beforeBadge = html.slice(Math.max(0, badgeOpen - 200), badgeOpen);
+  assert.ok(!beforeBadge.includes("cursor:pointer"), "badge should not be clickable");
+});
+
+test("idle renders the interactive thinking button instead of the badge", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(I18nProvider, null,
+      React.createElement(ChatInput, thinkingBaseProps)),
+  );
+  assert.ok(html.includes('aria-label="Change reasoning level"'), "idle thinking button has aria-label");
+  assert.ok(!html.includes(">Stop<"), "no stop button when idle");
+});
+
+test("streaming badge shows the mapped level label when thinkingLevelMap is set", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(I18nProvider, null,
+      React.createElement(ChatInput, {
+        ...thinkingBaseProps,
+        isStreaming: true,
+        thinkingLevelMap: { high: "claude thinking" },
+      })),
+  );
+  assert.ok(html.includes(">claude thinking</span>"), "badge should show mapped label");
+});
+
+test("streaming without thinkingLevel hides the badge but keeps Stop", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(I18nProvider, null,
+      React.createElement(ChatInput, { ...thinkingBaseProps, isStreaming: true, thinkingLevel: undefined })),
+  );
+  assert.ok(!html.includes(">high</span>"), "no badge when thinkingLevel is undefined");
+  assert.ok(html.includes(">Stop<"), "stop button still renders");
+});
+
+test("clearing an accepted new-session prompt cannot restore its draft", async () => {
+  const source = await readFile(new URL("./ChatInput.tsx", import.meta.url), "utf8");
+  const clearInputSource = source.slice(
+    source.indexOf("const clearInput = useCallback"),
+    source.indexOf("useEffect(() =>", source.indexOf("const clearInput = useCallback")),
+  );
+  const persistStart = source.indexOf("// 发送清空或切换草稿 key 时");
+  const persistDraftSource = source.slice(
+    persistStart,
+    source.indexOf("useEffect(() =>", persistStart + 1),
+  );
+
+  assert.match(clearInputSource, /valueRef\.current = "";[\s\S]*?setValue\(""\)/);
+  assert.match(clearInputSource, /attachedImagesRef\.current = \[\]/);
+  assert.match(persistDraftSource, /draftKeyRef\.current !== draftKey \|\| valueRef\.current !== value/);
 });
