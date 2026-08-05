@@ -296,8 +296,10 @@ export interface SessionInfo {
    *  Always set by the server; optional because the client builds transient
    *  SessionInfo objects before the first refresh. Fall back to cwd. */
   projectRoot?: string;
-  /** Branch name when cwd is a linked git worktree (not the main checkout) */
-  worktreeBranch?: string;
+  /** cwd 当前检出的 Git 分支；detached HEAD 显示 detached@<short-sha>，非 Git 目录为空 */
+  currentBranch?: string;
+  /** cwd 是否为 linked worktree 的顶层目录 */
+  isWorktree?: boolean;
 }
 
 export interface SessionContext {

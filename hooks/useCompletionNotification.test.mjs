@@ -18,16 +18,26 @@ test("shows the first-visit prompt only while permission is undecided", () => {
   assert.match(hookSource, /PROMPT_DISMISSED_KEY/);
 });
 
-test("service worker notification click returns to the target session", () => {
+test("service worker notification click returns to the source window and target session", () => {
   assert.match(serviceWorkerSource, /notificationclick/);
-  assert.match(serviceWorkerSource, /client\.navigate\(targetUrl\)/);
+  assert.match(serviceWorkerSource, /self\.clients\.get\(sourceClientId\)/);
+  assert.match(serviceWorkerSource, /sourceClient\.focus\(\)/);
+  assert.match(serviceWorkerSource, /sourceClient\.postMessage\(\{ type: "OPEN_NOTIFICATION_TARGET", url: targetUrl \}\)/);
+  assert.doesNotMatch(serviceWorkerSource, /sourceClient\.navigate\(targetUrl\)/);
   assert.match(serviceWorkerSource, /self\.clients\.openWindow\(targetUrl\)/);
+  assert.ok(
+    serviceWorkerSource.indexOf("self.clients.get(sourceClientId)")
+      < serviceWorkerSource.indexOf('self.clients.matchAll({ type: "window"'),
+  );
 });
 
-test("completion notifications are also sent while the app is focused", () => {
+test("completion notifications are sent through the controlling service worker", () => {
   assert.doesNotMatch(hookSource, /document\.visibilityState/);
   assert.doesNotMatch(hookSource, /document\.hasFocus/);
-  assert.match(hookSource, /registration\.showNotification\(title, options\)/);
+  assert.match(hookSource, /activeWorker\.postMessage\(\{ type: "SHOW_NOTIFICATION", title, options \}\)/);
+  assert.match(serviceWorkerSource, /event\.source\?\.id/);
+  assert.match(serviceWorkerSource, /sourceClientId/);
+  assert.match(serviceWorkerSource, /self\.registration\.showNotification\(title, notificationOptions\)/);
   assert.match(hookSource, /new Notification\(title, options\)/);
 });
 

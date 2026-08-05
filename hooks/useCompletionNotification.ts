@@ -79,8 +79,10 @@ export function useCompletionNotification() {
       const registration = "serviceWorker" in navigator
         ? await navigator.serviceWorker.getRegistration()
         : undefined;
-      if (registration) {
-        await registration.showNotification(title, options);
+      const activeWorker = navigator.serviceWorker.controller ?? registration?.active;
+      if (activeWorker) {
+        // 由当前控制页面的 worker 接收消息，Service Worker 才能记录准确的来源 Client.id。
+        activeWorker.postMessage({ type: "SHOW_NOTIFICATION", title, options });
         return;
       }
 

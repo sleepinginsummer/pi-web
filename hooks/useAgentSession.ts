@@ -1271,6 +1271,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!trimmedMessage && !images?.length) return false;
     // UI 状态可能晚于异步扩展启动的 agent_start；此时不可吞掉用户输入。
     if (agentRunningRef.current || bashRunningRef.current) return false;
+    const activeCwd = session?.cwd ?? newSessionCwd;
+    if (activeCwd) {
+      try {
+        const response = await fetch(`/api/git/context?cwd=${encodeURIComponent(activeCwd)}`, { cache: "no-store" });
+        if (response.ok) onSessionListRefresh?.();
+        else console.error("刷新当前 Git 分支失败", await response.text());
+      } catch (error) {
+        console.error("刷新当前 Git 分支失败", error);
+      }
+    }
     const isSlashCommandPrompt = !images?.length && trimmedMessage.startsWith("/");
 
     const isBashCommand = !images?.length && trimmedMessage.startsWith("!");
@@ -1375,7 +1385,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       dispatch({ type: "end" });
       return false;
     }
-  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, closeEvents, opts.chatInputRef]);
+  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, closeEvents, onSessionListRefresh, opts.chatInputRef]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
     if (agentRunningRef.current || bashRunningRef.current) return;

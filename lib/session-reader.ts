@@ -41,9 +41,11 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
       firstMessage: s.firstMessage || "(no messages)",
       parentSessionId: s.parentSessionPath ? pathToId.get(sessionPathKey(s.parentSessionPath)) : undefined,
       projectRoot: project?.projectRoot ?? s.cwd,
-      // 主 checkout 也是一个 worktree；统一把所有顶层 checkout 的分支
-      // 传给侧边栏，避免 main 会话缺少 worktree 标识。
-      ...(project?.isTopLevel && project.branch ? { worktreeBranch: project.branch } : {}),
+      // 分支代表 cwd 当前的 Git 状态；主 checkout 与 linked worktree 都显示。
+      ...(project?.isTopLevel && (project.branch || project.headCommit)
+        ? { currentBranch: project.branch ?? `detached@${project.headCommit}` }
+        : {}),
+      ...(project?.isTopLevel ? { isWorktree: project.isWorktree } : {}),
     };
   });
 }
