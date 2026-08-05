@@ -370,7 +370,32 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
 
   const { isDragOver, handleDragEnter, handleDragOver, handleDragLeave, handleDrop } = useDragDrop(onDrop);
 
-  const visibleMessages = messages.filter((m) => m.role === "user" || m.role === "assistant");
+  const messageRenderIndex = useMemo(() => {
+    const toolResults = new Map<string, ToolResultMessage>();
+    const visibleRefIndexByMessage = new Map<number, number>();
+    const assistantTimestampIndices = new Set<number>();
+    let visibleCount = 0;
+    let lastAssistantIndex = -1;
+
+    for (let index = 0; index < messages.length; index++) {
+      const message = messages[index];
+      if (message.role === "toolResult") {
+        toolResults.set((message as ToolResultMessage).toolCallId, message as ToolResultMessage);
+      }
+      if (message.role === "user" || message.role === "assistant") {
+        visibleRefIndexByMessage.set(index, visibleCount++);
+      }
+      if (message.role === "user") {
+        if (lastAssistantIndex >= 0) assistantTimestampIndices.add(lastAssistantIndex);
+        lastAssistantIndex = -1;
+      } else if (message.role === "assistant") {
+        lastAssistantIndex = index;
+      }
+    }
+    if (lastAssistantIndex >= 0) assistantTimestampIndices.add(lastAssistantIndex);
+
+    return { toolResults, visibleRefIndexByMessage, assistantTimestampIndices, visibleCount };
+  }, [messages]);
   const inputHistory = useMemo(() => {
     const seen = new Set<string>();
     const history: string[] = [];
@@ -383,7 +408,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     }
     return history.reverse();
   }, [messages]);
-  const messageRefs = useMessageRefs(visibleMessages.length);
+  const messageRefs = useMessageRefs(messageRenderIndex.visibleCount);
   const revealHistoryForMinimap = useCallback(() => {
     setVisibleCount((current) => Math.max(current, messages.length * 2));
   }, [messages.length]);
@@ -639,27 +664,13 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
               <ExtensionWidgets widgets={aboveEditorWidgets} />
 
             {(() => {
-              const toolResultsMap = new Map<string, ToolResultMessage>();
-              for (const msg of messages) {
-                if (msg.role === "toolResult") {
-                  toolResultsMap.set((msg as ToolResultMessage).toolCallId, msg as ToolResultMessage);
-                }
-              }
-
+              const { toolResults, visibleRefIndexByMessage, assistantTimestampIndices } = messageRenderIndex;
               // Anchor for live-tail detection and scroll positioning: the last
               // user message, or a compaction summary when compaction replaced it.
               let lastAnchorIdx = -1;
               for (let i = messages.length - 1; i >= 0; i--) {
                 if (isGroupAnchor(messages[i])) { lastAnchorIdx = i; break; }
               }
-
-              const visibleRefIndexByMessage = new Map<number, number>();
-              let refIdx = 0;
-              messages.forEach((msg, idx) => {
-                if (msg.role === "user" || msg.role === "assistant") {
-                  visibleRefIndexByMessage.set(idx, refIdx++);
-                }
-              });
 
               const attachVisibleRef = (idx: number, refIndex: number) => (el: HTMLDivElement | null) => {
                 messageRefs.current[refIndex] = el;
@@ -675,25 +686,17 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                 const isVisible = msg.role === "user" || msg.role === "assistant";
                 const currentRefIdx = visibleRefIndexByMessage.get(idx);
                 const keyPrefix = options.keyPrefix ?? "message";
-                let showTimestamp = false;
-                if (msg.role === "assistant") {
-                  showTimestamp = true;
-                  for (let j = idx + 1; j < messages.length; j++) {
-                    const r = messages[j].role;
-                    if (r === "user") break;
-                    if (r === "assistant") { showTimestamp = false; break; }
-                  }
-                  // Hide on the currently-streaming tail (the streaming bubble owns the live timestamp)
-                  if (showTimestamp && streamState.isStreaming && idx === messages.length - 1) {
-                    showTimestamp = false;
-                  }
+                let showTimestamp = msg.role === "assistant" && assistantTimestampIndices.has(idx);
+                // Hide on the currently-streaming tail (the streaming bubble owns the live timestamp).
+                if (showTimestamp && streamState.isStreaming && idx === messages.length - 1) {
+                  showTimestamp = false;
                 }
                 if (options.showTimestamp !== undefined) showTimestamp = options.showTimestamp;
                 const view = (
                   <MessageView
                     key={`${keyPrefix}-view-${idx}`}
                     message={msg}
-                    toolResults={toolResultsMap}
+                    toolResults={toolResults}
                     modelNames={modelNames}
                     cwd={messageCwd}
                     onOpenFile={onOpenFile}

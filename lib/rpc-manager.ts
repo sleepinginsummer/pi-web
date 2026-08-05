@@ -88,6 +88,17 @@ export interface RpcSessionStartOptions {
   thinkingLevel?: ThinkingLevel;
 }
 
+interface RpcStartupTimings {
+  services?: number;
+  modelScope?: number;
+  sessionCreate?: number;
+  preferences?: number;
+}
+
+function elapsedMs(startedAt: number): number {
+  return Math.round((performance.now() - startedAt) * 10) / 10;
+}
+
 const CODING_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 
 // Extensions require a complete Theme, while the web UI applies its own styling.
@@ -1193,6 +1204,9 @@ export async function startRpcSession(
   }
   const sessionCwd = sessionManager.getCwd();
   const finishStartingSession = trackStartingSession(sessionCwd);
+  const startupStartedAt = performance.now();
+  const startupTimings: RpcStartupTimings = {};
+  let startupStage = "setup";
   const starting = (async () => {
     // Some extensions access the SDK's global theme even outside the terminal UI.
     initTheme();
@@ -1217,15 +1231,22 @@ export async function startRpcSession(
     // Gate untrusted project extensions so opening a repository does not run
     // its .pi/extensions code automatically (see lib/project-trust.ts, #236).
     const trustReloadOptions = projectTrustReloadOptions(sessionCwd, agentDir);
+    startupStage = "services";
+    let stageStartedAt = performance.now();
     const services = await createAgentSessionServices({
       cwd: sessionCwd,
       agentDir,
       ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),
     });
+    startupTimings.services = elapsedMs(stageStartedAt);
+
+    startupStage = "modelScope";
+    stageStartedAt = performance.now();
     const scope = await resolveVisibleModels(
       services.modelRuntime,
       services.settingsManager.getEnabledModels(),
     );
+    startupTimings.modelScope = elapsedMs(stageStartedAt);
     const defaultProvider = services.settingsManager.getDefaultProvider();
     const defaultModelId = services.settingsManager.getDefaultModel();
     const hasExistingMessages = sessionManager.getBranch().some((entry) => entry.type === "message");
@@ -1238,6 +1259,8 @@ export async function startRpcSession(
           : {}),
         ...(thinkingLevel ? { thinkingLevel } : {}),
       });
+    startupStage = "sessionCreate";
+    stageStartedAt = performance.now();
     const { session: inner } = await createAgentSessionFromServices({
       services,
       sessionManager,
@@ -1246,7 +1269,10 @@ export async function startRpcSession(
       ...(initial.scopedModels.length > 0 ? { scopedModels: initial.scopedModels } : {}),
       ...(toolsOption !== undefined ? { tools: toolsOption } : {}),
     });
+    startupTimings.sessionCreate = elapsedMs(stageStartedAt);
 
+    startupStage = "preferences";
+    stageStartedAt = performance.now();
     const persistedPreferences = await persistExplicitStartupPreferences(
       services.settingsManager,
       {
@@ -1261,6 +1287,7 @@ export async function startRpcSession(
         supportsThinking: inner.supportsThinking(),
       },
     );
+    startupTimings.preferences = elapsedMs(stageStartedAt);
     if (persistedPreferences.modelDefaultChanged) invalidateModelsCache();
 
     // If specific tool names were requested (non-empty), set the active tools to the
@@ -1287,8 +1314,25 @@ export async function startRpcSession(
     registry.set(realSessionId, wrapper);
     wrapper.beginExtensionBinding({ forceEmptySystemPrompt: toolNames?.length === 0 });
 
+    console.info("[pi-web] RPC session startup", {
+      sessionId: realSessionId,
+      cwd: sessionCwd,
+      existingSession: Boolean(sessionFile),
+      total: elapsedMs(startupStartedAt),
+      ...startupTimings,
+    });
     return { session: wrapper, realSessionId };
-  })().finally(() => {
+  })().catch((error) => {
+    console.error("[pi-web] RPC session startup failed", {
+      cwd: sessionCwd,
+      existingSession: Boolean(sessionFile),
+      stage: startupStage,
+      total: elapsedMs(startupStartedAt),
+      ...startupTimings,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }).finally(() => {
     locks.delete(sessionId);
     finishStartingSession();
   });

@@ -22,6 +22,10 @@ import { getFileName } from "@/lib/file-paths";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
 import { getInitialNavigation } from "@/lib/initial-navigation";
 import {
+  NOTIFICATION_TARGET_EVENT,
+  type NotificationTargetEventDetail,
+} from "@/lib/notification-navigation";
+import {
   getDefaultRightPanelWidth,
   getRightPanelMaxWidth,
   getSidebarMaxWidth,
@@ -208,6 +212,7 @@ export function AppShell() {
   const [autoNameStatus, setAutoNameStatus] = useState<AutoNameStatus>({ kind: "idle" });
   const autoNameTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeSessionIdRef = useRef<string | null>(selectedSession?.id ?? null);
+  const notificationNavigationRequestRef = useRef(0);
   activeSessionIdRef.current = selectedSession?.id ?? null;
   const handleSessionStatsChange = useCallback((stats: SessionStatsInfo | null) => {
     setSessionStats(stats);
@@ -392,6 +397,8 @@ export function AppShell() {
   }, [router, selectedSession]);
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
+    // 任意显式会话选择都应使尚未完成的通知跳转失效，避免旧请求覆盖用户操作。
+    notificationNavigationRequestRef.current += 1;
     if (!isRestore && activeSessionIdRef.current === session.id) return;
     setNewSessionCwd(null);
     setSelectedSession(session);
@@ -411,6 +418,41 @@ export function AppShell() {
       replaceSessionUrl(session.id);
     }
   }, [isMobile]);
+
+  useEffect(() => {
+    const handleNotificationNavigation = (event: Event) => {
+      const notificationEvent = event as CustomEvent<NotificationTargetEventDetail>;
+      const targetUrl = new URL(notificationEvent.detail.url, window.location.origin);
+      const sessionId = targetUrl.searchParams.get("session");
+      if (targetUrl.pathname !== "/" || !sessionId) return;
+
+      // 同一会话只需同步地址栏；其它会话通过服务端数据进入既有切换流程。
+      notificationEvent.preventDefault();
+      const requestId = ++notificationNavigationRequestRef.current;
+      if (activeSessionIdRef.current === sessionId) {
+        replaceSessionUrl(sessionId);
+        return;
+      }
+
+      void fetch(`/api/sessions/${encodeURIComponent(sessionId)}?deferThinking=1&deferMedia=1`)
+        .then(async (response) => {
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          return response.json() as Promise<{ info?: SessionInfo | null }>;
+        })
+        .then(({ info }) => {
+          if (requestId !== notificationNavigationRequestRef.current) return;
+          if (!info) throw new Error("会话信息不存在");
+          handleSelectSession(info);
+        })
+        .catch((error: unknown) => {
+          if (requestId !== notificationNavigationRequestRef.current) return;
+          console.error("通知目标会话切换失败", { sessionId, error });
+        });
+    };
+
+    window.addEventListener(NOTIFICATION_TARGET_EVENT, handleNotificationNavigation);
+    return () => window.removeEventListener(NOTIFICATION_TARGET_EVENT, handleNotificationNavigation);
+  }, [handleSelectSession]);
 
   const handleNewSession = useCallback((_sessionId: string, cwd: string) => {
     setSelectedSession(null);

@@ -1,7 +1,7 @@
 import { isAbsolute } from "path";
 import { NextRequest, NextResponse } from "next/server";
 import { getAllowedFileRoots, isExistingFilePathAllowed, isFilePathAllowed } from "@/lib/file-access";
-import { invalidateSessionListCache } from "@/lib/session-reader";
+import { updateCachedSessionProject } from "@/lib/session-reader";
 import { invalidateProjectCache, resolveProject } from "@/lib/worktree";
 
 export const dynamic = "force-dynamic";
@@ -20,11 +20,12 @@ export async function GET(request: NextRequest) {
 
   try {
     invalidateProjectCache(cwd);
-    invalidateSessionListCache();
     const project = await resolveProject(cwd);
+    const currentBranch = project.branch ?? (project.headCommit ? `detached@${project.headCommit}` : null);
+    updateCachedSessionProject(cwd, project, currentBranch);
     return NextResponse.json({
       projectRoot: project.projectRoot,
-      currentBranch: project.branch ?? (project.headCommit ? `detached@${project.headCommit}` : null),
+      currentBranch,
       isWorktree: project.isWorktree,
     });
   } catch (error) {

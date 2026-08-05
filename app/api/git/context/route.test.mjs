@@ -11,9 +11,9 @@ test("Git 上下文接口只允许查询已授权的现有目录", () => {
   assert.match(source, /status: 403/);
 });
 
-test("Git 上下文接口绕过项目与会话列表缓存", () => {
+test("Git 上下文接口实时刷新项目并就地更新会话列表缓存", () => {
   assert.match(source, /invalidateProjectCache\(cwd\)/);
-  assert.match(source, /invalidateSessionListCache\(\)/);
-  assert.match(source, /currentBranch: project\.branch \?\?/);
+  assert.match(source, /updateCachedSessionProject\(cwd, project, currentBranch\)/);
+  assert.doesNotMatch(source, /invalidateSessionListCache\(\)/);
   assert.match(source, /detached@\$\{project\.headCommit\}/);
 });

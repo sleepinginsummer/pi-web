@@ -52,7 +52,7 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
 
 export async function listAllSessions(): Promise<SessionInfo[]> {
   const generation = globalThis.__piSessionListGeneration ?? 0;
-
+  const projectMetadataRevision = globalThis.__piProjectMetadataRevision ?? 0;
   // Return cached result if still fresh (avoids re-scanning session files
   // and re-spawning git processes on every page load).
   if (globalThis.__piSessionListCache && Date.now() - globalThis.__piSessionListCache.ts < SESSION_LIST_CACHE_TTL_MS) {
@@ -68,7 +68,10 @@ export async function listAllSessions(): Promise<SessionInfo[]> {
   const loadPromise = loadAllSessions().then((data) => {
     // An invalidation may happen while the scan is in flight. Do not let that
     // older result repopulate the cache after a session mutation.
-    if ((globalThis.__piSessionListGeneration ?? 0) === generation) {
+    if (
+      (globalThis.__piSessionListGeneration ?? 0) === generation
+      && (globalThis.__piProjectMetadataRevision ?? 0) === projectMetadataRevision
+    ) {
       globalThis.__piSessionListCache = { data, ts: Date.now() };
     }
     return data;
@@ -94,6 +97,7 @@ declare global {
   var __piSessionListPromise: Promise<SessionInfo[]> | undefined;
   var __piSessionListPromiseGeneration: number | undefined;
   var __piSessionListGeneration: number | undefined;
+  var __piProjectMetadataRevision: number | undefined;
   var __piSessionListCache: { data: SessionInfo[]; ts: number } | undefined;
 }
 
@@ -102,6 +106,42 @@ const SESSION_LIST_CACHE_TTL_MS = 30_000;
 export function invalidateSessionListCache(): void {
   globalThis.__piSessionListGeneration = (globalThis.__piSessionListGeneration ?? 0) + 1;
   globalThis.__piSessionListCache = undefined;
+}
+
+/**
+ * 仅更新已缓存会话的项目展示信息。缓存不存在时不主动扫描磁盘；
+ * 后续正常列表加载会从 SessionManager 和 Git 重新构建完整数据。
+ */
+export function updateCachedSessionProject(
+  cwd: string,
+  project: ProjectInfo,
+  currentBranch: string | null,
+ ): void {
+  globalThis.__piProjectMetadataRevision = (globalThis.__piProjectMetadataRevision ?? 0) + 1;
+  const cached = globalThis.__piSessionListCache;
+  if (!cached) return;
+
+  let changed = false;
+  const data = cached.data.map((session) => {
+    if (session.cwd !== cwd) return session;
+    changed = true;
+    const nextSession: SessionInfo = {
+      ...session,
+      projectRoot: project.projectRoot,
+    };
+    if (project.isTopLevel) {
+      if (currentBranch) nextSession.currentBranch = currentBranch;
+      else delete nextSession.currentBranch;
+      nextSession.isWorktree = project.isWorktree;
+    } else {
+      delete nextSession.currentBranch;
+      delete nextSession.isWorktree;
+    }
+    return nextSession;
+  });
+  if (changed) {
+    globalThis.__piSessionListCache = { data, ts: cached.ts };
+  }
 }
 
 function getPathCache(): Map<string, string> {

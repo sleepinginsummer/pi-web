@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { openNotificationTarget } from "@/lib/notification-navigation";
 import styles from "./PwaRegistration.module.css";
 
 const UPDATE_INTERVAL_MS = 60 * 60 * 1000;
@@ -38,9 +39,7 @@ export function PwaRegistration() {
     // Service Worker 先聚焦来源 PWA 窗口，再由该窗口完成会话跳转，避免 Chrome 改由普通标签页处理 URL。
     const handleNotificationTarget = (event: MessageEvent<{ type?: unknown; url?: unknown }>) => {
       if (event.data?.type !== "OPEN_NOTIFICATION_TARGET" || typeof event.data.url !== "string") return;
-      const targetUrl = new URL(event.data.url, window.location.origin);
-      if (targetUrl.origin !== window.location.origin) return;
-      window.location.assign(`${targetUrl.pathname}${targetUrl.search}${targetUrl.hash}`);
+      openNotificationTarget(event.data.url);
     };
     navigator.serviceWorker.addEventListener("message", handleNotificationTarget);
     let registration: ServiceWorkerRegistration | null = null;

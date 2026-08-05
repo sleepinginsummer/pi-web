@@ -4,6 +4,8 @@ import test from "node:test";
 
 const hookSource = await readFile(new URL("./useCompletionNotification.ts", import.meta.url), "utf8");
 const serviceWorkerSource = await readFile(new URL("../public/sw.js", import.meta.url), "utf8");
+const registrationSource = await readFile(new URL("../components/PwaRegistration.tsx", import.meta.url), "utf8");
+const appShellSource = await readFile(new URL("../components/AppShell.tsx", import.meta.url), "utf8");
 
 test("requests permission only from the explicit notification toggle", () => {
   assert.match(hookSource, /const toggle = useCallback\(async \(\) =>/);
@@ -29,6 +31,16 @@ test("service worker notification click returns to the source window and target 
     serviceWorkerSource.indexOf("self.clients.get(sourceClientId)")
       < serviceWorkerSource.indexOf('self.clients.matchAll({ type: "window"'),
   );
+});
+
+test("notification target switches sessions without reloading the current page", () => {
+  assert.match(registrationSource, /openNotificationTarget\(event\.data\.url\)/);
+  assert.match(hookSource, /openNotificationTarget\(url\)/);
+  assert.match(appShellSource, /window\.addEventListener\(NOTIFICATION_TARGET_EVENT/);
+  assert.match(appShellSource, /notificationEvent\.preventDefault\(\)/);
+  assert.match(appShellSource, /handleSelectSession\(info\)/);
+  assert.doesNotMatch(registrationSource, /window\.location\.assign/);
+  assert.doesNotMatch(hookSource, /window\.location\.assign/);
 });
 
 test("completion notifications are sent through the controlling service worker", () => {

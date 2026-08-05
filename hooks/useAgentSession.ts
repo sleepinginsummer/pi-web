@@ -401,6 +401,7 @@ export interface ChatInputHandle {
   insertIfEmpty: (content: string) => void;
   prependText: (text: string) => void;
   addImages: (files: File[]) => void;
+  clearAcceptedPrompt: () => void;
 }
 
 export interface AttachedImage {
@@ -656,6 +657,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const sid = sessionIdRef.current;
     if (!isNew || !newSessionCwd || !sid || newSessionPromotedRef.current) return;
     newSessionPromotedRef.current = true;
+    // 父级升级会改变 draftKey；先同步清空，避免旧输入在 key 切换副作用中回写临时草稿。
+    opts.chatInputRef?.current?.clearAcceptedPrompt();
     onSessionCreated?.({
       id: sid,
       path: "",
@@ -666,7 +669,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       messageCount,
       firstMessage,
     });
-  }, [isNew, newSessionCwd, onSessionCreated]);
+  }, [isNew, newSessionCwd, onSessionCreated, opts.chatInputRef]);
 
   const ensureNewSession = useCallback(async () => {
     if (sessionIdRef.current) return sessionIdRef.current;
@@ -1158,13 +1161,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const completed = event.message as AgentMessage | undefined;
         // detached completion 可能在父轮结束后到达，状态区仍必须消费。
         if (!agentRunningRef.current && completed?.role !== "custom") break;
-        // 消息落盘后让侧边栏刷新列表（节流 1s）。新会话的 .jsonl 在第一条
-        // assistant 消息之后的 entry 才真正写入，此时刷新才能扫到它。
+        // 首个 message_end 先立即刷新；在节流窗口结束时补一次，覆盖会话文件刚落盘、
+        // 但首次扫描尚未看到首条 assistant 消息的时序。
         if (!sessionListRefreshTimerRef.current) {
+          onSessionListRefresh?.();
           sessionListRefreshTimerRef.current = setTimeout(() => {
             sessionListRefreshTimerRef.current = null;
+            onSessionListRefresh?.();
           }, 1000);
-          onSessionListRefresh?.();
         }
         if (completed?.role === "toolResult" && completed.toolName === "subagent_spawn" && !completed.isError) {
           const text = contentText(completed.content);
@@ -1273,13 +1277,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (agentRunningRef.current || bashRunningRef.current) return false;
     const activeCwd = session?.cwd ?? newSessionCwd;
     if (activeCwd) {
-      try {
-        const response = await fetch(`/api/git/context?cwd=${encodeURIComponent(activeCwd)}`, { cache: "no-store" });
-        if (response.ok) onSessionListRefresh?.();
-        else console.error("刷新当前 Git 分支失败", await response.text());
-      } catch (error) {
-        console.error("刷新当前 Git 分支失败", error);
-      }
+      // 分支信息只影响侧栏展示，不应阻塞会话创建、SSE 建连和首条 prompt。
+      void fetch(`/api/git/context?cwd=${encodeURIComponent(activeCwd)}`, { cache: "no-store" })
+        .then(async (response) => {
+          if (response.ok) {
+            onSessionListRefresh?.();
+            return;
+          }
+          console.error("刷新当前 Git 分支失败", await response.text());
+        })
+        .catch((error) => {
+          console.error("刷新当前 Git 分支失败", error);
+        });
     }
     const isSlashCommandPrompt = !images?.length && trimmedMessage.startsWith("/");
 

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { openNotificationTarget } from "@/lib/notification-navigation";
 
 const STORAGE_KEY = "pi-notification-enabled";
 const PROMPT_DISMISSED_KEY = "pi-notification-prompt-dismissed";
@@ -89,7 +90,7 @@ export function useCompletionNotification() {
       const notification = new Notification(title, options);
       notification.onclick = () => {
         window.focus();
-        window.location.assign(url);
+        openNotificationTarget(url);
         notification.close();
       };
     } catch (error) {

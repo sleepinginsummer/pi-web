@@ -85,6 +85,8 @@ export interface ChatInputHandle {
   insertIfEmpty: (text: string) => void;
   prependText: (text: string) => void;
   addImages: (files: File[]) => void;
+  /** 首条消息获服务端确认、临时会话升级前同步清空输入与草稿。 */
+  clearAcceptedPrompt: () => void;
 }
 
 const TOOL_PRESETS = ["off", "default", "full"] as const;
@@ -467,6 +469,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     },
     addImages(files: File[]) {
       processImageFiles(files);
+    },
+    clearAcceptedPrompt() {
+      clearInput();
     },
   }));
 
