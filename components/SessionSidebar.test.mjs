@@ -22,7 +22,7 @@ test("does not add an empty new session to the server-backed list", () => {
   assert.doesNotMatch(source, /optimisticSession/);
   assert.doesNotMatch(source, /setOptimisticSessions/);
   assert.match(source, /const visibleSessions = allSessions/);
-  assert.match(source, /session\.worktreeBranch \? session\.cwd/);
+  assert.match(source, /session\.isWorktree \? session\.cwd/);
 });
 
 test("does not reselect the active session", () => {
@@ -36,6 +36,11 @@ test("polls running sessions only while the tab is visible", () => {
   assert.match(source, /document\.addEventListener\("visibilitychange", onVisibilityChange\)/);
 });
 
+test("并发刷新只允许最新的会话列表请求提交结果", () => {
+  assert.match(source, /const requestId = \+\+sessionLoadRequestIdRef\.current/);
+  assert.match(source, /fetch\("\/api\/sessions", \{ cache: "no-store" \}\)/);
+  assert.match(source, /if \(requestId !== sessionLoadRequestIdRef\.current\) return/);
+});
 test("renders projects as persistent directory rows with per-project session actions", () => {
   assert.match(source, /visibleProjects\.map\(\(project\) =>/);
   assert.match(source, /projectName\(project\)/);

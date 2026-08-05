@@ -19,6 +19,8 @@ export interface ProjectInfo {
   projectRoot: string;
   /** Current branch of the cwd, null for non-git dirs or detached HEAD */
   branch: string | null;
+  /** Short HEAD commit, used only when the checkout is detached */
+  headCommit?: string;
   /** True when cwd is a linked worktree (not the main checkout) */
   isWorktree: boolean;
   /** True when cwd is the top-level directory of a checkout (main or linked).
@@ -44,10 +46,13 @@ function getProjectCache(): Map<string, { info: ProjectInfo; expiresAt: number }
   return globalThis.__piProjectCache;
 }
 
-export function invalidateProjectCache(): void {
+export function invalidateProjectCache(cwd?: string): void {
+  if (cwd) {
+    globalThis.__piProjectCache?.delete(cwd);
+    return;
+  }
   globalThis.__piProjectCache?.clear();
 }
-
 async function git(cwd: string, args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], {
     timeout: 10_000,
@@ -91,6 +96,7 @@ export async function resolveProject(cwd: string): Promise<ProjectInfo> {
       "--abbrev-ref", "HEAD",
     ]);
     const [commonDir, gitDir, toplevel, ref] = out.split("\n").map((l) => l.trim());
+    const headCommit = ref === "HEAD" ? await git(cwd, ["rev-parse", "--short", "HEAD"]) : undefined;
     // git prints resolved (symlink-free) paths; normalize cwd the same way
     let realCwd = cwd;
     try { realCwd = realpathSync(cwd); } catch { /* keep as-is */ }
@@ -104,6 +110,7 @@ export async function resolveProject(cwd: string): Promise<ProjectInfo> {
     info = {
       projectRoot: isWorktreeTopLevel ? dirname(commonDir) : cwd,
       branch: ref && ref !== "HEAD" ? ref : null,
+      ...(headCommit ? { headCommit } : {}),
       isWorktree: isWorktreeTopLevel,
       isTopLevel,
     };

@@ -17,6 +17,7 @@ import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useResizablePanel } from "@/hooks/useResizablePanel";
 import { copyText } from "@/lib/clipboard";
+import { clearDraft } from "@/lib/draft-store";
 import { getFileName } from "@/lib/file-paths";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
 import { getInitialNavigation } from "@/lib/initial-navigation";
@@ -457,8 +458,9 @@ export function AppShell() {
       .catch(() => {});
   }, []);
 
-  // Called by ChatWindow when a new session gets its real id from pi
+  // 新会话转正时清理临时草稿；输入组件此时会切换 key，不能依赖其异步发送回调清理旧 key。
   const handleSessionCreated = useCallback((session: SessionInfo) => {
+    clearDraft(`new:${session.cwd}`);
     setNewSessionCwd(null);
     setPendingNewSessionCwds((current) => {
       if (!current.has(session.cwd)) return current;
@@ -481,6 +483,22 @@ export function AppShell() {
   const handleSessionListRefresh = useCallback(() => {
     setRefreshKey((k) => k + 1);
   }, []);
+
+  useEffect(() => {
+    const refreshVisibleSessionBranch = async () => {
+      if (document.visibilityState !== "visible" || !selectedSession?.cwd) return;
+      try {
+        const response = await fetch(`/api/git/context?cwd=${encodeURIComponent(selectedSession.cwd)}`, { cache: "no-store" });
+        if (response.ok) handleSessionListRefresh();
+        else console.error("刷新当前 Git 分支失败", await response.text());
+      } catch (error) {
+        console.error("刷新当前 Git 分支失败", error);
+      }
+    };
+    const onVisibilityChange = () => { void refreshVisibleSessionBranch(); };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, [handleSessionListRefresh, selectedSession?.cwd]);
   const handleAutoName = useCallback(async () => {
     const sessionId = selectedSession?.id;
     if (!sessionId || autoNameStatus.kind === "naming") return;

@@ -12,3 +12,13 @@ test("会话切换只更新地址栏而不发起 App Router 导航", () => {
   assert.match(source, /window\.history\.replaceState\(window\.history\.state/);
   assert.match(source, /replaceSessionUrl\(session\.id\)/);
 });
+
+test("新会话转正后清理对应目录的临时草稿", () => {
+  assert.match(source, /handleSessionCreated[\s\S]*?clearDraft\(`new:\$\{session\.cwd\}`\)/);
+});
+
+test("页面重新可见时刷新当前会话分支", () => {
+  assert.match(source, /\/api\/git\/context\?cwd=\$\{encodeURIComponent\(selectedSession\.cwd\)\}/);
+  assert.match(source, /document\.addEventListener\("visibilitychange", onVisibilityChange\)/);
+  assert.match(source, /if \(response\.ok\) handleSessionListRefresh\(\)/);
+});

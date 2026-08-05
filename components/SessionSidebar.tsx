@@ -443,16 +443,20 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   // Once polling has delivered a snapshot it is the source of truth for
   // running state; late /api/sessions responses must not overwrite it.
   const runningPollAuthoritativeRef = useRef(false);
+  // 会话列表可能被初始加载、刷新事件和可见性恢复并发触发，只允许最新请求提交结果。
+  const sessionLoadRequestIdRef = useRef(0);
   const sessionRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const explorerRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fileExplorerRef = useRef<FileExplorerHandle>(null);
 
   const loadSessions = useCallback(async (showLoading = false) => {
+    const requestId = ++sessionLoadRequestIdRef.current;
     try {
       if (showLoading) setLoading(true);
-      const res = await fetch("/api/sessions");
+      const res = await fetch("/api/sessions", { cache: "no-store" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json() as { sessions: SessionInfo[]; runningSessionIds?: string[] };
+      if (requestId !== sessionLoadRequestIdRef.current) return;
       setAllSessions(data.sessions);
       // Treat the fetched running set as an initial fallback only. Once the
       // lightweight poll is live, a slow session-list fetch cannot overwrite it.
@@ -473,9 +477,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         sessionRefreshTimerRef.current = setTimeout(() => setSessionRefreshDone(false), 2000);
       }
     } catch (e) {
-      setError(String(e));
+      if (requestId === sessionLoadRequestIdRef.current) setError(String(e));
     } finally {
-      if (showLoading) setLoading(false);
+      if (showLoading && requestId === sessionLoadRequestIdRef.current) setLoading(false);
     }
   }, []);
 
@@ -852,7 +856,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, [onNewSession]);
 
   const visibleSessions = allSessions;
-  const displayProject = (session: SessionInfo) => session.worktreeBranch ? session.cwd : (session.projectRoot ?? session.cwd);
+  const displayProject = (session: SessionInfo) => session.isWorktree ? session.cwd : (session.projectRoot ?? session.cwd);
   const recentProjects = [...new Set(visibleSessions.map(displayProject))];
   const selectedProject = projectRootFor(selectedCwd);
   const selectedDisplayProject = visibleSessions.find((session) => session.cwd === selectedCwd)
@@ -2078,9 +2082,9 @@ function SessionItem({
                 <span title={session.modified}>{formatRelativeTime(session.modified)}</span>
               )}
               <span>{t("sidebar.messagesCount", { count: session.messageCount })}</span>
-              {session.worktreeBranch && (
+              {session.currentBranch && (
                 <span
-                  title={`Worktree: ${session.cwd}`}
+                  title={`${session.isWorktree ? "Worktree" : "当前分支"}: ${session.currentBranch}\n${session.cwd}`}
                   style={{ display: "flex", alignItems: "center", gap: 3, color: "var(--accent)", minWidth: 0, overflow: "hidden" }}
                 >
                   <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
@@ -2089,7 +2093,7 @@ function SessionItem({
                     <circle cx="6" cy="18" r="3" />
                     <path d="M18 9a9 9 0 0 1-9 9" />
                   </svg>
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{session.worktreeBranch}</span>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{session.currentBranch}</span>
                 </span>
               )}
             </div>

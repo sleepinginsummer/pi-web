@@ -107,3 +107,14 @@ test("refuses a normal send while the hook knows an asynchronous run is active",
   assert.match(sendSource, /if \(agentRunningRef\.current \|\| bashRunningRef\.current\) return false;/);
   assert.match(sendSource, /return Boolean\(sentSessionId\);/);
 });
+
+test("发送消息前刷新当前工作目录的 Git 分支", () => {
+  const sendSource = source.slice(
+    source.indexOf("  const handleSend = useCallback"),
+    source.indexOf("  const executeBash = useCallback"),
+  );
+
+  assert.match(sendSource, /\/api\/git\/context\?cwd=\$\{encodeURIComponent\(activeCwd\)\}/);
+  assert.match(sendSource, /if \(response\.ok\) onSessionListRefresh\?\.\(\)/);
+  assert.match(sendSource, /刷新当前 Git 分支失败/);
+});
