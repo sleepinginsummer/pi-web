@@ -6,32 +6,24 @@ interface LoadedSkill {
   baseDir: string;
 }
 
-export interface ExpandedMultiSkillCommand {
-  text: string;
-  expanded: boolean;
-}
-
 function stripFrontmatter(content: string): string {
   return content.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, "").trim();
 }
 
-/** 展开 Pi 原生只处理第一个的多 skill 命令；单 skill 仍交给 Pi 自己处理。 */
+export interface ExpandedMultiSkillCommand {
+  text: string;
+  expanded: boolean;
+}
+/** 将输入中的已知 skill 命令直接展开在原位置，避免改变用户消息的排版。 */
 export function expandMultiSkillCommand(text: string, loadedSkills: LoadedSkill[]): ExpandedMultiSkillCommand {
-  const match = text.match(/^((?:\/skill:[^\s]+\s+){2,})([\s\S]*)$/);
-  if (!match) return { text, expanded: false };
-
-  const names = [...match[1].matchAll(/\/skill:([^\s]+)/g)].map((item) => item[1]);
-  const skills = names.map((name) => loadedSkills.find((skill) => skill.name === name));
-  if (skills.some((skill) => !skill)) return { text, expanded: false };
-
-  const blocks = skills.map((skill) => {
-    const resolved = skill!;
-    const body = stripFrontmatter(readFileSync(resolved.filePath, "utf-8"));
-    return `<skill name="${resolved.name}" location="${resolved.filePath}">\nReferences are relative to ${resolved.baseDir}.\n\n${body}\n</skill>`;
+  const skillsByName = new Map(loadedSkills.map((skill) => [skill.name, skill]));
+  let expanded = false;
+  const expandedText = text.replace(/\/skill:([^\s]+)/g, (command, name: string) => {
+    const skill = skillsByName.get(name);
+    if (!skill) return command;
+    expanded = true;
+    const body = stripFrontmatter(readFileSync(skill.filePath, "utf-8"));
+    return `<skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${body}\n</skill>`;
   });
-  const userMessage = match[2].trim();
-  return {
-    text: `${blocks.join("\n\n")}${userMessage ? `\n\n${userMessage}` : ""}`,
-    expanded: true,
-  };
+  return { text: expandedText, expanded };
 }

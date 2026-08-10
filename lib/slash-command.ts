@@ -30,15 +30,9 @@ export function findSlashQuery(value: string): SlashQuery | null {
   };
 }
 
-/** 把行尾选择的 skill 调整到开头，保持 pi 的 /skill:name 参数语义。 */
+/** 替换当前斜杠查询，保留 skill 在用户输入中的原位置。发送时再由服务端整理为 Pi 可识别的前缀。 */
 export function applySlashSelection(value: string, slash: SlashQuery, commandName: string): string {
   if (!slash.inline) return `/${commandName} `;
-  const beforeSelection = value.slice(0, slash.start);
-  const existingSkills = [...beforeSelection.matchAll(/(?:^|\s)(\/skill:[^\s]+)/g)].map((match) => match[1]);
-  const selectedSkill = `/${commandName}`;
-  const skills = existingSkills.includes(selectedSkill)
-    ? existingSkills
-    : [...existingSkills, selectedSkill];
-  const existingText = beforeSelection.replace(/(?:^|\s)\/skill:[^\s]+/g, " ").trim();
-  return `${skills.join(" ")}${existingText ? ` ${existingText}` : ""} `;
+  const selectionEnd = slash.start + 1 + slash.query.length;
+  return `${value.slice(0, slash.start)}/${commandName} ${value.slice(selectionEnd)}`;
 }

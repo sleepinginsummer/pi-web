@@ -16,13 +16,12 @@ function toClientEvent(event: AgentEvent): AgentEvent | null {
   return event;
 }
 
-// 会话文件在第一条 assistant 消息之后的任一条 entry 落盘（pi 的 flushed 机制），
-// 而 /api/sessions 有 30s 列表缓存。新会话落盘后必须失效缓存，否则左侧列表
-// 要等缓存过期或刷新页面才会出现。这些事件都发生在 entry 落盘前后，
-// 在这里失效缓存即可让下一次列表拉取扫到新会话。
+// RPC 包装层会在首条用户 message_end 转发前创建新会话文件；其余 entry 仍由 SDK
+// 按 flushed 机制追加。/api/sessions 有 30s 列表缓存，这些持久化边界必须失效缓存，
+// 才能让下一次列表拉取立即读取最新会话及消息统计。
 function isSessionFlushBoundaryEvent(event: { type?: string; message?: { role?: string } }): boolean {
   if (event.type === "message_end") {
-    // user 消息落盘同样可能触发 flushed（assistant 已存在时）
+    // 用户消息转发前已确保文件存在，assistant/toolResult 则由 SDK 正常追加。
     return true;
   }
   return event.type === "tool_execution_end" || event.type === "agent_end";

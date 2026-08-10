@@ -18,10 +18,13 @@ test("does not register row-level session deletion shortcuts", () => {
   assert.doesNotMatch(sessionItemSource, /tabIndex=\{0\}/);
 });
 
-test("does not add an empty new session to the server-backed list", () => {
+test("仅在服务端列表缺失时合并已转正的当前会话", () => {
   assert.doesNotMatch(source, /optimisticSession/);
   assert.doesNotMatch(source, /setOptimisticSessions/);
-  assert.match(source, /const visibleSessions = allSessions/);
+  assert.match(
+    source,
+    /const visibleSessions = selectedSession && !allSessions\.some\(\(session\) => session\.id === selectedSession\.id\)\s*\? \[selectedSession, \.\.\.allSessions\]\s*:\s*allSessions/,
+  );
   assert.match(source, /session\.isWorktree \? session\.cwd/);
 });
 

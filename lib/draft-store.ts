@@ -6,6 +6,8 @@ export interface ChatDraftImage {
 export interface ChatDraft {
   value: string;
   images: ChatDraftImage[];
+  /** 输入框中以 TXT 条目展示的超长粘贴文本。 */
+  textAttachment?: string;
 }
 
 const drafts = new Map<string, ChatDraft>();
@@ -14,11 +16,12 @@ function cloneDraft(draft: ChatDraft): ChatDraft {
   return {
     value: draft.value,
     images: draft.images.map((image) => ({ ...image })),
+    textAttachment: draft.textAttachment,
   };
 }
 
 function isEmptyDraft(draft: ChatDraft): boolean {
-  return !draft.value && draft.images.length === 0;
+  return !draft.value && draft.images.length === 0 && !draft.textAttachment;
 }
 
 export function getDraft(key: string): ChatDraft | null {

@@ -76,6 +76,8 @@ function ToolbarIconButton({
 
 interface Props {
   selectedSessionId: string | null;
+  /** 新会话转正后、服务端列表扫描到文件前用于立即渲染当前会话。 */
+  selectedSession?: SessionInfo | null;
   onSelectSession: (session: SessionInfo, isRestore?: boolean) => void;
   onNewSession?: (sessionId: string, cwd: string) => void;
   initialSessionId?: string | null;
@@ -401,7 +403,7 @@ function PiWebTitle() {
   );
 }
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions }: Props) {
+export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions }: Props) {
   const { t } = useI18n();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -855,7 +857,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     onNewSession?.(cwd, cwd);
   }, [onNewSession]);
 
-  const visibleSessions = allSessions;
+  const visibleSessions = selectedSession && !allSessions.some((session) => session.id === selectedSession.id)
+    ? [selectedSession, ...allSessions]
+    : allSessions;
   const displayProject = (session: SessionInfo) => session.isWorktree ? session.cwd : (session.projectRoot ?? session.cwd);
   const recentProjects = [...new Set(visibleSessions.map(displayProject))];
   const selectedProject = projectRootFor(selectedCwd);

@@ -548,16 +548,63 @@ export function AppShell() {
     setActiveTopPanel(null);
     setAutoNameStatus({ kind: "naming" });
 
+    const eventSource = new EventSource(`/api/agent/${encodeURIComponent(sessionId)}/events`);
+    let resolveConnected: (() => void) | undefined;
+    let rejectConnected: ((error: Error) => void) | undefined;
+    let connectionTimeout: ReturnType<typeof setTimeout> | undefined;
+    const connected = new Promise<void>((resolve, reject) => {
+      resolveConnected = () => {
+        if (connectionTimeout) clearTimeout(connectionTimeout);
+        resolve();
+      };
+      rejectConnected = reject;
+      connectionTimeout = setTimeout(() => {
+        reject(new Error("Session title event stream connection timed out"));
+      }, 10_000);
+    });
+    const completion = new Promise<string>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error("Session title generation timed out"));
+      }, 110_000);
+
+      eventSource.onmessage = (message) => {
+        try {
+          const event = JSON.parse(message.data) as { type?: string; title?: string; error?: string };
+          if (event.type === "connected") {
+            resolveConnected?.();
+          } else if (event.type === "session_title_updated" && event.title) {
+            clearTimeout(timeout);
+            resolve(event.title);
+          } else if (event.type === "session_title_error") {
+            clearTimeout(timeout);
+            reject(new Error(event.error || "Session title generation failed"));
+          }
+        } catch {
+          // 忽略非 JSON 或与自动命名无关的 SSE 消息。
+        }
+      };
+      eventSource.onerror = () => {
+        const error = new Error("Session title event stream disconnected");
+        clearTimeout(timeout);
+        if (connectionTimeout) clearTimeout(connectionTimeout);
+        rejectConnected?.(error);
+        reject(error);
+      };
+    });
+    // 连接阶段失败时 completion 也可能先被拒绝，提前挂接处理器避免未处理拒绝。
+    void completion.catch(() => {});
+
     try {
+      await connected;
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/auto-name`, {
         method: "POST",
       });
-      const body = (await response.json().catch(() => ({}))) as { title?: string; error?: string };
-      if (!response.ok || !body.title) {
+      const body = (await response.json().catch(() => ({}))) as { error?: string };
+      if (!response.ok) {
         throw new Error(body.error || `HTTP ${response.status}`);
       }
 
-      const title = body.title.trim();
+      const title = (await completion).trim();
       setRefreshKey((key) => key + 1);
       if (activeSessionIdRef.current !== sessionId) return;
       setSelectedSession((current) => current?.id === sessionId ? { ...current, name: title } : current);
@@ -569,9 +616,10 @@ export function AppShell() {
       const message = error instanceof Error ? error.message : String(error);
       setAutoNameStatus({ kind: "error", message });
       autoNameTimerRef.current = setTimeout(() => setAutoNameStatus({ kind: "idle" }), 5000);
+    } finally {
+      eventSource.close();
     }
   }, [autoNameStatus.kind, selectedSession?.id]);
-
   useEffect(() => {
     if (autoNameTimerRef.current) clearTimeout(autoNameTimerRef.current);
     setAutoNameStatus({ kind: "idle" });
@@ -745,6 +793,7 @@ export function AppShell() {
     <>
       <SessionSidebar
         selectedSessionId={selectedSession?.id ?? null}
+        selectedSession={selectedSession}
         onSelectSession={handleSelectSession}
         onNewSession={handleNewSession}
         initialSessionId={initialSessionId}

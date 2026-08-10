@@ -186,6 +186,7 @@ test("clearing an accepted new-session prompt cannot restore its draft", async (
   );
 
   assert.match(clearInputSource, /valueRef\.current = "";[\s\S]*?setValue\(""\)/);
+  assert.match(clearInputSource, /textareaRef\.current\.value = ""/);
   assert.match(clearInputSource, /attachedImagesRef\.current = \[\]/);
   assert.match(persistDraftSource, /draftKeyRef\.current !== draftKey \|\| valueRef\.current !== value/);
 });

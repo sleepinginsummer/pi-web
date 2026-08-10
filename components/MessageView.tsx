@@ -175,9 +175,9 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
           .map((b) => b.text)
           .join("\n");
   const skillMessage = parseSkillMessage(content);
-  const displayContent = skillMessage?.userMessage ?? (skillMessage ? "" : content);
+  const displayContent = skillMessage?.displayText ?? content;
   const skillCommand = skillMessage
-    ? `${skillMessage.skills.map((skill) => `/skill:${skill.name}`).join(" ")}${skillMessage.userMessage ? ` ${skillMessage.userMessage}` : ""}`
+    ? skillMessage.displayText
     : null;
   const longMessageStats = getLongUserMessageStats(displayContent);
 
@@ -241,11 +241,6 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
                   />
                 );
               })}
-            </div>
-          )}
-          {skillMessage && (
-            <div style={{ fontFamily: "var(--font-mono)", fontSize: 13, fontWeight: 600, marginBottom: displayContent ? 6 : 0 }}>
-              {skillMessage.skills.map((skill) => <div key={`${skill.name}:${skill.location}`}>[skill] {skill.name}</div>)}
             </div>
           )}
           {displayContent && longMessageStats.compact ? (

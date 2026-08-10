@@ -94,6 +94,8 @@ const TOOL_PRESET_MAP: Record<"off" | "default" | "full", "none" | "default" | "
 const COMPOSITION_END_ENTER_GRACE_MS = 100;
 const MODEL_FILTER_THRESHOLD = 8;
 const TEXTAREA_MAX_HEIGHT = 200;
+/** 超过此长度的纯文本粘贴改为 TXT 条目，避免 textarea 参与大文本渲染。 */
+const TEXT_ATTACHMENT_THRESHOLD = 10_000;
 const MODEL_OPTION_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
 function compareModelOptions(a: ModelOption, b: ModelOption): number {
@@ -350,8 +352,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
     draftKey ? draftImagesToAttachedImages(getDraft(draftKey)?.images) : []
   ));
+  const [textAttachment, setTextAttachment] = useState(() => (
+    draftKey ? getDraft(draftKey)?.textAttachment ?? null : null
+  ));
+  const [textPreviewOpen, setTextPreviewOpen] = useState(false);
   const trimmedValue = value.trimStart();
-  const bashMode = attachedImages.length === 0 && trimmedValue.startsWith("!");
+  const bashMode = attachedImages.length === 0 && !textAttachment && trimmedValue.startsWith("!");
   const bashExcluded = bashMode && trimmedValue.startsWith("!!");
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
@@ -391,11 +397,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const draftKeyRef = useRef(draftKey);
   const valueRef = useRef(value);
   const attachedImagesRef = useRef(attachedImages);
+  const textAttachmentRef = useRef<string | null>(textAttachment);
   const pendingImageCountRef = useRef(0);
   const resizeFrameRef = useRef<number | null>(null);
   const textareaAtMaxHeightRef = useRef(false);
   valueRef.current = value;
   attachedImagesRef.current = attachedImages;
+  textAttachmentRef.current = textAttachment;
 
   const resizeTextarea = useCallback((force = false) => {
     const ta = textareaRef.current;
@@ -534,11 +542,16 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     setValue("");
     setAtQuery(null);
     setHistoryMenuOpen(false);
+    setTextPreviewOpen(false);
     if (draftKey) clearDraft(draftKey);
     if (draftKeyRef.current && draftKeyRef.current !== draftKey) clearDraft(draftKeyRef.current);
     attachedImagesRef.current = [];
+    setTextAttachment(null);
     clearImages();
     if (textareaRef.current) {
+      // 发送成功后立即同步 DOM，避免异步会话切换期间旧草稿短暂回写到输入框。
+      textareaRef.current.value = "";
+      textareaRef.current.setSelectionRange(0, 0);
       textareaRef.current.style.height = "auto";
       textareaAtMaxHeightRef.current = false;
     }
@@ -550,8 +563,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     setDraft(draftKey, {
       value,
       images: attachedImages.map(imageToDraftImage),
+      textAttachment: textAttachment ?? undefined,
     });
-  }, [attachedImages, draftKey, value]);
+  }, [attachedImages, draftKey, textAttachment, value]);
 
   useEffect(() => {
     const previousDraftKey = draftKeyRef.current;
@@ -561,12 +575,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       setDraft(previousDraftKey, {
         value: valueRef.current,
         images: attachedImagesRef.current.map(imageToDraftImage),
+        textAttachment: textAttachmentRef.current ?? undefined,
       });
     }
-
     const draft = draftKey ? getDraft(draftKey) : null;
     draftKeyRef.current = draftKey;
     setValue(draft?.value ?? "");
+    setTextAttachment(draft?.textAttachment ?? null);
     setAtQuery(null);
     setHistoryMenuOpen(false);
     setAttachedImages((prev) => {
@@ -588,19 +603,22 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   const handleSend = useCallback(async () => {
     const msg = value.trim();
-    if (!msg && !attachedImages.length) return;
+    if (!msg && !attachedImages.length && !textAttachment) return;
     if (isStreaming) return;
     onAudioUnlock?.();
-    if (!attachedImages.length && msg.startsWith("/") && onBuiltinCommand) {
+    const messageWithTextAttachment = textAttachment
+      ? [msg, `<attached_text filename="pasted-text.txt">\n${textAttachment}\n</attached_text>`].filter(Boolean).join("\n\n")
+      : msg;
+    if (!attachedImages.length && !textAttachment && msg.startsWith("/") && onBuiltinCommand) {
       const result = await onBuiltinCommand(msg);
       if (result.handled) {
         if (!result.error) clearInput();
         return;
       }
     }
-    const accepted = await onSend(msg, attachedImages.length ? attachedImages : undefined);
+    const accepted = await onSend(messageWithTextAttachment, attachedImages.length ? attachedImages : undefined);
     if (accepted !== false) clearInput();
-  }, [value, attachedImages, isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock]);
+  }, [value, textAttachment, attachedImages, isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock]);
 
   const slashInputEnd = Math.min(slashCursor ?? value.length, value.length);
   const slashInputPrefix = value.slice(0, slashInputEnd);
@@ -634,7 +652,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     ? t(slashQuery ? "chat.match" : "chat.command")
     : t(slashQuery ? "chat.matches" : "chat.commands", { count: filteredSlashCommands.length });
   const hasInputText = Boolean(value.trim());
-  const canQueueStreamingMessage = hasInputText && attachedImages.length === 0;
+  const canQueueStreamingMessage = hasInputText && attachedImages.length === 0 && !textAttachment;
 
   // ── @ file autocomplete ──────────────────────────────────────────────────
   // Recomputed from the text before the caret on every change/caret move.
@@ -1024,10 +1042,19 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
     const items = Array.from(e.clipboardData?.items ?? []);
     const imageItems = items.filter((item) => item.type.startsWith("image/"));
-    if (!imageItems.length) return;
+    if (imageItems.length) {
+      e.preventDefault();
+      const files = imageItems.map((item) => item.getAsFile()).filter((f): f is File => f !== null);
+      processImageFiles(files);
+      return;
+    }
+    const pastedText = e.clipboardData?.getData("text/plain") ?? "";
+    if (pastedText.length <= TEXT_ATTACHMENT_THRESHOLD) return;
     e.preventDefault();
-    const files = imageItems.map((item) => item.getAsFile()).filter((f): f is File => f !== null);
-    processImageFiles(files);
+    setTextAttachment(pastedText);
+    setValue("");
+    setAtQuery(null);
+    setSlashMenuOpen(false);
   }, [processImageFiles]);
 
   useEffect(() => {
@@ -1155,6 +1182,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, []);
+  useEffect(() => {
+    if (!textPreviewOpen) return;
+    const handlePreviewKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setTextPreviewOpen(false);
+    };
+    document.addEventListener("keydown", handlePreviewKeyDown);
+    return () => document.removeEventListener("keydown", handlePreviewKeyDown);
+  }, [textPreviewOpen]);
 
   useEffect(() => {
     if (!isMobile) setControlsMenuOpen(false);
@@ -1171,14 +1206,23 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         paddingRight: isMobile ? 16 : 52, // desktop: 16px base + 36px for ChatMinimap alignment
       }}
     >
-      {/* Hidden file input */}
+      {/* Hidden file input — 视觉隐藏而非 display:none：安卓 WebView/部分浏览器对 display:none 的 file input 用 JS click() 不会弹出选择器 */}
       <input
+        id="chat-attach-input"
         ref={fileInputRef}
         type="file"
         accept="image/*"
         multiple
         disabled={isStreaming}
-        style={{ display: "none" }}
+        style={{
+          position: "absolute",
+          width: 1,
+          height: 1,
+          opacity: 0,
+          overflow: "hidden",
+          clipPath: "inset(50%)",
+          whiteSpace: "nowrap",
+        }}
         onChange={(e) => {
           const files = Array.from(e.target.files ?? []);
           processImageFiles(files);
@@ -1319,6 +1363,22 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             }}
           >
             {compactError}
+          </div>
+        )}
+        {/* 文本附件以轻量条目展示，避免把原文重新放入 textarea。 */}
+        {textAttachment && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, padding: "7px 9px", background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 6, maxWidth: "100%" }}>
+            <button type="button" onClick={() => setTextPreviewOpen(true)} title="查看文本内容" style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0, flex: 1, padding: 0, border: "none", background: "none", color: "var(--text)", cursor: "pointer", textAlign: "left" }}>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, color: "var(--accent)" }}>
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <polyline points="14 2 14 8 20 8" />
+                <line x1="8" y1="13" x2="16" y2="13" /><line x1="8" y1="17" x2="14" y2="17" />
+              </svg>
+              <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--font-mono)", fontSize: 12 }}>pasted-text.txt · {(new Blob([textAttachment]).size / 1024).toFixed(1)} KB</span>
+            </button>
+            <button type="button" onClick={() => setTextAttachment(null)} aria-label="移除文本附件" title="移除文本附件" style={{ flexShrink: 0, width: 20, height: 20, padding: 0, border: "none", background: "none", color: "var(--text-muted)", cursor: "pointer" }}>
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><line x1="2" y1="2" x2="10" y2="10" /><line x1="10" y1="2" x2="2" y2="10" /></svg>
+            </button>
           </div>
         )}
         {/* Image previews */}
@@ -1803,21 +1863,21 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           ) : (
             <button
               onClick={handleSend}
-              disabled={!value.trim() && !attachedImages.length}
+              disabled={!value.trim() && !attachedImages.length && !textAttachment}
               style={{
                 flexShrink: 0,
                 alignSelf: "flex-end",
                 display: "flex", alignItems: "center", gap: 6,
                 padding: "7px 14px",
-                background: (value.trim() || attachedImages.length) ? "var(--accent)" : "var(--bg-panel)",
+                background: (value.trim() || attachedImages.length || textAttachment) ? "var(--accent)" : "var(--bg-panel)",
                 border: "none",
                 borderRadius: 8,
-                color: (value.trim() || attachedImages.length) ? "#fff" : "var(--text-dim)",
-                cursor: (value.trim() || attachedImages.length) ? "pointer" : "not-allowed",
+                color: (value.trim() || attachedImages.length || textAttachment) ? "#fff" : "var(--text-dim)",
+                cursor: (value.trim() || attachedImages.length || textAttachment) ? "pointer" : "not-allowed",
                 fontSize: 13,
                 fontWeight: 600,
                 letterSpacing: "-0.01em",
-                boxShadow: (value.trim() || attachedImages.length) ? "0 1px 3px rgba(37,99,235,0.25)" : "none",
+                boxShadow: (value.trim() || attachedImages.length || textAttachment) ? "0 1px 3px rgba(37,99,235,0.25)" : "none",
                 transition: "background 0.15s, box-shadow 0.15s",
               }}
             >
@@ -1849,10 +1909,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
           {/* LEFT: attach + model selector (idle) or steer/followup toggle (streaming) */}
           <div style={{ flex: isMobile ? "1 1 auto" : "0 0 auto", minWidth: 0, display: "flex", alignItems: "center", gap: 2 }}>
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              disabled={isStreaming}
-             title={t("chat.attachImage")}
+            {/* 图片附件按钮：用 <label htmlFor> 原生触发，避免 JS click() 在移动端被浏览器拦截 */}
+            <label
+              htmlFor="chat-attach-input"
+              title={t("chat.attachImage")}
               style={{
                 flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
                 width: 32, height: 32, padding: 0,
@@ -1861,6 +1921,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 color: attachedImages.length ? "var(--accent)" : "var(--text-muted)",
                 cursor: isStreaming ? "not-allowed" : "pointer",
                 opacity: isStreaming ? 0.5 : 1,
+                pointerEvents: isStreaming ? "none" : undefined,
                 transition: "background 0.12s, color 0.12s",
               }}
               onMouseEnter={(e) => {
@@ -1878,7 +1939,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 <circle cx="8.5" cy="8.5" r="1.5" />
                 <polyline points="21 15 16 10 5 21" />
               </svg>
-            </button>
+            </label>
             {/* Model selector — visible always, disabled during streaming */}
             {(modelOptions.length > 0 || currentName || modelError) && onModelChange && (
                 <div ref={dropdownRef} style={{ position: "relative", flex: isMobile ? "1 1 auto" : undefined, minWidth: 0 }}>
@@ -2511,6 +2572,22 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
         </div>
       </div>
+      {textPreviewOpen && textAttachment && (
+        <div role="dialog" aria-modal="true" aria-label="文本附件预览" onMouseDown={(event) => { if (event.target === event.currentTarget) setTextPreviewOpen(false); }} style={{ position: "fixed", inset: 0, zIndex: 1200, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, background: "rgba(0,0,0,0.42)" }}>
+          <section style={{ width: "min(900px, 100%)", height: "min(720px, calc(100vh - 32px))", display: "flex", flexDirection: "column", overflow: "hidden", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, boxShadow: "0 12px 40px rgba(0,0,0,0.24)" }}>
+            <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "10px 14px", borderBottom: "1px solid var(--border)" }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--text)" }}>pasted-text.txt</div>
+                <div style={{ marginTop: 3, fontSize: 11, color: "var(--text-muted)" }}>{textAttachment.length.toLocaleString()} 个字符</div>
+              </div>
+              <button type="button" onClick={() => setTextPreviewOpen(false)} aria-label="关闭文本预览" title="关闭文本预览" style={{ width: 28, height: 28, padding: 0, border: "none", borderRadius: 6, background: "none", color: "var(--text-muted)", cursor: "pointer" }}>
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"><line x1="2" y1="2" x2="12" y2="12" /><line x1="12" y1="2" x2="2" y2="12" /></svg>
+              </button>
+            </header>
+            <pre style={{ flex: 1, minHeight: 0, margin: 0, padding: 14, overflow: "auto", whiteSpace: "pre-wrap", overflowWrap: "anywhere", color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.55 }}>{textAttachment}</pre>
+          </section>
+        </div>
+      )}
     </div>
   );
 });

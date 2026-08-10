@@ -188,6 +188,14 @@ export class AgentSessionWrapper {
 
   start(): void {
     this.unsubscribe = this.inner.subscribe((event: AgentEvent) => {
+      // SDK 会先广播 message_end，再把消息追加到 SessionManager。首条用户消息到达时
+      // 先创建会话文件，后续 SDK 追加即可直接写盘，侧栏刷新也能立即扫描到该会话。
+      if (
+        event.type === "message_end"
+        && (event.message as { role?: string } | undefined)?.role === "user"
+      ) {
+        this.persistPendingSession();
+      }
       if (event.type === "agent_end") {
         invalidateSessionListCache();
       }
@@ -315,7 +323,7 @@ export class AgentSessionWrapper {
     }, 10 * 60 * 1000);
   }
 
-  private persistBashOnlySession(): void {
+  private persistPendingSession(): void {
     const manager = this.inner.sessionManager;
     const sessionFile = manager.getSessionFile();
     if (!sessionFile || existsSync(sessionFile)) return;
@@ -328,11 +336,11 @@ export class AgentSessionWrapper {
       .join("\n") + "\n";
     writeFileSync(sessionFile, content, { encoding: "utf8", flag: "wx" });
 
-    // Pi normally delays the first flush until an assistant message exists.
-    // A leading shell command has no assistant message, so mark this SDK
-    // manager as flushed after writing its own generated entries.
+    // Pi 默认延迟到首条 assistant 消息才落盘。这里写入 SDK 已生成的 entry 后标记
+    // 为已刷新，使紧随当前回调的用户消息或仅包含 bash 的会话继续采用追加写入。
     (manager as unknown as { flushed: boolean }).flushed = true;
     cacheSessionPath(this.inner.sessionId, sessionFile);
+    invalidateSessionListCache();
   }
 
   onEvent(listener: EventListener): () => void {
@@ -342,6 +350,12 @@ export class AgentSessionWrapper {
       const i = this.listeners.indexOf(listener);
       if (i !== -1) this.listeners.splice(i, 1);
     };
+  }
+
+  /** 向当前会话的 SSE 订阅者广播应用级事件。 */
+  emitEvent(event: AgentEvent): void {
+    if (!this._alive) return;
+    this.emit(event);
   }
 
   onDestroy(cb: () => void): void {
@@ -368,10 +382,8 @@ export class AgentSessionWrapper {
         const streamingBehavior = command.streamingBehavior as "steer" | "followUp" | undefined;
         this.promptRunning = true;
         notifyRunningChange();
-        const multiSkill = expandMultiSkillCommand(
-          command.message as string,
-          this.inner.resourceLoader.getSkills().skills,
-        );
+        const loadedSkills = this.inner.resourceLoader.getSkills().skills;
+        const multiSkill = expandMultiSkillCommand(command.message as string, loadedSkills);
         this.inner.prompt(multiSkill.text, {
           ...(multiSkill.expanded ? { expandPromptTemplates: false } : {}),
           ...(promptImages?.length ? { images: promptImages } : {}),
@@ -380,6 +392,7 @@ export class AgentSessionWrapper {
         }).then(() => {
           this.promptRunning = false;
           this.resetIdleTimer();
+          invalidateSessionListCache();
           if (!streamingBehavior) this.emit({ type: "prompt_done" });
           notifyRunningChange();
         }).catch((error) => {
@@ -646,7 +659,7 @@ export class AgentSessionWrapper {
         notifyRunningChange();
         try {
           const result = await execution;
-          this.persistBashOnlySession();
+          this.persistPendingSession();
           return result;
         } finally {
           this.resetIdleTimer();

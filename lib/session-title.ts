@@ -6,6 +6,7 @@ import {
 } from "@earendil-works/pi-agent-core";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 
+const IDLE_TIMEOUT_MS = 15_000;
 const TITLE_TIMEOUT_MS = 90_000;
 const MAX_TITLE_LENGTH = 80;
 
@@ -210,8 +211,19 @@ export function sanitizeTitleMessages(messages: AgentMessage[]): AgentMessage[] 
 
 export async function generateSessionTitle(source: AgentSession): Promise<GeneratedSessionTitle> {
   const sourceAgent = source.agent;
-  await sourceAgent.waitForIdle();
-
+  let idleTimeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      sourceAgent.waitForIdle(),
+      new Promise<never>((_, reject) => {
+        idleTimeout = setTimeout(() => {
+          reject(new Error("The session is still running; wait for it to finish before generating a title"));
+        }, IDLE_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (idleTimeout) clearTimeout(idleTimeout);
+  }
   const sanitizedMessages = sanitizeTitleMessages(sourceAgent.state.messages);
   const historyLength = sanitizedMessages.length;
   if (!sanitizedMessages.some((message) => message.role === "user")) {

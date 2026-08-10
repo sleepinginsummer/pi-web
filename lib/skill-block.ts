@@ -8,24 +8,23 @@ export interface ParsedSkillBlock {
 export interface ParsedSkillMessage {
   skills: ParsedSkillBlock[];
   userMessage?: string;
+  /** 将已展开的 skill 还原为命令，保留它在原用户消息中的位置。 */
+  displayText: string;
 }
 
-/** 解析一个或多个连续展开的 skill，以及它们共享的附加用户输入。 */
+/** 解析会话中任意位置的 skill 展开块，并生成保留原位置的展示文本。 */
 export function parseSkillMessage(text: string): ParsedSkillMessage | null {
   const skills: ParsedSkillBlock[] = [];
-  let remaining = text;
-  const blockPattern = /^<skill name="([^"]+)" location="([^"]+)">\r?\n([\s\S]*?)\r?\n<\/skill>(?:\r?\n\r?\n|$)/;
-
-  while (remaining.startsWith("<skill ")) {
-    const match = remaining.match(blockPattern);
-    if (!match) return null;
-    skills.push({ name: match[1], location: match[2], content: match[3] });
-    remaining = remaining.slice(match[0].length);
-  }
-
+  const blockPattern = /<skill name="([^"]+)" location="([^"]+)">\r?\n([\s\S]*?)\r?\n<\/skill>/g;
+  const displayText = text.replace(blockPattern, (_match, name: string, location: string, content: string) => {
+    skills.push({ name, location, content });
+    return `/skill:${name}`;
+  });
   if (skills.length === 0) return null;
-  const userMessage = remaining.trim() || undefined;
-  return { skills, userMessage };
+
+  const leadingCommandPattern = /^(?:\/skill:[^\s]+\s*)+/;
+  const userMessage = displayText.replace(leadingCommandPattern, "").trim() || undefined;
+  return { skills, userMessage, displayText };
 }
 
 /** 解析 pi 展开 /skill:name 后写入会话的用户消息。 */

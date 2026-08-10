@@ -1,6 +1,19 @@
 import { NextResponse } from "next/server";
-import { resolveSessionPath } from "@/lib/session-reader";
+import { invalidateSessionListCache, resolveSessionPath } from "@/lib/session-reader";
 import { startRpcSession, getRpcSession } from "@/lib/rpc-manager";
+
+/**
+ * 会话列表只依赖会话文件中的持久化数据。查询类命令不需要淘汰缓存，
+ * 其余命令可能追加消息、修改名称或改变分支，应在命令完成后立即刷新列表。
+ */
+function shouldInvalidateSessionList(commandType: string): boolean {
+  return !new Set([
+    "get_state",
+    "get_tools",
+    "get_commands",
+    "get_session_stats",
+  ]).has(commandType);
+}
 
 // POST /api/agent/[id] - Send a command to an existing session
 export async function POST(
@@ -16,6 +29,7 @@ export async function POST(
     const existing = getRpcSession(id);
     if (existing?.isAlive()) {
       const result = await existing.send(body);
+      if (shouldInvalidateSessionList(body.type)) invalidateSessionListCache();
       return NextResponse.json({ success: true, data: result });
     }
 
@@ -26,6 +40,7 @@ export async function POST(
 
     const { session } = await startRpcSession(id, filePath, undefined);
     const result = await session.send(body);
+    if (shouldInvalidateSessionList(body.type)) invalidateSessionListCache();
 
     return NextResponse.json({ success: true, data: result });
   } catch (error) {

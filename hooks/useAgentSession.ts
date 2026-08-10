@@ -1190,10 +1190,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           scheduleEventStreamClose(sessionIdRef.current);
         }
         if (completed && completed.role === "user") {
-          // Delivered steering/follow-up messages surface here as user
-          // messages. The run's initial prompt also emits one, but handleSend
-          // already appended it optimistically. Consume only the still-adjacent
-          // optimistic bubble; later same-text queue deliveries must render.
+          // SDK 为了展开 inline skill 会把命令整理到前缀；展示层保留发送前的原始输入。
+          // 仅替换仍紧邻末尾的乐观消息，队列消息在首轮 message_end 后会正常追加。
           const delivered = normalizeToolCalls(completed);
           const deliveredKey = userMessageKey(delivered);
           const optimisticKey = optimisticUserMessageKeyRef.current;
@@ -1203,7 +1201,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             if (optimisticKey && last?.role === "user" && userMessageKey(last) === optimisticKey) {
               return optimisticKey === deliveredKey
                 ? prev
-                : [...prev.slice(0, -1), delivered];
+                : prev;
             }
             return [...prev, delivered];
           });
