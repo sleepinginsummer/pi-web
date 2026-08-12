@@ -98,6 +98,46 @@ test("finishes ordinary prompts immediately but keeps active detached subagents 
   assert.match(eventSource, /case "agent_settled":\s*case "prompt_done":[\s\S]*?settleIdleSession\(sessionIdRef\.current, promptRunIdRef\.current\)/);
 });
 
+test("keeps reconciliation active until compaction settles", () => {
+  const settlementSource = source.slice(
+    source.indexOf("const waitForPromptSettlement = useCallback"),
+    source.indexOf("waitForPromptSettlementRef.current = waitForPromptSettlement"),
+  );
+  const mountSource = source.slice(
+    source.indexOf("// Load session on mount"),
+    source.indexOf("onSystemPromptChange?."),
+  );
+
+  assert.match(settlementSource, /!state\.isStreaming && !state\.isPromptRunning && !state\.isCompacting/);
+  assert.match(mountSource, /isStreaming \|\| agentState\.state\?\.isPromptRunning \|\| agentState\.state\?\.isCompacting/);
+  assert.match(mountSource, /connectEvents\(session\.id\)/);
+  assert.match(mountSource, /state\.isPromptRunning \|\| agentState\.state\.isCompacting/);
+});
+
+test("reloads compacted context without the longer live-message cache", () => {
+  const compactLoadSource = source.slice(
+    source.indexOf("const loadCompactedSession = useCallback"),
+    source.indexOf("const loadContext = useCallback"),
+  );
+  const eventSource = source.slice(
+    source.lastIndexOf("const handleAgentEvent = useCallback"),
+    source.indexOf("handleAgentEventRef.current = handleAgentEvent"),
+  );
+  const manualCompactSource = source.slice(
+    source.indexOf("const handleCompact = useCallback"),
+    source.indexOf("const loadModels = useCallback"),
+  );
+  const slashCompactSource = source.slice(
+    source.indexOf('case "compact": {'),
+    source.indexOf('case "reload": {'),
+  );
+
+  assert.match(compactLoadSource, /liveSessionMessages\.delete\(sid\);[\s\S]*?loadSession\(sid, showLoading\)/);
+  assert.match(eventSource, /case "compaction_end":[\s\S]*?loadCompactedSession\(sessionIdRef\.current\)/);
+  assert.match(manualCompactSource, /await loadCompactedSession\(sid, true\)/);
+  assert.match(slashCompactSource, /await loadCompactedSession\(sid, true\)/);
+});
+
 test("refuses a normal send while the hook knows an asynchronous run is active", () => {
   const sendSource = source.slice(
     source.indexOf("  const handleSend = useCallback"),
@@ -144,4 +184,13 @@ test("临时会话升级前同步清空已提交输入，避免旧草稿在 key 
     promoteSource.indexOf("clearAcceptedPrompt()") < promoteSource.indexOf("onSessionCreated?.({"),
     "输入必须在父级切换 draftKey 前清空",
   );
+});
+
+test("surfaces auto-continue events from the RPC wrapper as notices", () => {
+  const eventSource = source.slice(
+    source.lastIndexOf("const handleAgentEvent = useCallback"),
+    source.indexOf("handleAgentEventRef.current = handleAgentEvent"),
+  );
+  assert.match(eventSource, /case "auto_continue":[\s\S]*?已自动继续/);
+  assert.match(eventSource, /case "auto_continue_stopped":[\s\S]*?自动继续已停止/);
 });

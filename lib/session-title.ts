@@ -10,6 +10,11 @@ const IDLE_TIMEOUT_MS = 15_000;
 const TITLE_TIMEOUT_MS = 90_000;
 const MAX_TITLE_LENGTH = 80;
 
+function createAbortError(): Error {
+  const error = new Error("Session title generation aborted");
+  error.name = "AbortError";
+  return error;
+}
 const TITLE_PROMPT = `Create a concise title for this session based on the conversation above.
 
 Requirements:
@@ -209,9 +214,52 @@ export function sanitizeTitleMessages(messages: AgentMessage[]): AgentMessage[] 
   return sanitized;
 }
 
-export async function generateSessionTitle(source: AgentSession): Promise<GeneratedSessionTitle> {
+/**
+ * 标题上下文限制：剥离图片并限制消息体积，避免超大会话（如含 base64 截图）
+ * 触发模型请求 payload 超限（413）。只在完整轮次边界截断，保证
+ * toolCall/toolResult 配对不因截断而残缺；标题主要依据开头消息，保留开头即可。
+ */
+const MAX_TITLE_CONTEXT_BYTES = 256 * 1024;
+const MAX_TITLE_CONTEXT_MESSAGES = 60;
+function limitTitleMessages(messages: AgentMessage[]): AgentMessage[] {
+  const stripped = messages.map((message) => {
+    if (message.role === "user") {
+      const content = Array.isArray(message.content)
+        ? message.content.filter((block) => block.type !== "image")
+        : message.content;
+      return { ...message, content };
+    }
+    if (message.role === "toolResult") {
+      return { ...message, content: message.content.filter((block) => block.type !== "image") };
+    }
+    return message;
+  });
+
+  let total = 0;
+  const kept: AgentMessage[] = [];
+  for (const message of stripped) {
+    const size = Buffer.byteLength(JSON.stringify(message), "utf8");
+    const overBudget = total + size > MAX_TITLE_CONTEXT_BYTES || kept.length >= MAX_TITLE_CONTEXT_MESSAGES;
+    // 只在 user 消息边界截断：该消息不加入，保留内容轮次完整
+    if (overBudget && kept.length > 0 && message.role === "user") break;
+    kept.push(message);
+    total += size;
+  }
+  return kept;
+}
+
+export async function generateSessionTitle(source: AgentSession, signal?: AbortSignal): Promise<GeneratedSessionTitle> {
   const sourceAgent = source.agent;
   let idleTimeout: ReturnType<typeof setTimeout> | undefined;
+  // 主会话开始新的运行时（auto-name 路由通过 agent_start 触发），立即中止本次标题生成，
+  // 避免标题 agent 与主 agent 并行复用同一 transport/streamFunction 相互干扰。
+  const aborted = new Promise<never>((_, reject) => {
+    if (signal?.aborted) {
+      reject(createAbortError());
+      return;
+    }
+    signal?.addEventListener("abort", () => reject(createAbortError()), { once: true });
+  });
   try {
     await Promise.race([
       sourceAgent.waitForIdle(),
@@ -220,21 +268,25 @@ export async function generateSessionTitle(source: AgentSession): Promise<Genera
           reject(new Error("The session is still running; wait for it to finish before generating a title"));
         }, IDLE_TIMEOUT_MS);
       }),
+      aborted,
     ]);
   } finally {
     if (idleTimeout) clearTimeout(idleTimeout);
   }
   const sanitizedMessages = sanitizeTitleMessages(sourceAgent.state.messages);
-  const historyLength = sanitizedMessages.length;
-  if (!sanitizedMessages.some((message) => message.role === "user")) {
+  // 剥离图片并按体积/条数截断，避免超大会话触发模型 payload 超限
+  const limitedMessages = limitTitleMessages(sanitizedMessages);
+  const historyLength = limitedMessages.length;
+  if (!limitedMessages.some((message) => message.role === "user")) {
     throw new Error("The session has no user messages to name");
   }
 
+
   const options = buildSessionTitleAgentOptions(sourceAgent);
-  options.initialState!.messages = sanitizedMessages;
-  const continuesFromTrailingUser = sanitizedMessages.at(-1)?.role === "user";
+  options.initialState!.messages = limitedMessages;
+  const continuesFromTrailingUser = limitedMessages.at(-1)?.role === "user";
   if (continuesFromTrailingUser) {
-    options.initialState!.messages = appendTitleRequestToTrailingUser(sanitizedMessages);
+    options.initialState!.messages = appendTitleRequestToTrailingUser(limitedMessages);
   }
 
   const temporaryAgent = new Agent(options);
@@ -252,6 +304,7 @@ export async function generateSessionTitle(source: AgentSession): Promise<Genera
           reject(new Error("Session title generation timed out"));
         }, TITLE_TIMEOUT_MS);
       }),
+      aborted,
     ]);
   } catch (error) {
     temporaryAgent.abort();

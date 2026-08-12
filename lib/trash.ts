@@ -35,12 +35,14 @@ export function getTrashDir(): string {
   return join(getAgentDir(), "trash");
 }
 
-/** 将会话文件移入回收站，文件名加时间戳前缀便于识别删除时间并避免同名冲突。 */
-export function trashSessionFile(filePath: string): void {
+/** 将会话文件移入回收站，文件名加时间戳前缀便于识别删除时间并避免同名冲突。返回回收站内的文件名。 */
+export function trashSessionFile(filePath: string): string {
   const trashDir = getTrashDir();
   mkdirSync(trashDir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  renameSync(filePath, join(trashDir, `${stamp}_${basename(filePath)}`));
+  const target = join(trashDir, `${stamp}_${basename(filePath)}`);
+  renameSync(filePath, target);
+  return basename(target);
 }
 
 // 提取首条 user 消息文本作为标题；解析失败时回退到 cwd。
@@ -82,6 +84,41 @@ function readTrashedTitle(filePath: string, fallback: string): string {
   return fallback;
 }
 
+/**
+ * 读取会话的显示名称（session_info entry 的 name，如自动/手动生成的标题）。
+ * session_info 由 pi 追加在文件末尾，这里只扫描尾部，避免全量解析大文件。
+ */
+const SESSION_NAME_TAIL_BYTES = 256 * 1024;
+function readTrashedSessionName(filePath: string): string | undefined {
+  try {
+    const stat = statSync(filePath);
+    if (stat.size === 0) return undefined;
+    const fd = openSync(filePath, "r");
+    try {
+      const tailSize = Math.min(stat.size, SESSION_NAME_TAIL_BYTES);
+      const buf = Buffer.alloc(tailSize);
+      const bytes = readSync(fd, buf, 0, tailSize, stat.size - tailSize);
+      const tail = buf.toString("utf8", 0, bytes);
+      // JSONL 每行一个 entry；session_info 行很短，找到后解析该行
+      const idx = tail.lastIndexOf('"type":"session_info"');
+      if (idx === -1) return undefined;
+      const lineStart = tail.lastIndexOf("\n", idx) + 1;
+      const lineEnd = tail.indexOf("\n", idx);
+      const line = tail.slice(lineStart, lineEnd === -1 ? tail.length : lineEnd);
+      const entry = JSON.parse(line) as { type?: string; name?: unknown };
+      if (entry.type === "session_info" && typeof entry.name === "string") {
+        const name = entry.name.trim();
+        if (name) return name;
+      }
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    // 忽略损坏文件（如尾部截断在超长行中间），回退到首条 user 消息
+  }
+  return undefined;
+}
+
 /** 列出回收站中的会话，按最后更新时间倒序。 */
 export function listTrashedSessions(): TrashedSession[] {
   const trashDir = getTrashDir();
@@ -105,7 +142,7 @@ export function listTrashedSessions(): TrashedSession[] {
         originalName: fileName.replace(TRASH_PREFIX_RE, ""),
         sessionId: header.id,
         cwd: header.cwd ?? "",
-        title: readTrashedTitle(filePath, header.cwd || fileName),
+        title: readTrashedSessionName(filePath) ?? readTrashedTitle(filePath, header.cwd || fileName),
         modified: stat.mtimeMs,
       });
     } catch {
@@ -117,7 +154,7 @@ export function listTrashedSessions(): TrashedSession[] {
 }
 
 // 校验文件名只能指向回收站目录内的普通 jsonl 文件，防止路径穿越。
-function assertTrashFileName(fileName: string): void {
+export function assertTrashFileName(fileName: string): void {
   if (!fileName.endsWith(".jsonl") || basename(fileName) !== fileName) {
     throw new Error("Invalid trash file name");
   }

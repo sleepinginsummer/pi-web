@@ -626,6 +626,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, []);
 
+  const loadCompactedSession = useCallback(async (sid: string, showLoading = false) => {
+    // 压缩后的服务端上下文必然比旧历史短，不能再让“消息更多”的实时缓存覆盖它。
+    liveSessionMessages.delete(sid);
+    return loadSession(sid, showLoading);
+  }, [loadSession]);
+
   const loadContext = useCallback(async (sid: string, leafId: string | null) => {
     try {
       const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1" });
@@ -985,7 +991,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (res.ok) {
           const data = await res.json() as { running?: boolean; state?: AgentStateResponse };
           const state = data.state;
-          if (!data.running || !state || (!state.isStreaming && !state.isPromptRunning)) {
+          if (!data.running || !state || (!state.isStreaming && !state.isPromptRunning && !state.isCompacting)) {
             settleIdleSession(sid, runId);
             return;
           }
@@ -1135,6 +1141,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "prompt_error":
         addNotice({ type: "error", message: (event.errorMessage as string | undefined) ?? "Command failed" });
         break;
+      case "session_title_generated":
+        // 服务端第一轮结束后异步生成的标题已写回会话文件：刷新侧栏列表显示新标题。
+        onSessionListRefresh?.();
+        break;
       case "extension_error":
         addNotice({
           type: "error",
@@ -1241,6 +1251,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "auto_retry_start":
         setRetryInfo({ attempt: event.attempt as number, maxAttempts: event.maxAttempts as number, errorMessage: event.errorMessage as string | undefined });
         break;
+      case "auto_continue":
+        addNotice({ type: "info", message: "检测到上轮工具调用未执行完成，已自动继续" });
+        break;
+      case "auto_continue_stopped":
+        addNotice({ type: "warning", message: "自动继续已停止：工具调用反复无法完成，请检查环境或手动处理" });
+        break;
       case "auto_retry_end":
         setRetryInfo(null);
         break;
@@ -1258,14 +1274,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           setCompactResult(null);
         } else if (!event.aborted) {
           setCompactResult(readCompactResult(event.result, (event.reason as string | undefined) ?? "auto"));
-          if (sessionIdRef.current) loadSession(sessionIdRef.current);
+          if (sessionIdRef.current) loadCompactedSession(sessionIdRef.current);
         }
         break;
       case "extension_ui_request":
         handleExtensionUiRequest(event as ExtensionUiRequest);
         break;
     }
-  }, [addNotice, cancelEventStreamGrace, handleExtensionUiRequest, loadSession, onSessionListRefresh, scheduleEventStreamClose, settleIdleSession]);
+  }, [addNotice, cancelEventStreamGrace, handleExtensionUiRequest, loadCompactedSession, loadSession, onSessionListRefresh, scheduleEventStreamClose, settleIdleSession]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
@@ -1518,14 +1534,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     try {
       const result = await sendAgentCommand<CompactCommandResult>(sid, { type: "compact" });
       setCompactResult(readCompactResult(result, "manual"));
-      await loadSession(sid, true);
+      await loadCompactedSession(sid, true);
     } catch (e) {
       setCompactError(e instanceof Error ? e.message : String(e));
       setCompactResult(null);
     } finally {
       setIsCompacting(false);
     }
-  }, [isCompacting, loadSession]);
+  }, [isCompacting, loadCompactedSession]);
 
   const loadModels = useCallback(async (signal?: AbortSignal) => {
     const modelCwd = newSessionCwd ?? session?.cwd ?? "";
@@ -1585,7 +1601,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             ...(args ? { customInstructions: args } : {}),
           });
           setCompactResult(readCompactResult(result, "manual"));
-          if (await loadSession(sid, true)) promoteNewSession();
+          if (await loadCompactedSession(sid, true)) promoteNewSession();
           return complete({ handled: true, message: "Compacted context" });
         }
 
@@ -1636,7 +1652,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       if (commandName === "compact") setIsCompacting(false);
     }
-  }, [addNotice, ensureNewSession, isCompacting, loadModels, loadSession, loadSlashCommands, loadTools, promoteNewSession, onSessionStatsPanelOpen]);
+  }, [addNotice, ensureNewSession, isCompacting, loadCompactedSession, loadModels, loadSession, loadSlashCommands, loadTools, promoteNewSession, onSessionStatsPanelOpen]);
 
   // Queued (undelivered) messages live in the queue panel only; the chat gets
   // the real user message when pi delivers it (user message_end event). An
@@ -1783,14 +1799,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       loadSession(session.id, true, true).then((agentState) => {
         if (agentState?.running) {
           loadTools(session.id);
-          if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {
+          if (agentState.state?.isStreaming || agentState.state?.isPromptRunning || agentState.state?.isCompacting) {
             pendingScrollToRunningEndRef.current = true;
             agentRunningRef.current = true;
             setAgentRunning(true);
             setAgentPhase(agentState.state.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
             dispatch({ type: "start" });
             void connectEvents(session.id);
-            if (!agentState.state.isStreaming && agentState.state.isPromptRunning) {
+            if (!agentState.state.isStreaming && (agentState.state.isPromptRunning || agentState.state.isCompacting)) {
               void waitForPromptSettlement(session.id);
             }
           }

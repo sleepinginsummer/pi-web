@@ -766,6 +766,19 @@ span.linenumber {
   to   { opacity: 1; transform: scale(1); }
 }
 
+/* ask 浮层卡片：从输入框上方上滑淡入 */
+@keyframes ask-card-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ask 选项：悬停/键盘聚焦高亮 */
+.ask-option:hover,
+.ask-option:focus-visible {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+}
+
 @keyframes drop-icon-float {
   0%, 100% { transform: translateY(0px); }
   50%       { transform: translateY(-6px); }

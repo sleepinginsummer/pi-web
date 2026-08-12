@@ -62,7 +62,7 @@ function replaceSessionUrl(sessionId: string | null): void {
 export function AppShell() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [initialNavigation] = useState(() => getInitialNavigation(searchParams));
+  const [initialNavigation] = useState(() => getInitialNavigation(searchParams ?? new URLSearchParams()));
   const { isDark, toggleTheme } = useTheme();
   const { locale, setLocale, t: translate, supportedLocales } = useI18n();
   const isMobile = useIsMobile();
@@ -578,6 +578,12 @@ export function AppShell() {
           } else if (event.type === "session_title_error") {
             clearTimeout(timeout);
             reject(new Error(event.error || "Session title generation failed"));
+          } else if (event.type === "session_title_skipped") {
+            // 标题生成因主会话开始运行被主动让路：标记为 AbortError，由 catch 静默处理
+            clearTimeout(timeout);
+            const error = new Error("Session title generation skipped");
+            error.name = "AbortError";
+            reject(error);
           }
         } catch {
           // 忽略非 JSON 或与自动命名无关的 SSE 消息。
@@ -613,6 +619,11 @@ export function AppShell() {
       autoNameTimerRef.current = setTimeout(() => setAutoNameStatus({ kind: "idle" }), 1800);
     } catch (error) {
       if (activeSessionIdRef.current !== sessionId) return;
+      // 标题生成被主动让路（主会话开始运行）不是错误：静默回到空闲态，避免误报
+      if (error instanceof Error && error.name === "AbortError") {
+        setAutoNameStatus({ kind: "idle" });
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       setAutoNameStatus({ kind: "error", message });
       autoNameTimerRef.current = setTimeout(() => setAutoNameStatus({ kind: "idle" }), 5000);

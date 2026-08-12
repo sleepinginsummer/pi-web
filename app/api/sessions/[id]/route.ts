@@ -13,6 +13,7 @@ import {
 import { sessionPathKey } from "@/lib/session-path";
 import { getRpcSession } from "@/lib/rpc-manager";
 import { trashSessionFile } from "@/lib/trash";
+import { queueTrashSessionTitle } from "@/lib/session-file-title";
 
 // BranchNavigator still traverses recursively, so keep the response tree shallow.
 const MAX_PROJECTED_TREE_DEPTH = 200;
@@ -238,9 +239,11 @@ export async function DELETE(
     } catch { /* skip if dir unreadable */ }
 
     await getRpcSession(id)?.shutdown();
-    trashSessionFile(filePath);
+    const trashedName = trashSessionFile(filePath);
     invalidateSessionPathCache(id);
     invalidateSessionListCache();
+    // 异步生成回收站标题（fire-and-forget，不阻塞删除响应；失败静默）
+    queueTrashSessionTitle(trashedName);
     return NextResponse.json({ ok: true });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });

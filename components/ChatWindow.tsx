@@ -496,6 +496,32 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     />
   );
 
+  // ask（select）浮层卡片：锚定在输入框上方，两个布局分支（空会话/消息列表）共用。
+  // 外层 wrapper 复刻 ChatInput 根容器的内边距（0 16px 8px，desktop 右侧 52px）与
+  // maxWidth 820 居中约束，使卡片宽度与输入框本体严格一致。
+  const askDialogElement = extensionDialog?.method === "select" ? (
+    <div
+      style={{
+        position: "absolute",
+        left: 0,
+        right: 0,
+        bottom: "calc(100% + 8px)",
+        zIndex: 60,
+        padding: "0 16px",
+        paddingRight: isMobile ? 16 : 52, // 与 ChatInput 根容器保持一致
+        pointerEvents: "none",
+      }}
+    >
+      <div style={{ maxWidth: 820, margin: "0 auto", pointerEvents: "auto" }}>
+        <AskDialog
+          request={extensionDialog}
+          onSelect={(request, value) => respondToExtensionUi(request, { value })}
+          onStop={handleAbort}
+        />
+      </div>
+    </div>
+  ) : null;
+
   const aboveEditorWidgets = extensionWidgets.filter((widget) => widget.placement !== "belowEditor");
   const belowEditorWidgets = extensionWidgets.filter((widget) => widget.placement === "belowEditor");
 
@@ -571,7 +597,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
         </div>
       )}
 
-      {extensionDialog && (
+      {extensionDialog && extensionDialog.method !== "select" && (
         <ExtensionDialog
           request={extensionDialog}
           onRespond={respondToExtensionUi}
@@ -637,7 +663,10 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
               </div>
             </div>
             <NoticeShelf notices={notices} onDismiss={dismissNotice} align="right" />
-            {chatInputElement}
+            <div className="relative">
+              {askDialogElement}
+              {chatInputElement}
+            </div>
           </div>
         </div>
       ) : (
@@ -889,7 +918,10 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
         {detachedSubagentStatuses.length > 0 && (
           <DetachedSubagentStatusPanel statuses={detachedSubagentStatuses} t={t} />
         )}
-        {chatInputElement}
+        <div className="relative">
+          {askDialogElement}
+          {chatInputElement}
+        </div>
         <ExtensionStatusBar statuses={extensionStatuses} />
       </div>
       </>
@@ -999,7 +1031,103 @@ function NoticeShelf({ notices, onDismiss, floating = false, align = "left" }: {
   );
 }
 
-type ExtensionDialogRequest = Extract<ExtensionUiRequest, { method: "select" | "confirm" | "input" | "editor" }>;
+type AskDialogRequest = Extract<ExtensionUiRequest, { method: "select" }>;
+type ExtensionDialogRequest = Extract<ExtensionUiRequest, { method: "confirm" | "input" | "editor" }>;
+
+// ask（select）专用：opencode 风格 —— 无遮罩浮层卡片，锚定在输入框上方，
+// 对话上下文保持可见可交互；取消按钮改为停止对话（onStop），不把取消发给 pi。
+function AskDialog({
+  request,
+  onSelect,
+  onStop,
+}: {
+  request: AskDialogRequest;
+  onSelect: (request: AskDialogRequest, value: string) => void;
+  onStop: () => void;
+}) {
+  const { t } = useI18n();
+  const optionsRef = useRef<HTMLDivElement>(null);
+
+  // 方向键在选项间移动焦点，回车触发当前项；Esc 由全局停止快捷键处理
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "Enter") return;
+    const buttons = Array.from(optionsRef.current?.querySelectorAll<HTMLButtonElement>("button[data-ask-option]") ?? []);
+    if (buttons.length === 0) return;
+    const active = document.activeElement;
+    const idx = active instanceof HTMLButtonElement ? buttons.indexOf(active) : -1;
+    if (e.key === "Enter") {
+      if (idx >= 0) {
+        e.preventDefault();
+        onSelect(request, buttons[idx].dataset.askOption ?? "");
+      }
+      return;
+    }
+    e.preventDefault();
+    const next = e.key === "ArrowDown" ? (idx + 1) % buttons.length : (idx - 1 + buttons.length) % buttons.length;
+    buttons[next].focus();
+  };
+
+  return (
+    <div
+      role="dialog"
+      aria-label={request.title}
+      onKeyDown={handleKeyDown}
+      style={{
+        width: "100%",
+        border: "1px solid var(--border)",
+        borderRadius: 10,
+        background: "var(--bg)",
+        boxShadow: "0 12px 40px rgba(0,0,0,0.22)",
+        overflow: "hidden",
+        animation: "ask-card-in 0.14s ease-out both",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "9px 12px", borderBottom: "1px solid var(--border)" }}>
+        <div style={{ color: "var(--text)", fontSize: 13, fontWeight: 650, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{request.title}</div>
+        <button
+          type="button"
+          onClick={onStop}
+          style={{
+            flexShrink: 0,
+            padding: "4px 10px",
+            borderRadius: 6,
+            border: "1px solid var(--border)",
+            background: "var(--bg-panel)",
+            color: "var(--text-muted)",
+            cursor: "pointer",
+            fontSize: 12,
+          }}
+        >
+          {t("chat.stop")}
+        </button>
+      </div>
+      <div ref={optionsRef} style={{ display: "grid", gap: 6, padding: 10 }}>
+        {request.options.map((option) => (
+          <button
+            key={option}
+            type="button"
+            data-ask-option={option}
+            onClick={() => onSelect(request, option)}
+            className="ask-option"
+            style={{
+              width: "100%",
+              padding: "9px 10px",
+              borderRadius: 7,
+              border: "1px solid var(--border)",
+              background: "var(--bg-panel)",
+              color: "var(--text)",
+              cursor: "pointer",
+              textAlign: "left",
+              fontSize: 13,
+            }}
+          >
+            {option}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 function ExtensionDialog({
   request,
@@ -1056,29 +1184,6 @@ function ExtensionDialog({
         <div style={{ padding: 14 }}>
           {request.method === "confirm" && (
             <div style={{ color: "var(--text-muted)", fontSize: 13, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{request.message}</div>
-          )}
-          {request.method === "select" && (
-            <div style={{ display: "grid", gap: 8 }}>
-              {request.options.map((option) => (
-                <button
-                  key={option}
-                  onClick={() => onRespond(request, { value: option })}
-                  style={{
-                    width: "100%",
-                    padding: "9px 10px",
-                    borderRadius: 7,
-                    border: "1px solid var(--border)",
-                    background: "var(--bg-panel)",
-                    color: "var(--text)",
-                    cursor: "pointer",
-                    textAlign: "left",
-                    fontSize: 13,
-                  }}
-                >
-                  {option}
-                </button>
-              ))}
-            </div>
           )}
           {request.method === "input" && (
             <input
@@ -1157,7 +1262,7 @@ function ExtensionDialog({
             >
                {t("chat.confirm")}
             </button>
-          ) : request.method !== "select" ? (
+          ) : (
             <button
               onClick={submitValue}
               style={{
@@ -1171,7 +1276,7 @@ function ExtensionDialog({
             >
                {t("chat.submit")}
             </button>
-          ) : null}
+          )}
         </div>
       </div>
     </div>

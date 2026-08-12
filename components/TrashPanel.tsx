@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import { useI18n } from "@/hooks/useI18n";
 import { formatRelativeTime } from "@/lib/i18n/format";
 import type { TrashedSession } from "@/lib/trash";
+import { TrashSessionDetail } from "./TrashSessionDetail";
 
 interface Props {
   onClose: () => void;
@@ -19,6 +20,10 @@ export function TrashPanel({ onClose, onRestored }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [confirmPurge, setConfirmPurge] = useState<string | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
+  // 折叠的目录（key 为 cwd），默认全部展开
+  const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set());
+  // 正在查看详情的会话（点击会话行打开弹窗）
+  const [detailSession, setDetailSession] = useState<TrashedSession | null>(null);
   const [portalTarget, setPortalTarget] = useState<HTMLElement | null>(null);
 
   const load = useCallback(() => {
@@ -39,14 +44,14 @@ export function TrashPanel({ onClose, onRestored }: Props) {
     setPortalTarget(document.body);
   }, []);
 
-  // Esc 关闭面板（与项目内其它 modal 行为一致）
+  // Esc 关闭面板（与项目内其它 modal 行为一致）；详情弹窗打开时只关弹窗，不关面板
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape" && detailSession === null) onClose();
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [onClose]);
+  }, [onClose, detailSession]);
   // 搜索过滤：匹配标题或原目录
   const filtered = useMemo(() => {
     if (!sessions) return [];
@@ -116,6 +121,15 @@ export function TrashPanel({ onClose, onRestored }: Props) {
       setConfirmPurge(null);
     }
   };
+
+  const toggleDir = useCallback((cwd: string) => {
+    setCollapsedDirs((prev) => {
+      const next = new Set(prev);
+      if (next.has(cwd)) next.delete(cwd);
+      else next.add(cwd);
+      return next;
+    });
+  }, []);
 
   if (!portalTarget) return null;
   return createPortal(
@@ -187,40 +201,56 @@ export function TrashPanel({ onClose, onRestored }: Props) {
           ) : filtered.length === 0 ? (
             <div style={{ padding: "24px 18px", color: "var(--text-dim)", fontSize: 12 }}>{t("trash.noMatches")}</div>
           ) : (
-            groups.map(([cwd, items]) => (
-              <div key={cwd}>
-                {/* Group header: directory */}
-                <div style={{
-                  display: "flex", alignItems: "center", gap: 8,
-                  padding: "7px 18px 5px",
-                  color: "var(--text-muted)", fontSize: 11, fontWeight: 600,
-                  fontFamily: "var(--font-mono)",
-                  position: "sticky", top: 0,
-                  background: "var(--bg)",
-                }}>
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-                  </svg>
-                  <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{cwd}</span>
-                </div>
+            groups.map(([cwd, items]) => {
+              const collapsed = collapsedDirs.has(cwd);
+              return (
+                <div key={cwd}>
+                  {/* Group header: directory（点击折叠/展开） */}
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => toggleDir(cwd)}
+                    onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleDir(cwd); } }}
+                    title={collapsed ? t("trash.expand") : t("trash.collapse")}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 8,
+                      padding: "7px 18px 5px",
+                      color: "var(--text-muted)", fontSize: 11, fontWeight: 600,
+                      fontFamily: "var(--font-mono)",
+                      position: "sticky", top: 0,
+                      background: "var(--bg)",
+                      cursor: "pointer", userSelect: "none",
+                    }}
+                  >
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, transition: "transform 0.12s", transform: collapsed ? "rotate(-90deg)" : "rotate(0deg)" }}>
+                      <polyline points="6 9 12 15 18 9" />
+                    </svg>
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                    </svg>
+                    <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{cwd}</span>
+                    <span style={{ color: "var(--text-dim)", fontWeight: 500 }}>{items.length}</span>
+                  </div>
 
-                {/* Sessions in this directory */}
-                {items.map((s) => (
-                  <TrashItem
-                    key={s.fileName}
-                    session={s}
-                    busy={busyKey === s.fileName}
-                    confirmPurge={confirmPurge === s.fileName}
-                    updatedAt={t("trash.updatedAt", { time: formatRelativeTime(new Date(s.modified), locale) })}
-                    onRestore={() => handleRestore(s)}
-                    onPurgeClick={() => setConfirmPurge(s.fileName)}
-                    onPurgeCancel={() => setConfirmPurge(null)}
-                    onPurgeConfirm={() => handlePurge(s)}
-                    t={t}
-                  />
-                ))}
-              </div>
-            ))
+                  {/* Sessions in this directory（折叠时隐藏，会话行缩进显示） */}
+                  {!collapsed && items.map((s) => (
+                    <TrashItem
+                      key={s.fileName}
+                      session={s}
+                      busy={busyKey === s.fileName}
+                      confirmPurge={confirmPurge === s.fileName}
+                      updatedAt={t("trash.updatedAt", { time: formatRelativeTime(new Date(s.modified), locale) })}
+                      onRestore={() => handleRestore(s)}
+                      onPurgeClick={() => setConfirmPurge(s.fileName)}
+                      onPurgeCancel={() => setConfirmPurge(null)}
+                      onPurgeConfirm={() => handlePurge(s)}
+                      onOpenDetail={() => setDetailSession(s)}
+                      t={t}
+                    />
+                  ))}
+                </div>
+              );
+            })
           )}
         </div>
       </div>
@@ -252,6 +282,18 @@ export function TrashPanel({ onClose, onRestored }: Props) {
           </div>
         </div>
       )}
+
+      {/* 会话详情弹窗（独立 portal，z-index 高于面板） */}
+      {detailSession && (
+        <TrashSessionDetail
+          session={detailSession}
+          onClose={() => setDetailSession(null)}
+          onRestored={() => {
+            setSessions((prev) => prev?.filter((x) => x.fileName !== detailSession.fileName) ?? prev);
+            onRestored();
+          }}
+        />
+      )}
     </div>,
     portalTarget,
   );
@@ -259,7 +301,7 @@ export function TrashPanel({ onClose, onRestored }: Props) {
 
 function TrashItem({
   session, busy, confirmPurge, updatedAt,
-  onRestore, onPurgeClick, onPurgeCancel, onPurgeConfirm, t,
+  onRestore, onPurgeClick, onPurgeCancel, onPurgeConfirm, onOpenDetail, t,
 }: {
   session: TrashedSession;
   busy: boolean;
@@ -270,6 +312,8 @@ function TrashItem({
   onPurgeClick: () => void;
   onPurgeCancel: () => void;
   onPurgeConfirm: () => void;
+  /** 点击会话行打开详情弹窗 */
+  onOpenDetail: () => void;
   t: ReturnType<typeof useI18n>["t"];
 }) {
   const [hovered, setHovered] = useState(false);
@@ -278,11 +322,15 @@ function TrashItem({
     <div
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
+      onClick={busy || confirmPurge ? undefined : onOpenDetail}
+      title={busy || confirmPurge ? undefined : t("trash.detail")}
       style={{
         display: "flex", alignItems: "center", gap: 8,
-        padding: "6px 18px",
+        // 相对目录分组头缩进，形成层级
+        padding: "6px 18px 6px 34px",
         background: hovered ? "var(--bg-hover)" : "transparent",
         opacity: busy ? 0.5 : 1,
+        cursor: busy || confirmPurge ? "default" : "pointer",
       }}
     >
       {confirmPurge ? (
@@ -290,14 +338,14 @@ function TrashItem({
           <div style={{ flex: 1, minWidth: 0, fontSize: 12, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {t("trash.purgeConfirm", { title: session.title })}
           </div>
-          <button onClick={onPurgeConfirm} disabled={busy} style={{
+          <button onClick={(e) => { e.stopPropagation(); onPurgeConfirm(); }} disabled={busy} style={{
             display: "flex", alignItems: "center", gap: 4, height: 26, padding: "0 10px",
             background: "#ef4444", border: "none", borderRadius: 6, color: "#fff",
             cursor: "pointer", fontSize: 12, fontWeight: 600, whiteSpace: "nowrap", flexShrink: 0,
           }}>
             {t("trash.purge")}
           </button>
-          <button onClick={onPurgeCancel} style={{
+          <button onClick={(e) => { e.stopPropagation(); onPurgeCancel(); }} style={{
             height: 26, padding: "0 10px",
             background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 6,
             color: "var(--text-muted)", cursor: "pointer", fontSize: 12, whiteSpace: "nowrap", flexShrink: 0,
@@ -318,7 +366,7 @@ function TrashItem({
           </div>
 
           {/* Actions */}
-          <button onClick={onRestore} disabled={busy} title={t("trash.restore")} style={{
+          <button onClick={(e) => { e.stopPropagation(); onRestore(); }} disabled={busy} title={t("trash.restore")} style={{
             display: "flex", alignItems: "center", justifyContent: "center", gap: 4,
             height: 26, padding: "0 10px",
             background: "var(--bg-hover)", border: "1px solid var(--border)", borderRadius: 6,
@@ -331,7 +379,7 @@ function TrashItem({
             {t("trash.restore")}
           </button>
           <button
-            onClick={onPurgeClick}
+            onClick={(e) => { e.stopPropagation(); onPurgeClick(); }}
             title={t("trash.purge")}
             style={{
               display: "flex", alignItems: "center", justifyContent: "center",

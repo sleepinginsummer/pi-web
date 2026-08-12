@@ -9,6 +9,7 @@ import { expandMultiSkillCommand } from "./multi-skill-command";
 import { invalidateModelsCache } from "./models-cache";
 import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
 import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
+import { generateTitleForSessionFile } from "./session-file-title";
 import { getProjectTrustStatus, projectTrustReloadOptions } from "./project-trust";
 import { persistExplicitStartupPreferences } from "./startup-preferences";
 import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
@@ -106,7 +107,7 @@ class PlainTextTheme extends Theme {
   constructor() {
     super(
       { thinkingXhigh: "" } as ConstructorParameters<typeof Theme>[0],
-      {} as ConstructorParameters<typeof Theme>[1],
+      { selectedBg: "" } as ConstructorParameters<typeof Theme>[1],
       "truecolor",
     );
   }
@@ -141,7 +142,47 @@ function withExtensionTools(session: AgentSessionLike, toolNames: string[]): str
   return [...new Set([...toolNames, ...extensionToolNames])];
 }
 
-// ============================================================================
+// ----------------------------------------------------------------------------
+// 未完成工具调用检测（工具中断自动恢复）
+// ----------------------------------------------------------------------------
+
+type AgentEndMessageLike = {
+  role?: string;
+  stopReason?: string;
+  content?: Array<{ type?: string; id?: string; name?: string }>;
+  toolCallId?: string;
+};
+
+/** 每个用户 prompt 周期内自动恢复未完成工具调用的最大次数。 */
+const MAX_AUTO_CONTINUE_TURNS = 3;
+
+/**
+ * 从 agent_end 携带的完整消息中检查最后一轮 assistant：如果发出了工具调用
+ * （toolCall）但没有对应结果（toolResult），说明工具执行被中断，返回第一个
+ * 未闭合的调用及其所属消息的 stopReason；全部闭合或没有工具调用时返回 null。
+ * 注意这里读的是 SDK 原始消息格式（toolCall 的 id 字段，非 web 层 toolCallId）。
+ */
+function findUnfinishedToolCall(messages: unknown[]): { toolCallId: string; toolName: string; stopReason?: string } | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i] as AgentEndMessageLike;
+    if (msg?.role !== "assistant") continue;
+    const toolCalls = (msg.content ?? []).filter((block) => block.type === "toolCall");
+    if (toolCalls.length === 0) return null;
+    const resultIds = new Set<string>();
+    for (let j = i + 1; j < messages.length; j++) {
+      const result = messages[j] as AgentEndMessageLike;
+      if (result?.role === "toolResult" && result.toolCallId) resultIds.add(result.toolCallId);
+    }
+    for (const call of toolCalls) {
+      if (call.id && !resultIds.has(call.id)) {
+        return { toolCallId: call.id, toolName: call.name ?? "tool", stopReason: msg.stopReason };
+      }
+    }
+    return null;
+  }
+  return null;
+}
+
 // AgentSessionWrapper
 // Wraps AgentSession with the same interface the rest of the app expects
 // ============================================================================
@@ -163,6 +204,13 @@ export class AgentSessionWrapper {
   private onDestroyCallback: (() => void) | null = null;
   private shutdownPromise: Promise<void> | null = null;
   private _alive = true;
+  // 工具中断自动恢复状态：最近一次 agent_end 的消息（供 agent_settled 检测）、
+  private lastAgentEndMessages: unknown[] | null = null;
+  private lastAgentEndWillRetry = false;
+  private autoContinueCount = 0;
+  private lastAutoContinuedToolCallId: string | null = null;
+  // 会话级自动标题只触发一次（成功或跳过都算），避免每条消息都重复检查。
+  private autoTitleTriggered = false;
 
   constructor(public readonly inner: AgentSessionLike) {}
 
@@ -198,6 +246,14 @@ export class AgentSessionWrapper {
       }
       if (event.type === "agent_end") {
         invalidateSessionListCache();
+        // SDK 的 agent_end 携带完整消息数组；缓存到 agent_settled 时做未闭合工具调用检测
+        this.lastAgentEndMessages = Array.isArray(event.messages) ? (event.messages as unknown[]) : null;
+        this.lastAgentEndWillRetry = event.willRetry === true;
+      }
+      if (event.type === "agent_settled") {
+        this.maybeAutoContinueUnfinishedTool();
+        // 会话第一轮结束后自动生成标题（文件级独立 services，不与主 agent 争用 transport）
+        this.maybeAutoTitleSession();
       }
       if (IDLE_RESET_EVENT_TYPES.has(event.type)) this.resetIdleTimer();
       this.emit(event);
@@ -205,6 +261,63 @@ export class AgentSessionWrapper {
     });
     this.resetIdleTimer();
     notifyRunningChange();
+  }
+
+  /**
+   * 工具中断自动恢复：agent_settled（本轮彻底结束）时，若最后一条 assistant 发出过
+   * 工具调用但结果缺失，说明工具执行被中断，自动 follow-up 一次让模型继续完成。
+   * 触发限制：用户主动中止（stopReason=aborted）、SDK 即将自动重试（willRetry）或
+   * 出错（stopReason=error）时不恢复；每个用户 prompt 周期最多恢复
+   * MAX_AUTO_CONTINUE_TURNS 次；同一工具调用不重复恢复（无进展即停止）。
+   * 恢复与停止都会向 UI 广播事件。
+   */
+  private maybeAutoContinueUnfinishedTool(): void {
+    if (!this._alive || !this.lastAgentEndMessages) return;
+    const unfinished = findUnfinishedToolCall(this.lastAgentEndMessages);
+    const willRetry = this.lastAgentEndWillRetry;
+    this.lastAgentEndMessages = null;
+    this.lastAgentEndWillRetry = false;
+    if (!unfinished) return;
+    if (willRetry || unfinished.stopReason === "aborted" || unfinished.stopReason === "error") return;
+    if (this.autoContinueCount >= MAX_AUTO_CONTINUE_TURNS) {
+      this.emit({ type: "auto_continue_stopped", reason: "limit" });
+      return;
+    }
+    if (this.lastAutoContinuedToolCallId === unfinished.toolCallId) {
+      this.emit({ type: "auto_continue_stopped", reason: "no_progress" });
+      return;
+    }
+    this.autoContinueCount += 1;
+    this.lastAutoContinuedToolCallId = unfinished.toolCallId;
+    this.emit({ type: "auto_continue", toolName: unfinished.toolName, toolCallId: unfinished.toolCallId });
+    void this.inner.followUp(
+      `上一个回合的工具调用 ${unfinished.toolName}（${unfinished.toolCallId}）未能执行完成。`
+      + "请继续执行该调用并完成其后续工作；若该调用已不再需要，请说明原因后继续推进剩余任务。",
+    ).catch((error) => {
+      console.error("[pi-web] auto-continue follow-up failed:", error instanceof Error ? error.message : String(error));
+    });
+  }
+
+  /**
+   * 会话第一轮结束后自动生成标题（每个 wrapper 只尝试一次）。
+   * 走文件级独立 services（generateTitleForSessionFile），不借用主 agent 的
+   * transport/streamFunction，因此与主会话并行也互不干扰；已有标题、
+   * 无 user 消息或文件不可读时会静默跳过。生成成功后广播事件让前端刷新列表。
+   */
+  private maybeAutoTitleSession(): void {
+    if (!this._alive || this.autoTitleTriggered) return;
+    const sessionFile = this.inner.sessionFile;
+    if (!sessionFile || !existsSync(sessionFile)) return;
+    this.autoTitleTriggered = true;
+    void generateTitleForSessionFile(sessionFile)
+      .then((generated) => {
+        if (!generated) return;
+        invalidateSessionListCache();
+        this.emit({ type: "session_title_generated", sessionId: this.inner.sessionId });
+      })
+      .catch((error) => {
+        console.error("[pi-web] auto title generation failed:", error instanceof Error ? error.message : String(error));
+      });
   }
 
   setForceEmptySystemPrompt(force: boolean): void {
@@ -382,6 +495,9 @@ export class AgentSessionWrapper {
         const streamingBehavior = command.streamingBehavior as "steer" | "followUp" | undefined;
         this.promptRunning = true;
         notifyRunningChange();
+        // 新一轮用户请求开始，重置工具中断自动恢复的计数与无进展记录
+        this.autoContinueCount = 0;
+        this.lastAutoContinuedToolCallId = null;
         const loadedSkills = this.inner.resourceLoader.getSkills().skills;
         const multiSkill = expandMultiSkillCommand(command.message as string, loadedSkills);
         this.inner.prompt(multiSkill.text, {
