@@ -1,6 +1,6 @@
 "use client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, CustomMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
 import { normalizeCustomPanelLines, parseAnsiLine } from "@/lib/ansi";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
@@ -12,6 +12,7 @@ import { ExtensionStatusBar } from "./ExtensionStatusBar";
 import { useI18n } from "@/hooks/useI18n";
 import { useAgentSession, type AgentPhase, type NoticeItem } from "@/hooks/useAgentSession";
 import { DetachedSubagentStatusPanel } from "./DetachedSubagentStatusPanel";
+import { TodoListPanel } from "./TodoListPanel";
 import { useAudio } from "@/hooks/useAudio";
 import { useCompletionNotification } from "@/hooks/useCompletionNotification";
 import notificationStyles from "./CompletionNotificationPrompt.module.css";
@@ -194,7 +195,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, children, t }: { mes
   );
 }
 
-export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onNewSessionCwdChange }: Props) {
+export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onNewSessionCwdChange }: Props) {
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
   const {
@@ -239,7 +240,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
-    notices, dismissNotice, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, detachedSubagentStatuses, respondToExtensionUi, sendExtensionCustomInput,
+    notices, dismissNotice, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, detachedSubagentStatuses, todos, todoAnchorIndex, respondToExtensionUi, sendExtensionCustomInput, armCustomAnswer,
     isAutoModelSelection,
     agentPhase,
     isNew,
@@ -516,6 +517,13 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
         <AskDialog
           request={extensionDialog}
           onSelect={(request, value) => respondToExtensionUi(request, { value })}
+          onCustomSubmit={(request, sentinelText, text) => {
+            // 先回送 sentinel 原文触发 pi 的 input 分支，同时登记待提交文本，
+            // 随后的 input 请求到达时由 useAgentSession 自动应答（不弹窗）
+            const prefix = request.title.split("\n\n--- ")[0];
+            armCustomAnswer(prefix, text);
+            respondToExtensionUi(request, { value: sentinelText });
+          }}
           onStop={handleAbort}
         />
       </div>
@@ -757,6 +765,13 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
 
               const rendered: ReactNode[] = [];
               let liveTailStartIndex: number | null = null;
+              // 将 TodoListPanel 锚定到“最后一条 todo 工具结果”所在的回复轮次末尾，
+              // 使其跟随消息流，而不是悬浮固定在输入框上方。
+              const pushTodoPanel = (fromIdx: number, toIdx: number) => {
+                if (todos.length > 0 && todoAnchorIndex >= fromIdx && todoAnchorIndex < toIdx) {
+                  rendered.push(<TodoListPanel key={`todo-panel-${fromIdx}`} todos={todos} t={t} />);
+                }
+              };
               for (let idx = 0; idx < messages.length;) {
                 const msg = messages[idx];
                 if (!isGroupAnchor(msg)) {
@@ -775,6 +790,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                   for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
                     rendered.push(renderMessage(renderIdx));
                   }
+                  pushTodoPanel(userIdx, endIdx);
                   idx = endIdx;
                   continue;
                 }
@@ -785,6 +801,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                   for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
                     rendered.push(renderMessage(renderIdx));
                   }
+                  pushTodoPanel(userIdx, endIdx);
                   idx = endIdx;
                   continue;
                 }
@@ -837,6 +854,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                 for (let renderIdx = finalAssistantIdx + 1; renderIdx < endIdx; renderIdx++) {
                   rendered.push(renderMessage(renderIdx));
                 }
+                pushTodoPanel(userIdx, endIdx);
                 idx = endIdx;
               }
               const window = getVisibleRenderWindow(rendered.length, visibleCount);
@@ -928,7 +946,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
       )}
     </div>
   );
-}
+});
 function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; lines: string[] }> }) {
   if (widgets.length === 0) return null;
   return (
@@ -1036,19 +1054,58 @@ type ExtensionDialogRequest = Extract<ExtensionUiRequest, { method: "confirm" | 
 
 // ask（select）专用：opencode 风格 —— 无遮罩浮层卡片，锚定在输入框上方，
 // 对话上下文保持可见可交互；取消按钮改为停止对话（onStop），不把取消发给 pi。
+// rpiv-ask-user-question 的 RPC fallback 把 "Type something." sentinel 恒追加为
+// 最后一项（格式 "N. Type something."，普通选项带 " — " 描述分隔符），
+// 识别后点击该行直接内联输入，配合 useAgentSession 的 input 接力实现免弹窗提交。
 function AskDialog({
   request,
   onSelect,
+  onCustomSubmit,
   onStop,
 }: {
   request: AskDialogRequest;
   onSelect: (request: AskDialogRequest, value: string) => void;
+  onCustomSubmit: (request: AskDialogRequest, sentinelText: string, text: string) => void;
   onStop: () => void;
 }) {
   const { t } = useI18n();
   const optionsRef = useRef<HTMLDivElement>(null);
+  const [customOpen, setCustomOpen] = useState(false);
+  const [customValue, setCustomValue] = useState("");
 
-  // 方向键在选项间移动焦点，回车触发当前项；Esc 由全局停止快捷键处理
+  const lastOption = request.options[request.options.length - 1];
+  const sentinelIndex =
+    request.options.length > 0 && /^\d+\.\s/.test(lastOption) && !lastOption.includes(" — ")
+      ? request.options.length - 1
+      : -1;
+
+  const openCustom = () => {
+    setCustomValue("");
+    setCustomOpen(true);
+  };
+  const submitCustom = () => {
+    const text = customValue.trim();
+    if (!text) {
+      setCustomOpen(false);
+      return;
+    }
+    onCustomSubmit(request, request.options[sentinelIndex], text);
+  };
+
+  const optionButtonStyle: React.CSSProperties = {
+    width: "100%",
+    padding: "9px 10px",
+    borderRadius: 7,
+    border: "1px solid var(--border)",
+    background: "var(--bg-panel)",
+    color: "var(--text)",
+    cursor: "pointer",
+    textAlign: "left",
+    fontSize: 13,
+  };
+
+  // 方向键在选项间移动焦点，回车触发当前项（sentinel 行回车打开内联输入）；
+  // Esc 由全局停止快捷键处理
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "Enter") return;
     const buttons = Array.from(optionsRef.current?.querySelectorAll<HTMLButtonElement>("button[data-ask-option]") ?? []);
@@ -1058,7 +1115,8 @@ function AskDialog({
     if (e.key === "Enter") {
       if (idx >= 0) {
         e.preventDefault();
-        onSelect(request, buttons[idx].dataset.askOption ?? "");
+        if (idx === sentinelIndex) openCustom();
+        else onSelect(request, buttons[idx].dataset.askOption ?? "");
       }
       return;
     }
@@ -1102,28 +1160,67 @@ function AskDialog({
         </button>
       </div>
       <div ref={optionsRef} style={{ display: "grid", gap: 6, padding: 10 }}>
-        {request.options.map((option) => (
-          <button
-            key={option}
-            type="button"
-            data-ask-option={option}
-            onClick={() => onSelect(request, option)}
-            className="ask-option"
-            style={{
-              width: "100%",
-              padding: "9px 10px",
-              borderRadius: 7,
-              border: "1px solid var(--border)",
-              background: "var(--bg-panel)",
-              color: "var(--text)",
-              cursor: "pointer",
-              textAlign: "left",
-              fontSize: 13,
-            }}
-          >
-            {option}
-          </button>
-        ))}
+        {request.options.map((option, index) =>
+          index === sentinelIndex ? (
+            customOpen ? (
+              <input
+                key={option}
+                autoFocus
+                value={customValue}
+                onChange={(e) => setCustomValue(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    submitCustom();
+                  } else if (e.key === "Escape") {
+                    setCustomOpen(false);
+                    setCustomValue("");
+                  } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                    // 不冒泡到卡片的选项键盘导航
+                    e.stopPropagation();
+                  }
+                }}
+                onBlur={() => setCustomOpen(false)}
+                placeholder={t("chat.typeYourAnswer")}
+                aria-label={t("chat.typeYourAnswer")}
+                style={{
+                  width: "100%",
+                  boxSizing: "border-box",
+                  padding: "9px 10px",
+                  borderRadius: 7,
+                  border: "1px solid var(--accent)",
+                  background: "var(--bg-panel)",
+                  color: "var(--text)",
+                  fontSize: 13,
+                  outline: "none",
+                }}
+              />
+            ) : (
+              <button
+                key={option}
+                type="button"
+                data-ask-option={option}
+                onClick={openCustom}
+                className="ask-option"
+                style={optionButtonStyle}
+                title={t("chat.typeYourAnswer")}
+              >
+                {option}
+              </button>
+            )
+          ) : (
+            <button
+              key={option}
+              type="button"
+              data-ask-option={option}
+              onClick={() => onSelect(request, option)}
+              className="ask-option"
+              style={optionButtonStyle}
+            >
+              {option}
+            </button>
+          ),
+        )}
       </div>
     </div>
   );

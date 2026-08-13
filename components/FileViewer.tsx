@@ -1,15 +1,21 @@
 "use client";
 
 import { useEffect, useState, useRef, useCallback, useMemo, type CSSProperties, type MouseEvent } from "react";
-import {
-  Prism as SyntaxHighlighter,
-  createElement as renderSyntaxNode,
-  type SyntaxHighlighterProps,
-} from "react-syntax-highlighter";
-import { vs } from "react-syntax-highlighter/dist/cjs/styles/prism";
-import { vscDarkPlus } from "react-syntax-highlighter/dist/cjs/styles/prism";
+import type { SyntaxHighlighterProps } from "react-syntax-highlighter";
+// 高亮按需加载：PrismLight 只带 refractor 核心，语言定义由 lib/prism-languages
+// 按需动态 import（主 bundle 不再包含 react-syntax-highlighter 全量语言表）。
+import PrismLight from "react-syntax-highlighter/dist/esm/prism-light";
+import renderSyntaxNode from "react-syntax-highlighter/dist/esm/create-element";
+import vs from "react-syntax-highlighter/dist/esm/styles/prism/vs";
+import vscDarkPlus from "react-syntax-highlighter/dist/esm/styles/prism/vsc-dark-plus";
+import { loadPrismLanguage } from "@/lib/prism-languages";
 import ReactMarkdown from "react-markdown";
 import { useTheme } from "@/hooks/useTheme";
+
+// PrismLight 与全量 Prism 组件 API 一致（renderer/行号等均支持），仅语言需按需注册。
+const SyntaxHighlighter = PrismLight;
+
+
 import {
   DOCX_PREVIEW_MAX_BYTES,
   getFileExt,
@@ -24,6 +30,21 @@ import { CodeBlock, MermaidBlock } from "./MermaidBlock";
 import { parseUnifiedPatch } from "@/lib/patch";
 import type { GitFileDiffResponse } from "@/lib/git-types";
 import { useI18n } from "@/hooks/useI18n";
+import { copyText } from "@/lib/clipboard";
+// ---- 文件内容 LRU 缓存 ----
+// 切换文件 tab 时秒开（避免每次重新下载内容）。SSE watch 的 change 事件负责
+// 实时失效；挂载时的后台静默 re-fetch 兜底陈旧缓存。
+const FILE_CONTENT_CACHE_LIMIT = 20;
+const fileContentCache = new Map<string, { data: FileData; ts: number }>();
+
+function cacheFileContent(filePath: string, data: FileData): void {
+  fileContentCache.delete(filePath); // 重新插入以保持 LRU 顺序
+  fileContentCache.set(filePath, { data, ts: Date.now() });
+  if (fileContentCache.size > FILE_CONTENT_CACHE_LIMIT) {
+    const oldest = fileContentCache.keys().next().value;
+    if (oldest !== undefined) fileContentCache.delete(oldest);
+  }
+}
 
 interface Props {
   filePath: string;
@@ -223,6 +244,47 @@ function DownloadLink({ filePath, sourceSessionId }: { filePath: string; sourceS
         <line x1="12" y1="15" x2="12" y2="3" />
       </svg>
     </a>
+  );
+}
+
+function CopyFileButton({ content }: { content: string }) {
+  const { t } = useI18n();
+  const [copied, setCopied] = useState(false);
+  const timerRef = useRef<number | null>(null);
+
+  // 卸载时清理成功提示的定时器
+  useEffect(() => () => {
+    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+  }, []);
+
+  const handleCopy = () => {
+    copyText(content).then(() => {
+      setCopied(true);
+      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+      timerRef.current = window.setTimeout(() => setCopied(false), 1500);
+    });
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={handleCopy}
+      title={copied ? t("i18n.copied") : t("i18n.copyFileContent")}
+      aria-label={copied ? t("i18n.copied") : t("i18n.copyFileContent")}
+      className="file-viewer-icon-button"
+      style={copied ? { background: "var(--bg-selected)", color: "var(--text)" } : undefined}
+    >
+      {copied ? (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M20 6 9 17l-5-5" />
+        </svg>
+      ) : (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+          <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+        </svg>
+      )}
+    </button>
   );
 }
 
@@ -811,7 +873,9 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
   const gitDiffRequestRef = useRef(0);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const [selectedLineRange, setSelectedLineRange] = useState<SelectedLineRange | null>(null);
-
+  // 高亮语言按需加载：语言定义下载完成前/未知语言时渲染纯文本
+  // （配合 lib/prism-languages 避免主 bundle 携带全量语言表）。
+  const [highlightReady, setHighlightReady] = useState(false);
   const fetchContent = useCallback((filePath: string) => {
     return fetch(getFileApiUrl(filePath, "read", sourceSessionId))
       .then((r) => r.json())
@@ -822,6 +886,7 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
         }
         setError(null);
         setData(d);
+        cacheFileContent(filePath, d);
         return d;
       })
       .catch((e) => {
@@ -854,9 +919,11 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
 
   // Initial load + SSE watch setup
   useEffect(() => {
-    setLoading(true);
     setError(null);
-    setData(null);
+    // 缓存命中：立即显示（不闪 loading），后台拉取最新内容校验。
+    const cached = fileContentCache.get(filePath);
+    setData(cached?.data ?? null);
+    setLoading(!cached);
     setGitDiff(null);
     setDisplayMode("source");
     setWrapLines(false);
@@ -896,6 +963,23 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
     };
   }, [filePath, fetchContent, fetchGitDiff, sourceSessionId]);
 
+  // 高亮语言按需加载：语言定义下载完成前/未知语言时渲染纯文本
+  // （配合 lib/prism-languages 避免主 bundle 携带全量语言表）。
+  useEffect(() => {
+    const language = data?.language;
+    if (!language || language === "text") {
+      setHighlightReady(false);
+      return;
+    }
+    let cancelled = false;
+    setHighlightReady(false);
+    loadPrismLanguage(language).then((ok) => {
+      if (!cancelled) setHighlightReady(ok);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [data?.language]);
   useEffect(() => {
     void fetchGitDiff(filePath);
   }, [fetchGitDiff, filePath, gitRefreshKey]);
@@ -1122,6 +1206,7 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
             )}
           </div>
 
+          {!isDeletedDiff && <CopyFileButton content={content} />}
           {!isDeletedDiff && <DownloadLink filePath={filePath} sourceSessionId={sourceSessionId} />}
         </div>
       </div>
@@ -1202,7 +1287,8 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
               {markdownPreview}
             </ReactMarkdown>
           </div>
-        ) : (
+        // 语言定义加载中/未知语言：纯文本占位，样式与高亮结果一致避免跳动
+        ) : highlightReady ? (
           <SyntaxHighlighter
             className={wrapLines ? "file-source-view is-wrapped" : "file-source-view"}
             language={language === "text" ? "plaintext" : language}
@@ -1235,6 +1321,26 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
           >
             {content}
           </SyntaxHighlighter>
+        ) : (
+          <pre
+            className={wrapLines ? "file-source-view is-wrapped" : "file-source-view"}
+            style={{
+              margin: 0,
+              padding: 0,
+              border: 0,
+              background: "var(--bg)",
+              ...FILE_CODE_STYLE,
+              width: wrapLines ? "100%" : "max-content",
+              minWidth: "100%",
+              minHeight: "100%",
+              overflow: "visible",
+              whiteSpace: wrapLines ? "pre-wrap" : "pre",
+              overflowWrap: wrapLines ? "anywhere" : "normal",
+              fontFamily: "var(--font-mono)",
+            }}
+          >
+            {content}
+          </pre>
         )}
       </div>
     </div>

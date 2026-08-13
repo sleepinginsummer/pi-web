@@ -8,7 +8,10 @@ const runningEventsSource = await readFile(new URL("./running/events/route.ts", 
 test("agent SSE projects SDK events onto the fields consumed by the web client", () => {
   assert.match(agentEventsSource, /OMITTED_EVENT_TYPES = new Set\(\["turn_start", "turn_end", "tool_execution_update"\]\)/);
   assert.match(agentEventsSource, /delete clientEvent\.assistantMessageEvent/);
-  assert.match(agentEventsSource, /event\.type === "agent_end"\) return \{ type: "agent_end" \}/);
+  assert.match(agentEventsSource, /event\.type === "agent_end"\) \{/);
+  // agent_end 被裁剪为轻量事件（保留权威消息数供客户端判断流式完整性）
+  assert.match(agentEventsSource, /type: "agent_end"/);
+  assert.match(agentEventsSource, /messageCount: Array\.isArray\(event\.messages\)/);
   assert.match(agentEventsSource, /const clientEvent = toClientEvent\(event\)/);
 });
 

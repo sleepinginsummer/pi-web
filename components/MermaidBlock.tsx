@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import { vs } from "react-syntax-highlighter/dist/cjs/styles/prism";
-import { vscDarkPlus } from "react-syntax-highlighter/dist/cjs/styles/prism";
+import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 import { useTheme } from "@/hooks/useTheme";
 import { useI18n } from "@/hooks/useI18n";
 import { copyText } from "@/lib/clipboard";
+
+// 代码高亮按需加载（见 lib/prism-languages.ts）：主 bundle 不再包含
+// react-syntax-highlighter 的全量语言表，首次遇到代码块时才加载对应语言 chunk。
+const LazyCodeHighlight = lazy(() => import("./CodeHighlight"));
 
 interface MermaidBlockProps {
   code: string;
@@ -256,23 +257,15 @@ export function CodeBlock({ code, lang, headerAction }: CodeBlockProps) {
           </button>
         </div>
       </div>
-      <SyntaxHighlighter
-        language={lang || "text"}
-        style={isDark ? vscDarkPlus : vs}
-        showLineNumbers
-        lineNumberStyle={{ color: "var(--text-dim)", fontStyle: "normal" }}
-        customStyle={{
-          margin: 0,
-          padding: "11px 13px",
-          fontSize: 12.5,
-          lineHeight: 1.62,
-          borderRadius: 0,
-          background: "color-mix(in srgb, var(--bg) 92%, var(--bg-panel))",
-        }}
-        codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
+      <Suspense
+        fallback={(
+          <pre className="markdown-code-plain" style={{ margin: 0, padding: "11px 13px", fontSize: 12.5, lineHeight: 1.62, borderRadius: 0, overflow: "auto" }}>
+            <code style={{ fontFamily: "var(--font-mono)", background: "none" }}>{code}</code>
+          </pre>
+        )}
       >
-        {code}
-      </SyntaxHighlighter>
+        <LazyCodeHighlight code={code} lang={lang || "text"} isDark={isDark} />
+      </Suspense>
     </div>
   );
 }

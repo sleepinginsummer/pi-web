@@ -53,10 +53,11 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
 export async function listAllSessions(): Promise<SessionInfo[]> {
   const generation = globalThis.__piSessionListGeneration ?? 0;
   const projectMetadataRevision = globalThis.__piProjectMetadataRevision ?? 0;
-  // Return cached result if still fresh (avoids re-scanning session files
-  // and re-spawning git processes on every page load).
-  if (globalThis.__piSessionListCache && Date.now() - globalThis.__piSessionListCache.ts < SESSION_LIST_CACHE_TTL_MS) {
-    return globalThis.__piSessionListCache.data;
+  const cached = globalThis.__piSessionListCache;
+  // 缓存新鲜且无脏标记：直接返回（避免每次页面加载/轮询都重扫会话文件
+  // 和重新 spawn git 进程）。
+  if (cached && Date.now() - cached.ts < SESSION_LIST_CACHE_TTL_MS && !globalThis.__piSessionListDirty) {
+    return cached.data;
   }
 
   // Coalescing dedup: concurrent callers share the same in-flight promise
@@ -73,6 +74,9 @@ export async function listAllSessions(): Promise<SessionInfo[]> {
       && (globalThis.__piProjectMetadataRevision ?? 0) === projectMetadataRevision
     ) {
       globalThis.__piSessionListCache = { data, ts: Date.now() };
+      // 重扫成功即消费脏标记；若重扫期间又发生失效（generation 已变），
+      // 上面的守卫不会写缓存，脏标记保持，下一次请求会再次重扫。
+      globalThis.__piSessionListDirty = false;
     }
     return data;
   });
@@ -99,13 +103,18 @@ declare global {
   var __piSessionListGeneration: number | undefined;
   var __piProjectMetadataRevision: number | undefined;
   var __piSessionListCache: { data: SessionInfo[]; ts: number } | undefined;
+  /** 会话已变更但缓存尚未重扫（惰性失效标记，见 invalidateSessionListCache）。 */
+  var __piSessionListDirty: boolean | undefined;
 }
 
 const SESSION_LIST_CACHE_TTL_MS = 30_000;
 
 export function invalidateSessionListCache(): void {
   globalThis.__piSessionListGeneration = (globalThis.__piSessionListGeneration ?? 0) + 1;
-  globalThis.__piSessionListCache = undefined;
+  // 惰性失效：只标记脏，不立即清缓存。列表请求发现脏标记后统一重扫一次，
+  // 使流式期间的多次失效（每条消息的 message_end 等）合并为一次全量扫描；
+  // 若缓存仍在 TTL 内且无请求，则完全避免重扫。
+  globalThis.__piSessionListDirty = true;
 }
 
 /**

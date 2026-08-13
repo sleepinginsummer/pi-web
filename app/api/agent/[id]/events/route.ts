@@ -12,7 +12,14 @@ function toClientEvent(event: AgentEvent): AgentEvent | null {
     delete clientEvent.assistantMessageEvent;
     return clientEvent;
   }
-  if (event.type === "agent_end") return { type: "agent_end" };
+  if (event.type === "agent_end") {
+    // 保留权威消息数（不携带完整消息数组以省带宽），供客户端判断
+    // 流式是否完整、能否跳过 agent_end 后的全量 context 重载。
+    return {
+      type: "agent_end",
+      messageCount: Array.isArray(event.messages) ? event.messages.length : 0,
+    };
+  }
   return event;
 }
 

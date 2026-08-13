@@ -674,6 +674,8 @@ function BlockView({ block, toolResults, isStreaming, streamingDuration, toolCal
   }
   if (block.type === "toolCall") {
     const tc = block as ToolCallContent;
+    // todo 工具调用已在输入框上方的 TodoListPanel 汇总展示，这里不再逐个渲染，避免刷屏。
+    if (tc.toolName === "todo") return null;
     const result = toolResults?.get(tc.toolCallId);
     const duration = toolCallDurations?.get(tc.toolCallId);
     return <ToolCallBlock block={tc} result={result} duration={duration} />;

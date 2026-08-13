@@ -2123,8 +2123,8 @@ function SessionItem({
             </button>
           )}
 
-          {/* Action buttons — shown on hover */}
-          {hovered && (
+          {/* Action buttons — shown on hover, always for the selected session */}
+          {(hovered || isSelected) && (
             <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
               <button
                 onClick={startRename}

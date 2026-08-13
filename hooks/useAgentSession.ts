@@ -60,6 +60,16 @@ export interface DetachedSubagentStatus {
   state: "running" | "completed" | "failed";
   error?: string;
 }
+export type TodoItemStatus = "pending" | "in_progress" | "completed";
+
+export interface TodoItem {
+  id: number;
+  subject: string;
+  status: TodoItemStatus;
+  description?: string;
+  activeForm?: string;
+}
+
 interface AgentEvent {
   type: string;
   [key: string]: unknown;
@@ -86,6 +96,12 @@ type AgentStateResponse = {
   extensionWidgets?: ExtensionWidgetItem[];
   queuedMessages?: { steering?: string[]; followUp?: string[] } | null;
 };
+
+// ask（select）的 "Type something." 行内输入接力：前端先回送 sentinel 原文触发
+// rpc-fallback 的 input 分支，pi 随即发来 method:"input" 请求；此处记录待提交文本，
+// 在 input 请求到达时自动应答，使自定义答案无需弹窗即可提交。
+// 超时兜底：pi 侧异常未发 input 时，残留记录自动失效，避免误应答后续无关请求。
+const CUSTOM_ANSWER_ARM_MS = 15_000;
 
 // ChatWindow instances are replaced when the user switches sessions. Keep the
 // latest in-memory messages briefly at module scope so a running session can
@@ -176,6 +192,54 @@ function deriveDetachedSubagentStatuses(messages: AgentMessage[]): DetachedSubag
   return [...statuses.values()];
 }
 
+
+function normalizeTodoItem(value: unknown): TodoItem | null {
+  if (typeof value !== "object" || value === null) return null;
+  const item = value as Record<string, unknown>;
+  const { id, subject } = item;
+  const rawStatus = item.status;
+  if (typeof id !== "number" || typeof subject !== "string" || typeof rawStatus !== "string") return null;
+  // deleted 是墓碑状态，直接丢弃；其余未知状态按 pending 兜底。
+  if (rawStatus === "deleted") return null;
+  const status: TodoItemStatus =
+    rawStatus === "in_progress" || rawStatus === "completed" ? rawStatus : "pending";
+  return {
+    id,
+    subject,
+    status,
+    description: typeof item.description === "string" ? item.description : undefined,
+    activeForm: typeof item.activeForm === "string" ? item.activeForm : undefined,
+  };
+}
+
+// todo 工具是增量 action（create/update/delete/clear），但 harness 每次 toolResult 的
+// details.tasks 都回传全量快照，因此取最后一条 todo toolResult 即为当前列表，无需重放。
+function deriveTodos(messages: AgentMessage[]): TodoItem[] {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.role !== "toolResult" || message.toolName !== "todo") continue;
+    const details = message.details as { tasks?: unknown } | undefined;
+    if (!details || !Array.isArray(details.tasks)) continue;
+    const todos: TodoItem[] = [];
+    for (const task of details.tasks) {
+      const normalized = normalizeTodoItem(task);
+      if (normalized) todos.push(normalized);
+    }
+    return todos;
+  }
+  return [];
+}
+
+// 最后一条 todo toolResult 在 messages 中的下标，用于把 TodoListPanel 锚定到对应 AI 回复下方。
+function findLastTodoResultIndex(messages: AgentMessage[]): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.role !== "toolResult" || message.toolName !== "todo") continue;
+    const details = message.details as { tasks?: unknown } | undefined;
+    if (details && Array.isArray(details.tasks)) return i;
+  }
+  return -1;
+}
 
 export interface QueuedMessages {
   steering: string[];
@@ -268,6 +332,9 @@ const EVENT_STREAM_CONNECT_TIMEOUT_MS = 15_000;
 const MAX_NOTICES = 5;
 const NOTICE_VISIBLE_MS = 2500;
 const NOTICE_EXIT_ANIMATION_MS = 180;
+// 流式期间侧栏列表刷新的节流窗口：消息边界过密时合并请求，避免每次
+// message_end 都触发一次全量会话扫描（服务端另有惰性脏标记兜底）。
+const SESSION_LIST_REFRESH_THROTTLE_MS = 4_000;
 const SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " ", "Space", "Spacebar"]);
 
 type EventStreamConnectionStatus = "connected" | "timeout" | "closed";
@@ -477,6 +544,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [extensionWidgets, setExtensionWidgets] = useState<ExtensionWidgetItem[]>([]);
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessages>({ steering: [], followUp: [] });
   const detachedSubagentStatuses = useMemo(() => deriveDetachedSubagentStatuses(messages), [messages]);
+  const todos = useMemo(() => deriveTodos(messages), [messages]);
+  const todoAnchorIndex = useMemo(() => findLastTodoResultIndex(messages), [messages]);
 
   useEffect(() => {
     const sid = sessionIdRef.current;
@@ -510,7 +579,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const thinkingLevelOverrideRef = useRef<Exclude<ThinkingLevelOption, "auto"> | null>(null);
   const promptRunIdRef = useRef(0);
   const optimisticUserMessageKeyRef = useRef<string | null>(null);
-  // 每条消息完成时刷新列表的节流：避免流式多事件导致连续全量扫描
+  // 流式期间本地已收齐的消息条数（在 message_end 的 setMessages updater 内同步），
+  // 用于 agent_end 时判断是否丢帧、能否跳过全量 context 重载。
+  const lastStreamedMessageCountRef = useRef(0);
   const sessionListRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // waitForPromptSettlement 定义在 respondToExtensionUi 之后，通过 ref 解耦调用
   const waitForPromptSettlementRef = useRef<((sid: string, runId?: number) => Promise<void>) | null>(null);
@@ -864,15 +935,34 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     dispatchNotice({ type: "remove", id });
   }, []);
 
+  // Type something. 行内输入接力：见模块级 CUSTOM_ANSWER_ARM_MS 注释
+  const pendingCustomAnswerRef = useRef<{ prefix: string; text: string; expiresAt: number } | null>(null);
+  const armCustomAnswer = useCallback((prefix: string, text: string) => {
+    pendingCustomAnswerRef.current = { prefix, text, expiresAt: Date.now() + CUSTOM_ANSWER_ARM_MS };
+  }, []);
+
   const handleExtensionUiRequest = useCallback((request: ExtensionUiRequest) => {
     switch (request.method) {
       case "select":
       case "confirm":
-      case "input":
       case "editor":
         setExtensionDialog(request);
         extensionDialogRef.current = request;
         break;
+      case "input": {
+        // Type something. 行内输入接力：匹配（同问题前缀、未过期）则自动应答，不弹窗
+        const pending = pendingCustomAnswerRef.current;
+        if (pending) {
+          pendingCustomAnswerRef.current = null; // 一次性消费
+          if (Date.now() < pending.expiresAt && request.title.startsWith(pending.prefix)) {
+            void respondToExtensionUi(request, { value: pending.text });
+            break;
+          }
+        }
+        setExtensionDialog(request);
+        extensionDialogRef.current = request;
+        break;
+      }
       case "notify": {
         addNotice({
           id: request.id,
@@ -914,7 +1004,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
         break;
     }
-  }, [addNotice, opts.chatInputRef]);
+  }, [addNotice, opts.chatInputRef, respondToExtensionUi]);
 
   const cancelEventStreamGrace = useCallback(() => {
     eventStreamGraceGenerationRef.current += 1;
@@ -1105,6 +1195,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "agent_start":
         cancelEventStreamGrace();
         agentRunningRef.current = true;
+        // 新一轮运行开始：重置流式消息计数（message_end 的 updater 会重新累计）。
+        lastStreamedMessageCountRef.current = 0;
         setAgentRunning(true);
         setAgentPhase({ kind: "waiting_model" });
         dispatch({ type: "start" });
@@ -1117,8 +1209,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setAgentPhase(null);
         setRetryInfo(null);
         dispatch({ type: "end" });
+        // 一轮运行结束：取消流式节流窗口并立即刷新一次，保证侧栏拿到最终状态。
+        if (sessionListRefreshTimerRef.current) {
+          clearTimeout(sessionListRefreshTimerRef.current);
+          sessionListRefreshTimerRef.current = null;
+        }
+        onSessionListRefresh?.();
         if (sessionIdRef.current) {
-          loadSession(sessionIdRef.current);
+          // 流式完整（服务端权威消息数已知且本地已收齐）时跳过全量 context 重载：
+          // 省一次 .jsonl 全量解析与消息对象重建（避免整列表重渲染）；
+          // SSE 丢帧/断线时本地数量不足，仍走 loadSession 兜底。
+          const authoritativeCount = (event as { messageCount?: number }).messageCount;
+          if (authoritativeCount === undefined || lastStreamedMessageCountRef.current < authoritativeCount) {
+            loadSession(sessionIdRef.current);
+          }
           fetch(`/api/agent/${encodeURIComponent(sessionIdRef.current)}`)
             .then((r) => r.json())
             .then((d: { state?: AgentStateResponse }) => {
@@ -1171,14 +1275,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const completed = event.message as AgentMessage | undefined;
         // detached completion 可能在父轮结束后到达，状态区仍必须消费。
         if (!agentRunningRef.current && completed?.role !== "custom") break;
-        // 首个 message_end 先立即刷新；在节流窗口结束时补一次，覆盖会话文件刚落盘、
-        // 但首次扫描尚未看到首条 assistant 消息的时序。
+        // 流式期间节流列表刷新：首条消息立即刷新（新会话快速出现），
+        // 后续 message_end 合并到节流窗口，窗口结束时补一次覆盖落盘时序；
+        // agent_end 会取消窗口并立即刷新，见上。
         if (!sessionListRefreshTimerRef.current) {
           onSessionListRefresh?.();
           sessionListRefreshTimerRef.current = setTimeout(() => {
             sessionListRefreshTimerRef.current = null;
             onSessionListRefresh?.();
-          }, 1000);
+          }, SESSION_LIST_REFRESH_THROTTLE_MS);
         }
         if (completed?.role === "toolResult" && completed.toolName === "subagent_spawn" && !completed.isError) {
           const text = contentText(completed.content);
@@ -1213,10 +1318,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
                 ? prev
                 : prev;
             }
-            return [...prev, delivered];
+            const next = [...prev, delivered];
+            lastStreamedMessageCountRef.current = next.length;
+            return next;
           });
         } else if (completed) {
-          setMessages((prev) => [...prev, normalizeToolCalls(completed)]);
+          setMessages((prev) => {
+            const next = [...prev, normalizeToolCalls(completed)];
+            lastStreamedMessageCountRef.current = next.length;
+            return next;
+          });
         }
         dispatch({ type: "reset" });
         setAgentPhase({ kind: "waiting_model" });
@@ -1924,14 +2035,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setSessionStatsOverride(null);
   }, [messages.length, contextUsage?.tokens, contextUsage?.percent, contextUsage?.contextWindow]);
 
-  return {
+  // 返回值整体 useMemo：流式期间 ChatWindow 每 token 重渲染时，若依赖未变则
+  // 保持同一对象引用，下游 memo 组件（ChatInput/MessageView）才能跳过渲染。
+  return useMemo(() => ({
     // State
     data, loading, error, activeLeafId, messages, entryIds, streamState,
     agentRunning, modelNames, modelList, modelError, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
     isCompacting, compactError, compactResult, currentModel, displayModel, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
-    notices: noticeState.visible, dismissNotice, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, detachedSubagentStatuses, respondToExtensionUi, sendExtensionCustomInput,
+    notices: noticeState.visible, dismissNotice, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, detachedSubagentStatuses, todos, todoAnchorIndex, respondToExtensionUi, sendExtensionCustomInput, armCustomAnswer,
     isAutoModelSelection: isNew && newSessionModel === null,
     agentPhase,
     isNew,
@@ -1948,5 +2061,24 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     bashRunning, pendingBash,
     // Subscriptions
     handleAgentEventRef,
-  };
+  }), [
+    data, loading, error, activeLeafId, messages, entryIds, streamState,
+    agentRunning, modelNames, modelList, modelError, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel,
+    retryInfo, contextUsage, systemPrompt, forkingEntryId,
+    isCompacting, compactError, compactResult, currentModel, displayModel, sessionStats,
+    slashCommands, slashCommandsLoading, queuedMessages,
+    noticeState.visible, dismissNotice, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, detachedSubagentStatuses, todos, todoAnchorIndex, respondToExtensionUi, sendExtensionCustomInput, armCustomAnswer,
+    isNew,
+    agentPhase,
+    sessionIdRef, eventSourceRef, messagesEndRef, scrollContainerRef,
+    lastUserMsgRef, pendingScrollToUserRef, initialScrollDoneRef,
+    handleSend, handleAbort, handleFork, handleNavigate, handleModelChange,
+    handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
+    handleRecallQueue,
+    handleBuiltinSlashCommand,
+    handleToolPresetChange, handleThinkingLevelChange, loadTools, loadSlashCommands, setActiveLeafId, setData, setMessages,
+    dispatch, setAgentRunning, setForkingEntryId,
+    bashRunning, pendingBash,
+    handleAgentEventRef,
+  ]);
 }
