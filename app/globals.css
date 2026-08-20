@@ -119,6 +119,9 @@ pre, code {
 
 /* react-markdown output styles */
 .markdown-body {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
   font-size: 14px;
   line-height: 1.7;
   color: var(--text);
@@ -366,6 +369,8 @@ pre, code {
 
 .markdown-code-block {
   position: relative;
+  min-width: 0;
+  max-width: 100%;
   margin: 6px 0;
   border: 1px solid var(--border);
   border-radius: 7px;
@@ -1383,5 +1388,10 @@ span.linenumber {
   .directory-picker-footer {
     flex-wrap: wrap;
     padding-bottom: max(10px, env(safe-area-inset-bottom)) !important;
+  }
+  textarea,
+  input,
+  select {
+    font-size: 16px !important;
   }
 }

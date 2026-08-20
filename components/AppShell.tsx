@@ -16,6 +16,7 @@ import { ShadowSessionToggle, type ShadowSessionControl } from "./ShadowSessionT
 import { useTheme } from "@/hooks/useTheme";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useViewportHeight } from "@/hooks/useViewportHeight";
 import { useResizablePanel } from "@/hooks/useResizablePanel";
 import { useWorktreeState } from "@/hooks/useWorktreeState";
 import { useCompletionNotification } from "@/hooks/useCompletionNotification";
@@ -51,6 +52,7 @@ import {
 } from "@/lib/pending-new-session";
 import type { ProjectTrustStatus } from "@/lib/api-types";
 import type { ChatInputHandle } from "./ChatInput";
+import { SessionInfoPopover, SessionStatsButton } from "./SessionInfoControls";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 
 type SessionCopyField = "file" | "id";
@@ -108,10 +110,7 @@ export function AppShell() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const [mobileSidebarReady, setMobileSidebarReady] = useState(false);
-  // 动态视口高度：精确跟随浏览器工具条/键盘/旋转后的可见区域。
-  // 100dvh/vh 在部分手机浏览器（尤其工具条展开时）不可靠，
-  // 会导致根容器偏高、底部输入栏（模型选择/更多按钮行）被裁掉。
-  const [viewportHeight, setViewportHeight] = useState<number | null>(null);
+  const viewportHeight = useViewportHeight();
   const sidebarWidthRef = useRef(SIDEBAR_DEFAULT_WIDTH);
   const rightPanelWidthRef = useRef(RIGHT_PANEL_FALLBACK_WIDTH);
   const getResponsiveRightPanelWidth = useCallback(
@@ -174,27 +173,6 @@ export function AppShell() {
     setMobileSidebarReady(true);
   }, []);
 
-  // 跟随可见视口高度：resize / orientationchange / visualViewport 变化时更新。
-  // 用 rAF 节流避免工具条动画期间高频 setState。
-  useEffect(() => {
-    let raf = 0;
-    const update = () => {
-      cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(() => {
-        setViewportHeight(window.innerHeight);
-      });
-    };
-    update();
-    window.addEventListener("resize", update);
-    window.addEventListener("orientationchange", update);
-    window.visualViewport?.addEventListener("resize", update);
-    return () => {
-      cancelAnimationFrame(raf);
-      window.removeEventListener("resize", update);
-      window.removeEventListener("orientationchange", update);
-      window.visualViewport?.removeEventListener("resize", update);
-    };
-  }, []);
   useEffect(() => {
     if (!rightPanelOpen) return;
     reclampSidebarWidth();
@@ -954,7 +932,16 @@ export function AppShell() {
     `}</style>
     <div
       className="app-shell-root"
-      style={{ display: "flex", height: viewportHeight ?? "100dvh", overflow: "hidden", background: "var(--bg)" }}
+      style={{
+        display: "flex",
+        height: viewportHeight ?? "100dvh",
+        overflow: "hidden",
+        paddingTop: "env(safe-area-inset-top)",
+        paddingBottom: "env(safe-area-inset-bottom)",
+        paddingLeft: "env(safe-area-inset-left)",
+        paddingRight: "env(safe-area-inset-right)",
+        background: "var(--bg)",
+      }}
     >
       {/* Mobile overlay backdrop */}
       <div
@@ -1318,103 +1305,18 @@ export function AppShell() {
               />
             </div>
           )}
-          {/* Session stats — right-aligned in top bar */}
-          {showChat && (() => {
-             const tokens = sessionStats?.tokens;
-            const c = sessionStats?.cost ?? 0;
-            const fmt = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(0)}k` : String(n);
-            const costStr = c > 0 ? (c >= 0.01 ? `$${c.toFixed(2)}` : `<$0.01`) : null;
-
-            let ctxColor = "var(--text-muted)";
-            let ctxStr: string | null = null;
-            if (contextUsage?.contextWindow) {
-              const pct = contextUsage.percent;
-              if (pct !== null && pct > 90) ctxColor = "#ef4444";
-              else if (pct !== null && pct > 70) ctxColor = "rgba(234,179,8,0.95)";
-              ctxStr = pct !== null ? `${pct.toFixed(0)}% / ${fmt(contextUsage.contextWindow)}` : `? / ${fmt(contextUsage.contextWindow)}`;
-            }
-
-            const tooltipParts: string[] = [];
-             if (tokens) {
-               tooltipParts.push(`in: ${tokens.input.toLocaleString(locale)}`);
-               tooltipParts.push(`out: ${tokens.output.toLocaleString(locale)}`);
-               tooltipParts.push(`cache read: ${tokens.cacheRead.toLocaleString(locale)}`);
-               tooltipParts.push(`cache write: ${tokens.cacheWrite.toLocaleString(locale)}`);
-              if (c > 0) tooltipParts.push(`cost: $${c.toFixed(4)}`);
-            }
-            if (contextUsage?.contextWindow) {
-              const pct = contextUsage.percent;
-              tooltipParts.push(`context: ${pct !== null ? pct.toFixed(1) + "%" : "unknown"} of ${contextUsage.contextWindow.toLocaleString()} tokens`);
-            }
-            const tooltip = tooltipParts.join("  |  ");
-
-            return (
-              <button
-                type="button"
-                onClick={() => toggleTopPanel("session")}
-               title={tooltip || translate("session.title")}
-                 aria-label={translate("session.title")}
-                aria-pressed={activeTopPanel === "session"}
-                style={{
-                  marginLeft: "auto",
-                  display: "flex", alignItems: "center", gap: 10,
-                  paddingLeft: 12,
-                  paddingRight: rightPanelOpen ? 12 : 48,
-                  height: "100%",
-                  background: activeTopPanel === "session" ? "var(--bg-selected)" : "none",
-                  border: "none",
-                  borderTop: activeTopPanel === "session" ? "2px solid var(--accent)" : "2px solid transparent",
-                  fontSize: 11, color: "var(--text-muted)",
-                  whiteSpace: "nowrap", cursor: "pointer",
-                  fontVariantNumeric: "tabular-nums",
-                  transition: "color 0.1s, background 0.1s",
-                }}
-                onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.color = activeTopPanel === "session" ? "var(--text)" : "var(--text-muted)"; }}
-              >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" />
-              </svg>
-                 {!isMobile && tokens && tokens.input > 0 && (
-                  <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                    <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
-                      <line x1="5" y1="8.5" x2="5" y2="1.5" /><polyline points="2 4 5 1.5 8 4" />
-                    </svg>
-                     {fmt(tokens.input)}
-                  </span>
-                )}
-                 {!isMobile && tokens && tokens.output > 0 && (
-                  <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                    <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
-                      <line x1="5" y1="1.5" x2="5" y2="8.5" /><polyline points="2 6 5 8.5 8 6" />
-                    </svg>
-                     {fmt(tokens.output)}
-                  </span>
-                )}
-                 {!isMobile && tokens && tokens.cacheRead > 0 && (
-                  <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                    <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M8.5 5a3.5 3.5 0 1 1-1-2.45" /><polyline points="6.5 1.5 8.5 2.5 7.5 4.5" />
-                    </svg>
-                     {fmt(tokens.cacheRead)}
-                  </span>
-                )}
-                {!isMobile && costStr && (
-                  <span style={{ display: "flex", alignItems: "center", color: "var(--text)", fontWeight: 500 }}>
-                    {costStr}
-                  </span>
-                )}
-                {ctxStr && (
-                  <span style={{ display: "flex", alignItems: "center", gap: 4, color: ctxColor }}>
-                    <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M1 9 L1 5 Q1 1 5 1 Q9 1 9 5 L9 9" /><line x1="1" y1="9" x2="9" y2="9" />
-                    </svg>
-                    {ctxStr}
-                  </span>
-                )}
-              </button>
-            );
-          })()}
+          {showChat && (
+            <SessionStatsButton
+              active={activeTopPanel === "session"}
+              contextUsage={contextUsage}
+              isMobile={isMobile}
+              locale={locale}
+              onClick={() => toggleTopPanel("session")}
+              rightPanelOpen={rightPanelOpen}
+              sessionStats={sessionStats}
+              translate={translate}
+            />
+          )}
           {/* Top panel dropdown — shared, only one active at a time */}
           {activeTopPanel && topPanelPos && (
             <div style={{
@@ -1505,151 +1407,15 @@ export function AppShell() {
                   boxShadow: "0 10px 28px rgba(0,0,0,0.10)",
                   padding: "12px 16px",
                 }}>
-                  {sessionStats ? (() => {
-                    const sessionRows = [
-                       ...(sessionStats.sessionName ? [{ label: translate("session.name"), value: sessionStats.sessionName, copyField: null }] : []),
-                       { label: translate("session.file"), value: sessionStats.sessionFile ?? translate("session.inMemory"), copyField: "file" as const },
-                       { label: translate("session.id"), value: sessionStats.sessionId, copyField: "id" as const },
-                    ];
-                    const messageRows = [
-                       [translate("session.user"), sessionStats.userMessages.toLocaleString(locale)],
-                       [translate("session.assistant"), sessionStats.assistantMessages.toLocaleString(locale)],
-                       [translate("session.toolCalls"), sessionStats.toolCalls.toLocaleString(locale)],
-                       [translate("session.toolResults"), sessionStats.toolResults.toLocaleString(locale)],
-                       [translate("session.total"), sessionStats.totalMessages.toLocaleString(locale)],
-                    ];
-                    const tokenRows = [
-                       [translate("session.input"), sessionStats.tokens.input.toLocaleString(locale)],
-                       [translate("session.output"), sessionStats.tokens.output.toLocaleString(locale)],
-                       ...(sessionStats.tokens.cacheRead > 0 ? [[translate("session.cacheRead"), sessionStats.tokens.cacheRead.toLocaleString(locale)]] : []),
-                       ...(sessionStats.tokens.cacheWrite > 0 ? [[translate("session.cacheWrite"), sessionStats.tokens.cacheWrite.toLocaleString(locale)]] : []),
-                       [translate("session.total"), sessionStats.tokens.total.toLocaleString(locale)],
-                    ];
-                    const ctx = contextUsage ?? sessionStats.contextUsage;
-                    const formatCompact = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(0)}k` : String(n);
-                    const extraTokenRows = [
-                       ...(sessionStats.cost > 0 ? [[translate("session.cost"), `$${sessionStats.cost.toFixed(4)}`]] : []),
-                       ...(ctx?.contextWindow ? [[translate("session.context"), `${ctx.percent !== null ? `${ctx.percent.toFixed(1)}%` : "?"} / ${formatCompact(ctx.contextWindow)}`]] : []),
-                    ];
-                    const section = (
-                      title: string,
-                      sectionRows: string[][],
-                      valueAlign: "left" | "right" = "left",
-                      compact = false,
-                    ) => (
-                        <div style={{ minWidth: 0 }}>
-                          <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>{title}</div>
-                          <div style={{
-                            display: "grid",
-                            gridTemplateColumns: compact ? "max-content max-content" : "auto minmax(0, 1fr)",
-                            columnGap: compact ? 14 : 12,
-                            rowGap: 4,
-                            justifyContent: compact ? "start" : undefined,
-                          }}>
-                            {sectionRows.map(([label, value]) => (
-                              <div key={`${title}:${label}`} style={{ display: "contents" }}>
-                                <div style={{ color: "var(--text-dim)", whiteSpace: "nowrap" }}>{label}</div>
-                                <div style={{
-                                  color: "var(--text-muted)",
-                                  minWidth: 0,
-                                  overflowWrap: compact ? "normal" : "anywhere",
-                                  textAlign: valueAlign,
-                                  whiteSpace: valueAlign === "right" ? "nowrap" : "normal",
-                                }}>{value}</div>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      );
-                    const copyButton = (field: SessionCopyField, value: string) => {
-                      const copied = copiedSessionField === field;
-                      return (
-                        <button
-                          type="button"
-                           title={copied ? translate("session.copied") : translate(field === "file" ? "session.copyFile" : "session.copyId")}
-                          onClick={() => handleCopySessionField(field, value)}
-                          style={{
-                            alignSelf: "start",
-                            display: "inline-flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            width: 22,
-                            height: 22,
-                            marginTop: -2,
-                            color: copied ? "var(--accent)" : "var(--text-dim)",
-                            background: "transparent",
-                            border: "1px solid var(--border)",
-                            borderRadius: 4,
-                            cursor: "pointer",
-                            flex: "0 0 auto",
-                            transition: "color 0.12s, border-color 0.12s, background 0.12s",
-                          }}
-                          onMouseEnter={(e) => {
-                            e.currentTarget.style.color = "var(--accent)";
-                            e.currentTarget.style.borderColor = "var(--accent)";
-                            e.currentTarget.style.background = "var(--bg-hover)";
-                          }}
-                          onMouseLeave={(e) => {
-                            e.currentTarget.style.color = copied ? "var(--accent)" : "var(--text-dim)";
-                            e.currentTarget.style.borderColor = "var(--border)";
-                            e.currentTarget.style.background = "transparent";
-                          }}
-                        >
-                          {copied ? (
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                              <polyline points="20 6 9 17 4 12" />
-                            </svg>
-                          ) : (
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                              <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                            </svg>
-                          )}
-                        </button>
-                      );
-                    };
-                    const sessionInfoSection = (
-                      <div style={{ minWidth: 0 }}>
-                         <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>{translate("session.infoSection")}</div>
-                        <div style={{ display: "grid", gridTemplateColumns: "auto minmax(0, 1fr) auto", columnGap: 12, rowGap: 8, alignItems: "start" }}>
-                          {sessionRows.map((row) => (
-                            <div key={`session-info:${row.label}`} style={{ display: "contents" }}>
-                              <div style={{ color: "var(--text-dim)", whiteSpace: "nowrap" }}>{row.label}</div>
-                              <div style={{
-                                color: "var(--text-muted)",
-                                minWidth: 0,
-                                overflowWrap: "anywhere",
-                                wordBreak: "break-word",
-                                whiteSpace: "normal",
-                              }}>{row.value}</div>
-                              <div>{row.copyField ? copyButton(row.copyField, row.value) : null}</div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    );
-
-                    return (
-                      <div style={{
-                        display: "grid",
-                        gridTemplateColumns: isMobile
-                          ? "1fr"
-                          : "minmax(360px, 1.7fr) minmax(140px, 0.55fr) minmax(190px, 0.75fr)",
-                        gap: isMobile ? 16 : 24,
-                        fontSize: 12,
-                        lineHeight: 1.5,
-                        fontFamily: "var(--font-mono)",
-                      }}>
-                        {sessionInfoSection}
-                         {section(translate("session.messages"), messageRows)}
-                         {section(translate("session.tokens"), [...tokenRows, ...extraTokenRows], "right", true)}
-                      </div>
-                    );
-                  })() : (
-                    <div style={{ fontSize: 12, color: "var(--text-muted)", fontStyle: "italic" }}>
-                       {translate("session.load")}
-                    </div>
-                  )}
+                  <SessionInfoPopover
+                    contextUsage={contextUsage}
+                    copiedSessionField={copiedSessionField}
+                    isMobile={isMobile}
+                    locale={locale}
+                    onCopy={handleCopySessionField}
+                    sessionStats={sessionStats}
+                    translate={translate}
+                  />
                 </div>
               )}
             </div>
