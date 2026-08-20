@@ -1,5 +1,6 @@
 import type {
   AgentSessionEvent,
+  ExtensionCommandContext,
   SessionManager,
   SettingsManager,
   SlashCommandInfo,
@@ -68,10 +69,13 @@ interface ResourceLoaderLike {
 
 interface ExtensionRunnerLike {
   getRegisteredCommands(): Array<{
+    name: string;
     invocationName: string;
     description?: string;
     sourceInfo: SlashCommandInfo["sourceInfo"];
+    handler: (args: string, context: ExtensionCommandContext) => Promise<void>;
   }>;
+  createCommandContext?(): ExtensionCommandContext;
   emit?(event: { type: "session_shutdown"; reason: "quit" }): Promise<unknown>;
   setUIContext?(uiContext?: unknown, mode?: "tui" | "rpc" | "json" | "print"): void;
 }

@@ -6,6 +6,7 @@ const hookSource = await readFile(new URL("./useCompletionNotification.ts", impo
 const serviceWorkerSource = await readFile(new URL("../public/sw.js", import.meta.url), "utf8");
 const registrationSource = await readFile(new URL("../components/PwaRegistration.tsx", import.meta.url), "utf8");
 const appShellSource = await readFile(new URL("../components/AppShell.tsx", import.meta.url), "utf8");
+const chatWindowSource = await readFile(new URL("../components/ChatWindow.tsx", import.meta.url), "utf8");
 
 test("requests permission only from the explicit notification toggle", () => {
   assert.match(hookSource, /const toggle = useCallback\(async \(\) =>/);
@@ -43,10 +44,14 @@ test("notification target switches sessions without reloading the current page",
   assert.doesNotMatch(hookSource, /window\.location\.assign/);
 });
 
-test("completion notifications are sent through the controlling service worker", () => {
+test("completion notifications use the controlling service worker without waiting for registration lookup", () => {
   assert.doesNotMatch(hookSource, /document\.visibilityState/);
   assert.doesNotMatch(hookSource, /document\.hasFocus/);
-  assert.match(hookSource, /activeWorker\.postMessage\(\{ type: "SHOW_NOTIFICATION", title, options \}\)/);
+  assert.match(hookSource, /const controllingWorker = [\s\S]*?navigator\.serviceWorker\.controller/);
+  assert.match(hookSource, /controllingWorker\.postMessage\(\{ type: "SHOW_NOTIFICATION", title, options \}\)/);
+  assert.ok(
+    hookSource.indexOf("controllingWorker.postMessage") < hookSource.indexOf("await navigator.serviceWorker.getRegistration()"),
+  );
   assert.match(serviceWorkerSource, /event\.source\?\.id/);
   assert.match(serviceWorkerSource, /sourceClientId/);
   assert.match(serviceWorkerSource, /self\.registration\.showNotification\(title, notificationOptions\)/);
@@ -61,4 +66,12 @@ test("re-notifies when a session notification replaces the previous one", () => 
 test("exposes a session notification sender for completion and input requests", () => {
   assert.match(hookSource, /const notifySession = useCallback/);
   assert.match(hookSource, /notifySession,/);
+});
+
+test("AppShell owns one notification controller shared with ChatWindow and the global stream", () => {
+  assert.match(appShellSource, /const notificationController = useCompletionNotification\(\)/);
+  assert.match(appShellSource, /notifySession: notificationController\.notifySession/);
+  assert.match(appShellSource, /notificationController=\{notificationController\}/);
+  assert.doesNotMatch(chatWindowSource, /useCompletionNotification\(\)/);
+  assert.doesNotMatch(hookSource, /pi-notification-setting-change/);
 });

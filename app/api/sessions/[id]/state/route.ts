@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getRpcSession } from "@/lib/rpc-manager";
+import { getRpcSessionSnapshot } from "@/lib/rpc-manager";
 import { resolveSessionPath } from "@/lib/session-reader";
 
 export async function GET(
@@ -12,11 +12,7 @@ export async function GET(
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
 
-    const rpc = getRpcSession(id);
-    if (!rpc?.isAlive()) return NextResponse.json({ running: false });
-
-    const state = await rpc.send({ type: "get_state" });
-    return NextResponse.json({ running: true, state });
+    return NextResponse.json(await getRpcSessionSnapshot(id));
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }

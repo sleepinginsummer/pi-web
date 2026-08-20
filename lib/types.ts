@@ -302,6 +302,27 @@ export interface SessionInfo {
   isWorktree?: boolean;
 }
 
+/** /api/worktrees 返回的 worktree 数据。 */
+export interface WorktreeInfo {
+  path: string;
+  branch: string | null;
+  /** 当前本地分支跟踪的远程分支，例如 origin/main。 */
+  upstreamBranch?: string;
+  /** 仅用于界面展示的仓库 owner/分支，例如 sleepinginsummer/main。 */
+  upstreamDisplayBranch?: string;
+  isMain: boolean;
+}
+
+/** 当前活动项目的 worktree API 快照。 */
+export interface WorktreeState {
+  /** 发起本次加载的 cwd，用于拒绝跨目录复用旧快照。 */
+  forCwd: string;
+  projectRoot: string;
+  isGit: boolean;
+  isTopLevel: boolean;
+  worktrees: WorktreeInfo[];
+}
+
 export interface SessionContext {
   messages: AgentMessage[];
   entryIds: string[]; // parallel to messages — the session entry id for each message

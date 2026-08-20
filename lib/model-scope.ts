@@ -1,4 +1,4 @@
-import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { ThinkingLevel } from "./thinking-levels";
 import {
   resolveModelScopeWithDiagnostics,
   type ModelRuntime,
@@ -23,7 +23,7 @@ export interface ModelScopeResult {
   /** SDK-native scope retained for AgentSession model cycling and extensions. */
   scopedModels: readonly ScopedModel[];
   /** `provider/modelId` → thinking level pinned with a `:level` pattern suffix. */
-  thinkingLevelPins: Record<string, string>;
+  thinkingLevelPins: Record<string, ThinkingLevel>;
   /** Resolver diagnostics, e.g. a pattern that matched no model. */
   warnings: string[];
 }
@@ -82,7 +82,7 @@ export async function resolveVisibleModels(
   // `anthropic/*:high` pins a thinking level on every model the glob matched.
   // pi applies the pin of the model a new session starts with; report them all
   // so the client can look up whichever model it pre-selects.
-  const thinkingLevelPins: Record<string, string> = {};
+  const thinkingLevelPins: Record<string, ThinkingLevel> = {};
   for (const scoped of scopedModels) {
     if (scoped.thinkingLevel) {
       thinkingLevelPins[`${scoped.model.provider}/${scoped.model.id}`] = scoped.thinkingLevel;

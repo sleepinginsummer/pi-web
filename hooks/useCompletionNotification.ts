@@ -5,7 +5,6 @@ import { openNotificationTarget } from "@/lib/notification-navigation";
 
 const STORAGE_KEY = "pi-notification-enabled";
 const PROMPT_DISMISSED_KEY = "pi-notification-prompt-dismissed";
-
 type CompletionNotificationPermission = NotificationPermission | "unsupported";
 // 当前 TypeScript DOM 声明未包含已被浏览器实现的 renotify 标准选项。
 type CompletionNotificationOptions = NotificationOptions & { renotify: boolean };
@@ -32,6 +31,7 @@ export function useCompletionNotification() {
   useEffect(() => {
     enabledRef.current = enabled;
   }, [enabled]);
+
 
   const toggle = useCallback(async () => {
     if (!("Notification" in window)) return;
@@ -77,13 +77,20 @@ export function useCompletionNotification() {
     };
 
     try {
+      const controllingWorker = "serviceWorker" in navigator
+        ? navigator.serviceWorker.controller
+        : null;
+      if (controllingWorker) {
+        // 后台页面可能延迟异步注册查询；已有 controller 时必须同步投递消息。
+        controllingWorker.postMessage({ type: "SHOW_NOTIFICATION", title, options });
+        return;
+      }
+
       const registration = "serviceWorker" in navigator
         ? await navigator.serviceWorker.getRegistration()
         : undefined;
-      const activeWorker = navigator.serviceWorker.controller ?? registration?.active;
-      if (activeWorker) {
-        // 由当前控制页面的 worker 接收消息，Service Worker 才能记录准确的来源 Client.id。
-        activeWorker.postMessage({ type: "SHOW_NOTIFICATION", title, options });
+      if (registration?.active) {
+        registration.active.postMessage({ type: "SHOW_NOTIFICATION", title, options });
         return;
       }
 
@@ -107,3 +114,5 @@ export function useCompletionNotification() {
     notifySession,
   };
 }
+
+export type CompletionNotificationController = ReturnType<typeof useCompletionNotification>;

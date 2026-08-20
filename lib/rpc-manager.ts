@@ -4,11 +4,16 @@ import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@e
 import { randomUUID } from "crypto";
 import { existsSync, realpathSync, writeFileSync } from "fs";
 import { resolve } from "path";
+import type { AgentRuntimeSnapshot, AgentRuntimeState } from "./agent-state";
 import { validateAgentImages } from "./image-attachments";
 import { expandMultiSkillCommand } from "./multi-skill-command";
-import { invalidateModelsCache } from "./models-cache";
+import { invalidateModelsCache, updateCachedDefaultModel } from "./models-cache";
+import { PendingPromptTracker } from "./pending-prompt-tracker";
 import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
 import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
+import { restoreShadowSessionSettingSafely, ShadowSessionSetting } from "./shadow-session-setting";
+import { parseShadowMindToggleCommand, SHADOW_MIND_SESSION_STATE } from "./shadow-session-protocol";
+import { createForkedSession } from "./session-fork";
 import { generateTitleForSessionFile } from "./session-file-title";
 import { getProjectTrustStatus, projectTrustReloadOptions } from "./project-trust";
 import { persistExplicitStartupPreferences } from "./startup-preferences";
@@ -16,6 +21,7 @@ import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
 import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./pi-types";
 import type { ExtensionUiRequest, ExtensionUiResponse, ExtensionWidgetItem } from "./types";
 import { createHeadlessCustomUiTui, DEFAULT_CUSTOM_UI_COLUMNS } from "./custom-ui-terminal";
+import { clearAttentionSession, publishAttentionEvent } from "./attention-events";
 
 // ============================================================================
 // Types
@@ -24,6 +30,17 @@ import { createHeadlessCustomUiTui, DEFAULT_CUSTOM_UI_COLUMNS } from "./custom-u
 export interface AgentEvent {
   type: string;
   [key: string]: unknown;
+}
+
+export type ShadowSettingCommandResult = {
+  kind: "shadow-setting";
+  enabled: boolean;
+};
+
+export function isShadowSettingCommandResult(value: unknown): value is ShadowSettingCommandResult {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as { kind?: unknown; enabled?: unknown };
+  return candidate.kind === "shadow-setting" && typeof candidate.enabled === "boolean";
 }
 
 type EventListener = (event: AgentEvent) => void;
@@ -142,6 +159,7 @@ function withExtensionTools(session: AgentSessionLike, toolNames: string[]): str
   return [...new Set([...toolNames, ...extensionToolNames])];
 }
 
+
 // ----------------------------------------------------------------------------
 // 未完成工具调用检测（工具中断自动恢复）
 // ----------------------------------------------------------------------------
@@ -194,7 +212,7 @@ export class AgentSessionWrapper {
   private activeCustomUis = new Map<string, ActiveCustomUi>();
   private extensionStatuses = new Map<string, string>();
   private extensionWidgets = new Map<string, ExtensionWidgetItem>();
-  private promptRunning = false;
+  private readonly pendingPrompts = new PendingPromptTracker();
   private extensionsBound = false;
   private extensionBindingPromise: Promise<void> | null = null;
   private extensionBindingError: unknown = null;
@@ -203,6 +221,10 @@ export class AgentSessionWrapper {
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private onDestroyCallback: (() => void) | null = null;
   private shutdownPromise: Promise<void> | null = null;
+  // abort 期间扩展可能在取消当前问题后继续请求下一题，必须拒绝新 UI 才能真正收口。
+  private aborting = false;
+  // 异步 custom UI 工厂可能晚于 abort 返回；代次变化后禁止其重新挂载。
+  private uiCancellationGeneration = 0;
   private _alive = true;
   // 工具中断自动恢复状态：最近一次 agent_end 的消息（供 agent_settled 检测）、
   private lastAgentEndMessages: unknown[] | null = null;
@@ -211,8 +233,24 @@ export class AgentSessionWrapper {
   private lastAutoContinuedToolCallId: string | null = null;
   // 会话级自动标题只触发一次（成功或跳过都算），避免每条消息都重复检查。
   private autoTitleTriggered = false;
+  private readonly shadowSessionSetting: ShadowSessionSetting;
 
-  constructor(public readonly inner: AgentSessionLike) {}
+  constructor(public readonly inner: AgentSessionLike) {
+    this.shadowSessionSetting = new ShadowSessionSetting({
+      entries: () => this.inner.sessionManager.getEntries(),
+      appendState: (enabled) => {
+        const entryId = this.inner.sessionManager.appendCustomEntry(SHADOW_MIND_SESSION_STATE, { enabled });
+        const entry = this.inner.sessionManager.getEntry(entryId);
+        if (entry) this.emit({ type: "entry_appended", entry });
+      },
+      commands: () => this.inner.extensionRunner.getRegisteredCommands(),
+      createCommandContext: () => {
+        const context = this.inner.extensionRunner.createCommandContext?.();
+        if (!context) throw new Error("当前 Pi SDK 不支持扩展命令上下文");
+        return context;
+      },
+    });
+  }
 
   get sessionId(): string {
     return this.inner.sessionId;
@@ -231,7 +269,7 @@ export class AgentSessionWrapper {
   }
 
   isRunning(): boolean {
-    return this._alive && (this.promptRunning || this.inner.isStreaming || this.inner.isCompacting || this.inner.isBashRunning);
+    return this._alive && (this.pendingPrompts.active || this.inner.isStreaming || this.inner.isCompacting || this.inner.isBashRunning);
   }
 
   start(): void {
@@ -376,6 +414,7 @@ export class AgentSessionWrapper {
       } else {
         this.inner.extensionRunner.setUIContext?.(uiContext, "rpc");
       }
+      await this.restoreShadowSessionSetting();
       this.extensionsBound = true;
       this.applyForcedEmptySystemPrompt();
       console.log(`[pi-web] session_start dispatched to extensions for session ${this.inner.sessionId}`);
@@ -401,7 +440,7 @@ export class AgentSessionWrapper {
   }
 
   private shouldWaitForExtensions(type: string): boolean {
-    return type === "prompt" || type === "steer" || type === "follow_up" || type === "get_commands";
+    return type === "prompt" || type === "steer" || type === "follow_up" || type === "get_commands" || type === "get_state" || type === "set_shadow_mind_enabled";
   }
 
   private async withFinalRunningNotification<T>(operation: () => Promise<T>): Promise<T> {
@@ -413,6 +452,33 @@ export class AgentSessionWrapper {
     }
   }
 
+  /**
+   * 中止会话时同步释放扩展 UI Promise。仅中止 Agent 不足以让等待用户输入的
+   * 工具退出，AgentSession.abort() 会继续等待 idle，导致 stop 请求长期不返回。
+   */
+  private cancelPendingExtensionUis(): void {
+    this.uiCancellationGeneration += 1;
+    const dialogIds = Array.from(this.pendingUiResponses.keys());
+    for (const id of dialogIds) {
+      this.pendingUiResponses.get(id)?.cancel();
+      this.emit({ type: "extension_ui_closed", id });
+    }
+    for (const id of Array.from(this.activeCustomUis.keys())) {
+      this.closeCustomUi(id, undefined);
+    }
+    this.pendingUiRequests.clear();
+  }
+
+  private async restoreShadowSessionSetting(): Promise<void> {
+    const result = await restoreShadowSessionSettingSafely(this.shadowSessionSetting);
+    if (!result.ok) {
+      console.warn(
+        `[pi-web] failed to restore Shadow Mind state for session ${this.inner.sessionId}:`,
+        result.error instanceof Error ? result.error.message : result.error,
+      );
+    }
+  }
+
   private applyForcedEmptySystemPrompt(): void {
     if (this.forceEmptySystemPrompt && this.inner.agent.state) {
       this.inner.agent.state.systemPrompt = "";
@@ -420,7 +486,9 @@ export class AgentSessionWrapper {
   }
 
   private emit(event: AgentEvent): void {
-    for (const l of this.listeners) l(event);
+    for (const listener of this.listeners) listener(event);
+    // 统一出口确保扩展 UI 等直接事件不会漏掉；发布器只转发需要用户关注的事件。
+    publishAttentionEvent(this.sessionId, event);
   }
 
   private resetIdleTimer(): void {
@@ -487,13 +555,21 @@ export class AgentSessionWrapper {
 
     switch (type) {
       case "prompt": {
+        const shadowToggle = typeof command.message === "string"
+          ? parseShadowMindToggleCommand(command.message)
+          : null;
+        if (shadowToggle !== null) {
+          return { kind: "shadow-setting", enabled: await this.shadowSessionSetting.setEnabled(shadowToggle) };
+        }
         if (this.inner.isBashRunning) {
           throw new Error("Cannot send a prompt while a shell command is running");
         }
         // Fire and forget — events come via subscribe
         const promptImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
-        const streamingBehavior = command.streamingBehavior as "steer" | "followUp" | undefined;
-        this.promptRunning = true;
+        const requestedStreamingBehavior = command.streamingBehavior as "steer" | "followUp" | undefined;
+        // 用户点击发送与扩展 follow-up 可能同时抢占空闲边界。默认 followUp 可保证竞态中消息进入队列而非被 SDK 拒绝。
+        const streamingBehavior = requestedStreamingBehavior ?? "followUp";
+        const promptToken = this.pendingPrompts.begin();
         notifyRunningChange();
         // 新一轮用户请求开始，重置工具中断自动恢复的计数与无进展记录
         this.autoContinueCount = 0;
@@ -503,31 +579,38 @@ export class AgentSessionWrapper {
         this.inner.prompt(multiSkill.text, {
           ...(multiSkill.expanded ? { expandPromptTemplates: false } : {}),
           ...(promptImages?.length ? { images: promptImages } : {}),
-          ...(streamingBehavior ? { streamingBehavior } : {}),
+          streamingBehavior,
           source: "rpc",
         }).then(() => {
-          this.promptRunning = false;
-          this.resetIdleTimer();
-          invalidateSessionListCache();
-          if (!streamingBehavior) this.emit({ type: "prompt_done" });
-          notifyRunningChange();
+          if (!requestedStreamingBehavior && !this.inner.isStreaming) this.emit({ type: "prompt_done" });
         }).catch((error) => {
-          this.promptRunning = false;
-          this.resetIdleTimer();
-          invalidateSessionListCache();
           this.emit({
             type: "prompt_error",
             errorMessage: error instanceof Error ? error.message : String(error),
           });
-          if (!streamingBehavior) this.emit({ type: "prompt_done" });
+          if (!requestedStreamingBehavior) this.emit({ type: "prompt_done" });
+        }).finally(() => {
+          this.pendingPrompts.finish(promptToken);
+          this.resetIdleTimer();
+          invalidateSessionListCache();
           notifyRunningChange();
         });
         return null;
       }
 
-      case "abort":
-        await this.withFinalRunningNotification(() => this.inner.abort());
+      case "abort": {
+        if (this.aborting) return null;
+        this.aborting = true;
+        clearAttentionSession(this.sessionId);
+        try {
+          // 标记已在上方同步生效；取消 Promise 后的扩展续步只能拿到默认值，不能再挂起新 UI。
+          this.cancelPendingExtensionUis();
+          await this.withFinalRunningNotification(() => this.inner.abort());
+        } finally {
+          this.aborting = false;
+        }
         return null;
+      }
 
       case "get_state": {
         const model = this.inner.model;
@@ -536,7 +619,7 @@ export class AgentSessionWrapper {
           sessionId: this.inner.sessionId,
           sessionFile: this.inner.sessionFile ?? "",
           isStreaming: this.inner.isStreaming,
-          isPromptRunning: this.promptRunning,
+          isPromptRunning: this.pendingPrompts.active,
           isBashRunning: this.inner.isBashRunning,
           isCompacting: this.inner.isCompacting,
           autoCompactionEnabled: this.inner.autoCompactionEnabled,
@@ -553,6 +636,8 @@ export class AgentSessionWrapper {
             : null,
           systemPrompt: this.inner.agent.state?.systemPrompt ?? "",
           thinkingLevel: this.inner.agent.state?.thinkingLevel ?? "off",
+          shadowMindEnabled: this.shadowSessionSetting.current,
+          shadowMindAvailable: this.shadowSessionSetting.available,
           extensionStatuses: this.getExtensionStatuses(),
           extensionWidgets: this.getExtensionWidgets(),
         };
@@ -567,7 +652,7 @@ export class AgentSessionWrapper {
         }
         if (!model) throw new Error(`Model not found: ${provider}/${modelId}`);
         await this.inner.setModel(model);
-        invalidateModelsCache();
+        updateCachedDefaultModel(this.cwd, { provider: model.provider, modelId: model.id });
         invalidateSessionListCache();
         return { id: model.id, provider: model.provider };
       }
@@ -583,29 +668,10 @@ export class AgentSessionWrapper {
         if (!sessionManager.isPersisted()) return { cancelled: true };
         if (!currentSessionFile) throw new Error("Persisted session is missing a session file");
 
-        const entry = sessionManager.getEntry(entryId);
-        if (!entry) throw new Error("Invalid entry ID for forking");
-
-        const sessionDir = sessionManager.getSessionDir();
-        let newSessionFile: string;
-
-        if (!entry.parentId) {
-          // Fork before the first message: create an empty session linked to this one
-          const newManager = SessionManager.create(sessionManager.getCwd(), sessionDir);
-          newManager.newSession({ parentSession: currentSessionFile });
-          newSessionFile = newManager.getSessionFile() as string;
-        } else {
-          // Fork after some history: copy path up to (but not including) the fork point
-          const sourceManager = SessionManager.open(currentSessionFile, sessionDir);
-          const forkedPath = sourceManager.createBranchedSession(entry.parentId);
-          if (!forkedPath) throw new Error("Failed to create forked session");
-          newSessionFile = forkedPath;
-        }
-
-        const newSessionId = SessionManager.open(newSessionFile, sessionDir).getSessionId();
+        // 文件级 Fork 不改变当前 AgentSession，因此原会话生成期间也可复制已落盘历史。
+        const { newSessionId, newSessionFile } = createForkedSession(currentSessionFile, entryId);
         cacheSessionPath(newSessionId, newSessionFile);
         invalidateSessionListCache();
-        await this.shutdown();
         return { cancelled: false, newSessionId };
       }
 
@@ -628,6 +694,11 @@ export class AgentSessionWrapper {
         }
         invalidateSessionListCache();
         return null;
+      }
+
+      case "set_shadow_mind_enabled": {
+        const enabled = await this.shadowSessionSetting.setEnabled(command.enabled === true);
+        return { enabled };
       }
 
       case "compact": {
@@ -738,8 +809,9 @@ export class AgentSessionWrapper {
         if (typeof this.inner.bindExtensions !== "function") {
           this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "rpc");
         }
+        await this.restoreShadowSessionSetting();
         this.applyForcedEmptySystemPrompt();
-        invalidateModelsCache();
+        invalidateModelsCache(this.cwd);
         return { success: true };
       }
 
@@ -764,7 +836,7 @@ export class AgentSessionWrapper {
       }
 
       case "bash": {
-        if (this.promptRunning || this.inner.isStreaming || this.inner.isCompacting || this.inner.isBashRunning) {
+        if (this.pendingPrompts.active || this.inner.isStreaming || this.inner.isCompacting || this.inner.isBashRunning) {
           throw new Error("Cannot run a shell command while the session is busy");
         }
         const execution = this.inner.executeBash(
@@ -797,6 +869,7 @@ export class AgentSessionWrapper {
   destroy(): void {
     if (!this._alive) return;
     this._alive = false;
+    clearAttentionSession(this.sessionId);
     if (this.idleTimer) clearTimeout(this.idleTimer);
     if (this.inner.isBashRunning) this.inner.abortBash();
     this.unsubscribe?.();
@@ -921,8 +994,8 @@ export class AgentSessionWrapper {
     factory: unknown,
     options?: unknown,
   ): Promise<T> {
-    if (typeof factory !== "function") return Promise.resolve(undefined as T);
-
+    if (typeof factory !== "function" || this.aborting) return Promise.resolve(undefined as T);
+    const generation = this.uiCancellationGeneration;
     const id = randomUUID();
     const width = this.getCustomUiWidth(options);
 
@@ -951,12 +1024,13 @@ export class AgentSessionWrapper {
       Promise.resolve()
         .then(() => factory(tui, PLAIN_TEXT_THEME, CUSTOM_UI_KEYBINDINGS, done))
         .then((component) => {
-          if (completed) {
+          if (completed || generation !== this.uiCancellationGeneration || this.aborting) {
             try {
               (component as CustomUiComponent | undefined)?.dispose?.();
             } catch {
               // Ignore dispose errors from a component completed before mounting.
             }
+            finish(undefined as T);
             return;
           }
           if (!component || typeof component !== "object" || typeof (component as CustomUiComponent).render !== "function") {
@@ -992,7 +1066,7 @@ export class AgentSessionWrapper {
     timeout?: number,
     signal?: AbortSignal,
   ): Promise<T> {
-    if (signal?.aborted) return Promise.resolve(defaultValue);
+    if (signal?.aborted || this.aborting) return Promise.resolve(defaultValue);
 
     const id = randomUUID();
     const fullRequest = {
@@ -1232,6 +1306,15 @@ export function getRpcSession(sessionId: string): AgentSessionWrapper | undefine
   return getRegistry().get(sessionId);
 }
 
+/** 统一生成会话运行快照，避免 alive/running/busy 在不同路由中产生不同语义。 */
+export async function getRpcSessionSnapshot(sessionId: string): Promise<AgentRuntimeSnapshot> {
+  const session = getRpcSession(sessionId);
+  if (!session?.isAlive()) return { alive: false, busy: false };
+
+  const state = await session.send({ type: "get_state" }) as AgentRuntimeState;
+  return { alive: true, busy: session.isRunning(), state };
+}
+
 export function hasBusyRpcSessionForCwd(cwd: string): boolean {
   const targetCwd = normalizeRpcCwd(cwd);
   if (getStartingSessionCwds().has(targetCwd)) return true;
@@ -1277,6 +1360,7 @@ export function subscribeRunningSessions(listener: (ids: string[]) => void): () 
   listeners.add(listener);
   return () => { listeners.delete(listener); };
 }
+
 
 let lastRunningSnapshot = "";
 
@@ -1417,7 +1501,9 @@ export async function startRpcSession(
       },
     );
     startupTimings.preferences = elapsedMs(stageStartedAt);
-    if (persistedPreferences.modelDefaultChanged) invalidateModelsCache();
+    if (persistedPreferences.modelDefaultChanged && inner.model) {
+      updateCachedDefaultModel(sessionCwd, { provider: inner.model.provider, modelId: inner.model.id });
+    }
 
     // If specific tool names were requested (non-empty), set the active tools to the
     // requested builtin coding tools PLUS all extension/package tools, so installed

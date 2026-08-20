@@ -4,6 +4,8 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useI18n } from "@/hooks/useI18n";
 import type { ModelCatalogPreset, ModelCatalogRecommendation } from "@/lib/model-catalog";
+import type { ThinkingLevelMap } from "@/lib/model-types";
+import { THINKING_LEVELS, type ThinkingLevel } from "@/lib/thinking-levels";
 import type { DiscoveredModel } from "@/lib/model-discovery";
 // Color icons (have their own fill colors — no background needed)
 import AnthropicIcon from "@lobehub/icons/es/Anthropic/components/Mono";
@@ -117,12 +119,12 @@ type OAuthLoginState =
   | { phase: "success" }
   | { phase: "error"; message: string };
 
-interface ModelEntry {
+interface ModelConfigEntry {
   id: string;
   name?: string;
   api?: string;
   reasoning?: boolean;
-  thinkingLevelMap?: Record<string, string | null>;
+  thinkingLevelMap?: ThinkingLevelMap;
   input?: string[];
   contextWindow?: number;
   maxTokens?: number;
@@ -136,7 +138,7 @@ interface ProviderEntry {
   apiKey?: string;
   headers?: Record<string, string>;
   compat?: Record<string, unknown>;
-  models?: ModelEntry[];
+  models?: ModelConfigEntry[];
   modelOverrides?: Record<string, unknown>;
 }
 
@@ -543,9 +545,6 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete, onAddMod
 
 // ── ThinkingLevelMap editor ───────────────────────────────────────────────────
 
-const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
-type ThinkingLevel = typeof THINKING_LEVELS[number];
-
 const LEVEL_COLORS: Record<ThinkingLevel, string> = {
   off:     "var(--text-dim)",
   minimal: "#6b7280",
@@ -560,8 +559,8 @@ function ThinkingLevelMapEditor({
   value,
   onChange,
 }: {
-  value: Record<string, string | null> | undefined;
-  onChange: (v: Record<string, string | null> | undefined) => void;
+  value: ThinkingLevelMap | undefined;
+  onChange: (v: ThinkingLevelMap | undefined) => void;
 }) {
   const map = value ?? {};
 
@@ -689,11 +688,11 @@ const DEEPSEEK_COMPAT = {
   requiresReasoningContentOnAssistantMessages: true,
 } as const;
 
-function hasDeepseekCompat(model: ModelEntry): boolean {
+function hasDeepseekCompat(model: ModelConfigEntry): boolean {
   return model.compat?.thinkingFormat === "deepseek";
 }
 
-function setDeepseekCompat(model: ModelEntry, enabled: boolean): ModelEntry {
+function setDeepseekCompat(model: ModelConfigEntry, enabled: boolean): ModelConfigEntry {
   if (enabled) {
     return { ...model, compat: { ...(model.compat ?? {}), ...DEEPSEEK_COMPAT } };
   }
@@ -705,9 +704,9 @@ function setDeepseekCompat(model: ModelEntry, enabled: boolean): ModelEntry {
 }
 
 function fillEmptyModelFields(
-  model: ModelEntry,
+  model: ModelConfigEntry,
   preset: ModelCatalogPreset,
-): { model: ModelEntry; appliedCount: number } {
+): { model: ModelConfigEntry; appliedCount: number } {
   const next = { ...model };
   let appliedCount = 0;
   if (!model.name?.trim() && preset.name) {
@@ -755,18 +754,18 @@ function ModelDetail({
 }: {
   providerName: string;
   provider: ProviderEntry;
-  model: ModelEntry;
-  onChange: (m: ModelEntry) => void;
+  model: ModelConfigEntry;
+  onChange: (m: ModelConfigEntry) => void;
   onDelete: () => void;
 }) {
   const [testState, setTestState] = useState<ModelTestState>({ phase: "idle" });
   const { t } = useI18n();
   const [catalogState, setCatalogState] = useState<ModelCatalogState>({ phase: "idle" });
   const catalogRequestIdRef = useRef(0);
-  const catalogUndoRef = useRef<ModelEntry | null>(null);
-  const set = <K extends keyof ModelEntry>(k: K, v: ModelEntry[K]) => onChange({ ...model, [k]: v });
-  const costVal = (k: keyof NonNullable<ModelEntry["cost"]>) => model.cost?.[k] !== undefined ? String(model.cost[k]) : "";
-  const setCost = (k: keyof NonNullable<ModelEntry["cost"]>, v: string) => {
+  const catalogUndoRef = useRef<ModelConfigEntry | null>(null);
+  const set = <K extends keyof ModelConfigEntry>(k: K, v: ModelConfigEntry[K]) => onChange({ ...model, [k]: v });
+  const costVal = (k: keyof NonNullable<ModelConfigEntry["cost"]>) => model.cost?.[k] !== undefined ? String(model.cost[k]) : "";
+  const setCost = (k: keyof NonNullable<ModelConfigEntry["cost"]>, v: string) => {
     const n = parseFloat(v);
     onChange({ ...model, cost: { ...(model.cost ?? {}), [k]: isNaN(n) ? undefined : n } });
   };
@@ -1765,7 +1764,7 @@ export function ModelsConfig({ onClose }: { onClose: () => void }) {
     });
   }, []);
 
-  const updateModel = useCallback((providerName: string, index: number, m: ModelEntry) => {
+  const updateModel = useCallback((providerName: string, index: number, m: ModelConfigEntry) => {
     setConfig((prev) => {
       const provider = prev.providers?.[providerName] ?? {};
       const models = [...(provider.models ?? [])];

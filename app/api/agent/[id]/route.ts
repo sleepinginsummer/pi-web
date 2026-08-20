@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { invalidateSessionListCache, resolveSessionPath } from "@/lib/session-reader";
-import { startRpcSession, getRpcSession } from "@/lib/rpc-manager";
+import { getRpcSession, getRpcSessionSnapshot, isShadowSettingCommandResult, startRpcSession } from "@/lib/rpc-manager";
 
 /**
  * 会话列表只依赖会话文件中的持久化数据。查询类命令不需要淘汰缓存，
@@ -15,6 +15,15 @@ function shouldInvalidateSessionList(commandType: string): boolean {
   ]).has(commandType);
 }
 
+
+type SubmitMode = "prompt" | "steer" | "followUp";
+
+function getSubmitMode(commandType: string): SubmitMode | null {
+  if (commandType === "prompt") return "prompt";
+  if (commandType === "steer") return "steer";
+  if (commandType === "follow_up") return "followUp";
+  return null;
+}
 // POST /api/agent/[id] - Send a command to an existing session
 export async function POST(
   req: Request,
@@ -25,22 +34,24 @@ export async function POST(
   try {
     const body = await req.json() as { type: string; [key: string]: unknown };
 
-    // Fast path: already-running session
-    const existing = getRpcSession(id);
-    if (existing?.isAlive()) {
-      const result = await existing.send(body);
-      if (shouldInvalidateSessionList(body.type)) invalidateSessionListCache();
-      return NextResponse.json({ success: true, data: result });
+    let session = getRpcSession(id);
+    if (!session?.isAlive()) {
+      const filePath = await resolveSessionPath(id);
+      if (!filePath) {
+        return NextResponse.json({ error: "Session not found" }, { status: 404 });
+      }
+      ({ session } = await startRpcSession(id, filePath, undefined));
     }
 
-    const filePath = await resolveSessionPath(id);
-    if (!filePath) {
-      return NextResponse.json({ error: "Session not found" }, { status: 404 });
-    }
-
-    const { session } = await startRpcSession(id, filePath, undefined);
     const result = await session.send(body);
     if (shouldInvalidateSessionList(body.type)) invalidateSessionListCache();
+    if (isShadowSettingCommandResult(result)) {
+      return NextResponse.json({ success: true, data: { enabled: result.enabled } });
+    }
+    const mode = getSubmitMode(body.type);
+    if (mode) {
+      return NextResponse.json({ success: true, data: { accepted: true, mode } });
+    }
 
     return NextResponse.json({ success: true, data: result });
   } catch (error) {
@@ -56,13 +67,7 @@ export async function GET(
   const { id } = await params;
 
   try {
-    const session = getRpcSession(id);
-    if (!session || !session.isAlive()) {
-      return NextResponse.json({ running: false });
-    }
-
-    const state = await session.send({ type: "get_state" });
-    return NextResponse.json({ running: true, state });
+    return NextResponse.json(await getRpcSessionSnapshot(id));
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }

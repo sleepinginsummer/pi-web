@@ -1,27 +1,18 @@
-export interface ModelsData {
-  models: Record<string, string>;
-  modelList: { id: string; name: string; provider: string }[];
-  defaultModel: { provider: string; modelId: string } | null;
-  thinkingLevels: Record<string, string[]>;
-  thinkingLevelMaps: Record<string, Record<string, string | null>>;
-  /** `provider/modelId` → thinking level pinned by an `enabledModels` `:level` suffix. */
-  thinkingLevelPins: Record<string, string>;
-  modelError?: string;
-  /** Warnings from resolving the `enabledModels` scope (e.g. a pattern matched nothing). */
-  modelScopeWarnings?: string[];
-}
+import type { ModelsData } from "./model-types";
 
 interface ModelsCacheState {
   entries: Map<string, { data: ModelsData; expiresAt: number }>;
   inFlight: Map<string, Promise<ModelsData>>;
   generation: number;
+  cwdGenerations: Map<string, number>;
 }
 
 declare global {
   var __piModelsCacheState: ModelsCacheState | undefined;
 }
 
-const MODELS_CACHE_TTL_MS = 60_000;
+// 模型配置/Auth/项目信任变化都有主动失效；较长 TTL 避免新会话反复构建完整 Pi services。
+const MODELS_CACHE_TTL_MS = 10 * 60_000;
 const MAX_MODELS_CACHE_ENTRIES = 32;
 
 function getModelsCacheState(): ModelsCacheState {
@@ -30,18 +21,40 @@ function getModelsCacheState(): ModelsCacheState {
       entries: new Map(),
       inFlight: new Map(),
       generation: 0,
+      cwdGenerations: new Map(),
     };
   }
+  globalThis.__piModelsCacheState.cwdGenerations ??= new Map();
   return globalThis.__piModelsCacheState;
 }
 
-export function invalidateModelsCache(): void {
+export function invalidateModelsCache(cwd?: string): void {
   const state = getModelsCacheState();
+  if (cwd) {
+    state.cwdGenerations.set(cwd, (state.cwdGenerations.get(cwd) ?? 0) + 1);
+    state.entries.delete(cwd);
+    state.inFlight.delete(cwd);
+    return;
+  }
   state.generation += 1;
+  state.cwdGenerations.clear();
   state.entries.clear();
   state.inFlight.clear();
 }
 
+/** 默认模型变化不影响可用模型目录，直接更新已缓存投影，避免重建完整 services。 */
+export function updateCachedDefaultModel(
+  cwd: string,
+  defaultModel: ModelsData["defaultModel"],
+): void {
+  const state = getModelsCacheState();
+  const cached = state.entries.get(cwd);
+  if (!cached) return;
+  state.entries.set(cwd, {
+    ...cached,
+    data: { ...cached.data, defaultModel },
+  });
+}
 export function withModelRuntimeError(data: ModelsData, modelError: string | undefined): ModelsData {
   return modelError ? { ...data, modelError } : data;
 }
@@ -58,10 +71,15 @@ export function loadModelsWithCache(cwd: string, loader: () => Promise<ModelsDat
   if (existingLoad) return existingLoad;
 
   const generation = state.generation;
+  const cwdGeneration = state.cwdGenerations.get(cwd) ?? 0;
   const loadPromise: Promise<ModelsData> = Promise.resolve()
     .then(loader)
     .then((data) => {
-      if (state.generation === generation && state.inFlight.get(cwd) === loadPromise) {
+      if (
+        state.generation === generation
+        && (state.cwdGenerations.get(cwd) ?? 0) === cwdGeneration
+        && state.inFlight.get(cwd) === loadPromise
+      ) {
         const now = Date.now();
         for (const [key, entry] of state.entries) {
           if (entry.expiresAt <= now) state.entries.delete(key);

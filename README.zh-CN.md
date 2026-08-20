@@ -36,10 +36,11 @@ pi-web --no-open                # 不自动打开浏览器
 PORT=8080 pi-web                # 也支持环境变量
 PI_WEB_HOSTNAME=0.0.0.0 pi-web  # 显式开放网络访问
 PI_WEB_ALLOWED_HOSTS=pi-web.internal pi-web  # 允许指定的代理或自定义主机名
+PI_WEB_PASSWORD='足够长的随机密码' pi-web  # 启用登录页（用户名：pi）
 PI_WEB_NO_OPEN=1 pi-web         # 适用于后台服务或开机自启
 ```
 
-首次访问 Pi Web 时需要设置访问密码。密码哈希和会话密钥保存在 `~/.pi/agent/pi-web-auth.json`，文件权限仅限当前用户。Pi Web 可以调用高权限智能体，请勿直接暴露到互联网；仅在可信网络中使用非 loopback 监听地址，或放在安全配置的反向代理之后。
+设置 `PI_WEB_PASSWORD` 后，登录页会保护 Web 界面和全部 API，用户名固定为 `pi`；未设置或值为空时关闭认证。登录成功后使用 `HttpOnly` 会话 Cookie；勾选“保持登录 30 天”时持久保存，否则仅在当前浏览器会话中有效。签名密钥保存在权限仅限当前用户的 `~/.pi/agent/pi-web-session.json`。跨网络使用时应保持访问域名不变，因为浏览器按主机隔离 Cookie。Pi Web 可以调用高权限智能体，请勿直接暴露到互联网；远程访问应使用可信反向代理提供的 HTTPS 或可信 VPN。
 API 请求仅接受 loopback 名称、IP 字面量、当前监听主机名，以及 `PI_WEB_ALLOWED_HOSTS` 中以逗号分隔的精确主机名。可信反向代理使用不同的外部主机名时，请配置该变量。
 
 ## HTTP 代理

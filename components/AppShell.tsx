@@ -12,10 +12,14 @@ import { SkillsConfig } from "./SkillsConfig";
 import { PluginsConfig } from "./PluginsConfig";
 import { ProjectTrustDialog } from "./ProjectTrustDialog";
 import { BranchNavigator } from "./BranchNavigator";
+import { ShadowSessionToggle, type ShadowSessionControl } from "./ShadowSessionToggle";
 import { useTheme } from "@/hooks/useTheme";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useResizablePanel } from "@/hooks/useResizablePanel";
+import { useWorktreeState } from "@/hooks/useWorktreeState";
+import { useCompletionNotification } from "@/hooks/useCompletionNotification";
+import { useGlobalAttentionNotifications } from "@/hooks/useGlobalAttentionNotifications";
 import { copyText } from "@/lib/clipboard";
 import { clearDraft } from "@/lib/draft-store";
 import { getFileName } from "@/lib/file-paths";
@@ -36,7 +40,15 @@ import {
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
 } from "@/lib/panel-layout";
+import { runSessionTitleOperation } from "@/lib/session-title-operation-client";
 import type { SessionInfo, SessionTreeNode } from "@/lib/types";
+import { releaseNewSessionMaterialization } from "@/lib/new-session-materialization-client";
+import {
+  DEFAULT_PENDING_NEW_SESSION_CONTROL,
+  reducePendingNewSession,
+  type PendingNewSessionControl,
+  type PendingNewSessionEvent,
+} from "@/lib/pending-new-session";
 import type { ProjectTrustStatus } from "@/lib/api-types";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
@@ -50,6 +62,7 @@ type AutoNameStatus =
 
 const TOP_BAR_ICON_BUTTON_SIZE = 36;
 const LANGUAGE_MENU_WIDTH = 176;
+const NOOP = () => {};
 
 /** 仅同步地址栏，不触发 App Router 的服务端导航和聊天区域重复挂载。 */
 function replaceSessionUrl(sessionId: string | null): void {
@@ -65,12 +78,18 @@ export function AppShell() {
   const [initialNavigation] = useState(() => getInitialNavigation(searchParams ?? new URLSearchParams()));
   const { isDark, toggleTheme } = useTheme();
   const { locale, setLocale, t: translate, supportedLocales } = useI18n();
+  const notificationController = useCompletionNotification();
+  useGlobalAttentionNotifications({
+    notifySession: notificationController.notifySession,
+    attentionTitle: translate("chat.notificationAttentionTitle"),
+    attentionBody: translate("chat.notificationAttentionBody"),
+  });
   const isMobile = useIsMobile();
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
   // When user clicks +, we only store the cwd — no fake session id
   const [newSessionCwd, setNewSessionCwd] = useState<string | null>(null);
-  // 仅当前浏览器内记录每个 cwd 的一个未发送新会话，不写入服务端。
-  const [pendingNewSessionCwds, setPendingNewSessionCwds] = useState<Set<string>>(() => new Set());
+  // 未发送会话以 cwd 为稳定身份，同时保存 Shadow 预设与已提前创建的 runtime id。
+  const [pendingNewSessions, setPendingNewSessions] = useState<Map<string, PendingNewSessionControl>>(() => new Map());
   const [initialCwdStatus, setInitialCwdStatus] = useState<"idle" | "validating" | "ready" | "error">(
     () => initialNavigation.requestedCwd ? "validating" : "idle",
   );
@@ -202,6 +221,20 @@ export function AppShell() {
 
   const [systemPrompt, setSystemPrompt] = useState<string | null>(null);
   const systemBtnRef = useRef<HTMLButtonElement>(null);
+  const [shadowSessionControl, setShadowSessionControl] = useState<ShadowSessionControl | null>(null);
+
+  const handleShadowMindControlChange = useCallback((control: ShadowSessionControl) => {
+    setShadowSessionControl((previous) => previous
+      && previous.scopeKey === control.scopeKey
+      && previous.sessionId === control.sessionId
+      && previous.enabled === control.enabled
+      && previous.pending === control.pending
+      && previous.available === control.available
+      && previous.onToggle === control.onToggle
+      ? previous
+      : control);
+  }, []);
+
 
   const handleSystemPromptChange = useCallback((prompt: string | null) => {
     setSystemPrompt(prompt);
@@ -343,6 +376,12 @@ export function AppShell() {
 
     return () => controller.abort();
   }, [initialNavigation]);
+  const worktreeCwd = selectedSession?.cwd ?? newSessionCwd ?? activeCwd;
+  const {
+    snapshot: worktreeState,
+    create: handleCreateWorktree,
+    remove: handleRemoveWorktree,
+  } = useWorktreeState(worktreeCwd);
 
   const handleCwdChange = useCallback((cwd: string | null, projectRoot?: string | null) => {
     setActiveCwd(cwd);
@@ -434,12 +473,13 @@ export function AppShell() {
         return;
       }
 
-      void fetch(`/api/sessions/${encodeURIComponent(sessionId)}?deferThinking=1&deferMedia=1`)
+      void fetch("/api/sessions", { cache: "no-store" })
         .then(async (response) => {
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          return response.json() as Promise<{ info?: SessionInfo | null }>;
+          const data = await response.json() as { sessions?: SessionInfo[] };
+          return data.sessions?.find((session) => session.id === sessionId) ?? null;
         })
-        .then(({ info }) => {
+        .then((info) => {
           if (requestId !== notificationNavigationRequestRef.current) return;
           if (!info) throw new Error("会话信息不存在");
           handleSelectSession(info);
@@ -457,16 +497,16 @@ export function AppShell() {
   const handleNewSession = useCallback((_sessionId: string, cwd: string) => {
     setSelectedSession(null);
     // 同一目录只复用已有的未发送会话；draft-store 负责恢复输入内容。
-    if (pendingNewSessionCwds.has(cwd)) {
+    if (pendingNewSessions.has(cwd)) {
       setNewSessionCwd(cwd);
       setSessionKey((k) => k + 1);
       replaceSessionUrl(null);
       return;
     }
-    setPendingNewSessionCwds((current) => {
+    setPendingNewSessions((current) => {
       if (current.has(cwd)) return current;
-      const next = new Set(current);
-      next.add(cwd);
+      const next = new Map(current);
+      next.set(cwd, DEFAULT_PENDING_NEW_SESSION_CONTROL);
       return next;
     });
     setNewSessionCwd(cwd);
@@ -477,7 +517,7 @@ export function AppShell() {
     setActiveTopPanel(null);
     if (isMobile) setSidebarOpen(false);
     replaceSessionUrl(null);
-  }, [isMobile, pendingNewSessionCwds]);
+  }, [isMobile, pendingNewSessions]);
 
   // Global keyboard shortcuts (handles Esc, Ctrl+Alt+N etc.)
   useGlobalKeyboardShortcuts({
@@ -503,10 +543,11 @@ export function AppShell() {
   // 新会话转正时清理临时草稿；输入组件此时会切换 key，不能依赖其异步发送回调清理旧 key。
   const handleSessionCreated = useCallback((session: SessionInfo) => {
     clearDraft(`new:${session.cwd}`);
+    releaseNewSessionMaterialization(session.cwd);
     setNewSessionCwd(null);
-    setPendingNewSessionCwds((current) => {
+    setPendingNewSessions((current) => {
       if (!current.has(session.cwd)) return current;
-      const next = new Set(current);
+      const next = new Map(current);
       next.delete(session.cwd);
       return next;
     });
@@ -548,69 +589,9 @@ export function AppShell() {
     setActiveTopPanel(null);
     setAutoNameStatus({ kind: "naming" });
 
-    const eventSource = new EventSource(`/api/agent/${encodeURIComponent(sessionId)}/events`);
-    let resolveConnected: (() => void) | undefined;
-    let rejectConnected: ((error: Error) => void) | undefined;
-    let connectionTimeout: ReturnType<typeof setTimeout> | undefined;
-    const connected = new Promise<void>((resolve, reject) => {
-      resolveConnected = () => {
-        if (connectionTimeout) clearTimeout(connectionTimeout);
-        resolve();
-      };
-      rejectConnected = reject;
-      connectionTimeout = setTimeout(() => {
-        reject(new Error("Session title event stream connection timed out"));
-      }, 10_000);
-    });
-    const completion = new Promise<string>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error("Session title generation timed out"));
-      }, 110_000);
-
-      eventSource.onmessage = (message) => {
-        try {
-          const event = JSON.parse(message.data) as { type?: string; title?: string; error?: string };
-          if (event.type === "connected") {
-            resolveConnected?.();
-          } else if (event.type === "session_title_updated" && event.title) {
-            clearTimeout(timeout);
-            resolve(event.title);
-          } else if (event.type === "session_title_error") {
-            clearTimeout(timeout);
-            reject(new Error(event.error || "Session title generation failed"));
-          } else if (event.type === "session_title_skipped") {
-            // 标题生成因主会话开始运行被主动让路：标记为 AbortError，由 catch 静默处理
-            clearTimeout(timeout);
-            const error = new Error("Session title generation skipped");
-            error.name = "AbortError";
-            reject(error);
-          }
-        } catch {
-          // 忽略非 JSON 或与自动命名无关的 SSE 消息。
-        }
-      };
-      eventSource.onerror = () => {
-        const error = new Error("Session title event stream disconnected");
-        clearTimeout(timeout);
-        if (connectionTimeout) clearTimeout(connectionTimeout);
-        rejectConnected?.(error);
-        reject(error);
-      };
-    });
-    // 连接阶段失败时 completion 也可能先被拒绝，提前挂接处理器避免未处理拒绝。
-    void completion.catch(() => {});
-
+    const operationId = crypto.randomUUID();
     try {
-      await connected;
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/auto-name`, {
-        method: "POST",
-      });
-      const body = (await response.json().catch(() => ({}))) as { error?: string };
-      if (!response.ok) {
-        throw new Error(body.error || `HTTP ${response.status}`);
-      }
-
-      const title = (await completion).trim();
+      const title = await runSessionTitleOperation({ sessionId, operationId });
       setRefreshKey((key) => key + 1);
       if (activeSessionIdRef.current !== sessionId) return;
       setSelectedSession((current) => current?.id === sessionId ? { ...current, name: title } : current);
@@ -619,16 +600,9 @@ export function AppShell() {
       autoNameTimerRef.current = setTimeout(() => setAutoNameStatus({ kind: "idle" }), 1800);
     } catch (error) {
       if (activeSessionIdRef.current !== sessionId) return;
-      // 标题生成被主动让路（主会话开始运行）不是错误：静默回到空闲态，避免误报
-      if (error instanceof Error && error.name === "AbortError") {
-        setAutoNameStatus({ kind: "idle" });
-        return;
-      }
       const message = error instanceof Error ? error.message : String(error);
       setAutoNameStatus({ kind: "error", message });
       autoNameTimerRef.current = setTimeout(() => setAutoNameStatus({ kind: "idle" }), 5000);
-    } finally {
-      eventSource.close();
     }
   }, [autoNameStatus.kind, selectedSession?.id]);
   useEffect(() => {
@@ -735,6 +709,23 @@ export function AppShell() {
 
   // Show chat area if a session is selected, or if we have a cwd to start a new session in
   const effectiveNewSessionCwd = newSessionCwd ?? (selectedSession === null && activeCwd ? activeCwd : null);
+  const activeShadowScopeKey = selectedSession?.id ?? (effectiveNewSessionCwd ? `new:${effectiveNewSessionCwd}` : null);
+  const activeShadowSessionControl = shadowSessionControl?.scopeKey === activeShadowScopeKey
+    ? shadowSessionControl
+    : null;
+  const pendingNewSessionControl: PendingNewSessionControl = effectiveNewSessionCwd
+    ? (pendingNewSessions.get(effectiveNewSessionCwd) ?? DEFAULT_PENDING_NEW_SESSION_CONTROL)
+    : DEFAULT_PENDING_NEW_SESSION_CONTROL;
+  const dispatchPendingNewSession = useCallback((cwd: string, event: PendingNewSessionEvent) => {
+    setPendingNewSessions((current) => {
+      const previous = current.get(cwd) ?? DEFAULT_PENDING_NEW_SESSION_CONTROL;
+      const control = reducePendingNewSession(previous, event);
+      if (control === previous) return current;
+      const next = new Map(current);
+      next.set(cwd, control);
+      return next;
+    });
+  }, []);
   const showChat = selectedSession !== null || effectiveNewSessionCwd !== null;
   const projectTrustCwd = selectedSession?.cwd ?? effectiveNewSessionCwd;
   // While restoring initial session from URL, don't show the placeholder
@@ -814,6 +805,9 @@ export function AppShell() {
         onSessionDeleted={handleSessionDeleted}
         selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? null}
         onCwdChange={handleCwdChange}
+        worktreeState={worktreeState}
+        onCreateWorktree={handleCreateWorktree}
+        onRemoveWorktree={handleRemoveWorktree}
         onOpenFile={handleOpenFile}
         explorerRefreshKey={explorerRefreshKey}
         onExplorerRefresh={handleExplorerRefresh}
@@ -1315,10 +1309,17 @@ export function AppShell() {
                 </svg>
                  {!isMobile && <span>{translate("system.label")}</span>}
               </button>
+              <ShadowSessionToggle
+                enabled={activeShadowSessionControl?.enabled ?? true}
+                pending={activeShadowSessionControl?.pending ?? false}
+                available={activeShadowSessionControl?.available ?? false}
+                onToggle={activeShadowSessionControl?.onToggle ?? NOOP}
+                compact={isMobile}
+              />
             </div>
           )}
           {/* Session stats — right-aligned in top bar */}
-          {showChat && (sessionStats || contextUsage) && (() => {
+          {showChat && (() => {
              const tokens = sessionStats?.tokens;
             const c = sessionStats?.cost ?? 0;
             const fmt = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(0)}k` : String(n);
@@ -1371,11 +1372,9 @@ export function AppShell() {
                 onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
                 onMouseLeave={(e) => { e.currentTarget.style.color = activeTopPanel === "session" ? "var(--text)" : "var(--text-muted)"; }}
               >
-                {isMobile && (
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                    <circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" />
-                  </svg>
-                )}
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" />
+              </svg>
                  {!isMobile && tokens && tokens.input > 0 && (
                   <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
                     <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
@@ -1664,13 +1663,14 @@ export function AppShell() {
       <ChatWindow
               key={sessionKey}
               session={selectedSession}
-        newSessionCwd={effectiveNewSessionCwd}
-        onNewSessionCwdChange={(cwd) => {
-          setPendingNewSessionCwds((current) => {
-            const next = new Set(current);
-            next.add(cwd);
-            return next;
-          });
+              newSessionCwd={effectiveNewSessionCwd}
+              newSessionWorktrees={effectiveNewSessionCwd && worktreeState?.worktrees.some((worktree) => worktree.path === effectiveNewSessionCwd)
+                ? worktreeState.worktrees
+                : []}
+              pendingNewSessionControl={pendingNewSessionControl}
+              onPendingNewSessionEvent={dispatchPendingNewSession}
+              notificationController={notificationController}
+              onNewSessionCwdChange={(cwd) => {
           setNewSessionCwd(cwd);
         }}
               onAgentEnd={handleAgentEnd}
@@ -1681,6 +1681,7 @@ export function AppShell() {
               chatInputRef={chatInputRef}
               onBranchDataChange={handleBranchDataChange}
               onSystemPromptChange={handleSystemPromptChange}
+              onShadowMindControlChange={handleShadowMindControlChange}
               onSessionStatsChange={handleSessionStatsChange}
               onSessionStatsPanelOpen={openSessionStatsPanel}
               onContextUsageChange={handleContextUsageChange}

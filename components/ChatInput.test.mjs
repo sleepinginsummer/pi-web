@@ -9,9 +9,30 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { ChatInput, ModelErrorBanner, ModelScopeWarningBanner, filterModelOptions } = await jiti.import("./ChatInput.tsx");
+const { ChatInput, ModelDataDiagnosticBanner, ModelErrorBanner, ModelScopeWarningBanner } = await jiti.import("./ChatInput.tsx");
+const { filterModelOptions } = await jiti.import("./ModelPicker.tsx");
 const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
 
+
+const emptyModelState = {
+  names: {}, list: [], error: null, scopeWarnings: [], dataDiagnostics: [],
+  thinkingLevels: {}, thinkingLevelMaps: {}, newSessionModel: null,
+  newSessionDefaultModel: null, thinkingLevel: "auto", model: null,
+  isAutoModelSelection: false, availableThinkingLevels: null, thinkingLevelMap: null,
+};
+const emptyModelActions = {};
+
+test("renders structured model-data diagnostics at the presentation layer", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(I18nProvider, null,
+      React.createElement(ModelDataDiagnosticBanner, {
+        diagnostics: [{ code: "unknown-pin", modelKey: "p/m", level: "future" }],
+      })),
+  );
+  assert.match(html, /Model data warning/);
+  assert.match(html, /p\/m/);
+  assert.match(html, /future/);
+});
 test("renders the upstream model error", () => {
   const html = renderToStaticMarkup(
     React.createElement(ModelErrorBanner, {
@@ -48,11 +69,9 @@ test("keeps the model selector visible when a model error leaves no options", ()
       React.createElement(ChatInput, {
         onSend() {},
         onAbort() {},
-        onModelChange() {},
+        modelState: { ...emptyModelState, error: "Invalid models.json schema" },
+        modelActions: { changeModel() {} },
         isStreaming: false,
-        modelError: "Invalid models.json schema",
-        modelList: [],
-        modelNames: {},
       }),
     ),
   );
@@ -85,6 +104,8 @@ test("renders compact errors above the input as a wrapping alert", () => {
       React.createElement(ChatInput, {
         onSend() {},
         onAbort() {},
+        modelState: emptyModelState,
+        modelActions: emptyModelActions,
         onCompact() {},
         isStreaming: false,
         compactError: error,
@@ -107,25 +128,28 @@ test("renders the worktree selector only for a new session", () => {
       React.createElement(ChatInput, {
         onSend() {},
         onAbort() {},
+        modelState: emptyModelState,
+        modelActions: emptyModelActions,
         isStreaming: false,
         cwd: "/repo",
         newSessionCwd: "/repo-wt",
         newSessionWorktrees: [
-          { path: "/repo", branch: "main", isMain: true },
+          { path: "/repo", branch: "main", upstreamBranch: "fork/main", upstreamDisplayBranch: "sleepinginsummer/main", isMain: true },
           { path: "/repo-wt", branch: "feature/test", isMain: false },
         ],
       }),
     ),
   );
   assert.match(html, /选择 worktree/);
+  assert.match(html, /sleepinginsummer\/main/);
   assert.match(html, /feature\/test/);
+  assert.doesNotMatch(html, /主分支/);
 });
 
 const thinkingBaseProps = {
   onSend() {}, onAbort() {}, isStreaming: false,
-  model: "test-model", modelNames: [], modelList: [], modelError: null, modelScopeWarnings: [],
-  onModelChange() {}, thinkingLevel: "high", onThinkingLevelChange() {},
-  availableThinkingLevels: null, thinkingLevelMap: null,
+  modelState: { ...emptyModelState, thinkingLevel: "high" },
+  modelActions: { changeModel() {}, changeThinkingLevel() {} },
 };
 
 test("streaming shows read-only thinking badge before Stop", () => {
@@ -158,7 +182,7 @@ test("streaming badge shows the mapped level label when thinkingLevelMap is set"
       React.createElement(ChatInput, {
         ...thinkingBaseProps,
         isStreaming: true,
-        thinkingLevelMap: { high: "claude thinking" },
+        modelState: { ...thinkingBaseProps.modelState, thinkingLevelMap: { high: "claude thinking" } },
       })),
   );
   assert.ok(html.includes(">claude thinking</span>"), "badge should show mapped label");
@@ -167,7 +191,7 @@ test("streaming badge shows the mapped level label when thinkingLevelMap is set"
 test("streaming without thinkingLevel hides the badge but keeps Stop", () => {
   const html = renderToStaticMarkup(
     React.createElement(I18nProvider, null,
-      React.createElement(ChatInput, { ...thinkingBaseProps, isStreaming: true, thinkingLevel: undefined })),
+      React.createElement(ChatInput, { ...thinkingBaseProps, isStreaming: true, modelState: { ...thinkingBaseProps.modelState, thinkingLevel: undefined } })),
   );
   assert.ok(!html.includes(">high</span>"), "no badge when thinkingLevel is undefined");
   assert.ok(html.includes(">Stop<"), "stop button still renders");
@@ -189,4 +213,20 @@ test("clearing an accepted new-session prompt cannot restore its draft", async (
   assert.match(clearInputSource, /textareaRef\.current\.value = ""/);
   assert.match(clearInputSource, /attachedImagesRef\.current = \[\]/);
   assert.match(persistDraftSource, /draftKeyRef\.current !== draftKey \|\| valueRef\.current !== value/);
+});
+
+test("运行中消息仅在服务端确认后清空，失败保留输入", async () => {
+  const source = await readFile(new URL("./ChatInput.tsx", import.meta.url), "utf8");
+  const queuedSource = source.slice(
+    source.indexOf("const sendQueued = useCallback"),
+    source.indexOf("const getNextSlashIndex", source.indexOf("const sendQueued = useCallback")),
+  );
+
+  assert.match(queuedSource, /queuedSubmitPendingRef\.current\) return/);
+  assert.match(queuedSource, /queuedSubmitPendingRef\.current = true/);
+  assert.match(queuedSource, /const accepted = await onQueuedSubmit/);
+  assert.match(queuedSource, /queuedSubmitTokenRef\.current === token/);
+  assert.match(queuedSource, /valueRef\.current\.trim\(\) === msg/);
+  assert.match(source, /readOnly=\{queuedSubmitPending\}/);
+  assert.ok(queuedSource.indexOf("clearInput()") < queuedSource.indexOf("finally"));
 });

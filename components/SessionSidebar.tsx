@@ -1,8 +1,11 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useState, useCallback, useRef, type CSSProperties, type ReactNode } from "react";
-import type { SessionInfo } from "@/lib/types";
+import { useEffect, useState, useCallback, useRef, type CSSProperties, type ReactNode } from "react";
+import type { SessionInfo, WorktreeInfo, WorktreeState } from "@/lib/types";
 import { useI18n } from "@/hooks/useI18n";
+import { pruneSessionContextCache } from "@/lib/session-load-client";
+import { useSessionOrder } from "@/hooks/useSessionOrder";
+import { WorktreeMutationError } from "@/lib/worktree-client";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import { TrashPanel } from "./TrashPanel";
@@ -87,28 +90,14 @@ interface Props {
   onSessionDeleted?: (sessionId: string) => void;
   selectedCwd?: string | null;
   onCwdChange?: (cwd: string | null, projectRoot?: string | null) => void;
+  worktreeState?: WorktreeState | null;
+  onCreateWorktree?: (branch: string) => Promise<WorktreeInfo>;
+  onRemoveWorktree?: (path: string, force: boolean) => Promise<void>;
   onOpenFile?: (filePath: string, fileName: string, options?: { sourceSessionId?: string | null; modeHint?: "diff" }) => void;
   explorerRefreshKey?: number;
   onExplorerRefresh?: () => void;
   onAtMention?: (relativePath: string, isDir: boolean) => void;
   onAtMentions?: (relativePaths: string[]) => void;
-}
-
-interface WorktreeEntry {
-  path: string;
-  branch: string | null;
-  isMain: boolean;
-}
-
-interface WorktreeState {
-  /** The cwd this data was fetched for — guards against stale responses */
-  forCwd: string;
-  projectRoot: string;
-  isGit: boolean;
-  /** False when forCwd is a repo subdirectory — the switcher is hidden there
-   *  because subdir sessions keep their own project identity */
-  isTopLevel: boolean;
-  worktrees: WorktreeEntry[];
 }
 
 const UNREAD_SESSIONS_STORAGE_KEY = "pi-web:unread-session-ids";
@@ -137,7 +126,6 @@ function saveUnreadSessionIds(ids: Set<string>): void {
     // ignore storage quota / privacy-mode errors
   }
 }
-
 function loadLegacyProjectDirectories(): string[] {
   if (typeof window === "undefined") return [];
   try {
@@ -190,6 +178,11 @@ function displayCwd(cwd: string, homeDir?: string): string {
 function projectName(cwd: string): string {
   const trimmed = cwd.replace(/[\\/]+$/, "");
   return trimmed.slice(Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\")) + 1) || trimmed;
+}
+
+/** 优先显示仓库 owner/upstream；未配置时回退到本地分支名。 */
+function worktreeBranchLabel(worktree: WorktreeInfo): string | null {
+  return worktree.upstreamDisplayBranch ?? worktree.upstreamBranch ?? worktree.branch;
 }
 
 /**
@@ -271,7 +264,7 @@ interface SessionTreeNode {
   children: SessionTreeNode[];
 }
 
-function buildSessionTree(sessions: SessionInfo[]): SessionTreeNode[] {
+function buildSessionTree(sessions: SessionInfo[], manualOrder: string[]): SessionTreeNode[] {
   const byId = new Map<string, SessionTreeNode>();
   for (const s of sessions) {
     byId.set(s.id, { session: s, children: [] });
@@ -306,10 +299,11 @@ function buildSessionTree(sessions: SessionInfo[]): SessionTreeNode[] {
     }
   }
 
-  // Sort each level by modified desc
+  // 父子树结构不变；同层节点按统一的手动顺序排列。
+  const orderIndex = new Map(manualOrder.map((id, index) => [id, index]));
   const sort = (nodes: SessionTreeNode[]) => {
-    nodes.sort((a, b) => b.session.modified.localeCompare(a.session.modified));
-    nodes.forEach((n) => sort(n.children));
+    nodes.sort((left, right) => (orderIndex.get(left.session.id) ?? Number.MAX_SAFE_INTEGER) - (orderIndex.get(right.session.id) ?? Number.MAX_SAFE_INTEGER));
+    nodes.forEach((node) => sort(node.children));
   };
   sort(roots);
   return roots;
@@ -402,10 +396,10 @@ function PiWebTitle() {
     </button>
   );
 }
-
-export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions }: Props) {
+export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, worktreeState = null, onCreateWorktree, onRemoveWorktree, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions }: Props) {
   const { t } = useI18n();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
+  const { order: sessionOrder, moveSession } = useSessionOrder(allSessions);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedCwd, setSelectedCwd] = useState<string | null>(null);
@@ -421,8 +415,7 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
   const [customPathValue, setCustomPathValue] = useState("");
   const [customPathError, setCustomPathError] = useState<string | null>(null);
   const [customPathValidating, setCustomPathValidating] = useState(false);
-  // Worktree switcher state
-  const [worktreeState, setWorktreeState] = useState<WorktreeState | null>(null);
+  // Worktree switcher UI state; data is owned and loaded by AppShell.
   const [wtDropdownOpen, setWtDropdownOpen] = useState(false);
   const [wtNewOpen, setWtNewOpen] = useState(false);
   const [wtNewBranch, setWtNewBranch] = useState("");
@@ -460,6 +453,7 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
       const data = await res.json() as { sessions: SessionInfo[]; runningSessionIds?: string[] };
       if (requestId !== sessionLoadRequestIdRef.current) return;
       setAllSessions(data.sessions);
+      pruneSessionContextCache(data.sessions.map((session) => session.id));
       // Treat the fetched running set as an initial fallback only. Once the
       // lightweight poll is live, a slow session-list fetch cannot overwrite it.
       if (!runningPollAuthoritativeRef.current) {
@@ -670,37 +664,6 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
     }
   }, [selectedCwdProp]);
 
-  // Load worktrees for the current effective cwd
-  const [wtRefreshKey, setWtRefreshKey] = useState(0);
-  useLayoutEffect(() => {
-    if (!selectedCwd) {
-      setWorktreeState(null);
-      return;
-    }
-    let cancelled = false;
-    fetch(`/api/worktrees?cwd=${encodeURIComponent(selectedCwd)}`)
-      .then((r) => r.json())
-      .then((d: { projectRoot?: string; isGit?: boolean; isTopLevel?: boolean; worktrees?: WorktreeEntry[]; error?: string }) => {
-        if (cancelled) return;
-        if (d.error || !d.projectRoot) {
-          setWorktreeState(null);
-          return;
-        }
-        setWorktreeState({
-          forCwd: selectedCwd,
-          projectRoot: d.projectRoot,
-          isGit: d.isGit ?? false,
-          isTopLevel: d.isTopLevel ?? false,
-          worktrees: d.worktrees ?? [],
-        });
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setWorktreeState(null);
-        }
-      });
-    return () => { cancelled = true; };
-  }, [selectedCwd, wtRefreshKey, refreshKey]);
 
   // Auto-select cwd and restore session from URL on first load
   useEffect(() => {
@@ -761,69 +724,40 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
   }, []);
   const handleCreateWorktree = useCallback(async () => {
     const branch = wtNewBranch.trim();
-    if (!branch || wtBusy || !worktreeState) return;
+    if (!branch || wtBusy || !onCreateWorktree) return;
     setWtBusy(true);
     setWtError(null);
     try {
-      const res = await fetch("/api/worktrees", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd: worktreeState.projectRoot, branch }),
-      });
-      const data = await res.json().catch(() => ({})) as { path?: string; error?: string };
-      if (!res.ok || data.error || !data.path) {
-        setWtError(data.error ?? `HTTP ${res.status}`);
-        return;
-      }
+      const created = await onCreateWorktree(branch);
       setWtNewOpen(false);
       setWtNewBranch("");
       setWtDropdownOpen(false);
-      // Optimistically register the new worktree so projectRootFor() resolves
-      // it to the main repo before the refetch lands (keeps AppShell from
-      // treating the new cwd as a different project).
-      setWorktreeState((prev) => prev ? {
-        ...prev,
-        forCwd: data.path!,
-        worktrees: [...prev.worktrees, { path: data.path!, branch, isMain: false }],
-      } : prev);
-      setSelectedCwd(data.path);
-      setWtRefreshKey((k) => k + 1);
+      setSelectedCwd(created.path);
     } catch (e) {
       setWtError(e instanceof Error ? e.message : String(e));
     } finally {
       setWtBusy(false);
     }
-  }, [wtNewBranch, wtBusy, worktreeState]);
+  }, [wtNewBranch, wtBusy, onCreateWorktree]);
 
   const handleRemoveWorktree = useCallback(async (path: string, force: boolean) => {
-    if (!worktreeState || wtBusy) return;
+    if (!worktreeState || wtBusy || !onRemoveWorktree) return;
     setWtBusy(true);
     setWtError(null);
     try {
-      const res = await fetch("/api/worktrees", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd: worktreeState.projectRoot, path, force }),
-      });
-      const data = await res.json().catch(() => ({})) as { error?: string; dirty?: boolean };
-      if (!res.ok) {
-        if (data.dirty && !force) {
-          // Dirty worktree — ask the user to confirm a force removal
-          setWtConfirmRemove(path);
-          return;
-        }
-        setWtError(data.error ?? `HTTP ${res.status}`);
-        return;
-      }
+      await onRemoveWorktree(path, force);
       setWtConfirmRemove(null);
       if (selectedCwd === path) setSelectedCwd(worktreeState.projectRoot);
-      setWtRefreshKey((k) => k + 1);
     } catch (e) {
+      if (e instanceof WorktreeMutationError && e.dirty && !force) {
+        setWtConfirmRemove(path);
+        return;
+      }
       setWtError(e instanceof Error ? e.message : String(e));
     } finally {
       setWtBusy(false);
     }
-  }, [worktreeState, wtBusy, selectedCwd]);
+  }, [worktreeState, wtBusy, selectedCwd, onRemoveWorktree]);
 
   // Close dropdowns on outside click
   useEffect(() => {
@@ -1111,7 +1045,7 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
           const showWtFilter = worktreeState.worktrees.length >= 8;
           const visibleWorktrees = showWtFilter && wtFilter.trim()
             ? worktreeState.worktrees.filter((w) =>
-                (w.branch ?? displayCwd(w.path, homeDir)).toLowerCase().includes(wtFilter.trim().toLowerCase()))
+                (worktreeBranchLabel(w) ?? displayCwd(w.path, homeDir)).toLowerCase().includes(wtFilter.trim().toLowerCase()))
             : worktreeState.worktrees;
           return (
             <div ref={wtDropdownRef} style={{ position: "relative", marginTop: 6 }}>
@@ -1143,12 +1077,9 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
                   <path d="M18 9a9 9 0 0 1-9 9" />
                 </svg>
                 <PathLabel
-                  text={currentWt ? (currentWt.branch ?? displayCwd(currentWt.path, homeDir)) : "…"}
+                  text={currentWt ? (worktreeBranchLabel(currentWt) ?? displayCwd(currentWt.path, homeDir)) : "…"}
                   style={{ flex: 1, fontFamily: "var(--font-mono)", color: "var(--text)" }}
                 />
-                {currentWt?.isMain && (
-                   <span style={{ flexShrink: 0, color: "var(--text-dim)", fontSize: 10 }}>{t("sidebar.main")}</span>
-                )}
                 {worktreeState.worktrees.length > 1 && (
                   <span style={{ flexShrink: 0, color: "var(--text-dim)", fontSize: 10 }}>
                     {worktreeState.worktrees.length}
@@ -1264,8 +1195,7 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
                             ) : (
                               <span style={{ width: 10, flexShrink: 0 }} />
                             )}
-                            <PathLabel text={wt.branch ?? displayCwd(wt.path, homeDir)} style={{ flex: 1 }} />
-                            {wt.isMain && <span style={{ flexShrink: 0, color: "var(--text-dim)", fontSize: 10 }}>{t("sidebar.main")}</span>}
+                            <PathLabel text={worktreeBranchLabel(wt) ?? displayCwd(wt.path, homeDir)} style={{ flex: 1 }} />
                           </button>
                           {!wt.isMain && (
                             <button
@@ -1472,8 +1402,20 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
         {visibleProjects.map((project) => {
           const collapsed = collapsedProjects.has(project);
           const projectSessions = visibleSessions.filter((session) => displayProject(session) === project);
-          const projectTree = buildSessionTree(projectSessions);
+          const projectTree = buildSessionTree(projectSessions, sessionOrder);
           const active = project === selectedDisplayProject;
+          const treeProps: SessionTreeSharedProps = {
+            selectedSessionId,
+            runningSessionIds,
+            unreadSessionIds,
+            onSelectSession: handleSelectSessionFromList,
+            onRenamed: loadSessions,
+            onMoveSession: moveSession,
+            onSessionDeleted: (id) => {
+              onSessionDeleted?.(id);
+              loadSessions();
+            },
+          };
           return (
             <section key={project} style={{ padding: "2px 6px 6px" }}>
               <div
@@ -1572,7 +1514,7 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
                     >
                       {worktreeState.worktrees.map((worktree) => (
                         <option key={worktree.path} value={worktree.path}>
-                          {worktree.branch ?? projectName(worktree.path)}{worktree.isMain ? ` · ${t("sidebar.main")}` : ""}
+                          {worktreeBranchLabel(worktree) ?? projectName(worktree.path)}
                         </option>
                       ))}
                     </select>
@@ -1587,15 +1529,7 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
                     <SessionTreeItem
                       key={node.session.id}
                       node={node}
-                      selectedSessionId={selectedSessionId}
-                      runningSessionIds={runningSessionIds}
-                      unreadSessionIds={unreadSessionIds}
-                      onSelectSession={handleSelectSessionFromList}
-                      onRenamed={loadSessions}
-                      onSessionDeleted={(id) => {
-                        onSessionDeleted?.(id);
-                        loadSessions();
-                      }}
+                      treeProps={treeProps}
                       depth={0}
                     />
                   ))}
@@ -1722,32 +1656,50 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
     </div>
   );
 }
-
-function SessionTreeItem({
-  node,
-  selectedSessionId,
-  runningSessionIds,
-  unreadSessionIds,
-  onSelectSession,
-  onRenamed,
-  onSessionDeleted,
-  depth,
-}: {
-  node: SessionTreeNode;
+interface SessionTreeSharedProps {
   selectedSessionId: string | null;
   runningSessionIds: Set<string>;
   unreadSessionIds: Set<string>;
-  onSelectSession: (s: SessionInfo) => void;
+  onSelectSession: (session: SessionInfo) => void;
   onRenamed?: () => void;
+  onMoveSession: (sourceId: string, targetId: string) => void;
   onSessionDeleted?: (id: string) => void;
+}
+
+function SessionTreeItem({
+  node,
+  treeProps,
+  depth,
+}: {
+  node: SessionTreeNode;
+  treeProps: SessionTreeSharedProps;
   depth: number;
 }) {
+  const { selectedSessionId, runningSessionIds, unreadSessionIds, onSelectSession, onRenamed, onMoveSession, onSessionDeleted } = treeProps;
   const [collapsed, setCollapsed] = useState(false);
   const hasChildren = node.children.length > 0;
 
   return (
     <div>
-      <div style={{ position: "relative" }}>
+      <div
+        draggable
+        onDragStart={(event) => {
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", node.session.id);
+        }}
+        onDragOver={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          event.dataTransfer.dropEffect = "move";
+        }}
+        onDrop={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          const sourceId = event.dataTransfer.getData("text/plain");
+          if (sourceId) onMoveSession(sourceId, node.session.id);
+        }}
+        style={{ position: "relative", cursor: "grab" }}
+      >
         {/* Indent line for child sessions */}
         {depth > 0 && (
           <div style={{
@@ -1779,12 +1731,7 @@ function SessionTreeItem({
             <SessionTreeItem
               key={child.session.id}
               node={child}
-              selectedSessionId={selectedSessionId}
-              runningSessionIds={runningSessionIds}
-              unreadSessionIds={unreadSessionIds}
-              onSelectSession={onSelectSession}
-              onRenamed={onRenamed}
-              onSessionDeleted={onSessionDeleted}
+              treeProps={treeProps}
               depth={depth + 1}
             />
           ))}

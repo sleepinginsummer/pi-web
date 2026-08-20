@@ -8,7 +8,7 @@ import { closeSync, openSync, readSync } from "fs";
 import { normalize as normalizePath } from "path";
 import type { AgentMessage, SessionEntry, SessionHeader, SessionInfo, SessionContext } from "./types";
 import type { SessionEntry as PiSessionEntry, SessionInfo as PiSessionInfo } from "@earendil-works/pi-coding-agent";
-import { normalizeToolCalls } from "./normalize";
+import { normalizeAssistantMessage } from "./normalize";
 import { sessionPathKey } from "./session-path";
 import { resolveProject, type ProjectInfo } from "./worktree";
 
@@ -257,7 +257,7 @@ export function getSessionEntries(filePath: string): SessionEntry[] {
 export function buildSessionContext(
   entries: SessionEntry[],
   leafId?: string | null,
-  options: { deferThinking?: boolean; deferToolResultImages?: boolean } = {},
+  options: { deferThinking?: boolean; deferToolResultImages?: boolean; maxMessages?: number } = {},
 ): SessionContext {
   const byId = new Map<string, SessionEntry>();
   for (const e of entries) byId.set(e.id, e);
@@ -265,17 +265,15 @@ export function buildSessionContext(
   const piEntries = entries as unknown as PiSessionEntry[];
   const piCtx = piBuildSessionContext(piEntries, leafId, byId as unknown as Map<string, PiSessionEntry>);
 
-  const contextEntries = piBuildContextEntries(
-    piEntries,
-    leafId,
-    byId as unknown as Map<string, PiSessionEntry>,
-  );
+  const contextEntries = piBuildContextEntries(piEntries, leafId, byId as unknown as Map<string, PiSessionEntry>);
+  const visibleEntries = options.maxMessages && options.maxMessages > 0
+    ? contextEntries.slice(-options.maxMessages)
+    : contextEntries;
 
-  // Convert the SDK-selected context entries and their IDs together. This keeps
-  // fork/navigation targets aligned while preserving pi's compaction ordering.
+  // 消息与 entry id 必须同步裁剪，否则分支导航和 fork 会指向错误条目。
   const messages: AgentMessage[] = [];
   const entryIds: string[] = [];
-  for (const entry of contextEntries) {
+  for (const entry of visibleEntries) {
     const localEntry = entry as unknown as SessionEntry;
     const m = entryToUiMessage(localEntry, options);
     if (m) {
@@ -353,12 +351,12 @@ function entryToUiMessage(
   // bashExecution messages enter the case "message" branch (entry.type === "message").
   // The early return at line below ("!options.deferThinking || message.role !== "assistant"")
   // passes non-assistant messages — including bashExecution — through unchanged.
-  // normalizeToolCalls is a secondary guard (returns non-assistant messages as-is).
+  // normalizeAssistantMessage is a secondary guard (returns non-assistant messages as-is).
   switch (entry.type) {
     case "message": {
       const message = options.deferToolResultImages
-        ? omitToolResultBase64Images(normalizeToolCalls(entry.message))
-        : normalizeToolCalls(entry.message);
+        ? omitToolResultBase64Images(normalizeAssistantMessage(entry.message))
+        : normalizeAssistantMessage(entry.message);
       if (!options.deferThinking || message.role !== "assistant") return message;
       return {
         ...message,
@@ -397,6 +395,64 @@ function entryToUiMessage(
         details: entry.details,
         timestamp: parseEntryTimestamp(entry.timestamp),
       };
+    case "custom": {
+      if (entry.customType !== "shadow-mind-event") return null;
+      const event = entry.data as {
+        kind?: unknown;
+        data?: {
+          shadowId?: unknown;
+          model?: unknown;
+          reason?: unknown;
+          durationMs?: unknown;
+          count?: unknown;
+        };
+      } | undefined;
+      const data = event?.data;
+      if (event?.kind === "run-start" && typeof data?.shadowId === "string") {
+        return {
+          role: "custom",
+          customType: "shadow-mind",
+          content: data.shadowId,
+          display: true,
+          details: {
+            event: "run-start",
+            shadowId: data.shadowId,
+            model: typeof data.model === "string" ? data.model : null,
+          },
+          timestamp: parseEntryTimestamp(entry.timestamp),
+        };
+      }
+      if (event?.kind === "run-end" && typeof data?.shadowId === "string") {
+        return {
+          role: "custom",
+          customType: "shadow-mind",
+          content: data.shadowId,
+          display: true,
+          details: {
+            event: "run-end",
+            shadowId: data.shadowId,
+            reason: typeof data.reason === "string" ? data.reason : null,
+            durationMs: typeof data.durationMs === "number" ? data.durationMs : null,
+          },
+          timestamp: parseEntryTimestamp(entry.timestamp),
+        };
+      }
+      if (event?.kind === "runs-aborted" && typeof data?.count === "number" && data.count > 0) {
+        return {
+          role: "custom",
+          customType: "shadow-mind",
+          content: "",
+          display: true,
+          details: {
+            event: "runs-aborted",
+            count: data.count,
+            reason: typeof data.reason === "string" ? data.reason : null,
+          },
+          timestamp: parseEntryTimestamp(entry.timestamp),
+        };
+      }
+      return null;
+    }
     default:
       return null;
   }

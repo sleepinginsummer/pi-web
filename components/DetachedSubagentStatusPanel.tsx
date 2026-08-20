@@ -1,10 +1,10 @@
 "use client";
 
-import type { DetachedSubagentStatus } from "@/hooks/useAgentSession";
+import type { SubagentStatus } from "@/hooks/useAgentSession";
 
 type Translate = (key: string, params?: Record<string, string | number>) => string;
-
-export function DetachedSubagentStatusPanel({ statuses, t }: { statuses: DetachedSubagentStatus[]; t: Translate }) {
+type PanelStatus = { id: string; agent: string; task: string; mode: string; state: "running" | "completed" | "failed"; error?: string };
+export function DetachedSubagentStatusPanel({ statuses, t }: { statuses: PanelStatus[]; t: Translate }) {
   const running = statuses.filter((status) => status.state === "running").length;
   return (
     <div
@@ -48,7 +48,7 @@ export function DetachedSubagentStatusPanel({ statuses, t }: { statuses: Detache
               ●
             </span>
             <div style={{ minWidth: 0 }}>
-              <div style={{ color: "var(--text)" }}>{status.agent} · {status.mode}</div>
+              <div style={{ color: "var(--text)" }}>{status.agent === "shadow-report" ? "shadow-report" : `${status.agent} · ${status.mode}`}</div>
               <div
                 title={status.task}
                 style={{

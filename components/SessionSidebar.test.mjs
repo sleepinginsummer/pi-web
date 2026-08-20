@@ -44,6 +44,11 @@ test("并发刷新只允许最新的会话列表请求提交结果", () => {
   assert.match(source, /fetch\("\/api\/sessions", \{ cache: "no-store" \}\)/);
   assert.match(source, /if \(requestId !== sessionLoadRequestIdRef\.current\) return/);
 });
+
+test("会话列表加载后不抢占首屏资源预取全部历史上下文", () => {
+  assert.doesNotMatch(source, /for \(const session of data\.sessions\) prefetchSessionContext/);
+  assert.doesNotMatch(source, /import \{[^}]*prefetchSessionContext/);
+});
 test("renders projects as persistent directory rows with per-project session actions", () => {
   assert.match(source, /visibleProjects\.map\(\(project\) =>/);
   assert.match(source, /projectName\(project\)/);

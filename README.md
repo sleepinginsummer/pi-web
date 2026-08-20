@@ -38,10 +38,11 @@ pi-web --no-open                # do not open the browser automatically
 PORT=8080 pi-web                # environment variable is also supported
 PI_WEB_HOSTNAME=0.0.0.0 pi-web  # explicit network exposure
 PI_WEB_ALLOWED_HOSTS=pi-web.internal pi-web  # allow an exact proxy/custom hostname
+PI_WEB_PASSWORD='a-long-random-password' pi-web  # enable the login page (username: pi)
 PI_WEB_NO_OPEN=1 pi-web         # useful when running as a background service
 ```
 
-On first access, Pi Web asks you to create an access password. The password hash and session secret are stored in `~/.pi/agent/pi-web-auth.json` with private file permissions. Pi Web can invoke a high-privilege agent, so do not expose it directly to the internet; only use non-loopback bindings on a trusted network or behind a properly secured reverse proxy.
+Set `PI_WEB_PASSWORD` to protect the Web UI and every API endpoint with the login page. The username is always `pi`; an empty or missing value disables authentication. A successful login uses an `HttpOnly` session cookie. Selecting “Keep me signed in” persists it for 30 days; otherwise it lasts for the browser session. The signing secret is stored in `~/.pi/agent/pi-web-session.json` with private file permissions. Use one stable hostname when moving between networks because browsers isolate cookies by host. Pi Web can invoke a high-privilege agent, so do not expose it directly to the internet; use HTTPS through a trusted reverse proxy or a trusted VPN for remote access.
 API requests accept loopback names, IP literals, the selected bind hostname, and exact comma-separated names in `PI_WEB_ALLOWED_HOSTS`. Configure that variable when a trusted reverse proxy uses a different external hostname.
 
 ## HTTP Proxy
@@ -136,7 +137,7 @@ lib/
   http-dispatcher.ts  # HTTP(S) proxy setup for server-side fetch
   rpc-manager.ts      # AgentSessionWrapper lifecycle and global registry
   session-reader.ts   # parses .jsonl session files and branch contexts
-  normalize.ts        # normalizes toolCall field names
+  normalize.ts        # normalizes assistant toolCall fields and converts legacy <thinking> text into thinking blocks
   file-access.ts      # file read safety boundary
   file-paths.ts       # path encoding and relative path helpers
   markdown.ts         # Markdown/Mermaid/KaTeX plugin configuration

@@ -1,11 +1,13 @@
 "use client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, CustomMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
+import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, CustomMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage, WorktreeInfo } from "@/lib/types";
 import { normalizeCustomPanelLines, parseAnsiLine } from "@/lib/ansi";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
 import { countToolCallBlocks, getAssistantErrorMessage, getDisplayableAssistantBlocks, splitFinalAssistantBlocks } from "@/lib/message-display";
 import { MessageView } from "./MessageView";
+import { AskDialog } from "./AskDialog";
+import { AskQuestionnaire } from "./AskQuestionnaire";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ExtensionStatusBar } from "./ExtensionStatusBar";
@@ -14,11 +16,14 @@ import { useAgentSession, type AgentPhase, type NoticeItem } from "@/hooks/useAg
 import { DetachedSubagentStatusPanel } from "./DetachedSubagentStatusPanel";
 import { TodoListPanel } from "./TodoListPanel";
 import { useAudio } from "@/hooks/useAudio";
-import { useCompletionNotification } from "@/hooks/useCompletionNotification";
+import type { CompletionNotificationController } from "@/hooks/useCompletionNotification";
+import { useCompletionEffects } from "@/hooks/useCompletionEffects";
 import notificationStyles from "./CompletionNotificationPrompt.module.css";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import type { SessionStatsInfo } from "@/lib/pi-types";
+import type { PendingNewSessionControl, PendingNewSessionEvent } from "@/lib/pending-new-session";
+import type { ShadowSessionControl } from "./ShadowSessionToggle";
 import {
   captureScrollDistance,
   getNextVisibleCount,
@@ -26,10 +31,15 @@ import {
   restoreScrollTop,
   VISIBLE_PAGE_SIZE,
 } from "@/lib/chat-lazy-load";
+import { buildMessageRenderGroups, type MessageRenderGroup } from "@/lib/message-render-groups";
 
 interface Props {
   session: SessionInfo | null;
   newSessionCwd: string | null;
+  newSessionWorktrees: WorktreeInfo[];
+  pendingNewSessionControl: PendingNewSessionControl;
+  onPendingNewSessionEvent: (cwd: string, event: PendingNewSessionEvent) => void;
+  notificationController: CompletionNotificationController;
   onAgentEnd?: () => void;
   onSessionCreated?: (session: SessionInfo) => void;
   onSessionListRefresh?: () => void;
@@ -38,6 +48,7 @@ interface Props {
   chatInputRef?: React.RefObject<ChatInputHandle | null>;
   onBranchDataChange?: (tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void) => void;
   onSystemPromptChange?: (prompt: string | null) => void;
+  onShadowMindControlChange?: (control: ShadowSessionControl) => void;
   onSessionStatsChange?: (stats: SessionStatsInfo | null) => void;
   onSessionStatsPanelOpen?: () => void;
   onContextUsageChange?: (usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => void;
@@ -152,7 +163,7 @@ function withAssistantBlocks(
   return next;
 }
 
-function ProcessDetailsGroup({ messageCount, toolCallCount, children, t }: { messageCount: number; toolCallCount: number; children: ReactNode; t: (key: string, params?: Record<string, string | number>) => string }) {
+function ProcessDetailsGroup({ messageCount, toolCallCount, renderChildren, t }: { messageCount: number; toolCallCount: number; renderChildren: () => ReactNode; t: (key: string, params?: Record<string, string | number>) => string }) {
   const [expanded, setExpanded] = useState(false);
   const parts = [t("chat.processDetails"), `${messageCount} ${t(messageCount === 1 ? "chat.message" : "chat.messages")}`];
   if (toolCallCount > 0) parts.push(`${toolCallCount} ${t(toolCallCount === 1 ? "chat.toolCall" : "chat.toolCalls")}`);
@@ -188,101 +199,74 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, children, t }: { mes
       </button>
       {expanded && (
         <div style={{ marginTop: 8 }}>
-          {children}
+          {renderChildren()}
         </div>
       )}
     </div>
   );
 }
 
-export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onNewSessionCwdChange }: Props) {
+export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, newSessionWorktrees, pendingNewSessionControl, onPendingNewSessionEvent, notificationController, onAgentEnd, onSessionCreated, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onShadowMindControlChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onNewSessionCwdChange }: Props) {
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
   const {
     notificationEnabled, notificationPermission, showNotificationPrompt,
     onNotificationToggle, dismissNotificationPrompt, notifySession,
-  } = useCompletionNotification();
+  } = notificationController;
   const isMobile = useIsMobile();
+  const materializedNewSessionId = pendingNewSessionControl.kind === "materialized"
+    || pendingNewSessionControl.kind === "initialization-failed"
+    ? pendingNewSessionControl.sessionId
+    : null;
 
-  // Wrap onAgentEnd to play the completion sound. This is more reliable than
-  // wrapping handleAgentEventRef because useAgentSession overwrites that ref
-  // on every render (it syncs the latest callback), which would blow away an
-  // externally-installed wrapper after the first re-render.
-  const playDoneSoundRef = useRef(playDoneSound);
-  playDoneSoundRef.current = playDoneSound;
-  const soundEnabledRef = useRef(soundEnabled);
-  soundEnabledRef.current = soundEnabled;
-  const notifySessionRef = useRef(notifySession);
-  notifySessionRef.current = notifySession;
-  const notificationSessionIdRef = useRef<string | null>(session?.id ?? null);
-  const notificationTitleRef = useRef("");
-  const notificationPreviewRef = useRef("");
-  const wrappedOnAgentEnd = useCallback(() => {
-    if (soundEnabledRef.current) {
-      playDoneSoundRef.current();
-    }
-    void notifySessionRef.current(
-      notificationTitleRef.current || t("i18n.newSession"),
-      notificationPreviewRef.current || t("chat.notificationDoneBody"),
-      notificationSessionIdRef.current,
-    );
-    onAgentEnd?.();
-  }, [onAgentEnd, t]);
-
-  // 稳定化 onEditContent 引用，配合 React.memo 防止历史消息重渲染
-  const handleEditContent = useCallback((content: string) => {
-    chatInputRef?.current?.insertIfEmpty(content);
-  }, [chatInputRef]);
 
   const {
     loading, error, messages, entryIds, streamState,
-    agentRunning, bashRunning, pendingBash, modelNames, modelList, modelError, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
-    retryInfo, contextUsage, forkingEntryId,
-    isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats,
+    agentRunning, bashRunning, pendingBash, modelState, modelActions, toolPreset,
+    retryInfo, contextUsage, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
+    isCompacting, compactError, compactResult, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
-    notices, dismissNotice, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, detachedSubagentStatuses, todos, todoAnchorIndex, respondToExtensionUi, sendExtensionCustomInput, armCustomAnswer,
-    isAutoModelSelection,
-    agentPhase,
-    isNew,
-    sessionIdRef, messagesEndRef, scrollContainerRef,
+    notices, dismissNotice, extensionDialog, extensionCustomUi, askQuestionnaire, submitAskQuestionnaire, cancelAskQuestionnaire, extensionStatuses, extensionWidgets, detachedSubagentStatuses, todos, todoAnchorIndex, respondToExtensionUi, sendExtensionCustomInput, armCustomAnswer,
+    agentPhase, completion,
+    isNew, creationSettingsLocked,
+    sessionIdRef, messagesEndRef, lastRenderedMessageRef, scrollContainerRef,
     lastUserMsgRef,
-    handleSend, handleAbort, handleFork, handleNavigate, handleModelChange,
-    handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
+    handleSend, handleAbort, handleFork,
+    handleCompact, handleQueuedSubmit, handleAbortCompaction,
     handleRecallQueue,
     handleBuiltinSlashCommand,
-    handleToolPresetChange, handleThinkingLevelChange, loadSlashCommands,
+    handleShadowMindToggle, handleToolPresetChange, loadSlashCommands,
   } = useAgentSession({
-    session, newSessionCwd, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionListRefresh, onSessionForked,
+    session, newSessionCwd, pendingNewSessionControl, onPendingNewSessionEvent, onSessionCreated, onSessionListRefresh, onSessionForked,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
   });
-  notificationSessionIdRef.current = sessionIdRef.current ?? session?.id ?? null;
-  notificationTitleRef.current = compactNotificationText(
+  useEffect(() => {
+    const scopeKey = session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : null);
+    if (!scopeKey) return;
+    onShadowMindControlChange?.({
+      scopeKey,
+      sessionId: session?.id ?? materializedNewSessionId,
+      enabled: shadowMindEnabled,
+      pending: shadowMindTogglePending,
+      available: shadowMindAvailable,
+      onToggle: handleShadowMindToggle,
+    });
+  }, [handleShadowMindToggle, materializedNewSessionId, newSessionCwd, onShadowMindControlChange, session, shadowMindAvailable, shadowMindEnabled, shadowMindTogglePending]);
+  const notificationSessionId = sessionIdRef.current ?? session?.id ?? null;
+  const notificationTitle = compactNotificationText(
     session?.name || session?.firstMessage || t("i18n.newSession"),
     48,
   );
-  notificationPreviewRef.current = getAssistantNotificationPreview(messages);
-  const notifiedExtensionDialogIdRef = useRef<string | null>(null);
-  const notifiedExtensionCustomUiIdRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!extensionDialog || notifiedExtensionDialogIdRef.current === extensionDialog.id) return;
-    notifiedExtensionDialogIdRef.current = extensionDialog.id;
-    void notifySessionRef.current(
-      compactNotificationText(extensionDialog.title, 48) || t("chat.notificationAttentionTitle"),
-      extensionDialog.method === "confirm"
-        ? compactNotificationText(extensionDialog.message, 80) || t("chat.notificationAttentionBody")
-        : t("chat.notificationAttentionBody"),
-      notificationSessionIdRef.current,
-    );
-  }, [extensionDialog, t]);
-  useEffect(() => {
-    if (!extensionCustomUi || extensionCustomUi.closed || notifiedExtensionCustomUiIdRef.current === extensionCustomUi.id) return;
-    notifiedExtensionCustomUiIdRef.current = extensionCustomUi.id;
-    void notifySessionRef.current(
-      t("chat.notificationAttentionTitle"),
-      t("chat.notificationAttentionBody"),
-      notificationSessionIdRef.current,
-    );
-  }, [extensionCustomUi, t]);
+  const notificationPreview = getAssistantNotificationPreview(messages);
+  useCompletionEffects({
+    completion,
+    soundEnabled,
+    playDoneSound,
+    notifySession,
+    title: notificationTitle || t("i18n.newSession"),
+    body: notificationPreview || t("chat.notificationDoneBody"),
+    onComplete: onAgentEnd,
+  });
   const sessionBusy = agentRunning || bashRunning;
 
   // Register the abort handler for the global Esc shortcut
@@ -293,7 +277,10 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, onA
   // --- Lazy-load historical messages ---
   // Only render the last N messages initially. When the user scrolls to the
   // top, load another page while keeping the scroll position stable.
-  const [visibleCount, setVisibleCount] = useState(VISIBLE_PAGE_SIZE);
+  const renderWindowKey = session?.id ?? `new:${newSessionCwd ?? "none"}`;
+  const [renderWindow, setRenderWindow] = useState({ key: renderWindowKey, count: VISIBLE_PAGE_SIZE });
+  // key 不匹配时当前 render 立即回落到 50，避免 effect 执行前先挂载上一会话的数百节点。
+  const visibleCount = renderWindow.key === renderWindowKey ? renderWindow.count : VISIBLE_PAGE_SIZE;
   const sentinelRef = useRef<HTMLDivElement>(null);
   const prevScrollDistanceRef = useRef<number | null>(null);
 
@@ -308,14 +295,17 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, onA
         if (entries[0]?.isIntersecting) {
           // Save distance from top before prepending to restore scroll later
           prevScrollDistanceRef.current = captureScrollDistance(container.scrollHeight, container.scrollTop);
-          setVisibleCount((prev) => getNextVisibleCount(prev));
+          setRenderWindow((current) => ({
+            key: renderWindowKey,
+            count: getNextVisibleCount(current.key === renderWindowKey ? current.count : VISIBLE_PAGE_SIZE),
+          }));
         }
       },
       { root: container, threshold: 0 }
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [visibleCount, messages.length, scrollContainerRef]);
+  }, [visibleCount, messages.length, renderWindowKey, scrollContainerRef]);
 
   // After visibleCount increases (more messages prepended), restore the
   // scroll position so the viewport doesn't jump.
@@ -411,59 +401,28 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, onA
   }, [messages]);
   const messageRefs = useMessageRefs(messageRenderIndex.visibleCount);
   const revealHistoryForMinimap = useCallback(() => {
-    setVisibleCount((current) => Math.max(current, messages.length * 2));
-  }, [messages.length]);
+    setRenderWindow({ key: renderWindowKey, count: Math.max(VISIBLE_PAGE_SIZE, messages.length * 2) });
+  }, [messages.length, renderWindowKey]);
 
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
   const messageCwd = session?.cwd ?? newSessionCwd ?? undefined;
-  const [newSessionWorktrees, setNewSessionWorktrees] = useState<{ path: string; branch: string | null; isMain: boolean }[]>([]);
-
   // 新会话引导区：π Pi Web 正下方显示当前文件夹名
   const newSessionFolderName = (() => {
     if (!newSessionCwd) return null;
     return newSessionCwd.split(/[\\/]/).filter(Boolean).pop() ?? newSessionCwd;
   })();
-  useEffect(() => {
-    if (session || !newSessionCwd) {
-      setNewSessionWorktrees([]);
-      return;
-    }
-    const controller = new AbortController();
-    fetch(`/api/worktrees?cwd=${encodeURIComponent(newSessionCwd)}`, { signal: controller.signal })
-      .then((response) => response.ok ? response.json() as Promise<{ worktrees?: typeof newSessionWorktrees }> : Promise.reject(new Error(`HTTP ${response.status}`)))
-      .then((data) => setNewSessionWorktrees(data.worktrees ?? []))
-      .catch((error: unknown) => {
-        if (error instanceof DOMException && error.name === "AbortError") return;
-        console.error("加载新会话 worktree 失败", error);
-        setNewSessionWorktrees([]);
-      });
-    return () => controller.abort();
-  }, [newSessionCwd, session]);
 
-  const availableThinkingLevels = displayModelValue
-    ? (modelThinkingLevels[`${displayModelValue.provider}:${displayModelValue.modelId}`] ?? null)
-    : null;
-
-  const currentThinkingLevelMap = displayModelValue
-    ? (modelThinkingLevelMaps[`${displayModelValue.provider}:${displayModelValue.modelId}`] ?? null)
-    : null;
 
   const chatInputElement = (
     <ChatInput
       ref={chatInputRef}
       onSend={handleSend}
       onAbort={handleAbort}
-      onSteer={agentRunning ? handleSteer : undefined}
-      onFollowUp={agentRunning ? handleFollowUp : undefined}
-      onPromptWithStreamingBehavior={agentRunning ? handlePromptWithStreamingBehavior : undefined}
+      onQueuedSubmit={agentRunning ? handleQueuedSubmit : undefined}
       isStreaming={sessionBusy}
-      model={displayModelValue}
-      isAutoModelSelection={isAutoModelSelection}
-      modelNames={modelNames}
-      modelList={modelList}
-      modelError={modelError}
-      modelScopeWarnings={modelScopeWarnings}
-      onModelChange={handleModelChange}
+      creationSettingsLocked={creationSettingsLocked}
+      modelState={modelState}
+      modelActions={modelActions}
       onCompact={session || isNew ? handleCompact : undefined}
       onAbortCompaction={handleAbortCompaction}
       isCompacting={isCompacting}
@@ -471,10 +430,6 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, onA
       compactResult={compactResult}
       toolPreset={toolPreset}
       onToolPresetChange={session || isNew ? handleToolPresetChange : undefined}
-      thinkingLevel={thinkingLevel}
-      onThinkingLevelChange={session || isNew ? handleThinkingLevelChange : undefined}
-      availableThinkingLevels={availableThinkingLevels}
-      thinkingLevelMap={currentThinkingLevelMap}
       retryInfo={retryInfo}
       queuedMessages={queuedMessages}
       inputHistory={inputHistory}
@@ -497,35 +452,35 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, onA
     />
   );
 
-  // ask（select）浮层卡片：锚定在输入框上方，两个布局分支（空会话/消息列表）共用。
-  // 外层 wrapper 复刻 ChatInput 根容器的内边距（0 16px 8px，desktop 右侧 52px）与
-  // maxWidth 820 居中约束，使卡片宽度与输入框本体严格一致。
-  const askDialogElement = extensionDialog?.method === "select" ? (
+  // ask 浮层卡片统一锚定在输入框上方。外层不拦截页面事件，只有卡片本身接收点击，
+  // 因此问卷打开时消息区仍可滚动和查看；多题问卷只在卡片内部滚动。
+  const askDialogElement = askQuestionnaire || extensionDialog?.method === "select" ? (
     <div
-      style={{
-        position: "absolute",
-        left: 0,
-        right: 0,
-        bottom: "calc(100% + 8px)",
-        zIndex: 60,
-        padding: "0 16px",
-        paddingRight: isMobile ? 16 : 52, // 与 ChatInput 根容器保持一致
-        pointerEvents: "none",
-      }}
+      className="ask-input-flyout"
+      style={{ paddingRight: isMobile ? 16 : 52 }}
     >
-      <div style={{ maxWidth: 820, margin: "0 auto", pointerEvents: "auto" }}>
-        <AskDialog
-          request={extensionDialog}
-          onSelect={(request, value) => respondToExtensionUi(request, { value })}
-          onCustomSubmit={(request, sentinelText, text) => {
-            // 先回送 sentinel 原文触发 pi 的 input 分支，同时登记待提交文本，
-            // 随后的 input 请求到达时由 useAgentSession 自动应答（不弹窗）
-            const prefix = request.title.split("\n\n--- ")[0];
-            armCustomAnswer(prefix, text);
-            respondToExtensionUi(request, { value: sentinelText });
-          }}
-          onStop={handleAbort}
-        />
+      <div className="ask-input-flyout-content">
+        {askQuestionnaire ? (
+          <AskQuestionnaire
+            key={askQuestionnaire.toolCallId}
+            questionnaire={askQuestionnaire}
+            onSubmit={submitAskQuestionnaire}
+            onCancel={cancelAskQuestionnaire}
+          />
+        ) : extensionDialog?.method === "select" ? (
+          <AskDialog
+            request={extensionDialog}
+            onSelect={(request, value) => respondToExtensionUi(request, { value })}
+            onCustomSubmit={(request, sentinelText, text) => {
+              // 先回送 sentinel 原文触发 pi 的 input 分支，同时登记待提交文本，
+              // 随后的 input 请求到达时由 useAgentSession 自动应答（不弹窗）。
+              const prefix = request.title.split("\n\n--- ")[0];
+              armCustomAnswer(prefix, text);
+              respondToExtensionUi(request, { value: sentinelText });
+            }}
+            onStop={handleAbort}
+          />
+        ) : null}
       </div>
     </div>
   ) : null;
@@ -605,7 +560,8 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, onA
         </div>
       )}
 
-      {extensionDialog && extensionDialog.method !== "select" && (
+
+      {extensionDialog && extensionDialog.method !== "select" && !askQuestionnaire && (
         <ExtensionDialog
           request={extensionDialog}
           onRespond={respondToExtensionUi}
@@ -670,7 +626,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, onA
                 </span>
               </div>
             </div>
-            <NoticeShelf notices={notices} onDismiss={dismissNotice} align="right" />
+            <NoticeShelf notices={notices} onDismiss={dismissNotice} />
             <div className="relative">
               {askDialogElement}
               {chatInputElement}
@@ -680,20 +636,8 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, onA
       ) : (
       <>
       <div className="relative flex flex-1 overflow-hidden">
-        <div
-          style={{
-            position: "absolute",
-            top: 12,
-            left: 0,
-            right: isMobile ? 0 : CHAT_MINIMAP_WIDTH,
-            zIndex: 40,
-            padding: `0 ${CHAT_COLUMN_PADDING}px`,
-            pointerEvents: "none",
-          }}
-        >
-          <div style={{ maxWidth: 820, margin: "0 auto" }}>
-            <NoticeShelf notices={notices} onDismiss={dismissNotice} floating align="right" />
-          </div>
+        <div className="notice-shelf-overlay">
+          <NoticeShelf notices={notices} onDismiss={dismissNotice} floating />
         </div>
         <div ref={scrollContainerRef} className="flex-1 overflow-y-auto pt-4 [scrollbar-width:none]">
           <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
@@ -705,6 +649,10 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, onA
               // Anchor for live-tail detection and scroll positioning: the last
               // user message, or a compaction summary when compaction replaced it.
               let lastAnchorIdx = -1;
+              let lastRenderedMessageIdx = -1;
+              for (let i = messages.length - 1; i >= 0; i--) {
+                if (messages[i].role === "user" || messages[i].role === "assistant") { lastRenderedMessageIdx = i; break; }
+              }
               for (let i = messages.length - 1; i >= 0; i--) {
                 if (isGroupAnchor(messages[i])) { lastAnchorIdx = i; break; }
               }
@@ -716,10 +664,6 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, onA
 
               const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean } = {}): ReactNode => {
                 const msg = options.messageOverride ?? messages[idx];
-                const prevAssistantEntryId =
-                  msg.role === "user" && idx > 0 && messages[idx - 1].role === "assistant"
-                    ? entryIds[idx - 1]
-                    : undefined;
                 const isVisible = msg.role === "user" || msg.role === "assistant";
                 const currentRefIdx = visibleRefIndexByMessage.get(idx);
                 const keyPrefix = options.keyPrefix ?? "message";
@@ -734,15 +678,12 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, onA
                     key={`${keyPrefix}-view-${idx}`}
                     message={msg}
                     toolResults={toolResults}
-                    modelNames={modelNames}
+                    modelNames={modelState.names}
                     cwd={messageCwd}
                     onOpenFile={onOpenFile}
                     entryId={entryIds[idx]}
-                    onFork={sessionBusy || isNew || (idx === 0 && msg.role === "user") ? undefined : handleFork}
+                    onFork={isNew || !entryIds[idx] || bashRunning ? undefined : handleFork}
                     forking={forkingEntryId === entryIds[idx]}
-                    onNavigate={sessionBusy ? undefined : handleNavigate}
-                    prevAssistantEntryId={sessionBusy ? undefined : prevAssistantEntryId}
-                    onEditContent={handleEditContent}
                     showTimestamp={showTimestamp}
                     prevTimestamp={idx > 0 ? (messages[idx - 1] as AgentMessage & { timestamp?: number }).timestamp : undefined}
                     sessionId={session?.id ?? sessionIdRef.current ?? undefined}
@@ -750,69 +691,50 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, onA
                 );
                 if (idx === lastAnchorIdx && (!isVisible || currentRefIdx === undefined)) {
                   return (
-                    <div key={`${keyPrefix}-${idx}`} ref={(el) => { (lastUserMsgRef as { current: HTMLDivElement | null }).current = el; }}>
+                    <div key={`${keyPrefix}-${idx}`} ref={(el) => {
+                      (lastUserMsgRef as { current: HTMLDivElement | null }).current = el;
+                      if (idx === lastRenderedMessageIdx) lastRenderedMessageRef.current = el;
+                    }}>
                       {view}
                     </div>
                   );
                 }
                 if (!isVisible || options.attachRef === false || currentRefIdx === undefined) return view;
                 return (
-                  <div key={`${keyPrefix}-${idx}`} ref={attachVisibleRef(idx, currentRefIdx)}>
+                  <div key={`${keyPrefix}-${idx}`} ref={(el) => {
+                    attachVisibleRef(idx, currentRefIdx)(el);
+                    if (idx === lastRenderedMessageIdx) lastRenderedMessageRef.current = el;
+                  }}>
                     {view}
                   </div>
                 );
               };
 
-              const rendered: ReactNode[] = [];
-              let liveTailStartIndex: number | null = null;
-              // 将 TodoListPanel 锚定到“最后一条 todo 工具结果”所在的回复轮次末尾，
-              // 使其跟随消息流，而不是悬浮固定在输入框上方。
-              const pushTodoPanel = (fromIdx: number, toIdx: number) => {
-                if (todos.length > 0 && todoAnchorIndex >= fromIdx && todoAnchorIndex < toIdx) {
-                  rendered.push(<TodoListPanel key={`todo-panel-${fromIdx}`} todos={todos} t={t} />);
-                }
-              };
-              for (let idx = 0; idx < messages.length;) {
-                const msg = messages[idx];
-                if (!isGroupAnchor(msg)) {
-                  rendered.push(renderMessage(idx));
-                  idx += 1;
-                  continue;
-                }
+              const { groups, liveTailStartIndex } = buildMessageRenderGroups(messages, {
+                isAnchor: isGroupAnchor,
+                findFinalAssistantIndex,
+                busy: sessionBusy || streamState.isStreaming,
+                lastAnchorIndex: lastAnchorIdx,
+              });
 
-                const userIdx = idx;
-                let endIdx = userIdx + 1;
-                while (endIdx < messages.length && !isGroupAnchor(messages[endIdx])) endIdx += 1;
-
-                const finalAssistantIdx = findFinalAssistantIndex(messages, userIdx, endIdx);
-
-                if (finalAssistantIdx === -1) {
-                  for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
-                    rendered.push(renderMessage(renderIdx));
+              const renderGroup = (group: MessageRenderGroup): ReactNode => {
+                const { start, end, finalAssistantIdx, isLiveTail } = group;
+                const nodes: ReactNode[] = [];
+                const appendTodoPanel = () => {
+                  if (todos.length > 0 && todoAnchorIndex >= start && todoAnchorIndex < end) {
+                    nodes.push(<TodoListPanel key={`todo-panel-${start}`} todos={todos} t={t} />);
                   }
-                  pushTodoPanel(userIdx, endIdx);
-                  idx = endIdx;
-                  continue;
+                };
+                if (finalAssistantIdx === -1 || isLiveTail) {
+                  for (let index = start; index < end; index++) nodes.push(renderMessage(index));
+                  appendTodoPanel();
+                  return <Fragment key={`group-${start}`}>{nodes}</Fragment>;
                 }
 
-                const isLiveTail = (sessionBusy || streamState.isStreaming) && endIdx === messages.length && userIdx === lastAnchorIdx;
-                if (isLiveTail) {
-                  liveTailStartIndex = rendered.length;
-                  for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
-                    rendered.push(renderMessage(renderIdx));
-                  }
-                  pushTodoPanel(userIdx, endIdx);
-                  idx = endIdx;
-                  continue;
-                }
-
-                rendered.push(renderMessage(userIdx));
-
+                nodes.push(renderMessage(start));
                 const processIndices: number[] = [];
-                for (let processIdx = userIdx + 1; processIdx < finalAssistantIdx; processIdx++) {
-                  processIndices.push(processIdx);
-                }
-                const visibleProcessIndices = processIndices.filter((processIdx) => hasDisplayableProcessMessage(messages[processIdx]));
+                for (let index = start + 1; index < finalAssistantIdx; index++) processIndices.push(index);
+                const visibleProcessIndices = processIndices.filter((index) => hasDisplayableProcessMessage(messages[index]));
                 const finalAssistant = messages[finalAssistantIdx] as AssistantMessage;
                 const finalSplit = splitFinalAssistantBlocks(finalAssistant);
                 const finalProcessMessage = finalSplit.processBlocks.length > 0
@@ -821,43 +743,38 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, onA
                 const finalAnswerMessage = finalSplit.answerBlocks.length > 0 || getAssistantErrorMessage(finalAssistant)
                   ? withAssistantBlocks(finalAssistant, finalSplit.answerBlocks)
                   : null;
-
                 const processCount = visibleProcessIndices.length + (finalProcessMessage ? 1 : 0);
                 if (processCount > 0) {
                   const processRefIdx = visibleProcessIndices
-                    .map((processIdx) => visibleRefIndexByMessage.get(processIdx))
+                    .map((index) => visibleRefIndexByMessage.get(index))
                     .find((value): value is number => typeof value === "number")
                     ?? (finalAnswerMessage ? undefined : visibleRefIndexByMessage.get(finalAssistantIdx));
-                  const processGroup = (
-                    <ProcessDetailsGroup
-                       messageCount={processCount}
-                       t={t}
-                      toolCallCount={countToolCalls(messages, visibleProcessIndices) + countToolCallBlocks(finalSplit.processBlocks)}
-                    >
-                      {visibleProcessIndices.map((processIdx) => renderMessage(processIdx, { attachRef: false, keyPrefix: "process" }))}
-                      {finalProcessMessage && renderMessage(finalAssistantIdx, { attachRef: false, keyPrefix: "process-final", messageOverride: finalProcessMessage, showTimestamp: false })}
-                    </ProcessDetailsGroup>
-                  );
-                  rendered.push(
+                  nodes.push(
                     <div
-                      key={`process-group-${userIdx}-${finalAssistantIdx}`}
-                      ref={processRefIdx === undefined ? undefined : (el) => { messageRefs.current[processRefIdx] = el; }}
+                      key={`process-group-${start}-${finalAssistantIdx}`}
+                      ref={processRefIdx === undefined ? undefined : (element) => { messageRefs.current[processRefIdx] = element; }}
                     >
-                      {processGroup}
+                      <ProcessDetailsGroup
+                        messageCount={processCount}
+                        t={t}
+                        toolCallCount={countToolCalls(messages, visibleProcessIndices) + countToolCallBlocks(finalSplit.processBlocks)}
+                        renderChildren={() => (
+                          <>
+                            {visibleProcessIndices.map((index) => renderMessage(index, { attachRef: false, keyPrefix: "process" }))}
+                            {finalProcessMessage && renderMessage(finalAssistantIdx, { attachRef: false, keyPrefix: "process-final", messageOverride: finalProcessMessage, showTimestamp: false })}
+                          </>
+                        )}
+                      />
                     </div>,
                   );
                 }
+                if (finalAnswerMessage) nodes.push(renderMessage(finalAssistantIdx, { messageOverride: finalAnswerMessage }));
+                for (let index = finalAssistantIdx + 1; index < end; index++) nodes.push(renderMessage(index));
+                appendTodoPanel();
+                return <Fragment key={`group-${start}`}>{nodes}</Fragment>;
+              };
 
-                if (finalAnswerMessage) {
-                  rendered.push(renderMessage(finalAssistantIdx, { messageOverride: finalAnswerMessage }));
-                }
-                for (let renderIdx = finalAssistantIdx + 1; renderIdx < endIdx; renderIdx++) {
-                  rendered.push(renderMessage(renderIdx));
-                }
-                pushTodoPanel(userIdx, endIdx);
-                idx = endIdx;
-              }
-              const window = getVisibleRenderWindow(rendered.length, visibleCount);
+              const window = getVisibleRenderWindow(groups.length, visibleCount);
               // 运行中的单轮会话可能包含超过一页的工具消息。必须连同该轮锚点一起渲染，
               // 否则定位引用会被分页裁掉，恢复会话时只能滚进底部预留的空白区域。
               const startIndex = liveTailStartIndex === null
@@ -871,17 +788,20 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, onA
                        {t("chat.loadEarlier", { count: startIndex })}
                     </div>
                   )}
-                  {rendered.slice(startIndex)}
+                  {groups.slice(startIndex).map(renderGroup)}
                 </>
               );
             })()}
             {streamState.isStreaming && streamState.streamingMessage && (
-              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} />
+              <div ref={lastRenderedMessageRef}>
+                <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelState.names} cwd={messageCwd} onOpenFile={onOpenFile} />
+              </div>
             )}
+            <div ref={messagesEndRef} />
 
             {agentRunning && !streamState.streamingMessage && (
               <div className="py-2 text-[13px] text-text-muted">
-                <span className="animate-[pulse_1.5s_infinite]">{phaseLabel(agentPhase, t)}</span>
+                <span className="animate-[pulse_1.5s_infinite]">{isCompacting ? t("chat.compacting") : phaseLabel(agentPhase, t)}</span>
               </div>
             )}
 
@@ -903,11 +823,6 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, onA
               />
             )}
 
-            <div ref={messagesEndRef} />
-
-            {agentRunning && (
-              <div style={{ height: scrollContainerRef.current ? scrollContainerRef.current.clientHeight : "80vh" }} />
-            )}
             </div>
           </div>
         </div>
@@ -931,11 +846,11 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, onA
         >
           <div style={{ maxWidth: 820, margin: "0 auto" }}>
             <ExtensionWidgets widgets={belowEditorWidgets} />
+            {detachedSubagentStatuses.length > 0 && (
+              <DetachedSubagentStatusPanel statuses={detachedSubagentStatuses} t={t} />
+            )}
           </div>
         </div>
-        {detachedSubagentStatuses.length > 0 && (
-          <DetachedSubagentStatusPanel statuses={detachedSubagentStatuses} t={t} />
-        )}
         <div className="relative">
           {askDialogElement}
           {chatInputElement}
@@ -973,19 +888,11 @@ function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; lines: st
   );
 }
 
-function NoticeShelf({ notices, onDismiss, floating = false, align = "left" }: { notices: NoticeItem[]; onDismiss: (id: string) => void; floating?: boolean; align?: "left" | "right" }) {
+function NoticeShelf({ notices, onDismiss, floating = false }: { notices: NoticeItem[]; onDismiss: (id: string) => void; floating?: boolean }) {
   const { t } = useI18n();
   if (notices.length === 0) return null;
   return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        alignItems: align === "right" ? "flex-end" : "stretch",
-        marginBottom: floating ? 0 : 10,
-        pointerEvents: "auto",
-      }}
-    >
+    <div className="notice-shelf" style={{ marginBottom: floating ? 0 : 10 }}>
       {notices.map((notice, index) => {
         const color = notice.type === "error"
           ? "#ef4444"
@@ -999,49 +906,17 @@ function NoticeShelf({ notices, onDismiss, floating = false, align = "left" }: {
             key={notice.id}
             type="button"
             onClick={() => onDismiss(notice.id)}
-            title={t("i18n.close")}
+            aria-label={`${notice.message}，${t("i18n.close")}`}
             className="notice-shelf-item"
             style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 10,
-              minHeight: 60,
-              height: 60,
-              maxHeight: 60,
               marginBottom: index === notices.length - 1 ? 0 : 6,
-              overflow: "hidden",
-              borderRadius: 14,
-              border: "1px solid color-mix(in srgb, var(--border) 70%, transparent)",
-              background: "var(--bg)",
-              color: "var(--text-muted)",
-              width: "fit-content",
-              maxWidth: "min(100%, 620px)",
-              boxShadow: floating
-                ? "0 1px 2px rgba(15,23,42,0.05), 0 10px 28px -14px rgba(15,23,42,0.24)"
-                : "0 1px 2px rgba(15,23,42,0.04), 0 8px 24px -12px rgba(15,23,42,0.10)",
-              fontSize: 18,
-              lineHeight: 1.45,
-              transformOrigin: "top center",
               animation: notice.exiting
                 ? "notice-shelf-out 0.18s ease-in forwards"
                 : "notice-shelf-in 0.18s ease-out both",
-              padding: "0 12px",
-              cursor: "pointer",
-              textAlign: "left",
             }}
           >
-            <span
-              style={{
-                width: 7,
-                height: 7,
-                borderRadius: "50%",
-                background: color,
-                flexShrink: 0,
-              }}
-            />
-            <span style={{ padding: "14px 0", minWidth: 0, maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {notice.message}
-            </span>
+            <span className="notice-shelf-dot" style={{ background: color }} />
+            <span className="notice-shelf-message">{notice.message}</span>
           </button>
         );
       })}
@@ -1049,182 +924,8 @@ function NoticeShelf({ notices, onDismiss, floating = false, align = "left" }: {
   );
 }
 
-type AskDialogRequest = Extract<ExtensionUiRequest, { method: "select" }>;
+
 type ExtensionDialogRequest = Extract<ExtensionUiRequest, { method: "confirm" | "input" | "editor" }>;
-
-// ask（select）专用：opencode 风格 —— 无遮罩浮层卡片，锚定在输入框上方，
-// 对话上下文保持可见可交互；取消按钮改为停止对话（onStop），不把取消发给 pi。
-// rpiv-ask-user-question 的 RPC fallback 把 "Type something." sentinel 恒追加为
-// 最后一项（格式 "N. Type something."，普通选项带 " — " 描述分隔符），
-// 识别后点击该行直接内联输入，配合 useAgentSession 的 input 接力实现免弹窗提交。
-function AskDialog({
-  request,
-  onSelect,
-  onCustomSubmit,
-  onStop,
-}: {
-  request: AskDialogRequest;
-  onSelect: (request: AskDialogRequest, value: string) => void;
-  onCustomSubmit: (request: AskDialogRequest, sentinelText: string, text: string) => void;
-  onStop: () => void;
-}) {
-  const { t } = useI18n();
-  const optionsRef = useRef<HTMLDivElement>(null);
-  const [customOpen, setCustomOpen] = useState(false);
-  const [customValue, setCustomValue] = useState("");
-
-  const lastOption = request.options[request.options.length - 1];
-  const sentinelIndex =
-    request.options.length > 0 && /^\d+\.\s/.test(lastOption) && !lastOption.includes(" — ")
-      ? request.options.length - 1
-      : -1;
-
-  const openCustom = () => {
-    setCustomValue("");
-    setCustomOpen(true);
-  };
-  const submitCustom = () => {
-    const text = customValue.trim();
-    if (!text) {
-      setCustomOpen(false);
-      return;
-    }
-    onCustomSubmit(request, request.options[sentinelIndex], text);
-  };
-
-  const optionButtonStyle: React.CSSProperties = {
-    width: "100%",
-    padding: "9px 10px",
-    borderRadius: 7,
-    border: "1px solid var(--border)",
-    background: "var(--bg-panel)",
-    color: "var(--text)",
-    cursor: "pointer",
-    textAlign: "left",
-    fontSize: 13,
-  };
-
-  // 方向键在选项间移动焦点，回车触发当前项（sentinel 行回车打开内联输入）；
-  // Esc 由全局停止快捷键处理
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "Enter") return;
-    const buttons = Array.from(optionsRef.current?.querySelectorAll<HTMLButtonElement>("button[data-ask-option]") ?? []);
-    if (buttons.length === 0) return;
-    const active = document.activeElement;
-    const idx = active instanceof HTMLButtonElement ? buttons.indexOf(active) : -1;
-    if (e.key === "Enter") {
-      if (idx >= 0) {
-        e.preventDefault();
-        if (idx === sentinelIndex) openCustom();
-        else onSelect(request, buttons[idx].dataset.askOption ?? "");
-      }
-      return;
-    }
-    e.preventDefault();
-    const next = e.key === "ArrowDown" ? (idx + 1) % buttons.length : (idx - 1 + buttons.length) % buttons.length;
-    buttons[next].focus();
-  };
-
-  return (
-    <div
-      role="dialog"
-      aria-label={request.title}
-      onKeyDown={handleKeyDown}
-      style={{
-        width: "100%",
-        border: "1px solid var(--border)",
-        borderRadius: 10,
-        background: "var(--bg)",
-        boxShadow: "0 12px 40px rgba(0,0,0,0.22)",
-        overflow: "hidden",
-        animation: "ask-card-in 0.14s ease-out both",
-      }}
-    >
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "9px 12px", borderBottom: "1px solid var(--border)" }}>
-        <div style={{ color: "var(--text)", fontSize: 13, fontWeight: 650, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{request.title}</div>
-        <button
-          type="button"
-          onClick={onStop}
-          style={{
-            flexShrink: 0,
-            padding: "4px 10px",
-            borderRadius: 6,
-            border: "1px solid var(--border)",
-            background: "var(--bg-panel)",
-            color: "var(--text-muted)",
-            cursor: "pointer",
-            fontSize: 12,
-          }}
-        >
-          {t("chat.stop")}
-        </button>
-      </div>
-      <div ref={optionsRef} style={{ display: "grid", gap: 6, padding: 10 }}>
-        {request.options.map((option, index) =>
-          index === sentinelIndex ? (
-            customOpen ? (
-              <input
-                key={option}
-                autoFocus
-                value={customValue}
-                onChange={(e) => setCustomValue(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    submitCustom();
-                  } else if (e.key === "Escape") {
-                    setCustomOpen(false);
-                    setCustomValue("");
-                  } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-                    // 不冒泡到卡片的选项键盘导航
-                    e.stopPropagation();
-                  }
-                }}
-                onBlur={() => setCustomOpen(false)}
-                placeholder={t("chat.typeYourAnswer")}
-                aria-label={t("chat.typeYourAnswer")}
-                style={{
-                  width: "100%",
-                  boxSizing: "border-box",
-                  padding: "9px 10px",
-                  borderRadius: 7,
-                  border: "1px solid var(--accent)",
-                  background: "var(--bg-panel)",
-                  color: "var(--text)",
-                  fontSize: 13,
-                  outline: "none",
-                }}
-              />
-            ) : (
-              <button
-                key={option}
-                type="button"
-                data-ask-option={option}
-                onClick={openCustom}
-                className="ask-option"
-                style={optionButtonStyle}
-                title={t("chat.typeYourAnswer")}
-              >
-                {option}
-              </button>
-            )
-          ) : (
-            <button
-              key={option}
-              type="button"
-              data-ask-option={option}
-              onClick={() => onSelect(request, option)}
-              className="ask-option"
-              style={optionButtonStyle}
-            >
-              {option}
-            </button>
-          ),
-        )}
-      </div>
-    </div>
-  );
-}
 
 function ExtensionDialog({
   request,

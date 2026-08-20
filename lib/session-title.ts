@@ -94,6 +94,13 @@ export function appendTitleRequestToTrailingUser(messages: AgentMessage[]): Agen
   ];
 }
 
+/** 构造标题 Agent 实际接收的最终消息序列，供预算检查和执行共用。 */
+export function prepareTitleMessages(messages: AgentMessage[]): AgentMessage[] {
+  return messages.at(-1)?.role === "user"
+    ? appendTitleRequestToTrailingUser(messages)
+    : [...messages, { role: "user", content: TITLE_PROMPT, timestamp: 0 }];
+}
+
 function stripWrappingQuotes(value: string): string {
   const pairs: Array<[string, string]> = [
     ['"', '"'],
@@ -215,14 +222,14 @@ export function sanitizeTitleMessages(messages: AgentMessage[]): AgentMessage[] 
 }
 
 /**
- * 标题上下文限制：剥离图片并限制消息体积，避免超大会话（如含 base64 截图）
- * 触发模型请求 payload 超限（413）。只在完整轮次边界截断，保证
- * toolCall/toolResult 配对不因截断而残缺；标题主要依据开头消息，保留开头即可。
+ * 标题消息预算：剥离图片并限制 AgentMessage 序列体积。该预算不包含 provider 转换后
+ * 的 system prompt、tool schema 等固定前缀，不能视为最终请求 payload 的硬上限。
  */
-const MAX_TITLE_CONTEXT_BYTES = 256 * 1024;
-const MAX_TITLE_CONTEXT_MESSAGES = 60;
-function limitTitleMessages(messages: AgentMessage[]): AgentMessage[] {
-  const stripped = messages.map((message) => {
+const MAX_TITLE_MESSAGE_BYTES = 256 * 1024;
+const MAX_TITLE_MESSAGES = 60;
+
+function stripTitleImages(messages: AgentMessage[]): AgentMessage[] {
+  return messages.map((message) => {
     if (message.role === "user") {
       const content = Array.isArray(message.content)
         ? message.content.filter((block) => block.type !== "image")
@@ -234,16 +241,62 @@ function limitTitleMessages(messages: AgentMessage[]): AgentMessage[] {
     }
     return message;
   });
+}
 
-  let total = 0;
-  const kept: AgentMessage[] = [];
-  for (const message of stripped) {
-    const size = Buffer.byteLength(JSON.stringify(message), "utf8");
-    const overBudget = total + size > MAX_TITLE_CONTEXT_BYTES || kept.length >= MAX_TITLE_CONTEXT_MESSAGES;
-    // 只在 user 消息边界截断：该消息不加入，保留内容轮次完整
-    if (overBudget && kept.length > 0 && message.role === "user") break;
-    kept.push(message);
-    total += size;
+function groupTitleTurns(messages: AgentMessage[]): { prefix: AgentMessage[]; turns: AgentMessage[][] } {
+  const firstUserIndex = messages.findIndex((message) => message.role === "user");
+  if (firstUserIndex < 0) return { prefix: [], turns: [] };
+  const turns: AgentMessage[][] = [];
+  for (const message of messages.slice(firstUserIndex)) {
+    if (message.role === "user") turns.push([message]);
+    else turns.at(-1)?.push(message);
+  }
+  return { prefix: messages.slice(0, firstUserIndex), turns };
+}
+
+function fitsPreparedTitleBudget(messages: AgentMessage[]): boolean {
+  const prepared = prepareTitleMessages(messages);
+  return prepared.length <= MAX_TITLE_MESSAGES
+    && Buffer.byteLength(JSON.stringify(prepared), "utf8") <= MAX_TITLE_MESSAGE_BYTES;
+}
+
+function truncateTitleUserToBudget(message: AgentMessage): AgentMessage {
+  if (message.role !== "user") return message;
+  const sourceText = typeof message.content === "string"
+    ? message.content
+    : message.content
+      .filter((block) => block.type === "text")
+      .map((block) => block.text)
+      .join("\n");
+  const characters = Array.from(sourceText);
+  let low = 0;
+  let high = characters.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    const candidate = { ...message, content: characters.slice(0, middle).join("") };
+    if (fitsPreparedTitleBudget([candidate])) low = middle;
+    else high = middle - 1;
+  }
+  return { ...message, content: characters.slice(0, low).join("") };
+}
+
+/** 按完整 user turn 限制标题上下文，首轮超限时至少保留经截断的 user 目标。 */
+export function limitTitleMessages(messages: AgentMessage[]): AgentMessage[] {
+  const { prefix, turns } = groupTitleTurns(stripTitleImages(messages));
+  const firstTurn = turns[0];
+  if (!firstTurn) return [];
+
+  const withPrefix = [...prefix, ...firstTurn];
+  let kept = fitsPreparedTitleBudget(withPrefix)
+    ? withPrefix
+    : fitsPreparedTitleBudget(firstTurn)
+      ? [...firstTurn]
+      : [truncateTitleUserToBudget(firstTurn[0])];
+
+  for (const turn of turns.slice(1)) {
+    const candidate = [...kept, ...turn];
+    if (!fitsPreparedTitleBudget(candidate)) break;
+    kept = candidate;
   }
   return kept;
 }
@@ -274,25 +327,21 @@ export async function generateSessionTitle(source: AgentSession, signal?: AbortS
     if (idleTimeout) clearTimeout(idleTimeout);
   }
   const sanitizedMessages = sanitizeTitleMessages(sourceAgent.state.messages);
-  // 剥离图片并按体积/条数截断，避免超大会话触发模型 payload 超限
+  // 剥离图片并限制标题消息序列；provider 固定前缀不属于此预算。
   const limitedMessages = limitTitleMessages(sanitizedMessages);
-  const historyLength = limitedMessages.length;
   if (!limitedMessages.some((message) => message.role === "user")) {
     throw new Error("The session has no user messages to name");
   }
 
 
   const options = buildSessionTitleAgentOptions(sourceAgent);
-  options.initialState!.messages = limitedMessages;
-  const continuesFromTrailingUser = limitedMessages.at(-1)?.role === "user";
-  if (continuesFromTrailingUser) {
-    options.initialState!.messages = appendTitleRequestToTrailingUser(limitedMessages);
-  }
+  const prepared = prepareTitleMessages(limitedMessages);
+  const historyLength = prepared.length;
+  options.initialState!.messages = prepared;
 
   const temporaryAgent = new Agent(options);
-  const runPromise = continuesFromTrailingUser
-    ? temporaryAgent.continue()
-    : temporaryAgent.prompt(TITLE_PROMPT);
+  // prepareTitleMessages 保证最终序列以 user 结束，两条路径都直接继续生成。
+  const runPromise = temporaryAgent.continue();
   let timeout: ReturnType<typeof setTimeout> | undefined;
 
   try {

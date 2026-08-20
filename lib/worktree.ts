@@ -2,7 +2,9 @@ import { execFile } from "child_process";
 import { existsSync, mkdirSync, realpathSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
 import { promisify } from "util";
+import { getUpstreamDisplayBranch } from "./git-remote-display";
 import { allowFileRoot } from "./allowed-roots";
+import type { WorktreeInfo } from "./types";
 
 const execFileAsync = promisify(execFile);
 
@@ -29,18 +31,24 @@ export interface ProjectInfo {
   isTopLevel: boolean;
 }
 
-export interface WorktreeInfo {
-  path: string;
-  branch: string | null;
-  isMain: boolean;
-}
-
 declare global {
   var __piProjectCache: Map<string, { info: ProjectInfo; expiresAt: number }> | undefined;
+  var __piWorktreeListCache: Map<string, { promise: Promise<WorktreeInfo[]>; expiresAt: number }> | undefined;
 }
 
 const PROJECT_CACHE_TTL_MS = 60_000;
+const WORKTREE_LIST_CACHE_TTL_MS = 5 * 60_000;
+const MAX_WORKTREE_LIST_CACHE_ENTRIES = 32;
 
+function getWorktreeListCache(): Map<string, { promise: Promise<WorktreeInfo[]>; expiresAt: number }> {
+  if (!globalThis.__piWorktreeListCache) globalThis.__piWorktreeListCache = new Map();
+  return globalThis.__piWorktreeListCache;
+}
+
+/** 创建/删除后主动失效；其它 Git 客户端修改最多在 TTL 后收敛。 */
+export function invalidateWorktreeListCache(): void {
+  globalThis.__piWorktreeListCache?.clear();
+}
 function getProjectCache(): Map<string, { info: ProjectInfo; expiresAt: number }> {
   if (!globalThis.__piProjectCache) globalThis.__piProjectCache = new Map();
   return globalThis.__piProjectCache;
@@ -136,7 +144,7 @@ async function getRepoRoot(cwd: string): Promise<string> {
   return dirname(commonDir);
 }
 
-export async function listWorktrees(cwd: string): Promise<WorktreeInfo[]> {
+async function loadWorktrees(cwd: string): Promise<WorktreeInfo[]> {
   const out = await git(cwd, ["worktree", "list", "--porcelain"]);
   const worktrees: WorktreeInfo[] = [];
   let current: (Partial<WorktreeInfo> & { prunable?: boolean }) | null = null;
@@ -170,9 +178,56 @@ export async function listWorktrees(cwd: string): Promise<WorktreeInfo[]> {
     }
   }
   flush();
-  return worktrees;
+
+  // 一次性读取本地分支的 upstream，避免为每个 worktree 单独启动 Git 进程。
+  const upstreamByBranch = new Map<string, string>();
+  const [refs, remoteConfig] = await Promise.all([
+    git(cwd, ["for-each-ref", "--format=%(refname:short)\t%(upstream:short)", "refs/heads"]),
+    git(cwd, ["config", "--get-regexp", "^remote\\..*\\.url$"]).catch(() => ""),
+  ]);
+  const remoteUrlByName = new Map<string, string>();
+  for (const line of remoteConfig.split("\n")) {
+    const match = line.match(/^remote\.([^\s.]+)\.url\s+(.+)$/);
+    if (match) remoteUrlByName.set(match[1], match[2]);
+  }
+  for (const line of refs.split("\n")) {
+    const [branch, upstream] = line.split("\t");
+    if (branch && upstream) upstreamByBranch.set(branch, upstream);
+  }
+  return worktrees.map((worktree) => ({
+    ...worktree,
+    ...(worktree.branch && upstreamByBranch.has(worktree.branch)
+      ? (() => {
+          const upstreamBranch = upstreamByBranch.get(worktree.branch)!;
+          return {
+            upstreamBranch,
+            upstreamDisplayBranch: getUpstreamDisplayBranch(upstreamBranch, remoteUrlByName),
+          };
+        })()
+      : {}),
+  }));
 }
 
+export function listWorktrees(cwd: string): Promise<WorktreeInfo[]> {
+  const cache = getWorktreeListCache();
+  const cached = cache.get(cwd);
+  if (cached && cached.expiresAt > Date.now()) return cached.promise;
+  const promise = loadWorktrees(cwd).catch((error) => {
+    if (cache.get(cwd)?.promise === promise) cache.delete(cwd);
+    throw error;
+  });
+  const now = Date.now();
+  for (const [key, entry] of cache) {
+    if (entry.expiresAt <= now) cache.delete(key);
+  }
+  while (cache.size >= MAX_WORKTREE_LIST_CACHE_ENTRIES) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey === undefined) break;
+    cache.delete(oldestKey);
+  }
+  cache.set(cwd, { promise, expiresAt: now + WORKTREE_LIST_CACHE_TTL_MS });
+  return promise;
+}
 function sanitizeBranchForDir(branch: string): string {
   return branch.replace(/[\/\\:*?"<>|\s]+/g, "-").replace(/^-+|-+$/g, "");
 }
@@ -213,6 +268,7 @@ export async function addWorktree(cwd: string, branch: string): Promise<{ path: 
 
   allowFileRoot(worktreePath);
   invalidateProjectCache();
+  invalidateWorktreeListCache();
   return { path: worktreePath, branch: trimmed };
 }
 
@@ -228,6 +284,7 @@ export async function removeWorktree(cwd: string, worktreePath: string, force = 
     throw new Error(extractGitError(error));
   }
   invalidateProjectCache();
+  invalidateWorktreeListCache();
 }
 
 function extractGitError(error: unknown): string {

@@ -6,7 +6,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { buildSlashCommandLayout } = await jiti.import("./ChatInput.tsx");
+const { buildSlashCommandLayout } = await jiti.import("../lib/slash-command-palette.ts");
 
 test("uses the rendered slash command order for selection indices", () => {
   const dormant = {

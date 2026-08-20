@@ -1,18 +1,29 @@
-import type { AssistantContentBlock, AssistantMessage, ThinkingContent, ToolCallContent } from "./types";
+import { getImageSource } from "./image-content";
+import type { AssistantContentBlock, AssistantMessage, ToolCallContent } from "./types";
 
 interface DisplayOptions {
   isStreaming?: boolean;
 }
 
-export function isEmptyThinkingBlock(block: AssistantContentBlock, options: DisplayOptions = {}): block is ThinkingContent {
-  return block.type === "thinking" && !block.deferred && !options.isStreaming && block.thinking.trim() === "";
+export function isDisplayableAssistantBlock(
+  block: AssistantContentBlock,
+  options: DisplayOptions = {},
+): boolean {
+  if (block.type === "text") return options.isStreaming || block.text.trim() !== "";
+  if (block.type === "thinking") {
+    return Boolean(block.deferred) || Boolean(options.isStreaming) || block.thinking.trim() !== "";
+  }
+  if (block.type === "image") return getImageSource(block) !== "";
+  // todo 调用由 TodoListPanel 汇总展示，消息正文不再重复渲染。
+  if (block.type === "toolCall") return block.toolName !== "todo";
+  return true;
 }
 
 export function getDisplayableAssistantBlocks(
   message: AssistantMessage,
   options: DisplayOptions = {},
 ): AssistantContentBlock[] {
-  return (message.content ?? []).filter((block) => !isEmptyThinkingBlock(block, options));
+  return (message.content ?? []).filter((block) => isDisplayableAssistantBlock(block, options));
 }
 
 export function getAssistantErrorMessage(

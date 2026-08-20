@@ -2,7 +2,9 @@ import { stat } from "fs/promises";
 import { resolve } from "path";
 import { createAgentSessionServices, getAgentDir, type SettingsManager } from "@earendil-works/pi-coding-agent";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
-import { loadModelsWithCache, withModelRuntimeError, type ModelsData } from "@/lib/models-cache";
+import type { ModelEntry, ModelsData, SelectedModel, ThinkingLevelMap } from "@/lib/model-types";
+import { loadModelsWithCache, withModelRuntimeError } from "@/lib/models-cache";
+import type { ThinkingLevel } from "@/lib/thinking-levels";
 import { resolveVisibleModels, selectInitialModelScope } from "@/lib/model-scope";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { projectTrustReloadOptions } from "@/lib/project-trust";
@@ -12,8 +14,8 @@ export const dynamic = "force-dynamic";
 const modelNameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
 function compareModelEntries(
-  a: { id: string; name: string; provider: string },
-  b: { id: string; name: string; provider: string }
+  a: ModelEntry,
+  b: ModelEntry
 ): number {
   return modelNameCollator.compare(a.name || a.id, b.name || b.id)
     || modelNameCollator.compare(a.provider, b.provider)
@@ -22,10 +24,10 @@ function compareModelEntries(
 
 async function loadModels(cwd: string): Promise<ModelsData> {
   const nameMap = new Map<string, string>();
-  let modelList: { id: string; name: string; provider: string }[] = [];
-  let defaultModel: { provider: string; modelId: string } | null = null;
-  const thinkingLevels: Record<string, string[]> = {};
-  const thinkingLevelMaps: Record<string, Record<string, string | null>> = {};
+  let modelList: ModelEntry[] = [];
+  let defaultModel: SelectedModel | null = null;
+  const thinkingLevels: Record<string, ThinkingLevel[]> = {};
+  const thinkingLevelMaps: Record<string, ThinkingLevelMap> = {};
 
   const agentDir = getAgentDir();
   // Gate untrusted project extensions: enumerating models still imports and

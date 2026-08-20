@@ -6,27 +6,37 @@ import type {
   ExtensionStatusItem,
   ExtensionUiRequest,
   ExtensionWidgetItem,
+  SessionEntry,
   SessionInfo,
   SessionTreeNode,
 } from "@/lib/types";
-import { normalizeToolCalls } from "@/lib/normalize";
+import type { AgentRuntimeSnapshot, AgentRuntimeState, AgentSubmitAcknowledgement } from "@/lib/agent-state";
+import type { SelectedModel } from "@/lib/model-types";
+import type { ModelSelectionViewActions, ModelSelectionViewState } from "@/lib/model-selection-types";
+import { isThinkingLevel, type ThinkingLevelOption } from "@/lib/thinking-levels";
+import { recordThinkingLevelPreference } from "@/lib/thinking-level-preference-client";
+import { materializeNewSession, releaseNewSessionMaterialization, type NewSessionMaterializationResult } from "@/lib/new-session-materialization-client";
+import { selectPendingNewSession, type PendingNewSessionControl, type PendingNewSessionEvent } from "@/lib/pending-new-session";
+import { useModelSelection } from "@/hooks/useModelSelection";
+import { useRunCompletion } from "@/hooks/useRunCompletion";
+export type { ThinkingLevelOption } from "@/lib/thinking-levels";
+import { normalizeAssistantMessage } from "@/lib/normalize";
 import { sendAgentCommand } from "@/lib/agent-client";
+import { setDraft, type ChatDraft } from "@/lib/draft-store";
 import { getToolNamesForPreset, type ToolEntry } from "@/lib/tool-presets";
 import type { SessionStatsInfo } from "@/lib/pi-types";
-
-export interface SessionData {
-  sessionId: string;
-  filePath: string;
-  tree: SessionTreeNode[];
-  leafId: string | null;
-  context: {
-    messages: AgentMessage[];
-    entryIds: string[];
-    thinkingLevel: string;
-    model: { provider: string; modelId: string } | null;
-  };
-}
-
+import {
+  fetchRuntimeState,
+  fetchSessionContext,
+  fetchSessionDetails,
+  type SessionContextSnapshot,
+  type SessionDetails,
+  invalidateSessionContext,
+} from "@/lib/session-load-client";
+import { LatestContextLoader } from "@/lib/latest-context-loader";
+import { SessionContextRefreshScheduler } from "@/lib/session-context-refresh-scheduler";
+import { ShadowLifecycleCoordinator } from "@/lib/shadow-lifecycle";
+import { useShadowSessionSetting } from "@/hooks/useShadowSessionSetting";
 interface StreamingState {
   isStreaming: boolean;
   streamingMessage: Partial<AgentMessage> | null;
@@ -60,6 +70,16 @@ export interface DetachedSubagentStatus {
   state: "running" | "completed" | "failed";
   error?: string;
 }
+
+export interface ShadowReportStatus {
+  id: string;
+  agent: "shadow-report";
+  task: string;
+  mode: "shadow-report";
+  state: "running";
+}
+
+export type SubagentStatus = DetachedSubagentStatus | ShadowReportStatus;
 export type TodoItemStatus = "pending" | "in_progress" | "completed";
 
 export interface TodoItem {
@@ -75,6 +95,7 @@ interface AgentEvent {
   [key: string]: unknown;
 }
 
+
 interface CompactCommandResult {
   tokensBefore?: number;
   estimatedTokensAfter?: number;
@@ -84,29 +105,12 @@ interface LastAssistantTextResponse {
   text?: string;
 }
 
-type AgentStateResponse = {
-  contextUsage?: { percent: number | null; contextWindow: number; tokens: number | null } | null;
-  systemPrompt?: string;
-  thinkingLevel?: string;
-  isStreaming?: boolean;
-  isPromptRunning?: boolean;
-  isBashRunning?: boolean;
-  isCompacting?: boolean;
-  extensionStatuses?: ExtensionStatusItem[];
-  extensionWidgets?: ExtensionWidgetItem[];
-  queuedMessages?: { steering?: string[]; followUp?: string[] } | null;
-};
-
 // ask（select）的 "Type something." 行内输入接力：前端先回送 sentinel 原文触发
 // rpc-fallback 的 input 分支，pi 随即发来 method:"input" 请求；此处记录待提交文本，
 // 在 input 请求到达时自动应答，使自定义答案无需弹窗即可提交。
 // 超时兜底：pi 侧异常未发 input 时，残留记录自动失效，避免误应答后续无关请求。
 const CUSTOM_ANSWER_ARM_MS = 15_000;
 
-// ChatWindow instances are replaced when the user switches sessions. Keep the
-// latest in-memory messages briefly at module scope so a running session can
-// be rendered immediately again before its JSONL file catches up.
-const liveSessionMessages = new Map<string, AgentMessage[]>();
 
 function contentText(content: string | Array<{ type: string; text?: string }>): string {
   if (typeof content === "string") return content;
@@ -192,6 +196,11 @@ function deriveDetachedSubagentStatuses(messages: AgentMessage[]): DetachedSubag
   return [...statuses.values()];
 }
 
+function deriveShadowReportStatus(_messages: AgentMessage[]): ShadowReportStatus[] {
+  // shadow-mind 事件属于历史记录，不能据此推导当前仍在运行；运行态由实时事件/运行状态负责。
+  return [];
+}
+
 
 function normalizeTodoItem(value: unknown): TodoItem | null {
   if (typeof value !== "object" || value === null) return null;
@@ -254,10 +263,36 @@ type ExtensionUiDialogRequest = Extract<ExtensionUiRequest, { method: "select" |
 type ExtensionUiCustomRequest = Extract<ExtensionUiRequest, { method: "custom" }>;
 export type NoticeType = "info" | "success" | "warning" | "error";
 
+export type AskQuestionnaireOption = {
+  label: string;
+  description: string;
+  preview?: string;
+};
+
+export type AskQuestionnaireQuestion = {
+  header: string;
+  question: string;
+  multiSelect: boolean;
+  options: AskQuestionnaireOption[];
+};
+
+export type AskQuestionnaireAnswer =
+  | { kind: "options"; optionIndexes: number[] }
+  | { kind: "custom"; text: string };
+
+export type AskQuestionnaireState = {
+  toolCallId: string;
+  questions: AskQuestionnaireQuestion[];
+  submitting: boolean;
+  error?: string;
+};
+
 export type NoticeItem = {
   id: string;
   message: string;
   type: NoticeType;
+  // 排队中的提示不计时，从真正进入可见队列时开始停留 5 秒。
+  shownAt?: number;
   exiting?: boolean;
 };
 
@@ -267,9 +302,9 @@ type NoticeState = {
 };
 
 type NoticeAction =
-  | { type: "add"; notice: NoticeItem }
-  | { type: "mark_oldest_exiting" }
-  | { type: "remove"; id: string };
+  | { type: "add"; notice: NoticeItem; now: number }
+  | { type: "mark_expired"; now: number }
+  | { type: "remove"; id: string; now: number };
 
 export type AgentPhase =
   | { kind: "waiting_model" }
@@ -303,7 +338,8 @@ export type BuiltinSlashCommandResult =
 export interface UseAgentSessionOptions {
   session: SessionInfo | null;
   newSessionCwd: string | null;
-  onAgentEnd?: () => void;
+  pendingNewSessionControl: PendingNewSessionControl;
+  onPendingNewSessionEvent: (cwd: string, event: PendingNewSessionEvent) => void;
   onSessionCreated?: (session: SessionInfo) => void;
   // 每条消息落盘（message_end）后通知父组件刷新会话列表，让新会话尽快出现在侧边栏
   onSessionListRefresh?: () => void;
@@ -316,13 +352,8 @@ export interface UseAgentSessionOptions {
   setToolPreset?: (preset: "none" | "default" | "full") => void;
 }
 
-export type ThinkingLevelOption = "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-
 const PROGRAMMATIC_SCROLL_IGNORE_MS = 700;
 const USER_SCROLL_INTENT_MS = 1200;
-const PROMPT_SETTLE_INITIAL_DELAY_MS = 800;
-const PROMPT_SETTLE_POLL_MS = 600;
-const PROMPT_SETTLE_MAX_MS = 20_000;
 // 父轮结束后，扩展可能异步注入一轮新的 agent run（例如后台子代理完成）。
 const EVENT_STREAM_IDLE_GRACE_MS = 30_000;
 const AGENT_STATE_RECONCILE_MS = 15_000;
@@ -330,7 +361,7 @@ const BASH_STATE_RECONCILE_MS = 1_000;
 // AgentSession 冷启动可能包含模型、扩展和资源初始化，5 秒不足以覆盖正常启动耗时。
 const EVENT_STREAM_CONNECT_TIMEOUT_MS = 15_000;
 const MAX_NOTICES = 5;
-const NOTICE_VISIBLE_MS = 2500;
+const NOTICE_VISIBLE_MS = 5_000;
 const NOTICE_EXIT_ANIMATION_MS = 180;
 // 流式期间侧栏列表刷新的节流窗口：消息边界过密时合并请求，避免每次
 // message_end 都触发一次全量会话扫描（服务端另有惰性脏标记兜底）。
@@ -364,24 +395,13 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function markOldestNoticeExiting(notices: NoticeItem[]): NoticeItem[] {
-  const index = notices.findIndex((notice) => !notice.exiting);
-  if (index === -1) return notices;
-  return notices.map((notice, i) => (
-    i === index ? { ...notice, exiting: true } : notice
-  ));
-}
-
-function fillPendingNotices(visible: NoticeItem[], pending: NoticeItem[]): NoticeState {
+function fillPendingNotices(visible: NoticeItem[], pending: NoticeItem[], now: number): NoticeState {
   let nextVisible = visible;
   let nextPending = pending;
   while (nextPending.length > 0 && nextVisible.length < MAX_NOTICES) {
     const [next, ...rest] = nextPending;
-    nextVisible = [...nextVisible, next];
+    nextVisible = [...nextVisible, { ...next, shownAt: now }];
     nextPending = rest;
-  }
-  if (nextPending.length > 0 && !nextVisible.some((notice) => notice.exiting)) {
-    nextVisible = markOldestNoticeExiting(nextVisible);
   }
   return { visible: nextVisible, pending: nextPending };
 }
@@ -389,25 +409,63 @@ function fillPendingNotices(visible: NoticeItem[], pending: NoticeItem[]): Notic
 function noticeReducer(state: NoticeState, action: NoticeAction): NoticeState {
   switch (action.type) {
     case "add": {
-      if (state.visible.some((notice) => notice.exiting) || state.visible.length >= MAX_NOTICES) {
-        return {
-          visible: state.visible.some((notice) => notice.exiting)
-            ? state.visible
-            : markOldestNoticeExiting(state.visible),
-          pending: [...state.pending, action.notice],
-        };
+      if (state.visible.length >= MAX_NOTICES) {
+        return { ...state, pending: [...state.pending, action.notice] };
       }
-      return { ...state, visible: [...state.visible, action.notice] };
+      return {
+        ...state,
+        visible: [...state.visible, { ...action.notice, shownAt: action.now }],
+      };
     }
-    case "mark_oldest_exiting":
-      return { ...state, visible: markOldestNoticeExiting(state.visible) };
+    case "mark_expired":
+      return {
+        ...state,
+        visible: state.visible.map((notice) => (
+          !notice.exiting && notice.shownAt !== undefined
+            && action.now - notice.shownAt >= NOTICE_VISIBLE_MS
+            ? { ...notice, exiting: true }
+            : notice
+        )),
+      };
     case "remove": {
       const visible = state.visible.filter((notice) => notice.id !== action.id);
-      return fillPendingNotices(visible, state.pending);
+      return fillPendingNotices(visible, state.pending, action.now);
     }
     default:
       return state;
   }
+}
+
+function parseAskQuestionnaire(input: unknown): AskQuestionnaireQuestion[] | null {
+  if (!input || typeof input !== "object") return null;
+  const questions = (input as { questions?: unknown }).questions;
+  if (!Array.isArray(questions) || questions.length < 2) return null;
+
+  const parsed: AskQuestionnaireQuestion[] = [];
+  for (const value of questions) {
+    if (!value || typeof value !== "object") return null;
+    const question = value as Record<string, unknown>;
+    if (typeof question.header !== "string" || typeof question.question !== "string" || !Array.isArray(question.options)) return null;
+    const options: AskQuestionnaireOption[] = [];
+    for (const valueOption of question.options) {
+      if (!valueOption || typeof valueOption !== "object") return null;
+      const option = valueOption as Record<string, unknown>;
+      if (typeof option.label !== "string" || typeof option.description !== "string") return null;
+      options.push({
+        label: option.label,
+        description: option.description,
+        ...(typeof option.preview === "string" ? { preview: option.preview } : {}),
+      });
+    }
+    if (options.length < 2) return null;
+    parsed.push({
+      header: question.header,
+      question: question.question,
+      multiSelect: question.multiSelect === true,
+      options,
+    });
+  }
+  return parsed;
 }
 
 function extractMessageText(message: Partial<AgentMessage>): string {
@@ -477,18 +535,6 @@ export interface AttachedImage {
   previewUrl: string;
 }
 
-type SelectedModel = { provider: string; modelId: string };
-type ModelEntry = { id: string; name: string; provider: string };
-type ModelsResponse = {
-  models: Record<string, string>;
-  modelList?: ModelEntry[];
-  defaultModel?: SelectedModel | null;
-  thinkingLevels?: Record<string, string[]>;
-  thinkingLevelMaps?: Record<string, Record<string, string | null>>;
-  thinkingLevelPins?: Record<string, string>;
-  modelError?: string;
-  modelScopeWarnings?: string[];
-};
 
 type SlashCommandsResponse = {
   commands?: SlashCommandInfo[];
@@ -496,13 +542,20 @@ type SlashCommandsResponse = {
 
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
-    session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionListRefresh, onSessionForked,
+    session, newSessionCwd, pendingNewSessionControl, onPendingNewSessionEvent, onSessionCreated, onSessionListRefresh, onSessionForked,
     modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
   } = opts;
 
   const isNew = session === null && newSessionCwd !== null;
+  const pendingControlKind = pendingNewSessionControl.kind;
+  const pendingSessionView = selectPendingNewSession(pendingNewSessionControl);
+  const pendingShadowMindEnabled = pendingSessionView.desiredShadowMindEnabled;
+  const creationSettingsLocked = pendingSessionView.busy;
+  const materializedNewSessionId = pendingSessionView.transportSessionId;
+  const { completion, beginRun, settleRun } = useRunCompletion();
 
-  const [data, setData] = useState<SessionData | null>(null);
+  const [contextModel, setContextModel] = useState<SessionContextSnapshot["model"]>(null);
+  const [detailsState, setDetailsState] = useState<{ sid: string; value: SessionDetails } | null>(null);
   const [loading, setLoading] = useState(!isNew);
   const [error, setError] = useState<string | null>(null);
   const [activeLeafId, setActiveLeafId] = useState<string | null>(null);
@@ -512,16 +565,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [agentRunning, setAgentRunning] = useState(false);
   const [bashRunning, setBashRunning] = useState(false);
   const [pendingBash, setPendingBash] = useState<{ command: string; excludeFromContext: boolean } | null>(null);
-  const [modelNames, setModelNames] = useState<Record<string, string>>({});
-  const [modelList, setModelList] = useState<ModelEntry[]>([]);
-  const [modelError, setModelError] = useState<string | null>(null);
-  const [modelScopeWarnings, setModelScopeWarnings] = useState<string[]>([]);
-  const [modelThinkingLevels, setModelThinkingLevels] = useState<Record<string, string[]>>({});
-  const [modelThinkingLevelMaps, setModelThinkingLevelMaps] = useState<Record<string, Record<string, string | null>>>({});
-  const [newSessionModel, setNewSessionModel] = useState<SelectedModel | null>(null);
-  const [newSessionDefaultModel, setNewSessionDefaultModel] = useState<SelectedModel | null>(null);
+  const { modelState: modelSelectionState, modelActions: modelSelectionActions } = useModelSelection();
+  const {
+    names: modelNames,
+    list: modelList,
+    error: modelError,
+    scopeWarnings: modelScopeWarnings,
+    dataDiagnostics: modelDataDiagnostics,
+    thinkingLevels: modelThinkingLevels,
+    thinkingLevelMaps: modelThinkingLevelMaps,
+    newSessionModel,
+    newSessionDefaultModel,
+    thinkingLevel,
+  } = modelSelectionState;
   const [toolPreset, setToolPreset] = useState<"none" | "default" | "full">("default");
-  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption>("auto");
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxAttempts: number; errorMessage?: string } | null>(null);
   const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
   const [systemPrompt, setSystemPrompt] = useState<string | null>(null);
@@ -539,56 +596,143 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [extensionDialog, setExtensionDialog] = useState<ExtensionUiDialogRequest | null>(null);
   // 同步弹窗状态：settlement 判定需要知道当前是否有 dialog 在等用户输入
   const extensionDialogRef = useRef<ExtensionUiDialogRequest | null>(null);
+  const [askQuestionnaire, setAskQuestionnaire] = useState<AskQuestionnaireState | null>(null);
+  const askQuestionnaireRef = useRef<AskQuestionnaireState | null>(null);
+  const askQuestionnaireRequestQueueRef = useRef<ExtensionUiDialogRequest[]>([]);
+  const askQuestionnaireRequestWaiterRef = useRef<{
+    accept: (request: ExtensionUiDialogRequest) => void;
+    cancel: () => void;
+  } | null>(null);
+  const askQuestionnaireRequestIdsRef = useRef(new Set<string>());
   const [extensionCustomUi, setExtensionCustomUi] = useState<ExtensionUiCustomRequest | null>(null);
   const [extensionStatuses, setExtensionStatuses] = useState<ExtensionStatusItem[]>([]);
   const [extensionWidgets, setExtensionWidgets] = useState<ExtensionWidgetItem[]>([]);
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessages>({ steering: [], followUp: [] });
   const detachedSubagentStatuses = useMemo(() => deriveDetachedSubagentStatuses(messages), [messages]);
+  const shadowReportStatuses = useMemo(() => deriveShadowReportStatus(messages), [messages]);
   const todos = useMemo(() => deriveTodos(messages), [messages]);
   const todoAnchorIndex = useMemo(() => findLastTodoResultIndex(messages), [messages]);
 
-  useEffect(() => {
-    const sid = sessionIdRef.current;
-    if (!sid || messages.length === 0) return;
-    liveSessionMessages.set(sid, messages);
-  }, [messages]);
 
   const eventSourceRef = useRef<EventSource | null>(null);
   const eventStreamGraceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const eventStreamGraceGenerationRef = useRef(0);
   // detached 子代理可能跨越多个父轮，必须按 agentId 保持到对应 completion 到达。
   const pendingDetachedSubagentIdsRef = useRef(new Set<string>());
-  const sessionIdRef = useRef<string | null>(session?.id ?? null);
+  const sessionIdRef = useRef<string | null>(session?.id ?? materializedNewSessionId);
+  useEffect(() => {
+    if (!newSessionCwd) return;
+    if (
+      pendingControlKind === "materialized"
+      || pendingControlKind === "initialization-failed"
+      || pendingControlKind === "materialization-failed"
+    ) {
+      releaseNewSessionMaterialization(newSessionCwd);
+    }
+  }, [newSessionCwd, pendingControlKind]);
+  const details = session && detailsState?.sid === session.id ? detailsState.value : null;
   const agentRunningRef = useRef(false);
   const bashRunningRef = useRef(false);
   const bashRecoveryIdRef = useRef(0);
   const handleAgentEventRef = useRef<((event: AgentEvent) => void) | null>(null);
   const initialScrollDoneRef = useRef(false);
+  const [scrollGeneration, setScrollGeneration] = useState(0);
   const lastUserMsgRef = useRef<HTMLDivElement | null>(null);
   const pendingScrollToUserRef = useRef(false);
   const pendingScrollToRunningEndRef = useRef(false);
+  const pendingInitialScrollRef = useRef(false);
   const completionScrollAllowedRef = useRef(true);
   const executeBashRef = useRef<(command: string, excludeFromContext: boolean) => Promise<void> | undefined>(undefined);
   const userScrollIntentUntilRef = useRef(0);
   const ignoreProgrammaticScrollUntilRef = useRef(0);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const lastRenderedMessageRef = useRef<HTMLDivElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
-  const ensuringNewSessionRef = useRef<Promise<string | null> | null>(null);
   const newSessionPromotedRef = useRef(false);
-  const newSessionModelOverrideRef = useRef<SelectedModel | null>(null);
-  const thinkingLevelOverrideRef = useRef<Exclude<ThinkingLevelOption, "auto"> | null>(null);
+  const initialPendingSettings = pendingNewSessionControl.kind === "staged" ? pendingNewSessionControl : null;
+  const newSessionModelOverrideRef = useRef<SelectedModel | null>(initialPendingSettings?.model ?? null);
+  const thinkingLevelOverrideRef = useRef<Exclude<ThinkingLevelOption, "auto"> | null>(
+    initialPendingSettings?.thinkingLevel === "auto" ? null : initialPendingSettings?.thinkingLevel ?? null,
+  );
+  const recommendedThinkingLevelRef = useRef<Exclude<ThinkingLevelOption, "auto"> | null>(null);
+  useEffect(() => {
+    if (!isNew || !initialPendingSettings) return;
+    if (initialPendingSettings.model) {
+      void modelSelectionActions.selectNewSessionModel(initialPendingSettings.model, false);
+      setPendingModel(initialPendingSettings.model);
+    }
+    modelSelectionActions.setThinkingLevel(initialPendingSettings.thinkingLevel);
+  // 仅在该 cwd 的新会话组件挂载时恢复一次，后续变更由交互处理器同步。
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const promptRunIdRef = useRef(0);
   const optimisticUserMessageKeyRef = useRef<string | null>(null);
   // 流式期间本地已收齐的消息条数（在 message_end 的 setMessages updater 内同步），
   // 用于 agent_end 时判断是否丢帧、能否跳过全量 context 重载。
   const lastStreamedMessageCountRef = useRef(0);
   const sessionListRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // waitForPromptSettlement 定义在 respondToExtensionUi 之后，通过 ref 解耦调用
-  const waitForPromptSettlementRef = useRef<((sid: string, runId?: number) => Promise<void>) | null>(null);
+  // 统一 reconciliation 定义较晚，通过 ref 供扩展 UI 回调触发，避免再维护独立轮询器。
+  const reconcileAgentStateRef = useRef<((sid: string, runId?: number) => Promise<void>) | null>(null);
+  const reconcileRequestGenerationRef = useRef(0);
+  // context 与后台 details/state 使用独立取消域，避免并行请求互相 abort。
+  const contextLoaderRef = useRef(new LatestContextLoader());
+  const contextRefreshSchedulerRef = useRef(new SessionContextRefreshScheduler());
+  const shadowLifecycleRef = useRef(new ShadowLifecycleCoordinator());
+  const detailsRequestRef = useRef<{ generation: number; controller: AbortController | null }>({
+    generation: 0,
+    controller: null,
+  });
+  const backfillRequestRef = useRef<{ sid: string; generation: number; controller: AbortController | null }>({
+    sid: "",
+    generation: 0,
+    controller: null,
+  });
+  const runtimeStateRequestRef = useRef<AbortController | null>(null);
+  const navigationSequenceRef = useRef(0);
+  const navigationGenerationRef = useRef(new Map<string, number>());
+  const navigationChainRef = useRef(new Map<string, Promise<void>>());
+
+  const addNotice = useCallback((notice: { id?: string; message: string; type?: NoticeType }) => {
+    const message = notice.message.trim();
+    if (!message) return;
+    dispatchNotice({
+      type: "add",
+      notice: {
+        id: notice.id ?? createNoticeId(),
+        message,
+        type: notice.type ?? "info",
+      },
+      now: Date.now(),
+    });
+  }, []);
+  const addShadowErrorNotice = useCallback((message: string) => {
+    addNotice({ type: "error", message });
+  }, [addNotice]);
+  const handlePendingShadowMindChange = useCallback((enabled: boolean) => {
+    if (newSessionCwd) onPendingNewSessionEvent(newSessionCwd, { type: "SET_SHADOW", enabled });
+  }, [newSessionCwd, onPendingNewSessionEvent]);
+  const shadowSessionSetting = useShadowSessionSetting({
+    sessionIdRef,
+    addErrorNotice: addShadowErrorNotice,
+    staged: isNew && pendingSessionView.shadowMode === "staged" ? {
+      enabled: pendingShadowMindEnabled,
+      pending: pendingSessionView.shadowPending,
+      onChange: handlePendingShadowMindChange,
+    } : null,
+  });
+  const {
+    enabled: shadowMindEnabled,
+    available: shadowMindAvailable,
+    pending: shadowMindTogglePending,
+    applyRuntimeState: applyShadowRuntimeState,
+    consumeEntry: consumeShadowEntry,
+    runSlashCommand: runShadowSlashCommand,
+    toggle: handleShadowMindToggle,
+  } = shadowSessionSetting;
 
   const setToolPresetState = opts.setToolPreset ?? setToolPreset;
 
-  const currentModel = currentModelOverride ?? data?.context.model ?? pendingModel ?? null;
+  const currentModel = currentModelOverride ?? contextModel ?? pendingModel ?? null;
   const displayModel = isNew ? (newSessionModel ?? newSessionDefaultModel) : currentModel;
 
   const sessionStats = useMemo(() => {
@@ -616,7 +760,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     tokens.total = tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite;
     if (tokens.total === 0 && messages.length === 0) return null;
     return {
-      sessionFile: data?.filePath || undefined,
+      sessionFile: details?.filePath || undefined,
       sessionId: sessionIdRef.current ?? session?.id ?? "",
       sessionName: session?.name,
       userMessages,
@@ -628,95 +772,196 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       cost,
       ...(contextUsage ? { contextUsage } : {}),
     } satisfies SessionStatsInfo;
-  }, [messages, sessionStatsOverride, contextUsage, data?.filePath, session?.id, session?.name]);
+  }, [messages, sessionStatsOverride, contextUsage, details?.filePath, session?.id, session?.name]);
+
+
+  /** 所有服务端运行状态都通过这一入口投影，避免挂载、reload、reconcile 字段漂移。 */
+  const applyRuntimeState = useCallback((state: AgentRuntimeState | undefined) => {
+    setIsCompacting(state?.isCompacting ?? false);
+    setQueuedMessages(normalizeQueuedMessages(state?.queuedMessages));
+    if (!state) return;
+    setContextUsage(state.contextUsage);
+    setSystemPrompt(state.systemPrompt);
+    applyShadowRuntimeState(state);
+    modelSelectionActions.setThinkingLevel(state.thinkingLevel);
+    setExtensionStatuses(state.extensionStatuses);
+    setExtensionWidgets(state.extensionWidgets);
+  }, [applyShadowRuntimeState, modelSelectionActions]);
+
+  /** context 的所有派生状态统一原子提交，挂载加载和分支导航不得各维护一份字段列表。 */
+  const commitContextSnapshot = useCallback((
+    sid: string,
+    snapshot: SessionContextSnapshot,
+    leafId: string | null,
+    options: { preserveScroll?: boolean } = {},
+  ): boolean => {
+    if (sessionIdRef.current !== sid) return false;
+    setContextModel(snapshot.model);
+    setActiveLeafId(leafId);
+    pendingDetachedSubagentIdsRef.current = pendingDetachedSubagentIds(snapshot.messages);
+    if (!options.preserveScroll) {
+      // 首屏、导航和 backfill 属于显式定位；后台 entry 刷新必须保持用户滚动位置。
+      pendingInitialScrollRef.current = true;
+      completionScrollAllowedRef.current = false;
+      setScrollGeneration((generation) => generation + 1);
+    }
+    setMessages(snapshot.messages);
+    setEntryIds(snapshot.entryIds);
+    setCurrentModelOverride(null);
+    setError(null);
+    if (snapshot.thinkingLevel && snapshot.thinkingLevel !== "off") {
+      modelSelectionActions.setThinkingLevel(snapshot.thinkingLevel);
+    }
+    setLoading(false);
+    return true;
+  }, [modelSelectionActions]);
+  const startContextBackfill = useCallback((sid: string, generation: number) => {
+    const controller = new AbortController();
+    backfillRequestRef.current.controller = controller;
+    void fetchSessionContext(sid, controller.signal, { skipCache: true }).then((loaded) => {
+      const current = backfillRequestRef.current;
+      if (loaded.kind === "loaded" && current.sid === sid && current.generation === generation && sessionIdRef.current === sid) {
+        commitContextSnapshot(sid, loaded.snapshot, loaded.leafId);
+      }
+    }).catch((error: unknown) => {
+      if (!(error instanceof DOMException && error.name === "AbortError")) console.error("Failed to backfill session context:", error);
+    }).finally(() => {
+      if (backfillRequestRef.current.generation === generation) backfillRequestRef.current.controller = null;
+    });
+  }, [commitContextSnapshot]);
 
   const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false) => {
-    let messagesLoaded = false;
+    backfillRequestRef.current.controller?.abort();
+    const backfillGeneration = backfillRequestRef.current.generation + 1;
+    backfillRequestRef.current = { sid, generation: backfillGeneration, controller: null };
+    const earlyRuntimeController = includeState ? new AbortController() : null;
+    const earlyRuntimePromise = earlyRuntimeController
+      ? fetchRuntimeState(sid, earlyRuntimeController.signal).then((snapshot) => {
+          if (sessionIdRef.current === sid) applyRuntimeState(snapshot.state);
+          return snapshot;
+        }).catch((error: unknown) => {
+          if (!(error instanceof DOMException && error.name === "AbortError")) {
+            console.error("Failed to load early session runtime state:", error);
+          }
+          return null;
+        })
+      : null;
+    if (showLoading) setLoading(true);
     try {
-      if (showLoading) setLoading(true);
-      const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1" });
-      const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}?${params}`);
-      if (res.status === 404) {
-        if (showLoading) {
-          setData(null);
-          setActiveLeafId(null);
-          setMessages([]);
-          setError(null);
-        }
-        return null;
-      }
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const d = await res.json() as SessionData;
-      if (sessionIdRef.current !== sid) return null;
-      setData(d);
-      setActiveLeafId(d.leafId);
-      const cachedMessages = liveSessionMessages.get(sid);
-      const loadedMessages = cachedMessages && cachedMessages.length > d.context.messages.length
-        ? cachedMessages
-        : d.context.messages;
-      pendingDetachedSubagentIdsRef.current = pendingDetachedSubagentIds(loadedMessages);
-      setMessages(loadedMessages);
-      setEntryIds(d.context.entryIds ?? []);
-      setCurrentModelOverride(null);
-      setError(null);
-      if (d.context.thinkingLevel && d.context.thinkingLevel !== "off") {
-        setThinkingLevel(d.context.thinkingLevel as ThinkingLevelOption);
-      }
+      const contextResult = await contextLoaderRef.current.run(
+        sid,
+        (signal) => fetchSessionContext(sid, signal),
+        (loaded) => {
+          if (sessionIdRef.current !== sid) return false;
+          if (loaded.kind === "missing") {
+            if (showLoading) {
+              setContextModel(null);
+              setDetailsState(null);
+              setActiveLeafId(null);
+              setMessages([]);
+              setEntryIds([]);
+              setError(null);
+            }
+            setLoading(false);
+            return false;
+          }
+          return commitContextSnapshot(sid, loaded.snapshot, loaded.leafId);
+      });
+      if (!contextResult.committed || !contextResult.value) return { loaded: false, agentState: null };
 
-      messagesLoaded = true;
-      if (showLoading) setLoading(false);
-      if (!includeState) return null;
+      // 首屏先显示预加载消息，再后台补齐完整历史。
+      startContextBackfill(sid, backfillGeneration);
+      detailsRequestRef.current.controller?.abort();
+      const controller = new AbortController();
+      const generation = detailsRequestRef.current.generation + 1;
+      detailsRequestRef.current = { generation, controller };
+      void fetchSessionDetails(sid, controller.signal)
+        .then((sessionDetails) => {
+          if (
+            detailsRequestRef.current.generation === generation
+            && sessionIdRef.current === sid
+          ) setDetailsState({ sid, value: sessionDetails });
+        })
+        .catch((error: unknown) => {
+          if (error instanceof DOMException && error.name === "AbortError") return;
+          console.error("Failed to load session details:", error);
+        });
 
+      if (!includeState) return { loaded: true, agentState: null };
+      runtimeStateRequestRef.current?.abort();
+      const runtimeController = earlyRuntimeController ?? new AbortController();
+      runtimeStateRequestRef.current = runtimeController;
       try {
-        const stateRes = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`);
-        if (!stateRes.ok) throw new Error(`HTTP ${stateRes.status}`);
-        const agentState = await stateRes.json() as { running: boolean; state?: AgentStateResponse };
-        if (sessionIdRef.current !== sid) return null;
-
-        const liveState = agentState.state;
-        if (liveState) {
-          if (liveState.contextUsage !== undefined) setContextUsage(liveState.contextUsage ?? null);
-          if (liveState.systemPrompt !== undefined) setSystemPrompt(liveState.systemPrompt ?? null);
-          if (liveState.thinkingLevel !== undefined) setThinkingLevel((liveState.thinkingLevel as ThinkingLevelOption) ?? "auto");
-          if (liveState.extensionStatuses !== undefined) setExtensionStatuses(liveState.extensionStatuses ?? []);
-          if (liveState.extensionWidgets !== undefined) setExtensionWidgets(liveState.extensionWidgets ?? []);
-          if (liveState.queuedMessages !== undefined) setQueuedMessages(normalizeQueuedMessages(liveState.queuedMessages));
-        } else if (!agentState.running) {
-          setQueuedMessages({ steering: [], followUp: [] });
+        const agentState = earlyRuntimePromise ? await earlyRuntimePromise : await fetchRuntimeState(sid, runtimeController.signal);
+        if (!agentState) return { loaded: true, agentState: null };
+        if (sessionIdRef.current !== sid || runtimeStateRequestRef.current !== runtimeController) {
+          return { loaded: true, agentState: null };
         }
-        return agentState;
-      } catch (e) {
-        console.error("Failed to load agent state:", e);
-        return null;
+        applyRuntimeState(agentState.state);
+        return { loaded: true, agentState };
+      } catch (error) {
+        if (!(error instanceof DOMException && error.name === "AbortError")) {
+          console.error("Failed to load session runtime state:", error);
+        }
+        return { loaded: true, agentState: null };
+      } finally {
+        if (runtimeStateRequestRef.current === runtimeController) runtimeStateRequestRef.current = null;
       }
-    } catch (e) {
-      setError(String(e));
-      return null;
-    } finally {
-      if (showLoading && !messagesLoaded) setLoading(false);
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        return { loaded: false, agentState: null };
+      }
+      if (sessionIdRef.current === sid) {
+        setError(String(error));
+        setLoading(false);
+      }
+      return { loaded: false, agentState: null };
     }
-  }, []);
+  }, [applyRuntimeState, commitContextSnapshot, startContextBackfill]);
+
+  /** Shadow lifecycle entry 使用单次 context-only 刷新，避免触发 details/backfill 或改变滚动位置。 */
+  const scheduleContextRefresh = useCallback((sid: string) => {
+    contextRefreshSchedulerRef.current.schedule(sid, async () => {
+      if (sessionIdRef.current !== sid) return;
+      invalidateSessionContext(sid);
+      try {
+        await contextLoaderRef.current.run(
+          sid,
+          (signal) => fetchSessionContext(sid, signal, { skipCache: true }),
+          (loaded) => loaded.kind === "loaded"
+            ? commitContextSnapshot(sid, loaded.snapshot, loaded.leafId, { preserveScroll: true })
+            : false,
+        );
+      } catch (error) {
+        if (!(error instanceof DOMException && error.name === "AbortError")) {
+          console.error("Failed to refresh Shadow lifecycle context:", error);
+        }
+      }
+    });
+  }, [commitContextSnapshot]);
 
   const loadCompactedSession = useCallback(async (sid: string, showLoading = false) => {
-    // 压缩后的服务端上下文必然比旧历史短，不能再让“消息更多”的实时缓存覆盖它。
-    liveSessionMessages.delete(sid);
     return loadSession(sid, showLoading);
   }, [loadSession]);
 
-  const loadContext = useCallback(async (sid: string, leafId: string | null) => {
+  const loadContext = useCallback(async (sid: string, leafId: string | null): Promise<boolean> => {
     try {
-      const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1" });
-      if (leafId) params.set("leafId", leafId);
-      const url = `/api/sessions/${encodeURIComponent(sid)}/context?${params}`;
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const d = await res.json() as { context: { messages: AgentMessage[]; entryIds: string[] } };
-      setMessages(d.context.messages);
-      setEntryIds(d.context.entryIds ?? []);
-    } catch (e) {
-      console.error("Failed to load context:", e);
+      const result = await contextLoaderRef.current.run(
+        sid,
+        (signal) => fetchSessionContext(sid, signal, { leafId }),
+        (loaded) => {
+          if (loaded.kind === "missing") return false;
+          return commitContextSnapshot(sid, loaded.snapshot, loaded.leafId);
+      });
+      return result.committed && result.value;
+    } catch (error) {
+      if (sessionIdRef.current === sid) {
+        console.error("Failed to load context:", error);
+        setLoading(false);
+      }
+      return false;
     }
-  }, []);
+  }, [commitContextSnapshot]);
 
   const loadTools = useCallback(async (sid: string) => {
     try {
@@ -749,61 +994,86 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [isNew, newSessionCwd, onSessionCreated, opts.chatInputRef]);
 
   const ensureNewSession = useCallback(async () => {
-    if (sessionIdRef.current) return sessionIdRef.current;
     if (!isNew || !newSessionCwd) return sessionIdRef.current;
-    if (ensuringNewSessionRef.current) return ensuringNewSessionRef.current;
-
-    const promise = (async () => {
-      // Only send explicit user overrides. The server resolves the current
-      // enabledModels scope atomically with AgentSession construction.
-      const selectedModel = newSessionModelOverrideRef.current;
-      const selectedThinkingLevel = thinkingLevelOverrideRef.current;
-      if (selectedModel) setPendingModel(selectedModel);
-      const toolNames = getToolNamesForPreset(toolPreset);
-      const res = await fetch("/api/agent/new", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          cwd: newSessionCwd,
-          type: "ensure_session",
-          toolNames,
-          ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
-          ...(selectedThinkingLevel
-            ? { thinkingLevel: selectedThinkingLevel }
-            : {}),
-        }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const result = await res.json() as {
-        sessionId: string;
-        model?: SelectedModel | null;
-        thinkingLevel?: ThinkingLevelOption;
-      };
-      const realId = result.sessionId;
-      sessionIdRef.current = realId;
-      if (result.model && newSessionModelOverrideRef.current === selectedModel) {
-        setPendingModel(result.model);
-        if (!selectedModel) setNewSessionDefaultModel(result.model);
-      }
-      if (
-        result.thinkingLevel
-        && thinkingLevelOverrideRef.current === selectedThinkingLevel
-      ) {
-        setThinkingLevel(result.thinkingLevel);
-      }
-      return realId;
-    })();
-
-    ensuringNewSessionRef.current = promise;
-    try {
-      return await promise;
-    } finally {
-      ensuringNewSessionRef.current = null;
+    if (pendingControlKind === "initialization-failed") {
+      throw new Error(pendingNewSessionControl.error);
     }
-  }, [isNew, newSessionCwd, toolPreset]);
+    if (pendingControlKind === "materialized") {
+      sessionIdRef.current = pendingNewSessionControl.sessionId;
+      return pendingNewSessionControl.sessionId;
+    }
+
+    const recoverySessionId = pendingControlKind === "materialization-failed"
+      || pendingControlKind === "recovering"
+      ? pendingNewSessionControl.sessionId
+      : null;
+    const requestedShadowMindEnabled = pendingNewSessionControl.shadowMindEnabled;
+    if (pendingControlKind === "materialization-failed") {
+      onPendingNewSessionEvent(newSessionCwd, { type: "RETRY" });
+    } else if (pendingControlKind === "staged") {
+      onPendingNewSessionEvent(newSessionCwd, { type: "START" });
+    }
+
+    const selectedModel = newSessionModelOverrideRef.current;
+    const selectedThinkingLevel = thinkingLevelOverrideRef.current ?? recommendedThinkingLevelRef.current;
+    if (selectedModel) setPendingModel(selectedModel);
+
+    let result: NewSessionMaterializationResult;
+    try {
+      result = await materializeNewSession({
+        ...(recoverySessionId
+          ? { operation: "finalize-existing" as const, sessionId: recoverySessionId }
+          : { operation: "create" as const }),
+        cwd: newSessionCwd,
+        toolNames: getToolNamesForPreset(toolPreset),
+        shadowMindEnabled: requestedShadowMindEnabled,
+        ...(selectedModel ? { model: selectedModel } : {}),
+        ...(selectedThinkingLevel ? { thinkingLevel: selectedThinkingLevel } : {}),
+      });
+    } catch (error) {
+      onPendingNewSessionEvent(newSessionCwd, {
+        type: "REQUEST_FAIL",
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+
+    const realId = result.sessionId;
+    sessionIdRef.current = realId;
+    if (result.kind === "materialization-failed") {
+      onPendingNewSessionEvent(newSessionCwd, {
+        type: "POST_START_FAIL",
+        sessionId: realId,
+        error: result.error,
+      });
+      throw new Error(result.error);
+    }
+
+    applyShadowRuntimeState(result);
+    if (result.kind === "initialization-failed") {
+      onPendingNewSessionEvent(newSessionCwd, {
+        type: "INIT_FAIL",
+        sessionId: realId,
+        error: result.error,
+      });
+    } else {
+      onPendingNewSessionEvent(newSessionCwd, { type: "READY", sessionId: realId });
+    }
+    if (result.model) {
+      setPendingModel(result.model);
+      if (!newSessionModelOverrideRef.current) modelSelectionActions.setNewSessionDefaultModel(result.model);
+    }
+    if (isThinkingLevel(result.thinkingLevel)) {
+      modelSelectionActions.setThinkingLevel(result.thinkingLevel);
+    }
+    await loadTools(realId);
+
+    if (result.kind === "initialization-failed") throw new Error(result.error);
+    return realId;
+  }, [applyShadowRuntimeState, isNew, loadTools, newSessionCwd, onPendingNewSessionEvent, pendingControlKind, pendingNewSessionControl, toolPreset]);
 
   const loadSlashCommands = useCallback(async () => {
-    const sid = sessionIdRef.current ?? await ensureNewSession();
+    const sid = await ensureNewSession();
     if (!sid) {
       setSlashCommands([]);
       return [] as SlashCommandInfo[];
@@ -880,6 +1150,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     throw new EventStreamConnectionError(result.status);
   }, [connectEvents]);
 
+  const sendExtensionUiResponse = useCallback(async (
+    request: ExtensionUiDialogRequest,
+    response: { value: string } | { confirmed: boolean } | { cancelled: true },
+  ) => {
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    await sendAgentCommand(sid, {
+      type: "extension_ui_response",
+      id: request.id,
+      ...response,
+    });
+  }, []);
+
   const respondToExtensionUi = useCallback(async (
     request: ExtensionUiDialogRequest,
     response: { value: string } | { confirmed: boolean } | { cancelled: true },
@@ -889,20 +1172,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (extensionDialogRef.current?.id === request.id) extensionDialogRef.current = null;
     if (!sid) return;
     try {
-      await sendAgentCommand(sid, {
-        type: "extension_ui_response",
-        id: request.id,
-        ...response,
-      });
+      await sendExtensionUiResponse(request, response);
     } catch (e) {
       console.error("Failed to send extension UI response:", e);
     }
     // dialog 已关闭：重新检查服务器状态 —— 扩展可能已恢复运行（保持流式），
     // 也可能确实结束（此时补一次结束判定，避免 UI 一直停在运行态）
     if (agentRunningRef.current) {
-      void waitForPromptSettlementRef.current?.(sid);
+      void reconcileAgentStateRef.current?.(sid, promptRunIdRef.current);
     }
-  }, []);
+  }, [sendExtensionUiResponse]);
 
   const sendExtensionCustomInput = useCallback(async (request: ExtensionUiCustomRequest, data: string) => {
     const sid = sessionIdRef.current;
@@ -918,21 +1197,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, []);
 
-  const addNotice = useCallback((notice: { id?: string; message: string; type?: NoticeType }) => {
-    const message = notice.message.trim();
-    if (!message) return;
-    dispatchNotice({
-      type: "add",
-      notice: {
-        id: notice.id ?? createNoticeId(),
-        message,
-        type: notice.type ?? "info",
-      },
-    });
-  }, []);
-
   const dismissNotice = useCallback((id: string) => {
-    dispatchNotice({ type: "remove", id });
+    dispatchNotice({ type: "remove", id, now: Date.now() });
   }, []);
 
   // Type something. 行内输入接力：见模块级 CUSTOM_ANSWER_ARM_MS 注释
@@ -941,7 +1207,122 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     pendingCustomAnswerRef.current = { prefix, text, expiresAt: Date.now() + CUSTOM_ANSWER_ARM_MS };
   }, []);
 
+  // 第三方 ask 插件在 RPC 模式下逐题发请求；先缓存请求，待用户完成复核后再按原顺序回送。
+  const queueAskQuestionnaireRequest = useCallback((request: ExtensionUiDialogRequest) => {
+    if (askQuestionnaireRequestIdsRef.current.has(request.id)) return;
+    askQuestionnaireRequestIdsRef.current.add(request.id);
+    const waiter = askQuestionnaireRequestWaiterRef.current;
+    if (waiter) {
+      askQuestionnaireRequestWaiterRef.current = null;
+      waiter.accept(request);
+    } else {
+      askQuestionnaireRequestQueueRef.current.push(request);
+    }
+  }, []);
+
+  const takeAskQuestionnaireRequest = useCallback((): Promise<ExtensionUiDialogRequest> => {
+    const queued = askQuestionnaireRequestQueueRef.current.shift();
+    if (queued) return Promise.resolve(queued);
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        askQuestionnaireRequestWaiterRef.current = null;
+        reject(new Error("等待下一题请求超时"));
+      }, 15_000);
+      const accept = (request: ExtensionUiDialogRequest) => {
+        clearTimeout(timeout);
+        resolve(request);
+      };
+      askQuestionnaireRequestWaiterRef.current = {
+        accept,
+        cancel: () => {
+          clearTimeout(timeout);
+          reject(new Error("ask 问卷已取消"));
+        },
+      };
+    });
+  }, []);
+
+  const clearAskQuestionnaire = useCallback(() => {
+    askQuestionnaireRequestQueueRef.current = [];
+    askQuestionnaireRequestIdsRef.current.clear();
+    askQuestionnaireRequestWaiterRef.current?.cancel();
+    askQuestionnaireRequestWaiterRef.current = null;
+    askQuestionnaireRef.current = null;
+    setAskQuestionnaire(null);
+  }, []);
+
+  const cancelAskQuestionnaire = useCallback(() => {
+    const currentRequest = askQuestionnaireRequestQueueRef.current.shift();
+    clearAskQuestionnaire();
+    if (currentRequest) {
+      void sendExtensionUiResponse(currentRequest, { cancelled: true }).catch((error) => {
+        console.error("取消 ask 问卷失败:", error);
+      });
+    }
+  }, [clearAskQuestionnaire, sendExtensionUiResponse]);
+
+  const submitAskQuestionnaire = useCallback(async (answers: AskQuestionnaireAnswer[]) => {
+    const questionnaire = askQuestionnaireRef.current;
+    if (!questionnaire || answers.length !== questionnaire.questions.length) return;
+    const markSubmitting = { ...questionnaire, submitting: true, error: undefined };
+    askQuestionnaireRef.current = markSubmitting;
+    setAskQuestionnaire(markSubmitting);
+
+    try {
+      for (let index = 0; index < answers.length; index++) {
+        const request = await takeAskQuestionnaireRequest();
+        const question = questionnaire.questions[index];
+        const answer = answers[index];
+
+        if (answer.kind === "custom") {
+          if (question.multiSelect) {
+            if (request.method !== "input") throw new Error("多选题请求类型无效");
+            await sendExtensionUiResponse(request, { value: answer.text });
+          } else {
+            if (request.method !== "select") throw new Error("自定义答案缺少选项请求");
+            const sentinel = request.options[request.options.length - 1];
+            await sendExtensionUiResponse(request, { value: sentinel });
+            const inputRequest = await takeAskQuestionnaireRequest();
+            if (inputRequest.method !== "input") throw new Error("自定义答案缺少输入请求");
+            await sendExtensionUiResponse(inputRequest, { value: answer.text });
+          }
+          continue;
+        }
+
+        if (question.multiSelect) {
+          if (request.method !== "input") throw new Error("多选题请求类型无效");
+          await sendExtensionUiResponse(request, {
+            value: answer.optionIndexes.map((value) => value + 1).join(","),
+          });
+        } else {
+          if (request.method !== "select") throw new Error("单选题请求类型无效");
+          const option = request.options[answer.optionIndexes[0]];
+          if (!option) throw new Error("未选择有效答案");
+          await sendExtensionUiResponse(request, { value: option });
+        }
+      }
+      clearAskQuestionnaire();
+    } catch (error) {
+      // 中止或工具已结束时不要让迟到的超时回调重新弹出已关闭问卷。
+      if (askQuestionnaireRef.current?.toolCallId !== questionnaire.toolCallId) return;
+      const failed = {
+        ...questionnaire,
+        submitting: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+      askQuestionnaireRef.current = failed;
+      setAskQuestionnaire(failed);
+    }
+  }, [clearAskQuestionnaire, sendExtensionUiResponse, takeAskQuestionnaireRequest]);
+
   const handleExtensionUiRequest = useCallback((request: ExtensionUiRequest) => {
+    if (
+      askQuestionnaireRef.current
+      && (request.method === "select" || request.method === "input")
+    ) {
+      queueAskQuestionnaireRequest(request);
+      return;
+    }
     switch (request.method) {
       case "select":
       case "confirm":
@@ -1004,7 +1385,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
         break;
     }
-  }, [addNotice, opts.chatInputRef, respondToExtensionUi]);
+  }, [addNotice, opts.chatInputRef, queueAskQuestionnaireRequest, respondToExtensionUi]);
 
   const cancelEventStreamGrace = useCallback(() => {
     eventStreamGraceGenerationRef.current += 1;
@@ -1014,85 +1395,90 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, []);
 
-  const finishPromptWithoutStream = useCallback(async (sid: string | null = sessionIdRef.current, runId?: number) => {
-    // Bail out before loadSession too: a stale finish for a previous run
-    // must not overwrite the messages of the run currently streaming.
-    if (runId !== undefined && promptRunIdRef.current !== runId) return;
-    cancelEventStreamGrace();
-    try {
-      if (sid) await loadSession(sid);
-    } finally {
-      if (runId !== undefined && promptRunIdRef.current !== runId) return;
-      const wasRunning = agentRunningRef.current;
-      agentRunningRef.current = false;
-      if (pendingDetachedSubagentIdsRef.current.size === 0) closeEvents();
-      optimisticUserMessageKeyRef.current = null;
-      if (!wasRunning) return;
-      setAgentRunning(false);
-      setAgentPhase(null);
-      setRetryInfo(null);
-      dispatch({ type: "end" });
-      onAgentEnd?.();
-    }
-  }, [cancelEventStreamGrace, closeEvents, loadSession, onAgentEnd]);
-
-  const scheduleEventStreamClose = useCallback((sid: string, runId?: number) => {
+  const scheduleEventStreamClose = useCallback((sid: string) => {
     cancelEventStreamGrace();
     const generation = eventStreamGraceGenerationRef.current;
-    const checkServerIdle = async () => {
-      if (generation !== eventStreamGraceGenerationRef.current || sessionIdRef.current !== sid) return;
-      try {
-        const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
-        if (!res.ok) return;
-        const data = await res.json() as { running?: boolean; state?: AgentStateResponse };
-        const state = data.state;
-        const subagentsActive = Boolean(state?.extensionStatuses?.some((status) => status.key === "subagents"));
-        const busy = Boolean(data.running && state && (state.isStreaming || state.isPromptRunning || state.isCompacting));
-        if (busy || subagentsActive || pendingDetachedSubagentIdsRef.current.size > 0) {
-          eventStreamGraceTimerRef.current = setTimeout(() => void checkServerIdle(), PROMPT_SETTLE_POLL_MS);
-          return;
-        }
-        await finishPromptWithoutStream(sid, runId);
-      } catch {
-        // 状态不可达时继续保留 SSE，避免后台完成消息无监听者。
-        eventStreamGraceTimerRef.current = setTimeout(() => void checkServerIdle(), PROMPT_SETTLE_POLL_MS);
-      }
-    };
-    eventStreamGraceTimerRef.current = setTimeout(() => void checkServerIdle(), EVENT_STREAM_IDLE_GRACE_MS);
-  }, [cancelEventStreamGrace, finishPromptWithoutStream]);
+    eventStreamGraceTimerRef.current = setTimeout(() => {
+      if (
+        generation === eventStreamGraceGenerationRef.current
+        && sessionIdRef.current === sid
+        && !agentRunningRef.current
+        && pendingDetachedSubagentIdsRef.current.size === 0
+        && !shadowLifecycleRef.current.hasActiveRuns
+      ) closeEvents();
+    }, EVENT_STREAM_IDLE_GRACE_MS);
+  }, [cancelEventStreamGrace, closeEvents]);
 
-  const settleIdleSession = useCallback((sid: string, runId?: number) => {
-    // 父轮结束只收口主代理 UI；detached 子代理由底部状态区独立展示。
-    void finishPromptWithoutStream(sid, runId);
-  }, [finishPromptWithoutStream]);
-
-  const waitForPromptSettlement = useCallback(async (sid: string, runId?: number) => {
-    await delay(PROMPT_SETTLE_INITIAL_DELAY_MS);
-    const startedAt = Date.now();
-
-    while (agentRunningRef.current && Date.now() - startedAt < PROMPT_SETTLE_MAX_MS) {
-      if (runId !== undefined && promptRunIdRef.current !== runId) return;
-      // 扩展 dialog（ask 弹窗）在等用户输入时，服务器视角的 prompt 可能已结束
-      // （prompt() resolve），但会话并未真正结束：用户响应后扩展会恢复。
-      // 此时结束 UI 会出现“弹窗还开着但会话已结束、没有 stop 按钮”的错乱。
-      if (extensionDialogRef.current) return;
-      try {
-        const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
-        if (res.ok) {
-          const data = await res.json() as { running?: boolean; state?: AgentStateResponse };
-          const state = data.state;
-          if (!data.running || !state || (!state.isStreaming && !state.isPromptRunning && !state.isCompacting)) {
-            settleIdleSession(sid, runId);
-            return;
-          }
-        }
-      } catch {
-        // SSE remains the primary completion path.
-      }
-      await delay(PROMPT_SETTLE_POLL_MS);
+  /** 本地发送、外部 agent_start 与挂载恢复统一从这里采用主运行。 */
+  const enterMainRun = useCallback((phase: AgentPhase): number => {
+    if (!agentRunningRef.current) {
+      const runId = promptRunIdRef.current + 1;
+      promptRunIdRef.current = runId;
+      beginRun(runId);
+      agentRunningRef.current = true;
     }
-  }, [settleIdleSession]);
-  waitForPromptSettlementRef.current = waitForPromptSettlement;
+    setAgentRunning(true);
+    setAgentPhase(phase);
+    dispatch({ type: "start" });
+    return promptRunIdRef.current;
+  }, [beginRun]);
+
+  const finishPromptWithoutStream = useCallback(async (sid: string | null = sessionIdRef.current, runId = promptRunIdRef.current) => {
+    // completion 控制器负责当前轮校验与重复 settled 拒绝。
+    if (!settleRun(runId, sid)) return;
+
+    // 服务端确认 idle 后立即发布完成事件；消息重载不能阻塞声音和系统通知。
+    agentRunningRef.current = false;
+    if (sid) scheduleEventStreamClose(sid);
+    optimisticUserMessageKeyRef.current = null;
+    setAgentRunning(false);
+    setAgentPhase(null);
+    setRetryInfo(null);
+    dispatch({ type: "end" });
+
+    if (sid) {
+      // 完成副作用已发布，最终消息同步作为独立刷新执行。
+      void loadSession(sid);
+    }
+  }, [loadSession, scheduleEventStreamClose, settleRun]);
+
+  const readAgentSnapshot = useCallback(async (sid: string): Promise<AgentRuntimeSnapshot | null> => {
+    try {
+      const response = await fetch(`/api/agent/${encodeURIComponent(sid)}`, { cache: "no-store" });
+      if (!response.ok) return null;
+      return await response.json() as AgentRuntimeSnapshot;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const applyAgentSnapshot = useCallback(async (
+    sid: string,
+    runId: number,
+    snapshot: AgentRuntimeSnapshot,
+  ) => {
+    if (sessionIdRef.current !== sid || promptRunIdRef.current !== runId) return;
+    applyRuntimeState(snapshot.state);
+
+    if (snapshot.busy) {
+      agentRunningRef.current = true;
+      setAgentRunning(true);
+      return;
+    }
+    // 扩展 UI 等待用户输入时 wrapper 可能暂时 idle，不能提前结束交互。
+    if (extensionDialogRef.current || askQuestionnaireRef.current || !agentRunningRef.current) return;
+    await finishPromptWithoutStream(sid, runId);
+  }, [applyRuntimeState, finishPromptWithoutStream]);
+
+  const reconcileAgentState = useCallback(async (sid: string, runId = promptRunIdRef.current) => {
+    const generation = reconcileRequestGenerationRef.current + 1;
+    reconcileRequestGenerationRef.current = generation;
+    const snapshot = await readAgentSnapshot(sid);
+    // 同一 run 的多个触发可能乱序返回，只允许最新请求提交状态。
+    if (generation !== reconcileRequestGenerationRef.current || !snapshot) return;
+    await applyAgentSnapshot(sid, runId, snapshot);
+  }, [applyAgentSnapshot, readAgentSnapshot]);
+  reconcileAgentStateRef.current = reconcileAgentState;
 
   const waitForBashSettlement = useCallback(async (sid: string) => {
     const recoveryId = bashRecoveryIdRef.current + 1;
@@ -1107,7 +1493,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       try {
         const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
         if (!res.ok) continue;
-        const data = await res.json() as { state?: AgentStateResponse };
+        const data = await res.json() as AgentRuntimeSnapshot;
         if (data.state?.isBashRunning) continue;
 
         await loadSession(sid);
@@ -1122,45 +1508,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [loadSession]);
 
-  // Reconcile client streaming state with the server. When SSE events are
-  // missed (network drop, mobile tab backgrounded, half-open connection),
-  // agent_end never arrives and the UI stays in streaming state forever.
-  // If the server reports idle while we still think it's running, finish
-  // through the same settlement path used by non-streaming prompts.
-  const reconcileAgentState = useCallback(async (sid: string) => {
-    if (!agentRunningRef.current) return;
-    const runId = promptRunIdRef.current;
-    try {
-      const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
-      if (!res.ok) return;
-      const data = await res.json() as { running?: boolean; state?: AgentStateResponse };
-      // A slow response can straddle a run boundary (previous run finished
-      // and the user already started the next one while this request was in
-      // flight) — everything in it is stale, drop it.
-      if (promptRunIdRef.current !== runId) return;
-      const state = data.state;
-      // Mirror compaction state unconditionally: a missed compaction_end
-      // would otherwise leave the "Stop compaction" UI stuck. No state
-      // (wrapper destroyed) means nothing is compacting.
-      setIsCompacting(state?.isCompacting ?? false);
-      setQueuedMessages(normalizeQueuedMessages(state?.queuedMessages));
-      const busy = data.running && state
-        && (state.isStreaming || state.isPromptRunning || state.isCompacting);
-      if (busy || !agentRunningRef.current) return;
-      // 扩展 dialog（ask 弹窗）等待用户输入时服务器可能已 idle，但会话并未
-      // 真正结束：此时结束 UI 会出现“弹窗还在但会话已结束、没有 stop”的错乱。
-      if (extensionDialogRef.current) return;
-      if (state) {
-        if (state.contextUsage !== undefined) setContextUsage(state.contextUsage ?? null);
-        if (state.systemPrompt !== undefined) setSystemPrompt(state.systemPrompt ?? null);
-        if (state.extensionStatuses !== undefined) setExtensionStatuses(state.extensionStatuses ?? []);
-        if (state.extensionWidgets !== undefined) setExtensionWidgets(state.extensionWidgets ?? []);
-      }
-      settleIdleSession(sid, runId);
-    } catch {
-      // Network still down — the next poll / visibility / online tick retries.
-    }
-  }, [settleIdleSession]);
 
   // Recovery net for missed SSE events: while the agent is running, verify
   // against the server periodically and whenever the tab returns to the
@@ -1194,13 +1541,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     switch (event.type) {
       case "agent_start":
         cancelEventStreamGrace();
-        agentRunningRef.current = true;
         // 新一轮运行开始：重置流式消息计数（message_end 的 updater 会重新累计）。
         lastStreamedMessageCountRef.current = 0;
-        setAgentRunning(true);
-        setAgentPhase({ kind: "waiting_model" });
-        dispatch({ type: "start" });
+        enterMainRun({ kind: "waiting_model" });
         break;
+      case "entry_appended": {
+        const sid = sessionIdRef.current;
+        if (!sid) break;
+        const entry = event.entry as SessionEntry | undefined;
+        consumeShadowEntry(entry);
+        const lifecycle = shadowLifecycleRef.current.consume(entry);
+        if (lifecycle.changed) {
+          if (lifecycle.hasActiveRuns) cancelEventStreamGrace();
+          scheduleContextRefresh(sid);
+          if (!agentRunningRef.current && !lifecycle.hasActiveRuns) scheduleEventStreamClose(sid);
+        }
+        break;
+      }
       case "agent_end":
         // One logical prompt can emit multiple agent_end events before retrying,
         // compacting, or continuing messages queued by extension handlers.
@@ -1216,31 +1573,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
         onSessionListRefresh?.();
         if (sessionIdRef.current) {
-          // 流式完整（服务端权威消息数已知且本地已收齐）时跳过全量 context 重载：
-          // 省一次 .jsonl 全量解析与消息对象重建（避免整列表重渲染）；
-          // SSE 丢帧/断线时本地数量不足，仍走 loadSession 兜底。
-          const authoritativeCount = (event as { messageCount?: number }).messageCount;
-          if (authoritativeCount === undefined || lastStreamedMessageCountRef.current < authoritativeCount) {
-            loadSession(sessionIdRef.current);
-          }
-          fetch(`/api/agent/${encodeURIComponent(sessionIdRef.current)}`)
-            .then((r) => r.json())
-            .then((d: { state?: AgentStateResponse }) => {
-              if (d.state?.contextUsage !== undefined) setContextUsage(d.state.contextUsage ?? null);
-              if (d.state?.systemPrompt !== undefined) setSystemPrompt(d.state.systemPrompt ?? null);
-              if (d.state?.extensionStatuses !== undefined) setExtensionStatuses(d.state.extensionStatuses ?? []);
-              if (d.state?.extensionWidgets !== undefined) setExtensionWidgets(d.state.extensionWidgets ?? []);
-              // Aborted turns can leave messages queued in pi (delivered with the
-              // next turn); dead wrapper (no state) means the queue is gone.
-              setQueuedMessages(normalizeQueuedMessages(d.state?.queuedMessages));
-            })
-            .catch(() => {});
+          // 结束事件后始终从服务端重新读取最终上下文，不能仅依据本地 messageCount 跳过；
+          // SSE 可能丢失最后一段 message_end，刷新页面才会暴露这个问题。
+          invalidateSessionContext(sessionIdRef.current);
+          void loadSession(sessionIdRef.current);
+          void reconcileAgentState(sessionIdRef.current, promptRunIdRef.current);
         }
         break;
       case "agent_settled":
       case "prompt_done":
         if (!agentRunningRef.current || !sessionIdRef.current) break;
-        settleIdleSession(sessionIdRef.current, promptRunIdRef.current);
+        void reconcileAgentState(sessionIdRef.current, promptRunIdRef.current);
         break;
       case "prompt_error":
         addNotice({ type: "error", message: (event.errorMessage as string | undefined) ?? "Command failed" });
@@ -1266,7 +1609,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           break;
         }
         if (msg) {
-          dispatch({ type: "update", message: normalizeToolCalls(msg as AgentMessage) });
+          dispatch({ type: "update", message: normalizeAssistantMessage(msg as AgentMessage) });
         }
         setAgentPhase(null);
         break;
@@ -1307,7 +1650,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (completed && completed.role === "user") {
           // SDK 为了展开 inline skill 会把命令整理到前缀；展示层保留发送前的原始输入。
           // 仅替换仍紧邻末尾的乐观消息，队列消息在首轮 message_end 后会正常追加。
-          const delivered = normalizeToolCalls(completed);
+          const delivered = normalizeAssistantMessage(completed);
           const deliveredKey = userMessageKey(delivered);
           const optimisticKey = optimisticUserMessageKeyRef.current;
           optimisticUserMessageKeyRef.current = null;
@@ -1324,7 +1667,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           });
         } else if (completed) {
           setMessages((prev) => {
-            const next = [...prev, normalizeToolCalls(completed)];
+            const next = [...prev, normalizeAssistantMessage(completed)];
             lastStreamedMessageCountRef.current = next.length;
             return next;
           });
@@ -1336,6 +1679,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "tool_execution_start": {
         const id = event.toolCallId as string;
         const name = event.toolName as string;
+        if (name === "ask_user_question") {
+          const questions = parseAskQuestionnaire(event.args);
+          if (questions) {
+            const questionnaire = { toolCallId: id, questions, submitting: false };
+            askQuestionnaireRequestQueueRef.current = [];
+            askQuestionnaireRequestIdsRef.current.clear();
+            askQuestionnaireRef.current = questionnaire;
+            setAskQuestionnaire(questionnaire);
+          }
+        }
         setAgentPhase((prev) => {
           const tools = prev?.kind === "running_tools" ? [...prev.tools] : [];
           if (!tools.some((t) => t.id === id)) tools.push({ id, name });
@@ -1345,6 +1698,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       case "tool_execution_end": {
         const id = event.toolCallId as string;
+        if (askQuestionnaireRef.current?.toolCallId === id) clearAskQuestionnaire();
         setAgentPhase((prev) => {
           if (prev?.kind !== "running_tools") return prev;
           const tools = prev.tools.filter((t) => t.id !== id);
@@ -1391,11 +1745,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "extension_ui_request":
         handleExtensionUiRequest(event as ExtensionUiRequest);
         break;
+      case "extension_ui_closed": {
+        const id = event.id as string;
+        setExtensionDialog((current) => current?.id === id ? null : current);
+        if (extensionDialogRef.current?.id === id) extensionDialogRef.current = null;
+        if (askQuestionnaireRequestIdsRef.current.has(id)) clearAskQuestionnaire();
+        break;
+      }
     }
-  }, [addNotice, cancelEventStreamGrace, handleExtensionUiRequest, loadCompactedSession, loadSession, onSessionListRefresh, scheduleEventStreamClose, settleIdleSession]);
+  }, [addNotice, cancelEventStreamGrace, clearAskQuestionnaire, consumeShadowEntry, enterMainRun, handleExtensionUiRequest, loadCompactedSession, loadSession, onSessionListRefresh, reconcileAgentState, scheduleContextRefresh, scheduleEventStreamClose]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
+    backfillRequestRef.current.controller?.abort();
+    backfillRequestRef.current.generation += 1;
+    const requestSessionId = sessionIdRef.current ?? session?.id ?? null;
+    if (requestSessionId) invalidateSessionContext(requestSessionId);
     const trimmedMessage = message.trim();
     if (!trimmedMessage && !images?.length) return false;
     // UI 状态可能晚于异步扩展启动的 agent_start；此时不可吞掉用户输入。
@@ -1425,7 +1790,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       await executeBashRef.current?.(bashCmd, isExcluded);
       return true;
     }
-    const promptRunId = promptRunIdRef.current + 1;
 
     const imageBlocks = images?.map((img) => ({ type: "image" as const, source: { type: "base64" as const, media_type: img.mimeType, data: img.data } }));
     const userMsg: AgentMessage = {
@@ -1437,11 +1801,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     };
     setMessages((prev) => [...prev, userMsg]);
     optimisticUserMessageKeyRef.current = userMessageKey(userMsg);
-    promptRunIdRef.current = promptRunId;
-    agentRunningRef.current = true;
-    setAgentRunning(true);
-    setAgentPhase(isSlashCommandPrompt ? { kind: "running_command" } : { kind: "waiting_model" });
-    dispatch({ type: "start" });
+    const promptRunId = enterMainRun(isSlashCommandPrompt ? { kind: "running_command" } : { kind: "waiting_model" });
     pendingScrollToUserRef.current = true;
     completionScrollAllowedRef.current = true;
 
@@ -1452,14 +1812,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     try {
       if (isNew && newSessionCwd) {
         const selectedModel = newSessionModel;
-        const existingSid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
-        const sid = existingSid ?? await ensureNewSession();
+        const alreadyMaterialized = pendingControlKind === "materialized";
+        const sid = await ensureNewSession();
 
         if (sid) {
           sentSessionId = sid;
           if (selectedModel) {
             setPendingModel(selectedModel);
-            if (existingSid) {
+            if (alreadyMaterialized) {
               await sendAgentCommand(sid, { type: "set_model", provider: selectedModel.provider, modelId: selectedModel.modelId });
             }
           }
@@ -1470,6 +1830,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             message,
             ...(piImages?.length ? { images: piImages } : {}),
           });
+          try {
+            const runtimeState = await sendAgentCommand<AgentRuntimeState>(sid, { type: "get_state" });
+            if (runtimeState.model && isThinkingLevel(runtimeState.thinkingLevel)) {
+              void recordThinkingLevelPreference(runtimeState.model.id, runtimeState.thinkingLevel);
+            }
+          } catch (preferenceError) {
+            console.error("[pi-web] 获取思考强度实际值失败:", preferenceError);
+          }
           promoteNewSession(1, message);
         }
       } else if (session) {
@@ -1483,7 +1851,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
       }
       if (isSlashCommandPrompt && sentSessionId) {
-        void waitForPromptSettlement(sentSessionId, promptRunId);
+        void reconcileAgentState(sentSessionId, promptRunId);
       }
       return Boolean(sentSessionId);
     } catch (e) {
@@ -1491,7 +1859,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // before the response connection was lost. Keep SSE alive until the
       // server confirms idle so a real run cannot continue unseen.
       if (promptRequestStarted && sentSessionId) {
-        void waitForPromptSettlement(sentSessionId, promptRunId);
+        void reconcileAgentState(sentSessionId, promptRunId);
         // 请求已发出但响应失败时，服务端可能已受理；保留原有的乐观提交行为。
         return true;
       }
@@ -1511,7 +1879,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // The prompt never reached the agent, so restore the user's text into
         // the input instead of losing it. Mirrors the shell-command recovery in
         // executeBash; insertIfEmpty avoids clobbering anything typed since.
-        if (message) opts.chatInputRef?.current?.insertIfEmpty(message);
+        if (message && sessionIdRef.current === requestSessionId) opts.chatInputRef?.current?.insertIfEmpty(message);
       }
       optimisticUserMessageKeyRef.current = null;
       setAgentRunning(false);
@@ -1519,7 +1887,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       dispatch({ type: "end" });
       return false;
     }
-  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, closeEvents, onSessionListRefresh, opts.chatInputRef]);
+  }, [addNotice, closeEvents, ensureEventsConnected, ensureNewSession, enterMainRun, isNew, newSessionCwd, newSessionModel, onSessionListRefresh, opts.chatInputRef, promoteNewSession, reconcileAgentState, session]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
     if (agentRunningRef.current || bashRunningRef.current) return;
@@ -1528,7 +1896,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setPendingBash({ command, excludeFromContext });
     setBashRunning(true);
     try {
-      const sid = sessionIdRef.current ?? session?.id ?? await ensureNewSession();
+      const sid = await ensureNewSession();
       if (!sid) throw new Error("Unable to create a session for the shell command");
       await sendAgentCommand(sid, {
         type: "bash",
@@ -1563,14 +1931,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // 中止会话后不再等待用户输入，关闭挂起的 dialog 弹窗
     setExtensionDialog(null);
     extensionDialogRef.current = null;
+    clearAskQuestionnaire();
     try {
       await sendAgentCommand(sid, { type: "abort" });
     } catch (e) {
       console.error("Failed to abort:", e);
     }
-  }, []);
+  }, [clearAskQuestionnaire]);
 
-  const handleFork = useCallback(async (entryId: string) => {
+  const handleFork = useCallback(async (entryId: string, draft?: ChatDraft) => {
     if (bashRunningRef.current) return;
     const sid = sessionIdRef.current;
     if (!sid) return;
@@ -1582,6 +1951,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       });
       const { cancelled, newSessionId } = result ?? {};
       if (!cancelled && newSessionId) {
+        if (draft) setDraft(newSessionId, draft);
         onSessionForked?.(newSessionId);
       }
     } catch (e) {
@@ -1591,33 +1961,50 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [onSessionForked]);
 
-  const handleNavigate = useCallback(async (entryId: string) => {
-    if (bashRunningRef.current) return;
-    const sid = sessionIdRef.current;
-    if (!sid) return;
-    sendAgentCommand(sid, { type: "navigate_tree", targetId: entryId }).catch(() => {});
-    setActiveLeafId(entryId);
-    await loadContext(sid, entryId);
+  const navigateToLeaf = useCallback((sid: string, leafId: string | null): Promise<void> => {
+    const generation = navigationSequenceRef.current + 1;
+    navigationSequenceRef.current = generation;
+    navigationGenerationRef.current.set(sid, generation);
+    const previous = navigationChainRef.current.get(sid) ?? Promise.resolve();
+    const baseOperation = previous.then(async () => {
+      if (navigationGenerationRef.current.get(sid) !== generation || sessionIdRef.current !== sid) return;
+      if (leafId) await sendAgentCommand(sid, { type: "navigate_tree", targetId: leafId });
+      if (navigationGenerationRef.current.get(sid) !== generation || sessionIdRef.current !== sid) return;
+      await loadContext(sid, leafId);
+    }).catch((error) => {
+      if (navigationGenerationRef.current.get(sid) === generation) console.error("Failed to navigate session:", error);
+    });
+    const operation = baseOperation.finally(() => {
+      if (navigationChainRef.current.get(sid) !== operation) return;
+      navigationChainRef.current.delete(sid);
+      navigationGenerationRef.current.delete(sid);
+    });
+    navigationChainRef.current.set(sid, operation);
+    return operation;
   }, [loadContext]);
-
   const handleLeafChange = useCallback(async (leafId: string | null) => {
     if (bashRunningRef.current) return;
-    setActiveLeafId(leafId);
     const sid = sessionIdRef.current;
     if (!sid) return;
-    await loadContext(sid, leafId);
-    if (leafId) {
-      sendAgentCommand(sid, { type: "navigate_tree", targetId: leafId }).catch(() => {});
-    }
-  }, [loadContext]);
+    await navigateToLeaf(sid, leafId);
+  }, [navigateToLeaf]);
 
   const handleModelChange = useCallback(async (provider: string, modelId: string) => {
     if (isNew) {
+      if (creationSettingsLocked) return;
       const selectedModel = { provider, modelId };
       newSessionModelOverrideRef.current = selectedModel;
-      setNewSessionModel(selectedModel);
+      if (newSessionCwd) onPendingNewSessionEvent(newSessionCwd, { type: "SET_MODEL", model: selectedModel });
+      const selection = await modelSelectionActions.selectNewSessionModel(
+        selectedModel,
+        thinkingLevelOverrideRef.current === null,
+      );
+      if (!selection.committed || newSessionModelOverrideRef.current !== selectedModel) return;
+      if (thinkingLevelOverrideRef.current === null) {
+        recommendedThinkingLevelRef.current = selection.preferredThinking ?? null;
+      }
       setPendingModel(selectedModel);
-      const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
+      const sid = sessionIdRef.current;
       if (!sid) return;
       try {
         await sendAgentCommand(sid, { type: "set_model", provider, modelId });
@@ -1634,7 +2021,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch (e) {
       console.error("Failed to set model:", e);
     }
-  }, [isNew, setNewSessionModel]);
+  }, [creationSettingsLocked, isNew, modelSelectionActions, newSessionCwd, onPendingNewSessionEvent]);
 
   const handleCompact = useCallback(async () => {
     const sid = sessionIdRef.current;
@@ -1655,32 +2042,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [isCompacting, loadCompactedSession]);
 
   const loadModels = useCallback(async (signal?: AbortSignal) => {
-    const modelCwd = newSessionCwd ?? session?.cwd ?? "";
-    const modelsUrl = modelCwd ? `/api/models?cwd=${encodeURIComponent(modelCwd)}` : "/api/models";
-    const res = await fetch(modelsUrl, signal ? { signal } : undefined);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const d = await res.json() as ModelsResponse;
-    setModelNames(d.models);
-    setModelError(d.modelError ?? null);
-    setModelScopeWarnings(d.modelScopeWarnings ?? []);
-    setModelThinkingLevels(d.thinkingLevels ?? {});
-    setModelThinkingLevelMaps(d.thinkingLevelMaps ?? {});
-    const nextModelList = d.modelList ?? [];
-    setModelList(nextModelList);
+    const preferredThinking = await modelSelectionActions.load({
+      cwd: newSessionCwd ?? session?.cwd ?? "",
+      initializeNewSession: isNew && !sessionIdRef.current,
+      applyPinnedThinking: thinkingLevelOverrideRef.current === null,
+      signal,
+    });
     if (isNew && !sessionIdRef.current) {
-      const match = d.defaultModel
-        ? nextModelList.find((m) => m.id === d.defaultModel?.modelId && m.provider === d.defaultModel?.provider)
-        : undefined;
-      const displayModel = match ?? nextModelList[0];
-      setNewSessionDefaultModel(displayModel ? { provider: displayModel.provider, modelId: displayModel.id } : null);
-      // An `enabledModels` pattern may pin a thinking level (`anthropic/*:high`).
-      // Like pi, apply it to the model a new session starts with.
-      const pinned = displayModel && d.thinkingLevelPins?.[`${displayModel.provider}/${displayModel.id}`];
       if (thinkingLevelOverrideRef.current === null) {
-        setThinkingLevel((pinned as ThinkingLevelOption | undefined) ?? "auto");
+        recommendedThinkingLevelRef.current = preferredThinking ?? null;
       }
     }
-  }, [isNew, newSessionCwd, session?.cwd]);
+  }, [isNew, modelSelectionActions, newSessionCwd, session?.cwd]);
+
 
   const handleBuiltinSlashCommand = useCallback(async (text: string): Promise<BuiltinSlashCommandResult> => {
     if (!text.startsWith("/")) return { handled: false };
@@ -1689,7 +2063,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
     const [, commandName, rawArgs = ""] = match;
     const args = rawArgs.trim();
-    const sid = sessionIdRef.current ?? await ensureNewSession();
+    const sid = await ensureNewSession();
     const complete = (result: BuiltinSlashCommandResult): BuiltinSlashCommandResult => {
       if (!result.handled) return result;
       if (result.error) {
@@ -1732,7 +2106,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (!sid) return complete({ handled: true, error: "No active session to name" });
           if (!args) return complete({ handled: true, error: "Usage: /name <name>" });
           await sendAgentCommand(sid, { type: "set_session_name", name: args });
-          if (await loadSession(sid)) promoteNewSession();
+          if ((await loadSession(sid)).loaded) promoteNewSession();
           return complete({ handled: true, message: `Session renamed to ${args}` });
         }
 
@@ -1744,6 +2118,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           }
           onSessionStatsPanelOpen?.();
           return complete({ handled: true, action: "openSessionStats" });
+        }
+
+        case "shadow": {
+          const shadowResult = await runShadowSlashCommand(text, sid);
+          if (!shadowResult.handled) return { handled: false };
+          if (!shadowResult.success) return complete({ handled: true, error: shadowResult.error });
+          return complete({ handled: true, message: shadowResult.message });
         }
 
         case "copy": {
@@ -1763,61 +2144,37 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       if (commandName === "compact") setIsCompacting(false);
     }
-  }, [addNotice, ensureNewSession, isCompacting, loadCompactedSession, loadModels, loadSession, loadSlashCommands, loadTools, promoteNewSession, onSessionStatsPanelOpen]);
+  }, [addNotice, ensureNewSession, isCompacting, loadCompactedSession, loadModels, loadSession, loadSlashCommands, loadTools, promoteNewSession, onSessionStatsPanelOpen, runShadowSlashCommand]);
 
-  // Queued (undelivered) messages live in the queue panel only; the chat gets
-  // the real user message when pi delivers it (user message_end event). An
-  // optimistic chat bubble here would duplicate the queue panel and turn into
-  // a ghost message if the queue is recalled.
-  const handleSteer = useCallback(async (message: string, images?: AttachedImage[]) => {
-    const sid = sessionIdRef.current;
-    if (!sid) return;
-    const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
-    try {
-      await sendAgentCommand(sid, {
-        type: "steer",
-        message,
-        ...(piImages?.length ? { images: piImages } : {}),
-      });
-    } catch (e) {
-      console.error("Failed to steer:", e);
-    }
-  }, []);
-
-  const handlePromptWithStreamingBehavior = useCallback(async (
+  // 运行中提交统一走确认式契约：只有服务端确认 Pi 已接受后才允许输入框清空。
+  // 斜杠命令需要保留 prompt 的模板展开语义，普通文本则使用原生 steer/followUp 队列。
+  const handleQueuedSubmit = useCallback(async (
     message: string,
-    behavior: "steer" | "followUp",
-    images?: AttachedImage[],
-  ) => {
+    mode: "steer" | "followUp",
+  ): Promise<boolean> => {
     const sid = sessionIdRef.current;
-    if (!sid) return;
-    const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
-    try {
-      await sendAgentCommand(sid, {
-        type: "prompt",
-        message,
-        streamingBehavior: behavior,
-        ...(piImages?.length ? { images: piImages } : {}),
-      });
-    } catch (e) {
-      console.error("Failed to queue prompt:", e);
+    if (!sid) {
+      addNotice({ type: "error", message: "当前会话尚未就绪，消息未发送" });
+      return false;
     }
-  }, []);
-
-  const handleFollowUp = useCallback(async (message: string, images?: AttachedImage[]) => {
-    const sid = sessionIdRef.current;
-    if (!sid) return;
-    const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
-    try {
-      await sendAgentCommand(sid, {
-        type: "follow_up",
-        message,
-        ...(piImages?.length ? { images: piImages } : {}),
-      });
-    } catch (e) {
-      console.error("Failed to follow up:", e);
+    const shadowResult = await runShadowSlashCommand(message, sid);
+    if (shadowResult.handled) {
+      if (!shadowResult.success) addNotice({ type: "error", message: shadowResult.error });
+      return shadowResult.success;
     }
-  }, []);
+    const command = message.startsWith("/")
+      ? { type: "prompt", message, streamingBehavior: mode }
+      : { type: mode === "steer" ? "steer" : "follow_up", message };
+    try {
+      const acknowledgement = await sendAgentCommand<AgentSubmitAcknowledgement>(sid, command);
+      if (!acknowledgement?.accepted) throw new Error("服务端未确认接收消息");
+      return true;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      addNotice({ type: "error", message: `消息发送失败，输入已保留：${detail}` });
+      return false;
+    }
+  }, [addNotice, runShadowSlashCommand]);
 
   const handleAbortCompaction = useCallback(async () => {
     const sid = sessionIdRef.current;
@@ -1848,33 +2205,53 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [opts.chatInputRef, addNotice]);
 
   const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption) => {
-    setThinkingLevel(level);
+    if (creationSettingsLocked) return;
+    modelSelectionActions.setThinkingLevel(level);
     if (isNew && !sessionIdRef.current) {
       thinkingLevelOverrideRef.current = level === "auto" ? null : level;
+      if (newSessionCwd) onPendingNewSessionEvent(newSessionCwd, { type: "SET_THINKING_LEVEL", level });
+      recommendedThinkingLevelRef.current = null;
     }
     if (level === "auto") return; // "auto" leaves pi's current setting untouched
-    const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
+    const sid = sessionIdRef.current;
     if (!sid) return;
     try {
       await sendAgentCommand(sid, { type: "set_thinking_level", level });
     } catch (e) {
       console.error("Failed to set thinking level:", e);
     }
-  }, [isNew]);
+  }, [creationSettingsLocked, isNew, modelSelectionActions, newSessionCwd, onPendingNewSessionEvent]);
+
 
   const handleToolPresetChange = useCallback(async (preset: "none" | "default" | "full") => {
+    if (creationSettingsLocked) return;
     const toolNames = getToolNamesForPreset(preset);
     setToolPresetState(preset);
-    const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
+    const sid = sessionIdRef.current;
     if (!sid) return;
     try {
       await sendAgentCommand(sid, { type: "set_tools", toolNames });
     } catch (e) {
       console.error("Failed to set tools:", e);
     }
-  }, [setToolPresetState]);
+  }, [creationSettingsLocked, setToolPresetState]);
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
+    const container = scrollContainerRef.current;
+    if (behavior === "instant" && container) {
+      // 使用容器相对坐标定位，避免永久修改滚动容器布局。
+      const lastMessage = lastRenderedMessageRef.current;
+      if (lastMessage) {
+        const containerRect = container.getBoundingClientRect();
+        const messageRect = lastMessage.getBoundingClientRect();
+        const desiredTop = container.scrollTop + messageRect.top - containerRect.top - (container.clientHeight - messageRect.height) / 2;
+        const maxTop = Math.max(0, container.scrollHeight - container.clientHeight);
+        container.scrollTop = Math.max(0, Math.min(desiredTop, maxTop));
+      } else {
+        container.scrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+      }
+      return;
+    }
     ignoreProgrammaticScrollUntilRef.current = Date.now() + PROGRAMMATIC_SCROLL_IGNORE_MS;
     messagesEndRef.current?.scrollIntoView({ behavior, block: "end" });
   }, []);
@@ -1907,19 +2284,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   useEffect(() => {
     if (session) {
       sessionIdRef.current = session.id;
-      loadSession(session.id, true, true).then((agentState) => {
-        if (agentState?.running) {
+      void connectEvents(session.id);
+      loadSession(session.id, true, true).then(({ agentState }) => {
+        if (agentState?.alive) {
           loadTools(session.id);
-          if (agentState.state?.isStreaming || agentState.state?.isPromptRunning || agentState.state?.isCompacting) {
+          const runtimeState = agentState.state;
+          if (agentState.busy && runtimeState && !runtimeState.isBashRunning) {
             pendingScrollToRunningEndRef.current = true;
-            agentRunningRef.current = true;
-            setAgentRunning(true);
-            setAgentPhase(agentState.state.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
-            dispatch({ type: "start" });
+            enterMainRun(runtimeState.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
             void connectEvents(session.id);
-            if (!agentState.state.isStreaming && (agentState.state.isPromptRunning || agentState.state.isCompacting)) {
-              void waitForPromptSettlement(session.id);
-            }
           }
           if (agentState.state?.isBashRunning) {
             bashRunningRef.current = true;
@@ -1927,22 +2300,45 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             void waitForBashSettlement(session.id);
           }
         }
-        if (agentState?.state) {
-          if (agentState.state.isCompacting !== undefined) setIsCompacting(agentState.state.isCompacting);
-          if (agentState.state.contextUsage !== undefined) setContextUsage(agentState.state.contextUsage ?? null);
-          if (agentState.state.systemPrompt !== undefined) setSystemPrompt(agentState.state.systemPrompt ?? null);
-          if (agentState.state.thinkingLevel !== undefined) setThinkingLevel((agentState.state.thinkingLevel as ThinkingLevelOption) ?? "auto");
-          if (agentState.state.extensionStatuses !== undefined) setExtensionStatuses(agentState.state.extensionStatuses ?? []);
-          if (agentState.state.extensionWidgets !== undefined) setExtensionWidgets(agentState.state.extensionWidgets ?? []);
-          if (agentState.state.queuedMessages !== undefined) setQueuedMessages(normalizeQueuedMessages(agentState.state.queuedMessages));
-        }
         if (!agentRunningRef.current && pendingDetachedSubagentIdsRef.current.size > 0) {
           // 刷新后只恢复后台监听，不能把 detached 子代理显示成主代理思考。
           void connectEvents(session.id);
         }
       });
+    } else if (materializedNewSessionId) {
+      sessionIdRef.current = materializedNewSessionId;
+      void connectEvents(materializedNewSessionId);
+      const controller = new AbortController();
+      runtimeStateRequestRef.current = controller;
+      void fetchRuntimeState(materializedNewSessionId, controller.signal)
+        .then((snapshot) => {
+          if (sessionIdRef.current === materializedNewSessionId) applyRuntimeState(snapshot.state);
+        })
+        .catch((error: unknown) => {
+          if (!(error instanceof DOMException && error.name === "AbortError")) {
+            console.error("恢复待发送会话 runtime 状态失败:", error);
+          }
+        });
     }
     return () => {
+      const sid = sessionIdRef.current;
+      if (sid) {
+        contextLoaderRef.current.cancel(sid);
+        contextRefreshSchedulerRef.current.cancel(sid);
+        shadowLifecycleRef.current.reset();
+        navigationSequenceRef.current += 1;
+        navigationGenerationRef.current.set(sid, navigationSequenceRef.current);
+        if (!navigationChainRef.current.has(sid)) navigationGenerationRef.current.delete(sid);
+      }
+      backfillRequestRef.current.controller?.abort();
+      backfillRequestRef.current.generation += 1;
+      detailsRequestRef.current = {
+        generation: detailsRequestRef.current.generation + 1,
+        controller: null,
+      };
+      runtimeStateRequestRef.current?.abort();
+      runtimeStateRequestRef.current = null;
+      clearAskQuestionnaire();
       bashRecoveryIdRef.current += 1;
       closeEvents();
     };
@@ -1955,8 +2351,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   useEffect(() => {
     if (!onBranchDataChange) return;
-    onBranchDataChange(data?.tree ?? [], activeLeafId, handleLeafChange);
-  }, [data?.tree, activeLeafId, handleLeafChange, onBranchDataChange]);
+    onBranchDataChange(details?.tree ?? [], activeLeafId, handleLeafChange);
+  }, [details?.tree, activeLeafId, handleLeafChange, onBranchDataChange]);
 
   useEffect(() => {
     window.addEventListener("keydown", markUserScrollIntent);
@@ -1981,8 +2377,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [messages.length, loading, handleScrollPositionChange, markUserScrollIntent]);
 
   useEffect(() => {
-    if (messages.length > 0) {
-      if (pendingScrollToUserRef.current) {
+    if (messages.length === 0) return;
+    const frame = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+      if (pendingInitialScrollRef.current) {
+        pendingInitialScrollRef.current = false;
+        initialScrollDoneRef.current = true;
+        scrollToBottom("instant");
+      } else if (pendingScrollToUserRef.current) {
         pendingScrollToUserRef.current = false;
         initialScrollDoneRef.current = true;
         scrollUserMsgToTop();
@@ -1996,15 +2398,29 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       } else if (!agentRunningRef.current && completionScrollAllowedRef.current) {
         scrollToBottom("smooth");
       }
+      });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [scrollGeneration, agentRunning, scrollToBottom, scrollUserMsgToTop]);
+
+  // 用户停留在底部时，流式消息增长自动跟随；用户上翻后不抢夺滚动位置。
+  const streamingContentVersion = streamState.streamingMessage
+    ? JSON.stringify((streamState.streamingMessage as { content?: unknown }).content ?? "")
+    : "";
+  useEffect(() => {
+    if (!agentRunningRef.current || !streamState.isStreaming) return;
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const distanceToBottom = container.scrollHeight - container.clientHeight - container.scrollTop;
+    if (distanceToBottom <= 48) {
+      container.scrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
     }
-  }, [messages.length, agentRunning, scrollToBottom, scrollUserMsgToTop]);
+  }, [streamState.isStreaming, streamingContentVersion]);
 
   // Load model list
   useEffect(() => {
     const controller = new AbortController();
-    loadModels(controller.signal).catch((e) => {
-      if (e instanceof DOMException && e.name === "AbortError") return;
-    });
+    void loadModels(controller.signal);
     return () => controller.abort();
   }, [loadModels, modelsRefreshKey]);
 
@@ -2016,18 +2432,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   useEffect(() => {
     if (noticeState.visible.length === 0) return;
+
     const exiting = noticeState.visible.find((notice) => notice.exiting);
     if (exiting) {
       const t = setTimeout(() => {
-        dispatchNotice({ type: "remove", id: exiting.id });
+        dispatchNotice({ type: "remove", id: exiting.id, now: Date.now() });
       }, NOTICE_EXIT_ANIMATION_MS);
       return () => clearTimeout(t);
     }
-    const oldest = noticeState.visible[0];
-    if (!oldest) return;
+
+    const now = Date.now();
+    const nextExpiryAt = Math.min(...noticeState.visible.map((notice) => (
+      (notice.shownAt ?? now) + NOTICE_VISIBLE_MS
+    )));
     const t = setTimeout(() => {
-      dispatchNotice({ type: "mark_oldest_exiting" });
-    }, NOTICE_VISIBLE_MS);
+      dispatchNotice({ type: "mark_expired", now: Date.now() });
+    }, Math.max(0, nextExpiryAt - now));
     return () => clearTimeout(t);
   }, [noticeState.visible]);
 
@@ -2035,48 +2455,75 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setSessionStatsOverride(null);
   }, [messages.length, contextUsage?.tokens, contextUsage?.percent, contextUsage?.contextWindow]);
 
+
+  const modelViewState = useMemo<ModelSelectionViewState>(() => {
+    const modelKey = displayModel
+      ? `${displayModel.provider}:${displayModel.modelId}`
+      : null;
+    return {
+      names: modelNames,
+      list: modelList,
+      error: modelError,
+      scopeWarnings: modelScopeWarnings,
+      dataDiagnostics: modelDataDiagnostics,
+      thinkingLevel,
+      model: displayModel,
+      isAutoModelSelection: isNew && newSessionModel === null,
+      availableThinkingLevels: modelKey ? (modelThinkingLevels[modelKey] ?? null) : null,
+      thinkingLevelMap: modelKey ? (modelThinkingLevelMaps[modelKey] ?? null) : null,
+    };
+  }, [
+    displayModel, isNew, modelDataDiagnostics, modelError, modelList, modelNames,
+    modelScopeWarnings, modelThinkingLevelMaps, modelThinkingLevels, newSessionModel, thinkingLevel,
+  ]);
+
+  const modelViewActions = useMemo<ModelSelectionViewActions>(() => ({
+    ...(session || isNew ? {
+      changeModel: handleModelChange,
+      changeThinkingLevel: handleThinkingLevelChange,
+    } : {}),
+  }), [handleModelChange, handleThinkingLevelChange, isNew, session]);
   // 返回值整体 useMemo：流式期间 ChatWindow 每 token 重渲染时，若依赖未变则
   // 保持同一对象引用，下游 memo 组件（ChatInput/MessageView）才能跳过渲染。
   return useMemo(() => ({
     // State
-    data, loading, error, activeLeafId, messages, entryIds, streamState,
-    agentRunning, modelNames, modelList, modelError, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel,
-    retryInfo, contextUsage, systemPrompt, forkingEntryId,
-    isCompacting, compactError, compactResult, currentModel, displayModel, sessionStats,
+    data: details, loading, error, activeLeafId, messages, entryIds, streamState,
+    agentRunning, modelState: modelViewState, modelActions: modelViewActions, toolPreset,
+    retryInfo, contextUsage, systemPrompt, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
+    isCompacting, compactError, compactResult, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
-    notices: noticeState.visible, dismissNotice, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, detachedSubagentStatuses, todos, todoAnchorIndex, respondToExtensionUi, sendExtensionCustomInput, armCustomAnswer,
-    isAutoModelSelection: isNew && newSessionModel === null,
-    agentPhase,
-    isNew,
+    notices: noticeState.visible, dismissNotice, extensionDialog, extensionCustomUi, askQuestionnaire, submitAskQuestionnaire, cancelAskQuestionnaire, extensionStatuses, extensionWidgets, detachedSubagentStatuses: [...detachedSubagentStatuses, ...shadowReportStatuses], todos, todoAnchorIndex, respondToExtensionUi, sendExtensionCustomInput, armCustomAnswer,
+    agentPhase, completion,
+    isNew, creationSettingsLocked,
     // Refs
-    sessionIdRef, eventSourceRef, messagesEndRef, scrollContainerRef,
+    sessionIdRef, eventSourceRef, messagesEndRef, lastRenderedMessageRef, scrollContainerRef,
     lastUserMsgRef, pendingScrollToUserRef, initialScrollDoneRef,
     // Actions
-    handleSend, handleAbort, handleFork, handleNavigate, handleModelChange,
-    handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
+    handleSend, handleAbort, handleFork,
+    handleCompact, handleQueuedSubmit, handleAbortCompaction,
     handleRecallQueue,
     handleBuiltinSlashCommand,
-    handleToolPresetChange, handleThinkingLevelChange, loadTools, loadSlashCommands, setActiveLeafId, setData, setMessages,
+    handleShadowMindToggle, handleToolPresetChange, loadTools, loadSlashCommands, setActiveLeafId, setMessages,
     dispatch, setAgentRunning, setForkingEntryId,
     bashRunning, pendingBash,
     // Subscriptions
     handleAgentEventRef,
   }), [
-    data, loading, error, activeLeafId, messages, entryIds, streamState,
-    agentRunning, modelNames, modelList, modelError, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel,
-    retryInfo, contextUsage, systemPrompt, forkingEntryId,
-    isCompacting, compactError, compactResult, currentModel, displayModel, sessionStats,
+    details, loading, error, activeLeafId, messages, entryIds, streamState,
+    agentRunning, modelViewState, modelViewActions, toolPreset,
+    retryInfo, contextUsage, systemPrompt, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
+    isCompacting, compactError, compactResult, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
-    noticeState.visible, dismissNotice, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, detachedSubagentStatuses, todos, todoAnchorIndex, respondToExtensionUi, sendExtensionCustomInput, armCustomAnswer,
-    isNew,
-    agentPhase,
-    sessionIdRef, eventSourceRef, messagesEndRef, scrollContainerRef,
+    noticeState.visible, dismissNotice, extensionDialog, extensionCustomUi, askQuestionnaire, submitAskQuestionnaire, cancelAskQuestionnaire, extensionStatuses, extensionWidgets, detachedSubagentStatuses, todos, todoAnchorIndex, respondToExtensionUi, sendExtensionCustomInput, armCustomAnswer,
+    isNew, creationSettingsLocked,
+    agentPhase, completion,
+    sessionIdRef, eventSourceRef, messagesEndRef, lastRenderedMessageRef, scrollContainerRef,
     lastUserMsgRef, pendingScrollToUserRef, initialScrollDoneRef,
-    handleSend, handleAbort, handleFork, handleNavigate, handleModelChange,
-    handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
+    handleSend, handleAbort, handleFork,
+    handleCompact, handleQueuedSubmit, handleAbortCompaction,
     handleRecallQueue,
     handleBuiltinSlashCommand,
-    handleToolPresetChange, handleThinkingLevelChange, loadTools, loadSlashCommands, setActiveLeafId, setData, setMessages,
+    handleShadowMindToggle, handleToolPresetChange, loadTools, loadSlashCommands, setActiveLeafId, setMessages,
     dispatch, setAgentRunning, setForkingEntryId,
     bashRunning, pendingBash,
     handleAgentEventRef,
