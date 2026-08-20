@@ -8,6 +8,7 @@ import type { ThinkingLevel } from "@/lib/thinking-levels";
 import { resolveVisibleModels, selectInitialModelScope } from "@/lib/model-scope";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { projectTrustReloadOptions } from "@/lib/project-trust";
+import { isFastModeAvailable } from "@/lib/fast-mode";
 
 export const dynamic = "force-dynamic";
 
@@ -52,6 +53,7 @@ async function loadModels(cwd: string): Promise<ModelsData> {
     id: m.id,
     name: m.name,
     provider: m.provider,
+    fastAvailable: isFastModeAvailable(m),
   })).sort(compareModelEntries);
   for (const m of visible) {
     const key = `${m.provider}:${m.id}`;

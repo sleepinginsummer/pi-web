@@ -22,6 +22,7 @@ import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./pi-ty
 import type { ExtensionUiRequest, ExtensionUiResponse, ExtensionWidgetItem } from "./types";
 import { createHeadlessCustomUiTui, DEFAULT_CUSTOM_UI_COLUMNS } from "./custom-ui-terminal";
 import { clearAttentionSession, publishAttentionEvent } from "./attention-events";
+import { FastSessionSetting, FAST_SESSION_STATE } from "./fast-session-setting";
 
 // ============================================================================
 // Types
@@ -104,6 +105,7 @@ export interface RpcSessionStartOptions {
   toolNames?: string[];
   initialModel?: { provider: string; modelId: string };
   thinkingLevel?: ThinkingLevel;
+  fastEnabled?: boolean;
 }
 
 interface RpcStartupTimings {
@@ -234,6 +236,7 @@ export class AgentSessionWrapper {
   // 会话级自动标题只触发一次（成功或跳过都算），避免每条消息都重复检查。
   private autoTitleTriggered = false;
   private readonly shadowSessionSetting: ShadowSessionSetting;
+  private readonly fastSessionSetting: FastSessionSetting;
 
   constructor(public readonly inner: AgentSessionLike) {
     this.shadowSessionSetting = new ShadowSessionSetting({
@@ -248,6 +251,17 @@ export class AgentSessionWrapper {
         const context = this.inner.extensionRunner.createCommandContext?.();
         if (!context) throw new Error("当前 Pi SDK 不支持扩展命令上下文");
         return context;
+      },
+    });
+    this.fastSessionSetting = new FastSessionSetting({
+      entries: () => this.inner.sessionManager.getEntries(),
+      currentModel: () => this.inner.model,
+      catalogModel: (provider, modelId) => this.inner.modelRuntime.getModel(provider, modelId),
+      setModel: (model) => this.inner.setModel(model),
+      appendState: (enabled) => {
+        const entryId = this.inner.sessionManager.appendCustomEntry(FAST_SESSION_STATE, { enabled });
+        const entry = this.inner.sessionManager.getEntry(entryId);
+        if (entry) this.emit({ type: "entry_appended", entry });
       },
     });
   }
@@ -415,6 +429,7 @@ export class AgentSessionWrapper {
         this.inner.extensionRunner.setUIContext?.(uiContext, "rpc");
       }
       await this.restoreShadowSessionSetting();
+      await this.fastSessionSetting.restoreAfterRuntimeReset();
       this.extensionsBound = true;
       this.applyForcedEmptySystemPrompt();
       console.log(`[pi-web] session_start dispatched to extensions for session ${this.inner.sessionId}`);
@@ -636,6 +651,8 @@ export class AgentSessionWrapper {
             : null,
           systemPrompt: this.inner.agent.state?.systemPrompt ?? "",
           thinkingLevel: this.inner.agent.state?.thinkingLevel ?? "off",
+          fastEnabled: this.fastSessionSetting.current,
+          fastAvailable: this.fastSessionSetting.available,
           shadowMindEnabled: this.shadowSessionSetting.current,
           shadowMindAvailable: this.shadowSessionSetting.available,
           extensionStatuses: this.getExtensionStatuses(),
@@ -651,7 +668,7 @@ export class AgentSessionWrapper {
           model = this.inner.modelRuntime.getModel(provider, modelId);
         }
         if (!model) throw new Error(`Model not found: ${provider}/${modelId}`);
-        await this.inner.setModel(model);
+        await this.fastSessionSetting.selectModel(model);
         updateCachedDefaultModel(this.cwd, { provider: model.provider, modelId: model.id });
         invalidateSessionListCache();
         return { id: model.id, provider: model.provider };
@@ -699,6 +716,11 @@ export class AgentSessionWrapper {
       case "set_shadow_mind_enabled": {
         const enabled = await this.shadowSessionSetting.setEnabled(command.enabled === true);
         return { enabled };
+      }
+
+      case "set_fast_enabled": {
+        const enabled = await this.fastSessionSetting.setEnabled(command.enabled === true);
+        return { enabled, available: this.fastSessionSetting.available };
       }
 
       case "compact": {
@@ -810,6 +832,7 @@ export class AgentSessionWrapper {
           this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "rpc");
         }
         await this.restoreShadowSessionSetting();
+        await this.fastSessionSetting.restoreAfterRuntimeReset();
         this.applyForcedEmptySystemPrompt();
         invalidateModelsCache(this.cwd);
         return { success: true };
@@ -1239,6 +1262,7 @@ export class AgentSessionWrapper {
             this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "rpc");
           },
         });
+        await this.fastSessionSetting.restoreAfterRuntimeReset();
         this.applyForcedEmptySystemPrompt();
       },
     };
@@ -1398,7 +1422,7 @@ export async function startRpcSession(
   cwd: string | undefined,
   options: RpcSessionStartOptions = {},
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
-  const { toolNames, initialModel, thinkingLevel } = options;
+  const { toolNames, initialModel, thinkingLevel, fastEnabled } = options;
   const registry = getRegistry();
   const locks = getLocks();
 
@@ -1520,6 +1544,9 @@ export async function startRpcSession(
       wrapper.setForceEmptySystemPrompt(true);
     }
     wrapper.start();
+    if (fastEnabled !== undefined) {
+      await wrapper.send({ type: "set_fast_enabled", enabled: fastEnabled });
+    }
 
     const realSessionId = inner.sessionId as string;
     const realSessionFile = inner.sessionFile as string | undefined;

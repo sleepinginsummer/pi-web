@@ -53,7 +53,7 @@ test("renders projects as persistent directory rows with per-project session act
   assert.match(source, /visibleProjects\.map\(\(project\) =>/);
   assert.match(source, /projectName\(project\)/);
   assert.match(source, /onClick=\{\(\) => handleNewSession\(project\)\}/);
-  assert.match(source, /buildSessionTree\(projectSessions\)/);
+  assert.match(source, /buildSessionTree\(projectSessions, sessionOrder\)/);
   assert.match(source, /projectName\(left\)\.localeCompare\(projectName\(right\)/);
   assert.match(source, /setProjectPendingRemoval\(project\)/);
   assert.match(source, /sidebar\.removeProjectDescription/);

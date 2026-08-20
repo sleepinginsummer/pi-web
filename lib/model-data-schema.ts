@@ -27,10 +27,16 @@ function parseModels(value: unknown): Record<string, string> {
 function parseModelList(value: unknown): ModelEntry[] {
   if (!Array.isArray(value)) throw new Error("Invalid models response: modelList must be an array");
   return value.map((item, index) => {
-    if (!isRecord(item) || typeof item.id !== "string" || typeof item.name !== "string" || typeof item.provider !== "string") {
+    if (
+      !isRecord(item)
+      || typeof item.id !== "string"
+      || typeof item.name !== "string"
+      || typeof item.provider !== "string"
+      || typeof item.fastAvailable !== "boolean"
+    ) {
       throw new Error(`Invalid models response: modelList[${index}] is malformed`);
     }
-    return { id: item.id, name: item.name, provider: item.provider };
+    return { id: item.id, name: item.name, provider: item.provider, fastAvailable: item.fastAvailable };
   });
 }
 

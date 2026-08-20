@@ -2,8 +2,9 @@
 
 import React, { memo, useEffect, useRef, useState } from "react";
 import { useI18n } from "@/hooks/useI18n";
-import type { ModelSelectionViewState } from "@/lib/model-selection-types";
+import type { ModelSelectionViewActions, ModelSelectionViewState } from "@/lib/model-selection-types";
 import { THINKING_LEVEL_OPTIONS, type ThinkingLevelOption } from "@/lib/thinking-levels";
+import { Zap } from "lucide-react";
 
 const TOOL_PRESETS = ["off", "default", "full"] as const;
 const TOOL_PRESET_MAP: Record<"off" | "default" | "full", "none" | "default" | "full"> = { off: "none", default: "default", full: "full" };
@@ -123,6 +124,37 @@ const ThinkingControl = memo(function ThinkingControl({ isMobile, modelState, on
                 )}
               </div>
 
+  );
+});
+
+interface FastModeControlProps {
+  isMobile: boolean;
+  modelState: ModelSelectionViewState;
+  onChange?: (enabled: boolean) => void;
+}
+
+const FastModeControl = memo(function FastModeControl({ isMobile, modelState, onChange }: FastModeControlProps) {
+  const { t } = useI18n();
+  if (!modelState.fastAvailable || !onChange) return null;
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={modelState.fastEnabled}
+      disabled={modelState.fastPending}
+      title={t(modelState.fastEnabled ? "chat.fastDisable" : "chat.fastEnable")}
+      onClick={() => onChange(!modelState.fastEnabled)}
+      style={{
+        display: "flex", alignItems: "center", gap: 5, height: 32,
+        padding: isMobile ? "0 7px" : "8px 10px", border: "none", borderRadius: 9,
+        background: modelState.fastEnabled ? "var(--bg-selected)" : "none",
+        color: modelState.fastEnabled ? "var(--accent)" : "var(--text-muted)",
+        cursor: modelState.fastPending ? "wait" : "pointer", fontSize: 12,
+      }}
+    >
+      <Zap size={13} aria-hidden="true" />
+      <span style={{ whiteSpace: "nowrap" }}>{t("chat.fast")}</span>
+    </button>
   );
 });
 
@@ -452,6 +484,7 @@ interface InputControlsProps {
   isMobile: boolean;
   isStreaming: boolean;
   modelState: ModelSelectionViewState;
+  modelActions: ModelSelectionViewActions;
   onThinkingLevelChange?: (level: ThinkingLevelOption) => void;
   toolPreset?: "none" | "default" | "full";
   onToolPresetChange?: (preset: "none" | "default" | "full") => void;
@@ -468,7 +501,7 @@ interface InputControlsProps {
 
 /** 输入控制栏自行管理下拉菜单，输入文字变化时无需重建控制栏。 */
 export const InputControls = memo(function InputControls({
-  isMobile, isStreaming, modelState, onThinkingLevelChange, toolPreset, onToolPresetChange,
+  isMobile, isStreaming, modelState, modelActions, onThinkingLevelChange, toolPreset, onToolPresetChange,
   onCompact, onAbortCompaction, isCompacting, onAbort, soundEnabled, onSoundToggle,
   notificationEnabled, notificationPermission, onNotificationToggle,
 }: InputControlsProps) {
@@ -482,6 +515,9 @@ export const InputControls = memo(function InputControls({
     if (level === "auto" || !thinkingLevelMap) return level;
     return thinkingLevelMap[level] ?? level;
   })();
+  const runningThinkingDisplayLabel = modelState.fastEnabled
+    ? `${thinkingDisplayLabel} + Fast`
+    : thinkingDisplayLabel;
 
   useEffect(() => {
     const handleOutsideClick = (event: MouseEvent) => {
@@ -572,6 +608,11 @@ export const InputControls = memo(function InputControls({
             {!isStreaming && (!isMobile || controlsMenuOpen) && (
               <>
                 <ThinkingControl isMobile={isMobile} modelState={modelState} onChange={onThinkingLevelChange} />
+                <FastModeControl
+                  isMobile={isMobile}
+                  modelState={modelState}
+                  onChange={modelActions.changeFastEnabled}
+                />
                 <ToolPresetControl isMobile={isMobile} toolPreset={toolPreset} onChange={onToolPresetChange} />
               </>
             )}
@@ -581,7 +622,7 @@ export const InputControls = memo(function InputControls({
               isStreaming={isStreaming}
               showLabel={!isMobile || controlsMenuOpen}
               thinkingLevel={thinkingLevel}
-              thinkingDisplayLabel={thinkingDisplayLabel}
+              thinkingDisplayLabel={runningThinkingDisplayLabel}
               onCompact={onCompact}
               onAbortCompaction={onAbortCompaction}
               isCompacting={isCompacting}

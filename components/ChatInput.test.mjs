@@ -19,6 +19,7 @@ const emptyModelState = {
   thinkingLevels: {}, thinkingLevelMaps: {}, newSessionModel: null,
   newSessionDefaultModel: null, thinkingLevel: "auto", model: null,
   isAutoModelSelection: false, availableThinkingLevels: null, thinkingLevelMap: null,
+  fastEnabled: false, fastAvailable: false, fastPending: false,
 };
 const emptyModelActions = {};
 
@@ -167,6 +168,18 @@ test("streaming shows read-only thinking badge before Stop", () => {
   assert.ok(!beforeBadge.includes("cursor:pointer"), "badge should not be clickable");
 });
 
+test("streaming Fast 会话在思考强度徽标中显示组合状态", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(I18nProvider, null,
+      React.createElement(ChatInput, {
+        ...thinkingBaseProps,
+        isStreaming: true,
+        modelState: { ...thinkingBaseProps.modelState, thinkingLevel: "low", fastEnabled: true, fastAvailable: true },
+      })),
+  );
+  assert.match(html, />low \+ Fast<\/span>/);
+});
+
 test("idle renders the interactive thinking button instead of the badge", () => {
   const html = renderToStaticMarkup(
     React.createElement(I18nProvider, null,
@@ -174,6 +187,20 @@ test("idle renders the interactive thinking button instead of the badge", () => 
   );
   assert.ok(html.includes('aria-label="Change reasoning level"'), "idle thinking button has aria-label");
   assert.ok(!html.includes(">Stop<"), "no stop button when idle");
+});
+
+test("Fast 开关通过模型视图状态与动作渲染", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(I18nProvider, null,
+      React.createElement(ChatInput, {
+        ...thinkingBaseProps,
+        modelState: { ...thinkingBaseProps.modelState, fastAvailable: true, fastEnabled: true },
+        modelActions: { ...thinkingBaseProps.modelActions, changeFastEnabled() {} },
+      })),
+  );
+  assert.match(html, /role="switch"/);
+  assert.match(html, /aria-checked="true"/);
+  assert.match(html, />Fast</);
 });
 
 test("streaming badge shows the mapped level label when thinkingLevelMap is set", () => {

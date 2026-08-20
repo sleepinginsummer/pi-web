@@ -12,6 +12,7 @@ export interface ModelEntry {
   id: string;
   name: string;
   provider: string;
+  fastAvailable: boolean;
 }
 
 

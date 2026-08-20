@@ -70,7 +70,7 @@ export async function POST(req: Request) {
     }
 
     // Use a one-time key so startRpcSession's lock doesn't conflict with real session ids
-    const { operation = "create", sessionId, provider, modelId, toolNames, thinkingLevel, shadowMindEnabled, ...promptCommand } = command as { operation?: unknown; sessionId?: unknown; provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: unknown; shadowMindEnabled?: unknown; [key: string]: unknown };
+    const { operation = "create", sessionId, provider, modelId, toolNames, thinkingLevel, fastEnabled, shadowMindEnabled, ...promptCommand } = command as { operation?: unknown; sessionId?: unknown; provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: unknown; fastEnabled?: unknown; shadowMindEnabled?: unknown; [key: string]: unknown };
     if (operation !== "create" && operation !== "finalize-existing") {
       throw new Error(`Invalid new-session operation: ${String(operation)}`);
     }
@@ -81,6 +81,9 @@ export async function POST(req: Request) {
       throw new Error("provider and modelId must be provided together");
     }
     const explicitThinkingLevel = parseThinkingLevel(thinkingLevel);
+    if (fastEnabled !== undefined && typeof fastEnabled !== "boolean") {
+      throw new Error("fastEnabled must be a boolean");
+    }
     if (shadowMindEnabled !== undefined && typeof shadowMindEnabled !== "boolean") {
       throw new Error("shadowMindEnabled must be a boolean");
     }
@@ -89,6 +92,7 @@ export async function POST(req: Request) {
       ...(toolNames ? { toolNames } : {}),
       ...(provider && modelId ? { initialModel: { provider, modelId } } : {}),
       ...(explicitThinkingLevel ? { thinkingLevel: explicitThinkingLevel } : {}),
+      ...(typeof fastEnabled === "boolean" ? { fastEnabled } : {}),
     };
     const requestedSessionId = typeof sessionId === "string" ? sessionId : undefined;
     let materialization: Awaited<ReturnType<typeof startRpcSession>>;

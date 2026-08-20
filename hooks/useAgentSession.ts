@@ -578,6 +578,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     newSessionDefaultModel,
     thinkingLevel,
   } = modelSelectionState;
+  const [fastEnabled, setFastEnabled] = useState(false);
+  const [fastAvailable, setFastAvailable] = useState(false);
+  const [fastPending, setFastPending] = useState(false);
   const [toolPreset, setToolPreset] = useState<"none" | "default" | "full">("default");
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxAttempts: number; errorMessage?: string } | null>(null);
   const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
@@ -734,6 +737,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const currentModel = currentModelOverride ?? contextModel ?? pendingModel ?? null;
   const displayModel = isNew ? (newSessionModel ?? newSessionDefaultModel) : currentModel;
+  const displayModelFastAvailable = displayModel
+    ? modelList.find((model) => model.provider === displayModel.provider && model.id === displayModel.modelId)?.fastAvailable ?? false
+    : false;
 
   const sessionStats = useMemo(() => {
     if (sessionStatsOverride) return sessionStatsOverride;
@@ -784,6 +790,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setSystemPrompt(state.systemPrompt);
     applyShadowRuntimeState(state);
     modelSelectionActions.setThinkingLevel(state.thinkingLevel);
+    setFastEnabled(state.fastEnabled);
+    setFastAvailable(state.fastAvailable);
     setExtensionStatuses(state.extensionStatuses);
     setExtensionWidgets(state.extensionWidgets);
   }, [applyShadowRuntimeState, modelSelectionActions]);
@@ -1029,6 +1037,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         shadowMindEnabled: requestedShadowMindEnabled,
         ...(selectedModel ? { model: selectedModel } : {}),
         ...(selectedThinkingLevel ? { thinkingLevel: selectedThinkingLevel } : {}),
+        ...(fastEnabled && displayModelFastAvailable ? { fastEnabled: true } : {}),
       });
     } catch (error) {
       onPendingNewSessionEvent(newSessionCwd, {
@@ -1070,7 +1079,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
     if (result.kind === "initialization-failed") throw new Error(result.error);
     return realId;
-  }, [applyShadowRuntimeState, isNew, loadTools, newSessionCwd, onPendingNewSessionEvent, pendingControlKind, pendingNewSessionControl, toolPreset]);
+  }, [applyShadowRuntimeState, displayModelFastAvailable, fastEnabled, isNew, loadTools, newSessionCwd, onPendingNewSessionEvent, pendingControlKind, pendingNewSessionControl, toolPreset]);
 
   const loadSlashCommands = useCallback(async () => {
     const sid = await ensureNewSession();
@@ -2223,6 +2232,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [creationSettingsLocked, isNew, modelSelectionActions, newSessionCwd, onPendingNewSessionEvent]);
 
 
+  const handleFastEnabledChange = useCallback(async (enabled: boolean) => {
+    if (creationSettingsLocked || fastPending) return;
+    const sid = sessionIdRef.current;
+    if (!sid) {
+      setFastEnabled(enabled);
+      return;
+    }
+    setFastPending(true);
+    try {
+      const result = await sendAgentCommand<{ enabled: boolean; available: boolean }>(sid, { type: "set_fast_enabled", enabled });
+      setFastEnabled(result.enabled);
+      setFastAvailable(result.available);
+    } catch (error) {
+      console.error("Failed to set Fast mode:", error);
+      addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setFastPending(false);
+    }
+  }, [addNotice, creationSettingsLocked, fastPending]);
   const handleToolPresetChange = useCallback(async (preset: "none" | "default" | "full") => {
     if (creationSettingsLocked) return;
     const toolNames = getToolNamesForPreset(preset);
@@ -2471,18 +2499,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       isAutoModelSelection: isNew && newSessionModel === null,
       availableThinkingLevels: modelKey ? (modelThinkingLevels[modelKey] ?? null) : null,
       thinkingLevelMap: modelKey ? (modelThinkingLevelMaps[modelKey] ?? null) : null,
+      fastEnabled,
+      fastAvailable: isNew && !sessionIdRef.current ? displayModelFastAvailable : fastAvailable,
+      fastPending,
     };
   }, [
-    displayModel, isNew, modelDataDiagnostics, modelError, modelList, modelNames,
-    modelScopeWarnings, modelThinkingLevelMaps, modelThinkingLevels, newSessionModel, thinkingLevel,
+    displayModel, displayModelFastAvailable, isNew, modelDataDiagnostics, modelError, modelList, modelNames,
+    fastAvailable, fastEnabled, fastPending, modelScopeWarnings, modelThinkingLevelMaps, modelThinkingLevels, newSessionModel, thinkingLevel,
   ]);
 
   const modelViewActions = useMemo<ModelSelectionViewActions>(() => ({
     ...(session || isNew ? {
       changeModel: handleModelChange,
       changeThinkingLevel: handleThinkingLevelChange,
+      changeFastEnabled: handleFastEnabledChange,
     } : {}),
-  }), [handleModelChange, handleThinkingLevelChange, isNew, session]);
+  }), [handleFastEnabledChange, handleModelChange, handleThinkingLevelChange, isNew, session]);
   // 返回值整体 useMemo：流式期间 ChatWindow 每 token 重渲染时，若依赖未变则
   // 保持同一对象引用，下游 memo 组件（ChatInput/MessageView）才能跳过渲染。
   return useMemo(() => ({

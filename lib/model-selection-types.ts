@@ -28,9 +28,13 @@ export interface ModelSelectionViewState {
   isAutoModelSelection: boolean;
   availableThinkingLevels: readonly ThinkingLevel[] | null;
   thinkingLevelMap: ThinkingLevelMap | null;
+  fastEnabled: boolean;
+  fastAvailable: boolean;
+  fastPending: boolean;
 }
 
 export interface ModelSelectionViewActions {
   changeModel?: (provider: string, modelId: string) => void;
   changeThinkingLevel?: (level: ThinkingLevelOption) => void;
+  changeFastEnabled?: (enabled: boolean) => void;
 }

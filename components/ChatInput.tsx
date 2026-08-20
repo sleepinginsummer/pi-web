@@ -1505,6 +1505,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             isMobile={isMobile}
             isStreaming={isStreaming}
             modelState={modelState}
+            modelActions={modelActions}
             onThinkingLevelChange={creationSettingsLocked ? undefined : onThinkingLevelChange}
             toolPreset={toolPreset}
             onToolPresetChange={creationSettingsLocked ? undefined : onToolPresetChange}

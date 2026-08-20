@@ -12,6 +12,7 @@ type NewSessionMaterializationConfig = {
   shadowMindEnabled: boolean;
   model?: NewSessionModel;
   thinkingLevel?: unknown;
+  fastEnabled?: boolean;
 };
 
 export type NewSessionMaterializationRequest = NewSessionMaterializationConfig & (
@@ -42,6 +43,7 @@ async function requestNewSessionMaterialization(
       ...(!request.shadowMindEnabled ? { shadowMindEnabled: false } : {}),
       ...(request.model ? { provider: request.model.provider, modelId: request.model.modelId } : {}),
       ...(request.thinkingLevel ? { thinkingLevel: request.thinkingLevel } : {}),
+      ...(request.fastEnabled ? { fastEnabled: true } : {}),
     }),
   });
   const payload: unknown = await response.json();

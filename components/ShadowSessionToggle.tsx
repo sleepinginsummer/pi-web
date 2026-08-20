@@ -2,15 +2,7 @@
 
 import { memo } from "react";
 import { useI18n } from "@/hooks/useI18n";
-
-export type ShadowSessionControl = {
-  scopeKey: string;
-  sessionId: string | null;
-  enabled: boolean;
-  pending: boolean;
-  available: boolean;
-  onToggle: () => void;
-};
+import type { ShadowSessionControl } from "@/lib/shadow-session-control";
 
 export const ShadowSessionToggle = memo(function ShadowSessionToggle({
   enabled,

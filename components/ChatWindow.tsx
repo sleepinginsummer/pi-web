@@ -23,7 +23,7 @@ import { useDragDrop } from "@/hooks/useDragDrop";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { PendingNewSessionControl, PendingNewSessionEvent } from "@/lib/pending-new-session";
-import type { ShadowSessionControl } from "./ShadowSessionToggle";
+import type { ShadowSessionControl } from "@/lib/shadow-session-control";
 import {
   captureScrollDistance,
   getNextVisibleCount,

@@ -3,17 +3,9 @@
 import { useState } from "react";
 import { getFileIcon } from "./FileIcons";
 import { useI18n } from "@/hooks/useI18n";
-
-export interface Tab {
-  id: string;
-  label: string;
-  filePath: string;
-  sourceSessionId?: string | null;
-  initialDisplayMode?: "source" | "preview" | "diff";
-}
-
+import type { FileTab } from "@/lib/file-panel-model";
 interface Props {
-  tabs: Tab[];
+  tabs: FileTab[];
   activeTabId: string;
   onSelectTab: (id: string) => void;
   onCloseTab: (id: string) => void;

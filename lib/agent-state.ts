@@ -18,6 +18,8 @@ export interface AgentRuntimeState {
   contextUsage: { percent: number | null; contextWindow: number; tokens: number | null } | null;
   systemPrompt: string;
   thinkingLevel: ThinkingLevel;
+  fastEnabled: boolean;
+  fastAvailable: boolean;
   shadowMindEnabled: boolean;
   shadowMindAvailable: boolean;
   extensionStatuses: ExtensionStatusItem[];
