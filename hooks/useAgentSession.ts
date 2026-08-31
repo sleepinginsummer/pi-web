@@ -1954,18 +1954,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return () => clearTimeout(t);
   }, [compactResult]);
 
-  // Pause notice expiry while hovered or focused.
-  // The remainingMs/startedAt/oldestId refs implement a true pause-and-resume instead of resetting the 5s timer.
-  const [pausedNoticeId, setPausedNoticeId] = useState<string | null>(null);
-  const noticeRemainingMsRef = useRef(NOTICE_VISIBLE_MS);
-  const noticeTimerStartedAtRef = useRef<number | null>(null);
-  const noticeOldestIdRef = useRef<string | null>(null);
-
   useEffect(() => {
-    if (noticeState.visible.length === 0) {
-      noticeOldestIdRef.current = null;
-      return;
-    }
+    if (noticeState.visible.length === 0) return;
     const exiting = noticeState.visible.find((notice) => notice.exiting);
     if (exiting) {
       const t = setTimeout(() => {
@@ -1975,28 +1965,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     const oldest = noticeState.visible[0];
     if (!oldest) return;
-    // Oldest visible notice changed; restart the countdown
-    if (noticeOldestIdRef.current !== oldest.id) {
-      noticeOldestIdRef.current = oldest.id;
-      noticeRemainingMsRef.current = NOTICE_VISIBLE_MS;
-    }
-    if (noticeState.visible.some((notice) => notice.id === pausedNoticeId)) return;
-    noticeTimerStartedAtRef.current = Date.now();
     const t = setTimeout(() => {
       dispatchNotice({ type: "mark_oldest_exiting" });
-    }, noticeRemainingMsRef.current);
-    return () => {
-      clearTimeout(t);
-      // Accrue the elapsed time so the countdown resumes from the remaining time
-      if (noticeTimerStartedAtRef.current !== null) {
-        noticeRemainingMsRef.current = Math.max(
-          0,
-          noticeRemainingMsRef.current - (Date.now() - noticeTimerStartedAtRef.current),
-        );
-        noticeTimerStartedAtRef.current = null;
-      }
-    };
-  }, [noticeState.visible, pausedNoticeId]);
+    }, NOTICE_VISIBLE_MS);
+    return () => clearTimeout(t);
+  }, [noticeState.visible]);
 
   useEffect(() => {
     setSessionStatsOverride(null);
@@ -2022,7 +1995,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     handleRecallQueue,
     handleBuiltinSlashCommand,
-    setNoticePaused: setPausedNoticeId,
     handleToolPresetChange, handleThinkingLevelChange, loadTools, loadSlashCommands, setActiveLeafId, setData, setMessages, loadContext,
     scrollToBottom, scrollUserMsgToTop,
     dispatch, setAgentRunning, setForkingEntryId,
