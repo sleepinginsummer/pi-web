@@ -80,10 +80,6 @@ export interface AppUpdateResponse {
   releaseUrl: string;
 }
 
-export interface PushConfigResponse {
-  publicKey: string;
-}
-
 export type PluginScope = "global" | "project";
 export type PluginResourceKind = "extension" | "skill" | "prompt" | "theme";
 

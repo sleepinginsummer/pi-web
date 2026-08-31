@@ -15,7 +15,6 @@ import {
 import { cacheSessionPath, invalidateSessionListCache, resolveSessionPath } from "./session-reader";
 import { getProjectTrustStatus, projectTrustReloadOptions } from "./project-trust";
 import { persistExplicitStartupPreferences } from "./startup-preferences";
-import { notifySessionComplete } from "./web-push";
 import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
 import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./pi-types";
 import type {
@@ -57,7 +56,6 @@ export interface AgentEvent {
 }
 
 type EventListener = (event: AgentEvent) => void;
-type AgentRunCompleteListener = (sessionId: string) => void;
 
 type PendingUiResponse = {
   resolve: (response: ExtensionUiResponse) => void;
@@ -112,7 +110,6 @@ type ExtensionCommandContextActionsLike = {
 type AgentSessionWrapperOptions = {
   exactSystemPrompt?: () => string;
   chatOnly?: boolean;
-  onAgentRunComplete?: AgentRunCompleteListener;
   suppressCompletionNotifications?: boolean;
 };
 
@@ -203,14 +200,12 @@ export class AgentSessionWrapper {
   private pendingPromptCount = 0;
   private activeMutatingCommands = 0;
   private sessionReplacement: "fork" | "clone" | null = null;
-  private agentRunNeedsCompletion = false;
   private promptAdmissionTail: Promise<void> = Promise.resolve();
   private extensionsBound = false;
   private extensionBindingPromise: Promise<void> | null = null;
   private extensionBindingError: unknown = null;
   private readonly exactSystemPrompt?: () => string;
   private readonly chatOnly: boolean;
-  private readonly onAgentRunComplete?: AgentRunCompleteListener;
   private readonly suppressCompletionNotifications: boolean;
   private unsubscribe: (() => void) | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -226,7 +221,6 @@ export class AgentSessionWrapper {
   ) {
     this.exactSystemPrompt = options.exactSystemPrompt;
     this.chatOnly = options.chatOnly ?? false;
-    this.onAgentRunComplete = options.onAgentRunComplete;
     this.suppressCompletionNotifications = options.suppressCompletionNotifications ?? false;
     this.installExactSystemPromptContinuation();
     this.applyExactSystemPrompt();
@@ -270,26 +264,13 @@ export class AgentSessionWrapper {
 
   start(): void {
     this.unsubscribe = this.inner.subscribe((event: AgentEvent) => {
-      if (event.type === "agent_start") this.agentRunNeedsCompletion = true;
       if (event.type === "agent_end") {
         invalidateSessionListCache();
       }
       if (IDLE_RESET_EVENT_TYPES.has(event.type)) this.resetIdleTimer();
       this.emit(event);
-      if (event.type === "agent_settled") this.notifyAgentRunCompleteIfIdle();
     });
     this.resetIdleTimer();
-  }
-
-  private notifyAgentRunCompleteIfIdle(): void {
-    if (!this.agentRunNeedsCompletion || this.isRunning()) return;
-    this.agentRunNeedsCompletion = false;
-    if (this.suppressCompletionNotifications) return;
-    try {
-      this.onAgentRunComplete?.(this.sessionId);
-    } catch (error) {
-      console.error("[pi-web] completion listener failed:", error instanceof Error ? error.message : error);
-    }
   }
 
   beginExtensionBinding(): void {
@@ -555,7 +536,6 @@ export class AgentSessionWrapper {
           const preflight = new Promise<void>((resolve, reject) => {
             acceptPreflight = () => {
               preflightAccepted = true;
-              this.agentRunNeedsCompletion = true;
               if (preflightSettled) return;
               preflightSettled = true;
               resolve();
@@ -571,7 +551,6 @@ export class AgentSessionWrapper {
             promptSettled = true;
             this.pendingPromptCount = Math.max(0, this.pendingPromptCount - 1);
             this.resetIdleTimer();
-            this.notifyAgentRunCompleteIfIdle();
           };
 
           this.pendingPromptCount += 1;
@@ -2022,11 +2001,6 @@ export async function startRpcSession(
     const wrapper = new AgentSessionWrapper(inner, {
       exactSystemPrompt,
       chatOnly,
-      onAgentRunComplete: (completedSessionId) => {
-        void notifySessionComplete(completedSessionId).catch((error) => {
-          console.error("[pi-web] failed to send completion push:", error instanceof Error ? error.message : error);
-        });
-      },
       suppressCompletionNotifications: Boolean(subagentResources),
     });
     const realSessionId = inner.sessionId as string;
