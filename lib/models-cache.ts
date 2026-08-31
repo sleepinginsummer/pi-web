@@ -14,6 +14,8 @@ declare global {
 // 模型配置/Auth/项目信任变化都有主动失效；较长 TTL 避免新会话反复构建完整 Pi services。
 const MODELS_CACHE_TTL_MS = 10 * 60_000;
 const MAX_MODELS_CACHE_ENTRIES = 32;
+// Never interpolate the caught error here; SDK errors can contain paths and provider details.
+const SAFE_MODEL_LOAD_FAILURE_MESSAGE = "Model list is temporarily unavailable. Check your configuration and try again.";
 
 function getModelsCacheState(): ModelsCacheState {
   if (!globalThis.__piModelsCacheState) {
@@ -57,6 +59,10 @@ export function updateCachedDefaultModel(
 }
 export function withModelRuntimeError(data: ModelsData, modelError: string | undefined): ModelsData {
   return modelError ? { ...data, modelError } : data;
+}
+
+export function withSafeModelLoadFailure(data: ModelsData): ModelsData {
+  return { ...data, modelError: SAFE_MODEL_LOAD_FAILURE_MESSAGE };
 }
 
 export function loadModelsWithCache(cwd: string, loader: () => Promise<ModelsData>): Promise<ModelsData> {
