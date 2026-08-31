@@ -2,12 +2,13 @@
 
 import { useEffect, useRef } from "react";
 import type { RunCompletion } from "@/hooks/useRunCompletion";
+import type { SessionNotificationOptions } from "@/lib/session-notifications";
 
 interface CompletionEffectsOptions {
   completion: RunCompletion | null;
   soundEnabled: boolean;
   playDoneSound: () => void;
-  notifySession: (title: string, body: string, sessionId?: string | null) => Promise<void>;
+  notifySession: (title: string, body: string, sessionId?: string | null, options?: SessionNotificationOptions) => Promise<void>;
   title: string;
   body: string;
   onComplete?: () => void;
@@ -30,7 +31,7 @@ export function useCompletionEffects({
     handledRunIdRef.current = completion.runId;
 
     if (soundEnabled) playDoneSound();
-    void notifySession(title, body, completion.sessionId);
+    void notifySession(title, body, completion.sessionId, { showWhenActive: true });
     onComplete?.();
   }, [body, completion, notifySession, onComplete, playDoneSound, soundEnabled, title]);
 }

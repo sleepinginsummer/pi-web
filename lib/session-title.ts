@@ -245,7 +245,12 @@ function stripTitleImages(messages: AgentMessage[]): AgentMessage[] {
 
 function groupTitleTurns(messages: AgentMessage[]): { prefix: AgentMessage[]; turns: AgentMessage[][] } {
   const firstUserIndex = messages.findIndex((message) => message.role === "user");
-  if (firstUserIndex < 0) return { prefix: [], turns: [] };
+  if (firstUserIndex < 0) {
+    const compactionIndex = messages.findIndex((message) => message.role === "compactionSummary");
+    return compactionIndex < 0
+      ? { prefix: [], turns: [] }
+      : { prefix: [], turns: [messages.slice(compactionIndex)] };
+  }
   const turns: AgentMessage[][] = [];
   for (const message of messages.slice(firstUserIndex)) {
     if (message.role === "user") turns.push([message]);
@@ -329,7 +334,9 @@ export async function generateSessionTitle(source: AgentSession, signal?: AbortS
   const sanitizedMessages = sanitizeTitleMessages(sourceAgent.state.messages);
   // 剥离图片并限制标题消息序列；provider 固定前缀不属于此预算。
   const limitedMessages = limitTitleMessages(sanitizedMessages);
-  if (!limitedMessages.some((message) => message.role === "user")) {
+  if (!limitedMessages.some(
+    (message) => message.role === "user" || message.role === "compactionSummary",
+  )) {
     throw new Error("The session has no user messages to name");
   }
 

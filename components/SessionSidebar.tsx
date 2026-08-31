@@ -1,10 +1,13 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef, type CSSProperties, type ReactNode } from "react";
+import { Pin as PinIcon } from "lucide-react";
 import type { SessionInfo, WorktreeInfo, WorktreeState } from "@/lib/types";
 import { useI18n } from "@/hooks/useI18n";
 import { pruneSessionContextCache } from "@/lib/session-load-client";
 import { useSessionOrder } from "@/hooks/useSessionOrder";
+import type { RunningSessionTransitionEvent } from "@/hooks/useRunningSessionTransitions";
+import { usePinnedSessions } from "@/hooks/usePinnedSessions";
 import { WorktreeMutationError } from "@/lib/worktree-client";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
@@ -88,8 +91,10 @@ interface Props {
   onInitialRestoreDone?: () => void;
   refreshKey?: number;
   onSessionDeleted?: (sessionId: string) => void;
+  runningSessionIds: ReadonlySet<string>;
+  runningSessionTransitions: RunningSessionTransitionEvent;
   selectedCwd?: string | null;
-  onCwdChange?: (cwd: string | null, projectRoot?: string | null) => void;
+  onCwdChange?: (cwd: string | null, projectRoot?: string | null, projectKey?: string | null) => void;
   worktreeState?: WorktreeState | null;
   onCreateWorktree?: (branch: string) => Promise<WorktreeInfo>;
   onRemoveWorktree?: (path: string, force: boolean) => Promise<void>;
@@ -98,11 +103,11 @@ interface Props {
   onExplorerRefresh?: () => void;
   onAtMention?: (relativePath: string, isDir: boolean) => void;
   onAtMentions?: (relativePaths: string[]) => void;
+  onSessionsChange?: (sessions: SessionInfo[]) => void;
 }
 
 const UNREAD_SESSIONS_STORAGE_KEY = "pi-web:unread-session-ids";
 const PROJECT_DIRECTORIES_STORAGE_KEY = "pi-web:project-directories";
-const RUNNING_SESSIONS_POLL_MS = 2500;
 
 function loadUnreadSessionIds(): Set<string> {
   if (typeof window === "undefined") return new Set();
@@ -396,13 +401,15 @@ function PiWebTitle() {
     </button>
   );
 }
-export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, worktreeState = null, onCreateWorktree, onRemoveWorktree, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions }: Props) {
+export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, runningSessionIds, runningSessionTransitions, selectedCwd: selectedCwdProp, onCwdChange, worktreeState = null, onCreateWorktree, onRemoveWorktree, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onSessionsChange }: Props) {
   const { t } = useI18n();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const { order: sessionOrder, moveSession } = useSessionOrder(allSessions);
+  const { pinnedIds, togglePinned } = usePinnedSessions(allSessions);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedCwd, setSelectedCwd] = useState<string | null>(null);
+  const [validatedProject, setValidatedProject] = useState<{ cwd: string; projectRoot?: string; projectKey?: string } | null>(null);
   // 服务端与客户端首屏都从空列表开始，挂载后再恢复本地目录，避免 hydration 不一致。
   const [knownProjects, setKnownProjects] = useState<string[]>([]);
   const [homeDir, setHomeDir] = useState<string>("");
@@ -432,12 +439,7 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
   const [trashOpen, setTrashOpen] = useState(false);
   const [sessionRefreshDone, setSessionRefreshDone] = useState(false);
   const [explorerRefreshDone, setExplorerRefreshDone] = useState(false);
-  const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => loadUnreadSessionIds());
-  const previousRunningSessionIdsRef = useRef<Set<string>>(new Set());
-  // Once polling has delivered a snapshot it is the source of truth for
-  // running state; late /api/sessions responses must not overwrite it.
-  const runningPollAuthoritativeRef = useRef(false);
   // 会话列表可能被初始加载、刷新事件和可见性恢复并发触发，只允许最新请求提交结果。
   const sessionLoadRequestIdRef = useRef(0);
   const sessionRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -450,15 +452,11 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
       if (showLoading) setLoading(true);
       const res = await fetch("/api/sessions", { cache: "no-store" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json() as { sessions: SessionInfo[]; runningSessionIds?: string[] };
+      const data = await res.json() as { sessions: SessionInfo[] };
       if (requestId !== sessionLoadRequestIdRef.current) return;
       setAllSessions(data.sessions);
+      onSessionsChange?.(data.sessions);
       pruneSessionContextCache(data.sessions.map((session) => session.id));
-      // Treat the fetched running set as an initial fallback only. Once the
-      // lightweight poll is live, a slow session-list fetch cannot overwrite it.
-      if (!runningPollAuthoritativeRef.current) {
-        setRunningSessionIds(new Set(data.runningSessionIds ?? []));
-      }
       // Drop unread markers for sessions that no longer exist (e.g. deleted).
       const existingIds = new Set(data.sessions.map((s) => s.id));
       setUnreadSessionIds((prev) => {
@@ -477,7 +475,35 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
     } finally {
       if (showLoading && requestId === sessionLoadRequestIdRef.current) setLoading(false);
     }
-  }, []);
+  }, [onSessionsChange]);
+
+  useEffect(() => {
+    let stopped = false;
+    const controller = new AbortController();
+    const refreshVisibleSessions = async () => {
+      if (document.visibilityState !== "visible") return;
+      const cwd = selectedCwdProp ?? selectedCwd;
+      if (cwd) {
+        try {
+          const response = await fetch(`/api/git/context?cwd=${encodeURIComponent(cwd)}`, {
+            cache: "no-store",
+            signal: controller.signal,
+          });
+          if (!response.ok) console.error("刷新当前 Git 分支失败", await response.text());
+        } catch (error) {
+          if (!controller.signal.aborted) console.error("刷新当前 Git 分支失败", error);
+        }
+      }
+      if (!stopped) await loadSessions(false);
+    };
+    const handleVisibilityChange = () => { void refreshVisibleSessions(); };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      stopped = true;
+      controller.abort();
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [loadSessions, selectedCwd, selectedCwdProp]);
 
   const initialLoadDone = useRef(false);
   useEffect(() => {
@@ -522,93 +548,29 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
     return () => { cancelled = true; };
   }, []);
 
-  useEffect(() => {
-    let stopped = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    let controller: AbortController | null = null;
-
-    const clearTimer = () => {
-      if (timer) clearTimeout(timer);
-      timer = null;
-    };
-
-    const schedule = () => {
-      clearTimer();
-      if (stopped || document.visibilityState !== "visible") return;
-      timer = setTimeout(() => void poll(), RUNNING_SESSIONS_POLL_MS);
-    };
-
-    const poll = async () => {
-      if (stopped || document.visibilityState !== "visible") return;
-      const current = new AbortController();
-      controller?.abort();
-      controller = current;
-      try {
-        const res = await fetch("/api/agent/running", {
-          cache: "no-store",
-          signal: current.signal,
-        });
-        if (!res.ok) return;
-        const data = await res.json() as { runningSessionIds?: string[] };
-        if (stopped || controller !== current) return;
-        runningPollAuthoritativeRef.current = true;
-        setRunningSessionIds(new Set(data.runningSessionIds ?? []));
-      } catch {
-        // Keep the last known state; the next visible-tab poll retries.
-      } finally {
-        if (controller === current) controller = null;
-        schedule();
-      }
-    };
-
-    const onVisibilityChange = () => {
-      if (document.visibilityState === "visible") {
-        void poll();
-        // 切回标签页时顺带刷新会话列表：配合 /api/sessions 的 running 兜底，
-        // 新会话落盘后即使错过 SSE 失效也能尽快出现
-        void loadSessions(false);
-        return;
-      }
-      clearTimer();
-      controller?.abort();
-      controller = null;
-    };
-
-    void poll();
-    document.addEventListener("visibilitychange", onVisibilityChange);
-    return () => {
-      stopped = true;
-      clearTimer();
-      controller?.abort();
-      document.removeEventListener("visibilitychange", onVisibilityChange);
-    };
-  }, [loadSessions]);
 
   useEffect(() => {
-    const previous = previousRunningSessionIdsRef.current;
-    const completedInBackground = [...previous].filter((id) => !runningSessionIds.has(id) && id !== selectedSessionId);
-    const newlyRunning = [...runningSessionIds];
-    // 新增的 running 会话（会话开始运行）
-    const addedRunning = newlyRunning.filter((id) => !previous.has(id));
+    setUnreadSessionIds((prev) => {
+      if (![...runningSessionIds].some((sessionId) => prev.has(sessionId))) return prev;
+      const next = new Set(prev);
+      runningSessionIds.forEach((sessionId) => next.delete(sessionId));
+      return next;
+    });
+  }, [runningSessionIds]);
 
-    if (completedInBackground.length > 0 || newlyRunning.length > 0) {
+  useEffect(() => {
+    if (runningSessionTransitions.revision === 0) return;
+    const { completedInBackground, started } = runningSessionTransitions;
+    if (completedInBackground.length > 0) {
       setUnreadSessionIds((prev) => {
         const next = new Set(prev);
-        newlyRunning.forEach((id) => next.delete(id));
-        completedInBackground.forEach((id) => next.add(id));
+        completedInBackground.forEach((sessionId) => next.add(sessionId));
         return next;
       });
     }
-    // 会话开始运行（新会话文件落盘）或后台会话完成时刷新列表。
-    // 新会话作为当前选中会话会被 completedInBackground 过滤掉，若 SSE
-    // 事件丢失（断线/竞态）导致 message_end 等未触发，这里兜底刷新，
-    // 否则列表要等手动刷新或缓存过期才会出现新会话。
-    if (completedInBackground.length > 0 || addedRunning.length > 0) {
-      loadSessions(false);
-    }
-
-    previousRunningSessionIdsRef.current = runningSessionIds;
-  }, [runningSessionIds, selectedSessionId, loadSessions]);
+    // 新会话开始运行或后台会话完成时刷新列表；当前会话完成由 ChatWindow 刷新。
+    if (completedInBackground.length > 0 || started.length > 0) void loadSessions(false);
+  }, [loadSessions, runningSessionTransitions]);
 
   useEffect(() => {
     if (!selectedSessionId) return;
@@ -635,13 +597,31 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
   /** Resolve the project root for a cwd from the freshest data available */
   const projectRootFor = useCallback((cwd: string | null): string | null => {
     if (!cwd) return null;
+    if (validatedProject?.cwd === cwd) return validatedProject.projectRoot ?? cwd;
     if (worktreeState && worktreeState.forCwd === cwd) return worktreeState.projectRoot;
     // Any path in the loaded worktree list belongs to that project — covers
     // worktrees without sessions, so switching to them keeps the row mounted.
     if (worktreeState?.worktrees.some((w) => w.path === cwd)) return worktreeState.projectRoot;
     const match = allSessions.find((s) => s.cwd === cwd);
     return match?.projectRoot ?? cwd;
-  }, [worktreeState, allSessions]);
+  }, [validatedProject, worktreeState, allSessions]);
+
+  const projectKeyFor = useCallback((cwd: string | null): string | null => {
+    if (!cwd) return null;
+    if (validatedProject?.cwd === cwd) return validatedProject.projectKey ?? validatedProject.projectRoot ?? cwd;
+    const match = allSessions.find((session) => session.cwd === cwd);
+    return match?.projectKey ?? match?.projectRoot ?? projectRootFor(cwd);
+  }, [allSessions, projectRootFor, validatedProject]);
+
+  // 先采用用户刚选择的精确路径，待接口刷新后改用服务端解析的 checkout 身份。
+  const currentWorktree = worktreeState
+    ? worktreeState.worktrees.find((worktree) => worktree.path === selectedCwd)
+      ?? (worktreeState.forCwd === selectedCwd && worktreeState.currentWorktreePath
+        ? worktreeState.worktrees.find((worktree) => worktree.path === worktreeState.currentWorktreePath)
+        : undefined)
+      ?? worktreeState.worktrees.find((worktree) => worktree.isMain)
+    : undefined;
+  const currentWorktreePath = currentWorktree?.path ?? null;
 
   // Notify parent only when the effective cwd actually changes (not when
   // projectRootFor identity changes due to session/worktree refreshes).
@@ -649,8 +629,8 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
   useEffect(() => {
     if (lastNotifiedCwdRef.current === selectedCwd) return;
     lastNotifiedCwdRef.current = selectedCwd;
-    onCwdChange?.(selectedCwd, projectRootFor(selectedCwd));
-  }, [selectedCwd, onCwdChange, projectRootFor]);
+    onCwdChange?.(selectedCwd, projectRootFor(selectedCwd), projectKeyFor(selectedCwd));
+  }, [selectedCwd, onCwdChange, projectKeyFor, projectRootFor]);
 
   // Sync the worktree switcher to the selected session's cwd. Sessions of all
   // worktrees in a project share one list, so clicking a session from another
@@ -694,20 +674,40 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
     setCustomPathValidating(true);
     setCustomPathError(null);
     try {
-      const res = await fetch("/api/project-directories", {
+      const validateResponse = await fetch("/api/cwd/validate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ cwd: path }),
+      });
+      const validated = await validateResponse.json().catch(() => ({})) as {
+        cwd?: string;
+        projectRoot?: string;
+        projectKey?: string;
+        error?: string;
+      };
+      if (!validateResponse.ok || !validated.cwd) {
+        setCustomPathError(validated.error ?? `HTTP ${validateResponse.status}`);
+        return;
+      }
+      setValidatedProject({
+        cwd: validated.cwd,
+        projectRoot: validated.projectRoot,
+        projectKey: validated.projectKey,
+      });
+      const res = await fetch("/api/project-directories", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd: validated.cwd }),
       });
       const data = await res.json().catch(() => ({})) as { cwd?: string; projects?: string[]; error?: string };
       if (!res.ok || data.error) {
         setCustomPathError(data.error ?? `HTTP ${res.status}`);
         return;
       }
-      setSelectedCwd(data.cwd ?? path);
+      setSelectedCwd(data.cwd ?? validated.cwd);
       setKnownProjects((current) => {
-        const cwd = data.cwd ?? path;
-        return data.projects ?? [cwd, ...current.filter((project) => project !== cwd)];
+        const cwd = data.cwd ?? validated.cwd;
+        return data.projects ?? [cwd, ...current.filter((project) => project !== cwd)].filter((project): project is string => typeof project === "string");
       });
       setCustomPathOpen(false);
       setCustomPathValue("");
@@ -747,7 +747,7 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
     try {
       await onRemoveWorktree(path, force);
       setWtConfirmRemove(null);
-      if (selectedCwd === path) setSelectedCwd(worktreeState.projectRoot);
+      if (currentWorktreePath === path) setSelectedCwd(worktreeState.projectRoot);
     } catch (e) {
       if (e instanceof WorktreeMutationError && e.dirty && !force) {
         setWtConfirmRemove(path);
@@ -757,7 +757,7 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
     } finally {
       setWtBusy(false);
     }
-  }, [worktreeState, wtBusy, selectedCwd, onRemoveWorktree]);
+  }, [worktreeState, wtBusy, currentWorktreePath, onRemoveWorktree]);
 
   // Close dropdowns on outside click
   useEffect(() => {
@@ -791,12 +791,30 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
     onNewSession?.(cwd, cwd);
   }, [onNewSession]);
 
-  const visibleSessions = selectedSession && !allSessions.some((session) => session.id === selectedSession.id)
-    ? [selectedSession, ...allSessions]
-    : allSessions;
+  const visibleSessions = useMemo(
+    () => selectedSession && !allSessions.some((session) => session.id === selectedSession.id)
+      ? [selectedSession, ...allSessions]
+      : allSessions,
+    [allSessions, selectedSession],
+  );
   const displayProject = (session: SessionInfo) => session.isWorktree ? session.cwd : (session.projectRoot ?? session.cwd);
   const recentProjects = [...new Set(visibleSessions.map(displayProject))];
   const selectedProject = projectRootFor(selectedCwd);
+  const projectActivity = useMemo(() => {
+    const counts = new Map<string, { running: number; unread: number }>();
+    for (const session of visibleSessions) {
+      const key = displayProject(session);
+      const current = counts.get(key) ?? { running: 0, unread: 0 };
+      if (runningSessionIds.has(session.id)) current.running += 1;
+      if (unreadSessionIds.has(session.id)) current.unread += 1;
+      counts.set(key, current);
+    }
+    return counts;
+  }, [runningSessionIds, unreadSessionIds, visibleSessions]);
+  const hasOtherWorkspaceActivity = useMemo(
+    () => [...projectActivity.entries()].some(([key, value]) => key !== selectedProject && (value.running > 0 || value.unread > 0)),
+    [projectActivity, selectedProject],
+  );
   const selectedDisplayProject = visibleSessions.find((session) => session.cwd === selectedCwd)
     ? displayProject(visibleSessions.find((session) => session.cwd === selectedCwd)!)
     : selectedProject;
@@ -918,7 +936,16 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
         }}
       >
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-          <PiWebTitle />
+          <div style={{ display: "flex", alignItems: "center", minWidth: 0 }}>
+            <PiWebTitle />
+            {hasOtherWorkspaceActivity && (
+              <span
+                title={t("sidebar.newActivity")}
+                aria-label={t("sidebar.newActivity")}
+                style={{ width: 7, height: 7, marginLeft: 6, borderRadius: "50%", background: "var(--accent)", flexShrink: 0 }}
+              />
+            )}
+          </div>
           <div style={{ display: "flex", gap: 6 }}>
             <button
               onClick={handleCustomPathClick}
@@ -1040,8 +1067,7 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
             project share the same list anyway. */}
         {showWorktreeSwitcher && worktreeState && worktreeState.worktrees.length > 1 && (() => {
           if (!worktreeState) return null;
-          const currentWt = worktreeState.worktrees.find((w) => w.path === selectedCwd)
-            ?? worktreeState.worktrees.find((w) => w.isMain);
+          const currentWt = currentWorktree;
           const showWtFilter = worktreeState.worktrees.length >= 8;
           const visibleWorktrees = showWtFilter && wtFilter.trim()
             ? worktreeState.worktrees.filter((w) =>
@@ -1135,7 +1161,7 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
                   )}
                   <div style={{ maxHeight: "min(40vh, 300px)", overflowY: "auto" }}>
                     {visibleWorktrees.map((wt) => {
-                      const isCurrent = wt.path === selectedCwd || (wt.isMain && !worktreeState.worktrees.some((w) => w.path === selectedCwd));
+                      const isCurrent = wt.path === currentWorktreePath;
                       if (wtConfirmRemove === wt.path) {
                         return (
                           <div key={wt.path} style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 10px", borderBottom: "1px solid var(--border)", background: "rgba(239,68,68,0.06)" }}>
@@ -1408,9 +1434,11 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
             selectedSessionId,
             runningSessionIds,
             unreadSessionIds,
+            pinnedSessionIds: pinnedIds,
             onSelectSession: handleSelectSessionFromList,
             onRenamed: loadSessions,
             onMoveSession: moveSession,
+            onTogglePinned: togglePinned,
             onSessionDeleted: (id) => {
               onSessionDeleted?.(id);
               loadSessions();
@@ -1464,6 +1492,7 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 13, fontWeight: 600 }}>
                     {projectName(project)}
                   </span>
+                  {showProjectActivity(projectActivity.get(project), t)}
                 </button>
                 <button
                   type="button"
@@ -1493,8 +1522,6 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
                 </button>
               </div>
               {active && !collapsed && showWorktreeSwitcher && worktreeState && (() => {
-                const currentWorktree = worktreeState.worktrees.find((worktree) => worktree.path === selectedCwd)
-                  ?? worktreeState.worktrees.find((worktree) => worktree.isMain);
                 return (
                   <label
                     title={currentWorktree?.path}
@@ -1658,11 +1685,13 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
 }
 interface SessionTreeSharedProps {
   selectedSessionId: string | null;
-  runningSessionIds: Set<string>;
+  runningSessionIds: ReadonlySet<string>;
   unreadSessionIds: Set<string>;
+  pinnedSessionIds: Set<string>;
   onSelectSession: (session: SessionInfo) => void;
   onRenamed?: () => void;
   onMoveSession: (sourceId: string, targetId: string) => void;
+  onTogglePinned: (sessionId: string) => void;
   onSessionDeleted?: (id: string) => void;
 }
 
@@ -1675,7 +1704,7 @@ function SessionTreeItem({
   treeProps: SessionTreeSharedProps;
   depth: number;
 }) {
-  const { selectedSessionId, runningSessionIds, unreadSessionIds, onSelectSession, onRenamed, onMoveSession, onSessionDeleted } = treeProps;
+  const { selectedSessionId, runningSessionIds, unreadSessionIds, pinnedSessionIds, onSelectSession, onRenamed, onMoveSession, onTogglePinned, onSessionDeleted } = treeProps;
   const [collapsed, setCollapsed] = useState(false);
   const hasChildren = node.children.length > 0;
 
@@ -1716,9 +1745,11 @@ function SessionTreeItem({
           isSelected={node.session.id === selectedSessionId}
           isRunning={runningSessionIds.has(node.session.id)}
           isUnread={unreadSessionIds.has(node.session.id)}
+          isPinned={pinnedSessionIds.has(node.session.id)}
           onClick={() => onSelectSession(node.session)}
           onRenamed={onRenamed}
           onDeleted={(id) => onSessionDeleted?.(id)}
+          onTogglePinned={() => onTogglePinned(node.session.id)}
           depth={depth}
           hasChildren={hasChildren}
           collapsed={collapsed}
@@ -1806,14 +1837,29 @@ function UnreadSessionIndicator() {
   );
 }
 
+function showProjectActivity(
+  activity: { running: number; unread: number } | undefined,
+  t: (key: string) => string,
+): ReactNode {
+  if (!activity || (activity.running === 0 && activity.unread === 0)) return null;
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 5, flexShrink: 0, marginLeft: 6, fontSize: 10, fontFamily: "var(--font-mono)" }}>
+      {activity.running > 0 && <span title={t("sidebar.agentRunning")} aria-label={`${t("sidebar.agentRunning")} (${activity.running})`} style={{ color: "var(--accent)" }}>~{activity.running}</span>}
+      {activity.unread > 0 && <span title={t("sidebar.newSessionActivity")} aria-label={`${t("sidebar.newSessionActivity")} (${activity.unread})`} style={{ color: "#0891b2" }}>+{activity.unread}</span>}
+    </span>
+  );
+}
+
 function SessionItem({
   session,
   isSelected,
   isRunning,
   isUnread,
+  isPinned,
   onClick,
   onRenamed,
   onDeleted,
+  onTogglePinned,
   depth = 0,
   hasChildren = false,
   collapsed = false,
@@ -1823,9 +1869,11 @@ function SessionItem({
   isSelected: boolean;
   isRunning?: boolean;
   isUnread?: boolean;
+  isPinned?: boolean;
   onClick: () => void;
   onRenamed?: () => void;
   onDeleted?: (id: string) => void;
+  onTogglePinned?: () => void;
   depth?: number;
   hasChildren?: boolean;
   collapsed?: boolean;
@@ -1913,9 +1961,10 @@ function SessionItem({
       style={{
         height: ITEM_HEIGHT,
         display: "flex",
+        position: "relative",
         alignItems: "center",
         paddingLeft: depth > 0 ? depth * 12 + 14 : 14,
-        paddingRight: 8,
+        paddingRight: isPinned ? 32 : 8,
         cursor: confirmDelete || renaming ? "default" : "pointer",
         background: confirmDelete
           ? "rgba(239,68,68,0.06)"
@@ -1929,6 +1978,29 @@ function SessionItem({
         overflow: "hidden",
       }}
     >
+      {isPinned && (
+        <span
+          aria-hidden="true"
+          style={{
+            position: "absolute",
+            top: 0,
+            right: 0,
+            width: 24,
+            height: 16,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "#eab308",
+            borderBottomLeftRadius: 5,
+            color: "#713f12",
+            boxShadow: "0 1px 2px rgba(161,98,7,0.24)",
+            pointerEvents: "none",
+            zIndex: 1,
+          }}
+        >
+          <PinIcon size={12} strokeWidth={2.4} aria-hidden="true" style={{ transform: "rotate(45deg)" }} />
+        </span>
+      )}
       {confirmDelete ? (
         /* ── Delete confirmation: same height, two flat buttons ── */
         <>
@@ -1997,13 +2069,11 @@ function SessionItem({
       ) : (
         /* ── Normal view ── */
         <>
-          {/* Fork indicator for child sessions */}
+          {/* 子代理会话使用统一的机器人标识。 */}
           {depth > 0 && (
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-              <line x1="6" y1="3" x2="6" y2="15" />
-              <circle cx="18" cy="6" r="3" />
-              <circle cx="6" cy="18" r="3" />
-              <path d="M18 9a9 9 0 0 1-9 9" />
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+              <rect x="5" y="7" width="14" height="11" rx="2" />
+              <path d="M9 11h.01M15 11h.01M9 15h6M12 7V4M10 4h4" />
             </svg>
           )}
           <div style={{ flex: 1, minWidth: 0 }}>
@@ -2073,6 +2143,33 @@ function SessionItem({
           {/* Action buttons — shown on hover, always for the selected session */}
           {(hovered || isSelected) && (
             <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+              <button
+                onClick={(e) => { e.stopPropagation(); onTogglePinned?.(); }}
+                title={t(isPinned ? "sidebar.unpin" : "sidebar.pin")}
+                aria-label={t(isPinned ? "sidebar.unpin" : "sidebar.pin")}
+                aria-pressed={isPinned}
+                style={{
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  width: 32, height: 32, padding: 0,
+                  background: isPinned ? "color-mix(in srgb, #f59e0b 12%, var(--bg-hover))" : "var(--bg-hover)",
+                  border: `1px solid ${isPinned ? "rgba(217,119,6,0.42)" : "var(--border)"}`,
+                  borderRadius: 7, color: isPinned ? "#d97706" : "var(--text-muted)",
+                  cursor: "pointer", flexShrink: 0,
+                  transition: "background 0.12s, color 0.12s, border-color 0.12s",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = "color-mix(in srgb, #f59e0b 18%, var(--bg-hover))";
+                  e.currentTarget.style.color = "#d97706";
+                  e.currentTarget.style.borderColor = "rgba(217,119,6,0.5)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = isPinned ? "color-mix(in srgb, #f59e0b 12%, var(--bg-hover))" : "var(--bg-hover)";
+                  e.currentTarget.style.color = isPinned ? "#d97706" : "var(--text-muted)";
+                  e.currentTarget.style.borderColor = isPinned ? "rgba(217,119,6,0.42)" : "var(--border)";
+                }}
+              >
+                <PinIcon size={14} strokeWidth={2} aria-hidden="true" style={{ transform: "rotate(45deg)" }} />
+              </button>
               <button
                 onClick={startRename}
                 title={t("sidebar.rename")}

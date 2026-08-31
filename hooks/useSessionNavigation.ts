@@ -1,10 +1,11 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { clearDraft } from "@/lib/draft-store";
 import { releaseNewSessionMaterialization } from "@/lib/new-session-materialization-client";
 import { replaceSessionUrl } from "@/lib/session-navigation-url";
+import { clearLastOpen, getLastOpenSession, setLastOpenSession, workspaceKeyOf } from "@/lib/workspace-memory";
 import { useNotificationSessionNavigation } from "@/hooks/useNotificationSessionNavigation";
 import {
   DEFAULT_PENDING_NEW_SESSION_CONTROL,
@@ -30,8 +31,26 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
   const [sessionKey, setSessionKey] = useState(0);
   const [initialSessionRestored, setInitialSessionRestored] = useState(() => !initialSessionId);
   const activeSessionIdRef = useRef<string | null>(null);
+  const activeWorkspaceKeyRef = useRef<string | null>(null);
+  const workspaceRestoreTokenRef = useRef(0);
   const suppressCwdBumpRef = useRef(false);
   activeSessionIdRef.current = selectedSession?.id ?? null;
+
+  const invalidateWorkspaceRestore = useCallback(() => {
+    workspaceRestoreTokenRef.current += 1;
+  }, []);
+
+  const syncWorkspaceKey = useCallback((workspaceKey: string) => {
+    activeWorkspaceKeyRef.current = workspaceKey;
+  }, []);
+
+  useEffect(() => {
+    if (!selectedSession) return;
+    const workspaceKey = selectedSession.projectKey
+      ?? activeWorkspaceKeyRef.current
+      ?? workspaceKeyOf(selectedSession);
+    setLastOpenSession(workspaceKey, selectedSession.id);
+  }, [selectedSession]);
 
   const hydrateSelectedSession = useCallback((sessionId: string) => {
     void fetch("/api/sessions")
@@ -61,10 +80,12 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
     selectSession: applySessionSelection,
   });
   const selectSession = useCallback((session: SessionInfo, isRestore = false) => {
+    invalidateWorkspaceRestore();
     invalidateNotificationNavigation();
     applySessionSelection(session, isRestore);
-  }, [applySessionSelection, invalidateNotificationNavigation]);
+  }, [applySessionSelection, invalidateNotificationNavigation, invalidateWorkspaceRestore]);
   const newSession = useCallback((_sessionId: string, cwd: string) => {
+    invalidateWorkspaceRestore();
     invalidateNotificationNavigation();
     setSelectedSession(null);
     if (!pendingNewSessions.has(cwd)) {
@@ -75,9 +96,10 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
     resetSessionViews();
     if (isMobile) onMobileSelect();
     replaceSessionUrl(null);
-  }, [invalidateNotificationNavigation, isMobile, onMobileSelect, pendingNewSessions, resetSessionViews]);
+  }, [invalidateNotificationNavigation, invalidateWorkspaceRestore, isMobile, onMobileSelect, pendingNewSessions, resetSessionViews]);
 
   const sessionCreated = useCallback((session: SessionInfo) => {
+    invalidateWorkspaceRestore();
     invalidateNotificationNavigation();
     clearDraft(`new:${session.cwd}`);
     releaseNewSessionMaterialization(session.cwd);
@@ -92,9 +114,10 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
     onRefresh();
     hydrateSelectedSession(session.id);
     replaceSessionUrl(session.id);
-  }, [hydrateSelectedSession, invalidateNotificationNavigation, onRefresh]);
+  }, [hydrateSelectedSession, invalidateNotificationNavigation, invalidateWorkspaceRestore, onRefresh]);
 
   const sessionForked = useCallback((newSessionId: string) => {
+    invalidateWorkspaceRestore();
     invalidateNotificationNavigation();
     onRefresh();
     setSessionKey((key) => key + 1);
@@ -105,9 +128,10 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
     }));
     hydrateSelectedSession(newSessionId);
     router.replace(`?session=${encodeURIComponent(newSessionId)}`, { scroll: false });
-  }, [hydrateSelectedSession, invalidateNotificationNavigation, onRefresh, router]);
+  }, [hydrateSelectedSession, invalidateNotificationNavigation, invalidateWorkspaceRestore, onRefresh, router]);
 
   const sessionDeleted = useCallback((sessionId: string) => {
+    invalidateWorkspaceRestore();
     invalidateNotificationNavigation();
     onRefresh();
     if (selectedSession?.id !== sessionId) return;
@@ -116,7 +140,7 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
     setSessionKey((key) => key + 1);
     resetSessionViews();
     router.replace("/", { scroll: false });
-  }, [invalidateNotificationNavigation, onRefresh, resetSessionViews, router, selectedSession]);
+  }, [invalidateNotificationNavigation, invalidateWorkspaceRestore, onRefresh, resetSessionViews, router, selectedSession]);
 
   const dispatchPending = useCallback((cwd: string, event: PendingNewSessionEvent) => {
     setPendingNewSessions((current) => {
@@ -130,26 +154,55 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
   }, []);
 
   const beginInitialCwd = useCallback((cwd: string) => {
+    invalidateWorkspaceRestore();
     invalidateNotificationNavigation();
     suppressCwdBumpRef.current = true;
     setNewSessionCwd(cwd);
-  }, [invalidateNotificationNavigation]);
+  }, [invalidateNotificationNavigation, invalidateWorkspaceRestore]);
   const consumeCwdSyncSuppression = useCallback(() => {
     if (!suppressCwdBumpRef.current) return false;
     suppressCwdBumpRef.current = false;
     return true;
   }, []);
   const leaveWorkspace = useCallback((cwd: string) => {
+    invalidateWorkspaceRestore();
     invalidateNotificationNavigation();
     setSelectedSession(null);
     setNewSessionCwd((current) => current && current !== cwd ? null : current);
     setSessionKey((key) => key + 1);
     resetSessionViews();
-  }, [invalidateNotificationNavigation, resetSessionViews]);
+  }, [invalidateNotificationNavigation, invalidateWorkspaceRestore, resetSessionViews]);
   const updateDraftCwd = useCallback((cwd: string | null) => {
+    invalidateWorkspaceRestore();
     invalidateNotificationNavigation();
     setNewSessionCwd(cwd);
-  }, [invalidateNotificationNavigation]);
+  }, [invalidateNotificationNavigation, invalidateWorkspaceRestore]);
+
+  const restoreWorkspaceContext = useCallback((workspaceKey: string) => {
+    activeWorkspaceKeyRef.current = workspaceKey;
+    const token = ++workspaceRestoreTokenRef.current;
+    const rememberedSessionId = getLastOpenSession(workspaceKey);
+    if (!rememberedSessionId) return;
+
+    void fetch("/api/sessions", { cache: "no-store" })
+      .then((response) => response.ok ? response.json() as Promise<{ sessions: SessionInfo[] }> : null)
+      .then((data) => {
+        if (token !== workspaceRestoreTokenRef.current) return;
+        const session = data?.sessions.find((candidate) => candidate.id === rememberedSessionId);
+        if (!session) {
+          if (data) clearLastOpen(workspaceKey);
+          return;
+        }
+        if (workspaceKeyOf(session) !== workspaceKey) {
+          clearLastOpen(workspaceKey);
+          return;
+        }
+        applySessionSelection(session);
+      })
+      .catch(() => {
+        // 网络错误时保留记录，下次切换工作区后重试。
+      });
+  }, [applySessionSelection]);
   const completeInitialRestore = useCallback(() => setInitialSessionRestored(true), []);
   const applyGeneratedTitle = useCallback((sessionId: string, title: string) => {
     if (activeSessionIdRef.current !== sessionId) return false;
@@ -171,12 +224,14 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
     newSession,
     newSessionCwd,
     pendingNewSessions,
+    restoreWorkspaceContext,
     selectSession,
     selectedSession,
     sessionCreated,
     sessionDeleted,
     sessionForked,
     sessionKey,
+    syncWorkspaceKey,
     updateDraftCwd,
   };
 }

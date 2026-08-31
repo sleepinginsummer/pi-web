@@ -1,5 +1,5 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { createAgentSessionFromServices, createAgentSessionServices, getAgentDir, initTheme, SessionManager, Theme } from "@earendil-works/pi-coding-agent";
+import { createAgentSessionFromServices, createAgentSessionServices, getAgentDir, initTheme, SessionManager, SettingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { randomUUID } from "crypto";
 import { existsSync, realpathSync, writeFileSync } from "fs";
@@ -10,7 +10,7 @@ import { expandMultiSkillCommand } from "./multi-skill-command";
 import { invalidateModelsCache, updateCachedDefaultModel } from "./models-cache";
 import { PendingPromptTracker } from "./pending-prompt-tracker";
 import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
-import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
+import { cacheSessionPath, invalidateSessionListCache, resolveSessionPath } from "./session-reader";
 import { restoreShadowSessionSettingSafely, ShadowSessionSetting } from "./shadow-session-setting";
 import { parseShadowMindToggleCommand, SHADOW_MIND_SESSION_STATE } from "./shadow-session-protocol";
 import { createForkedSession } from "./session-fork";
@@ -19,10 +19,35 @@ import { getProjectTrustStatus, projectTrustReloadOptions } from "./project-trus
 import { persistExplicitStartupPreferences } from "./startup-preferences";
 import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
 import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./pi-types";
-import type { ExtensionUiRequest, ExtensionUiResponse, ExtensionWidgetItem } from "./types";
-import { createHeadlessCustomUiTui, DEFAULT_CUSTOM_UI_COLUMNS } from "./custom-ui-terminal";
+import type {
+  ExtensionUiRequest,
+  ExtensionUiResponse,
+  ExtensionWidgetItem,
+  SessionEntry,
+  SessionInfo,
+  SessionMessageEntry,
+} from "./types";
+import { createHeadlessCustomUiTui, DEFAULT_CUSTOM_UI_COLUMNS, type HeadlessCustomUiTui } from "./custom-ui-terminal";
 import { clearAttentionSession, publishAttentionEvent } from "./attention-events";
-import { FastSessionSetting, FAST_SESSION_STATE } from "./fast-session-setting";
+import { FastSessionSetting, FAST_SESSION_STATE, type FastRuntimeSnapshot } from "./fast-session-setting";
+import { readModelsConfigSnapshot } from "./models-config-commit";
+import { createProjectCommandBashExtension, createProjectCommandBashOperations, preferUserBashExtension } from "./project-command-env";
+import { createSubagentExtension, preferPiWebSubagentExtension } from "./subagent-extension";
+import {
+  listSubagentProfiles,
+  readSubagentRun,
+  readSubagentSessionResources,
+  SUBAGENT_CONTROL_TOOL_NAMES,
+} from "./subagents";
+import { createSubagentController } from "./subagent-runtime";
+import { isBuiltInSubagentsEnabled } from "./subagent-settings";
+import { resolveShellTools } from "./powershell-settings";
+import { CHAT_ONLY_RESOURCE_LOADER_OPTIONS, contextFilesSystemPrompt } from "./chat-only";
+import {
+  appendSessionToolSelection,
+  readSessionToolSelection,
+  validateSessionToolSelection,
+} from "./session-tool-selection";
 
 // ============================================================================
 // Types
@@ -58,6 +83,22 @@ type CustomUiComponent = {
   invalidate?: () => void;
 };
 
+type ExtensionWidgetComponent = {
+  render: (width: number) => unknown;
+  dispose?: () => void;
+};
+
+type ExtensionWidgetFactory = (tui: HeadlessCustomUiTui, theme: Theme) => unknown;
+
+type ActiveExtensionWidget = {
+  key: string;
+  component: ExtensionWidgetComponent;
+  placement: "aboveEditor" | "belowEditor";
+  generation: number;
+  clearEmitted: boolean;
+  rendered: boolean;
+};
+
 type ActiveCustomUi = {
   component: CustomUiComponent;
   width: number;
@@ -84,6 +125,12 @@ type ExtensionBindingOptions = {
   forceEmptySystemPrompt?: boolean;
 };
 
+type AgentSessionWrapperOptions = {
+  exactSystemPrompt?: () => string;
+  chatOnly?: boolean;
+  suppressCompletionNotifications?: boolean;
+};
+
 const RUNNING_STATE_EVENT_TYPES = new Set([
   "agent_start",
   "agent_end",
@@ -104,6 +151,7 @@ const IDLE_RESET_EVENT_TYPES = new Set([
 export interface RpcSessionStartOptions {
   toolNames?: string[];
   initialModel?: { provider: string; modelId: string };
+  allowInitialModelFallback?: boolean;
   thinkingLevel?: ThinkingLevel;
   fastEnabled?: boolean;
 }
@@ -119,13 +167,14 @@ function elapsedMs(startedAt: number): number {
   return Math.round((performance.now() - startedAt) * 10) / 10;
 }
 
-const CODING_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls"];
+const CODING_TOOL_NAMES = ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"];
+const THINKING_LEVEL_NAMES = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
 // Extensions require a complete Theme, while the web UI applies its own styling.
 class PlainTextTheme extends Theme {
   constructor() {
     super(
-      { thinkingXhigh: "" } as ConstructorParameters<typeof Theme>[0],
+      { thinkingXhigh: "", searchMatchText: "" } as unknown as ConstructorParameters<typeof Theme>[0],
       { selectedBg: "" } as ConstructorParameters<typeof Theme>[1],
       "truecolor",
     );
@@ -153,12 +202,13 @@ function withExtensionTools(session: AgentSessionLike, toolNames: string[]): str
   if (toolNames.length === 0) return [];
 
   const codingToolNames = new Set(CODING_TOOL_NAMES);
+  const selectedToolNames = resolveShellTools(toolNames, session.settingsManager.getDefaultTools());
   const extensionToolNames = session
     .getAllTools()
     .map((t) => t.name)
     .filter((name) => !codingToolNames.has(name));
 
-  return [...new Set([...toolNames, ...extensionToolNames])];
+  return [...new Set([...selectedToolNames, ...extensionToolNames])];
 }
 
 
@@ -215,6 +265,10 @@ export class AgentSessionWrapper {
   private extensionStatuses = new Map<string, string>();
   private extensionWidgets = new Map<string, ExtensionWidgetItem>();
   private readonly pendingPrompts = new PendingPromptTracker();
+  private activeExtensionWidgets = new Map<string, ActiveExtensionWidget>();
+  private extensionWidgetGenerations = new Map<string, number>();
+  private extensionWidgetsResetting = false;
+  private promptRunning = false;
   private extensionsBound = false;
   private extensionBindingPromise: Promise<void> | null = null;
   private extensionBindingError: unknown = null;
@@ -237,10 +291,35 @@ export class AgentSessionWrapper {
   private autoTitleTriggered = false;
   private readonly shadowSessionSetting: ShadowSessionSetting;
   private readonly fastSessionSetting: FastSessionSetting;
+  private fastRuntimeSnapshot: FastRuntimeSnapshot;
+  private fastRuntimeGeneration = 0;
+  private readonly exactSystemPrompt?: () => string;
+  private readonly chatOnly: boolean;
+  private readonly suppressCompletionNotifications: boolean;
 
-  constructor(public readonly inner: AgentSessionLike) {
+  constructor(
+    public readonly inner: AgentSessionLike,
+    fastModels: ReadonlySet<string> = new Set(),
+    generation = "initial",
+    options: AgentSessionWrapperOptions = {},
+  ) {
+    const modelRuntime = inner.modelRuntime;
+    this.fastRuntimeSnapshot = {
+      generation: `0:${generation}`,
+      catalogModel: (provider, modelId) => modelRuntime.getModel(provider, modelId),
+      fastModels,
+    };
+    this.exactSystemPrompt = options.exactSystemPrompt;
+    this.chatOnly = options.chatOnly ?? false;
+    this.suppressCompletionNotifications = options.suppressCompletionNotifications ?? false;
+    this.installSystemPromptContinuation();
+    const sessionEntries = () => (
+      typeof this.inner.sessionManager.getEntries === "function"
+        ? this.inner.sessionManager.getEntries()
+        : []
+    );
     this.shadowSessionSetting = new ShadowSessionSetting({
-      entries: () => this.inner.sessionManager.getEntries(),
+      entries: sessionEntries,
       appendState: (enabled) => {
         const entryId = this.inner.sessionManager.appendCustomEntry(SHADOW_MIND_SESSION_STATE, { enabled });
         const entry = this.inner.sessionManager.getEntry(entryId);
@@ -254,9 +333,9 @@ export class AgentSessionWrapper {
       },
     });
     this.fastSessionSetting = new FastSessionSetting({
-      entries: () => this.inner.sessionManager.getEntries(),
+      entries: sessionEntries,
       currentModel: () => this.inner.model,
-      catalogModel: (provider, modelId) => this.inner.modelRuntime.getModel(provider, modelId),
+      runtimeSnapshot: () => this.fastRuntimeSnapshot,
       setModel: (model) => this.inner.setModel(model),
       appendState: (enabled) => {
         const entryId = this.inner.sessionManager.appendCustomEntry(FAST_SESSION_STATE, { enabled });
@@ -264,6 +343,23 @@ export class AgentSessionWrapper {
         if (entry) this.emit({ type: "entry_appended", entry });
       },
     });
+    this.applySystemPromptPolicy();
+  }
+
+  private installFastRuntimeSnapshot(fastModels: ReadonlySet<string>, configGeneration: string): void {
+    const modelRuntime = this.inner.modelRuntime;
+    this.fastRuntimeGeneration += 1;
+    this.fastRuntimeSnapshot = {
+      generation: `${this.fastRuntimeGeneration}:${configGeneration}`,
+      catalogModel: (provider, modelId) => modelRuntime.getModel(provider, modelId),
+      fastModels,
+    };
+  }
+
+  private async reloadRuntime(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
+    const snapshot = await readModelsConfigSnapshot();
+    await this.inner.reload(options);
+    this.installFastRuntimeSnapshot(snapshot.fastModels, snapshot.generation);
   }
 
   get sessionId(): string {
@@ -278,12 +374,28 @@ export class AgentSessionWrapper {
     return this.inner.sessionManager.getCwd();
   }
 
+  get streamingMessage() {
+    return this.inner.agent.state?.streamingMessage;
+  }
+
+  get isStreaming(): boolean {
+    return this.inner.isStreaming;
+  }
+
   isAlive(): boolean {
     return this._alive;
   }
 
   isRunning(): boolean {
     return this._alive && (this.pendingPrompts.active || this.inner.isStreaming || this.inner.isCompacting || this.inner.isBashRunning);
+  }
+
+  isChatOnly(): boolean {
+    return this.chatOnly;
+  }
+
+  hasSuppressedCompletionNotifications(): boolean {
+    return this.suppressCompletionNotifications;
   }
 
   start(): void {
@@ -375,6 +487,11 @@ export class AgentSessionWrapper {
   setForceEmptySystemPrompt(force: boolean): void {
     this.forceEmptySystemPrompt = force;
     this.applyForcedEmptySystemPrompt();
+  }
+
+  setActiveToolSelection(toolNames: string[]): void {
+    this.inner.setActiveToolsByName(withExtensionTools(this.inner, toolNames));
+    this.applySystemPromptPolicy();
   }
 
   beginExtensionBinding(options: ExtensionBindingOptions = {}): void {
@@ -495,11 +612,32 @@ export class AgentSessionWrapper {
   }
 
   private applyForcedEmptySystemPrompt(): void {
-    if (this.forceEmptySystemPrompt && this.inner.agent.state) {
+    this.applySystemPromptPolicy();
+  }
+
+  private applySystemPromptPolicy(): void {
+    if (!this.inner.agent?.state) return;
+    if (this.forceEmptySystemPrompt) {
       this.inner.agent.state.systemPrompt = "";
+    } else if (this.exactSystemPrompt) {
+      this.inner.agent.state.systemPrompt = this.exactSystemPrompt();
     }
   }
 
+  private installSystemPromptContinuation(): void {
+    if (!this.exactSystemPrompt || !this.inner.agent) return;
+    const previous = this.inner.agent.prepareNextTurnWithContext;
+    this.inner.agent.prepareNextTurnWithContext = async (turn, signal) => {
+      const prepared = await previous?.(turn, signal);
+      return {
+        ...prepared,
+        context: {
+          ...(prepared?.context ?? turn.context),
+          systemPrompt: this.forceEmptySystemPrompt ? "" : this.exactSystemPrompt!(),
+        },
+      };
+    };
+  }
   private emit(event: AgentEvent): void {
     for (const listener of this.listeners) listener(event);
     // 统一出口确保扩展 UI 等直接事件不会漏掉；发布器只转发需要用户关注的事件。
@@ -825,9 +963,9 @@ export class AgentSessionWrapper {
       case "reload": {
         await this.waitForExtensionsBound();
         this.extensionStatuses.clear();
-        this.extensionWidgets.clear();
+        this.resetExtensionWidgetsForReload();
         this.syncProjectTrust();
-        await this.inner.reload();
+        await this.reloadRuntime();
         if (typeof this.inner.bindExtensions !== "function") {
           this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "rpc");
         }
@@ -865,7 +1003,12 @@ export class AgentSessionWrapper {
         const execution = this.inner.executeBash(
           command.command as string,
           undefined,
-          { excludeFromContext: command.excludeFromContext as boolean | undefined },
+          {
+            excludeFromContext: command.excludeFromContext as boolean | undefined,
+            operations: createProjectCommandBashOperations({
+              shellPath: this.inner.settingsManager.getShellPath(),
+            }),
+          },
         );
         notifyRunningChange();
         try {
@@ -900,6 +1043,7 @@ export class AgentSessionWrapper {
     for (const id of Array.from(this.activeCustomUis.keys())) this.closeCustomUi(id, undefined);
     this.pendingUiResponses.clear();
     this.pendingUiRequests.clear();
+    this.clearExtensionWidgets(false);
     try {
       this.inner.dispose();
     } finally {
@@ -944,7 +1088,202 @@ export class AgentSessionWrapper {
   }
 
   private getExtensionWidgets(): ExtensionWidgetItem[] {
-    return Array.from(this.extensionWidgets.values());
+    return Array.from(this.extensionWidgets.values()).filter((widget) => widget.lines.length > 0);
+  }
+
+  private nextExtensionWidgetGeneration(key: string): number {
+    const generation = (this.extensionWidgetGenerations.get(key) ?? 0) + 1;
+    this.extensionWidgetGenerations.set(key, generation);
+    return generation;
+  }
+
+  private disposeExtensionWidgetComponent(component: unknown): void {
+    if (!component || (typeof component !== "object" && typeof component !== "function")) return;
+    const dispose = (component as { dispose?: unknown }).dispose;
+    if (typeof dispose !== "function") return;
+    try {
+      dispose.call(component);
+    } catch {
+      // Ignore dispose errors from extension widgets.
+    }
+  }
+
+  private emitExtensionWidgetClear(key: string): void {
+    this.emit({
+      type: "extension_ui_request",
+      id: randomUUID(),
+      method: "setWidget",
+      widgetKey: key,
+      widgetLines: undefined,
+      widgetPlacement: undefined,
+    } as ExtensionUiRequest as AgentEvent);
+  }
+
+  private clearExtensionWidget(key: string, emitClear = true): number {
+    const generation = this.nextExtensionWidgetGeneration(key);
+
+    const active = this.activeExtensionWidgets.get(key);
+    this.activeExtensionWidgets.delete(key);
+    this.extensionWidgets.delete(key);
+    if (active) this.disposeExtensionWidgetComponent(active.component);
+    if (this.extensionWidgetGenerations.get(key) !== generation) return generation;
+    if (emitClear) this.emitExtensionWidgetClear(key);
+    return generation;
+  }
+
+  private clearExtensionWidgets(emitClear: boolean): void {
+    const keys = new Set([
+      ...this.extensionWidgets.keys(),
+      ...this.activeExtensionWidgets.keys(),
+    ]);
+    for (const key of keys) this.clearExtensionWidget(key, emitClear);
+  }
+
+  private resetExtensionWidgetsForReload(): void {
+    this.extensionWidgetsResetting = true;
+    try {
+      const factoryKeys = [...this.activeExtensionWidgets.keys()];
+      for (const key of factoryKeys) this.clearExtensionWidget(key);
+      // Keep the existing array-widget reload behavior: snapshots are reset and
+      // the next extension session_start repopulates them.
+      this.extensionWidgets.clear();
+    } finally {
+      this.extensionWidgetsResetting = false;
+    }
+  }
+
+  private emitExtensionWidgetError(key: string, error: unknown): void {
+    this.emit({
+      type: "extension_error",
+      extensionPath: `extension-widget:${key}`,
+      event: "setWidget",
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  private failExtensionWidget(
+    key: string,
+    generation: number,
+    error: unknown,
+    clearEmitted: boolean,
+    component?: unknown,
+  ): void {
+    if (this.extensionWidgetGenerations.get(key) !== generation) {
+      this.disposeExtensionWidgetComponent(component);
+      return;
+    }
+
+    const active = this.activeExtensionWidgets.get(key);
+    let shouldEmitClear = !clearEmitted;
+    if (active?.generation === generation) {
+      shouldEmitClear = active.rendered || !active.clearEmitted;
+      this.activeExtensionWidgets.delete(key);
+      this.disposeExtensionWidgetComponent(active.component);
+    } else {
+      this.disposeExtensionWidgetComponent(component);
+    }
+    if (this.extensionWidgetGenerations.get(key) !== generation) {
+      this.emitExtensionWidgetError(key, error);
+      return;
+    }
+    this.extensionWidgets.delete(key);
+    if (shouldEmitClear) this.emitExtensionWidgetClear(key);
+    this.emitExtensionWidgetError(key, error);
+  }
+
+  private renderExtensionWidget(active: ActiveExtensionWidget): void {
+    if (
+      this.activeExtensionWidgets.get(active.key) !== active
+      || this.extensionWidgetGenerations.get(active.key) !== active.generation
+    ) return;
+
+    let lines: unknown;
+    try {
+      lines = active.component.render(DEFAULT_CUSTOM_UI_COLUMNS);
+    } catch (error) {
+      this.failExtensionWidget(active.key, active.generation, error, active.clearEmitted);
+      return;
+    }
+    if (!Array.isArray(lines) || !lines.every((line) => typeof line === "string")) {
+      this.failExtensionWidget(
+        active.key,
+        active.generation,
+        new Error("Extension widget render must return string[]"),
+        active.clearEmitted,
+      );
+      return;
+    }
+    if (
+      this.activeExtensionWidgets.get(active.key) !== active
+      || this.extensionWidgetGenerations.get(active.key) !== active.generation
+    ) return;
+
+    const widgetLines = lines as string[];
+    this.extensionWidgets.set(active.key, {
+      key: active.key,
+      lines: widgetLines,
+      placement: active.placement,
+    });
+    active.rendered = true;
+    this.emit({
+      type: "extension_ui_request",
+      id: randomUUID(),
+      method: "setWidget",
+      widgetKey: active.key,
+      widgetLines,
+      widgetPlacement: active.placement,
+    } as ExtensionUiRequest as AgentEvent);
+  }
+
+  private setExtensionWidgetFactory(
+    key: string,
+    factory: ExtensionWidgetFactory,
+    options?: { placement?: "aboveEditor" | "belowEditor" },
+  ): void {
+    const hadPrevious = this.extensionWidgets.has(key) || this.activeExtensionWidgets.has(key);
+    const generation = this.clearExtensionWidget(key, hadPrevious);
+    if (this.extensionWidgetGenerations.get(key) !== generation) return;
+    const tui = createHeadlessCustomUiTui(() => {
+      const active = this.activeExtensionWidgets.get(key);
+      if (active?.generation === generation) this.renderExtensionWidget(active);
+    }, DEFAULT_CUSTOM_UI_COLUMNS);
+
+    let component: unknown;
+    try {
+      component = factory(tui, PLAIN_TEXT_THEME);
+    } catch (error) {
+      this.failExtensionWidget(key, generation, error, hadPrevious);
+      return;
+    }
+    if (this.extensionWidgetGenerations.get(key) !== generation) {
+      this.disposeExtensionWidgetComponent(component);
+      return;
+    }
+    if (
+      !component
+      || (typeof component !== "object" && typeof component !== "function")
+      || typeof (component as { render?: unknown }).render !== "function"
+    ) {
+      this.failExtensionWidget(
+        key,
+        generation,
+        new Error("Extension widget factory must return a component with render(width)"),
+        hadPrevious,
+        component,
+      );
+      return;
+    }
+
+    const active: ActiveExtensionWidget = {
+      key,
+      component: component as ExtensionWidgetComponent,
+      placement: options?.placement ?? "aboveEditor",
+      generation,
+      clearEmitted: hadPrevious,
+      rendered: false,
+    };
+    this.activeExtensionWidgets.set(key, active);
+    this.renderExtensionWidget(active);
   }
 
   private getCustomUiWidth(options: unknown): number {
@@ -1086,10 +1425,23 @@ export class AgentSessionWrapper {
     request: ExtensionUiRequestBody,
     defaultValue: T,
     parseResponse: (response: ExtensionUiResponse) => T,
-    timeout?: number,
-    signal?: AbortSignal,
+    options: { timeout?: number; signal?: AbortSignal; required?: boolean } = {},
   ): Promise<T> {
-    if (signal?.aborted || this.aborting) return Promise.resolve(defaultValue);
+    const required = options.required === true;
+    const timeout = options.timeout;
+    const signal = options.signal;
+    const abortForUiFailure = (reason: string, reject: (error: Error) => void): void => {
+      reject(new Error(`Required user interaction failed: ${reason}`));
+      if (required && !this.aborting) {
+        void this.send({ type: "abort" }).catch((error) => {
+          console.error(`[pi-web] failed to abort after ask UI failure (${reason}):`, error instanceof Error ? error.message : error);
+        });
+      }
+    };
+    if (signal?.aborted || this.aborting) {
+      if (required) return Promise.reject(new Error("Required user interaction was aborted"));
+      return Promise.resolve(defaultValue);
+    }
 
     const id = randomUUID();
     const fullRequest = {
@@ -1099,7 +1451,7 @@ export class AgentSessionWrapper {
       ...(timeout ? { timeout, expiresAt: Date.now() + timeout } : {}),
     };
 
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       let timeoutId: ReturnType<typeof setTimeout> | undefined;
       const cleanup = () => {
         if (timeoutId) clearTimeout(timeoutId);
@@ -1107,19 +1459,30 @@ export class AgentSessionWrapper {
         this.pendingUiRequests.delete(id);
         this.pendingUiResponses.delete(id);
       };
+      const fail = (reason: string) => {
+        cleanup();
+        if (required) abortForUiFailure(reason, reject);
+        else resolve(defaultValue);
+      };
       const settle = (value: T) => {
         cleanup();
         resolve(value);
       };
-      const onAbort = () => settle(defaultValue);
+      const onAbort = () => fail("abort or cancellation");
 
-      if (timeout) timeoutId = setTimeout(() => settle(defaultValue), timeout);
+      if (timeout) timeoutId = setTimeout(() => fail("timeout"), timeout);
       signal?.addEventListener("abort", onAbort, { once: true });
 
       this.pendingUiRequests.set(id, fullRequest as AgentEvent);
       this.pendingUiResponses.set(id, {
-        resolve: (response) => settle(parseResponse(response)),
-        cancel: () => settle(defaultValue),
+        resolve: (response) => {
+          if (required && ("cancelled" in response || !("value" in response) && !("confirmed" in response))) {
+            fail("user cancelled");
+            return;
+          }
+          settle(parseResponse(response));
+        },
+        cancel: () => fail("wrapper shutdown"),
       });
       this.emit(fullRequest as AgentEvent);
     });
@@ -1131,29 +1494,37 @@ export class AgentSessionWrapper {
         { method: "select", title, options, ...(opts?.timeout ? { timeout: opts.timeout } : {}) },
         undefined,
         (response) => "value" in response ? response.value : undefined,
-        opts?.timeout,
-        opts?.signal,
+        { timeout: opts?.timeout, signal: opts?.signal },
+      ),
+      requiredSelect: (title, options, opts) => this.requestExtensionUi(
+        { method: "select", title, options, ...(opts?.timeout ? { timeout: opts.timeout } : {}) },
+        undefined,
+        (response) => "value" in response ? response.value : undefined,
+        { timeout: opts?.timeout, signal: opts?.signal, required: true },
       ),
       confirm: (title, message, opts) => this.requestExtensionUi(
         { method: "confirm", title, message, ...(opts?.timeout ? { timeout: opts.timeout } : {}) },
         false,
         (response) => "confirmed" in response ? response.confirmed : false,
-        opts?.timeout,
-        opts?.signal,
+        { timeout: opts?.timeout, signal: opts?.signal },
       ),
       input: (title, placeholder, opts) => this.requestExtensionUi(
         { method: "input", title, ...(placeholder !== undefined ? { placeholder } : {}), ...(opts?.timeout ? { timeout: opts.timeout } : {}) },
         undefined,
         (response) => "value" in response ? response.value : undefined,
-        opts?.timeout,
-        opts?.signal,
+        { timeout: opts?.timeout, signal: opts?.signal },
+      ),
+      requiredInput: (title, placeholder, opts) => this.requestExtensionUi(
+        { method: "input", title, ...(placeholder !== undefined ? { placeholder } : {}), ...(opts?.timeout ? { timeout: opts.timeout } : {}) },
+        undefined,
+        (response) => "value" in response ? response.value : undefined,
+        { timeout: opts?.timeout, signal: opts?.signal, required: true },
       ),
       editor: (title, prefill, opts) => this.requestExtensionUi(
         { method: "editor", title, ...(prefill !== undefined ? { prefill } : {}), ...(opts?.timeout ? { timeout: opts.timeout } : {}) },
         undefined,
         (response) => "value" in response ? response.value : undefined,
-        opts?.timeout,
-        opts?.signal,
+        { timeout: opts?.timeout, signal: opts?.signal },
       ),
       notify: (message, type) => {
         this.emit({
@@ -1181,16 +1552,29 @@ export class AgentSessionWrapper {
       setWorkingIndicator: () => {},
       setHiddenThinkingLabel: () => {},
       setWidget: (key, content, options) => {
+        if (!this._alive || this.extensionWidgetsResetting) return;
+        if (typeof content === "function") {
+          this.setExtensionWidgetFactory(
+            key,
+            content as unknown as ExtensionWidgetFactory,
+            options,
+          );
+          return;
+        }
         if (content !== undefined && !Array.isArray(content)) return;
         if (content === undefined) {
-          this.extensionWidgets.delete(key);
-        } else {
-          this.extensionWidgets.set(key, {
-            key,
-            lines: content,
-            placement: options?.placement ?? "aboveEditor",
-          });
+          this.clearExtensionWidget(key);
+          return;
         }
+        const generation = this.activeExtensionWidgets.has(key)
+          ? this.clearExtensionWidget(key)
+          : this.nextExtensionWidgetGeneration(key);
+        if (this.extensionWidgetGenerations.get(key) !== generation) return;
+        this.extensionWidgets.set(key, {
+          key,
+          lines: content,
+          placement: options?.placement ?? "aboveEditor",
+        });
         this.emit({
           type: "extension_ui_request",
           id: randomUUID(),
@@ -1255,9 +1639,9 @@ export class AgentSessionWrapper {
       switchSession: async () => ({ cancelled: true }),
       reload: async () => {
         this.extensionStatuses.clear();
-        this.extensionWidgets.clear();
+        this.resetExtensionWidgetsForReload();
         this.syncProjectTrust();
-        await this.inner.reload({
+        await this.reloadRuntime({
           beforeSessionStart: () => {
             this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "rpc");
           },
@@ -1296,6 +1680,48 @@ function getRegistry(): Map<string, AgentSessionWrapper> {
   return globalThis.__piSessions;
 }
 
+function registerRpcWrapper(wrapper: AgentSessionWrapper): void {
+  const registry = getRegistry();
+  const sessionId = wrapper.sessionId;
+  if (wrapper.sessionFile) cacheSessionPath(sessionId, wrapper.sessionFile);
+  wrapper.onDestroy(() => registry.delete(sessionId));
+  registry.set(sessionId, wrapper);
+  wrapper.start();
+  if (!wrapper.isChatOnly()) wrapper.beginExtensionBinding();
+}
+
+const SUBAGENT_CONTROLLER = createSubagentController({
+  getSession: (sessionId) => getRegistry().get(sessionId),
+  registerSession: (inner, options) => {
+    const wrapper = new AgentSessionWrapper(inner, new Set(), "subagent", {
+      ...(options?.exactSystemPrompt !== undefined
+        ? { exactSystemPrompt: () => options.exactSystemPrompt! }
+        : {}),
+      chatOnly: options?.chatOnly,
+      suppressCompletionNotifications: true,
+    });
+    registerRpcWrapper(wrapper);
+  },
+  reopenSession: async (sessionId, sessionFile) => (
+    await startRpcSession(sessionId, sessionFile, undefined)
+  ).session,
+  resolveSessionPath,
+  invalidateSessionList: invalidateSessionListCache,
+  isBuiltInSubagentsEnabled,
+});
+
+export function getSubagentRun(sessionId: string) {
+  return SUBAGENT_CONTROLLER.get(sessionId);
+}
+
+export function steerSubagent(sessionId: string, message: string) {
+  return SUBAGENT_CONTROLLER.steer(sessionId, message);
+}
+
+export function abortSubagent(sessionId: string) {
+  return SUBAGENT_CONTROLLER.abort(sessionId);
+}
+
 function getLocks(): Map<string, Promise<{ session: AgentSessionWrapper; realSessionId: string }>> {
   if (!globalThis.__piStartLocks) globalThis.__piStartLocks = new Map();
   return globalThis.__piStartLocks;
@@ -1330,6 +1756,141 @@ export function getRpcSession(sessionId: string): AgentSessionWrapper | undefine
   return getRegistry().get(sessionId);
 }
 
+export interface SetRpcSessionToolsResult {
+  session: AgentSessionWrapper;
+  sessionId: string;
+  recreated: boolean;
+}
+
+/** 持久化普通会话的工具选择；跨越 Chat-only 边界时重建资源运行时。 */
+export async function setRpcSessionTools(
+  sessionId: string,
+  sessionFile: string | undefined,
+  requestedToolNames: unknown,
+): Promise<SetRpcSessionToolsResult> {
+  const toolNames = validateSessionToolSelection(requestedToolNames);
+  const existing = getRpcSession(sessionId);
+
+  if (!existing?.isAlive()) {
+    if (!sessionFile) throw new Error("Session not found");
+    const manager = SessionManager.open(sessionFile, undefined);
+    if (readSubagentSessionResources(manager.getEntries() as unknown as SessionEntry[])) {
+      throw new Error("Subagent tool selection is fixed by its profile");
+    }
+    appendSessionToolSelection(manager, toolNames);
+    invalidateSessionListCache();
+    const started = await startRpcSession(sessionId, sessionFile, undefined);
+    return { session: started.session, sessionId: started.realSessionId, recreated: false };
+  }
+
+  if (existing.isRunning()) throw new Error("Cannot change tools while the session is running");
+  if (readSubagentSessionResources(existing.inner.sessionManager.getEntries() as unknown as SessionEntry[])) {
+    throw new Error("Subagent tool selection is fixed by its profile");
+  }
+
+  const crossesChatOnlyBoundary = existing.isChatOnly() !== (toolNames.length === 0);
+  appendSessionToolSelection(existing.inner.sessionManager, toolNames);
+  invalidateSessionListCache();
+  if (!crossesChatOnlyBoundary) {
+    existing.setActiveToolSelection(toolNames);
+    return { session: existing, sessionId, recreated: false };
+  }
+
+  const persistedFile = existing.sessionFile && existsSync(existing.sessionFile)
+    ? existing.sessionFile
+    : undefined;
+  const sessionCwd = existing.cwd;
+  const model = existing.inner.model;
+  const currentThinkingLevel = existing.inner.agent.state?.thinkingLevel;
+  await existing.shutdown();
+
+  if (persistedFile) {
+    const started = await startRpcSession(sessionId, persistedFile, undefined);
+    return { session: started.session, sessionId: started.realSessionId, recreated: true };
+  }
+
+  const started = await startRpcSession(`__recreate__${randomUUID()}`, "", sessionCwd, {
+    toolNames,
+    ...(model ? { initialModel: { provider: model.provider, modelId: model.id } } : {}),
+    allowInitialModelFallback: true,
+    ...(currentThinkingLevel && THINKING_LEVEL_NAMES.has(currentThinkingLevel as ThinkingLevel)
+      ? { thinkingLevel: currentThinkingLevel as ThinkingLevel }
+      : {}),
+  });
+  return { session: started.session, sessionId: started.realSessionId, recreated: true };
+}
+
+function runtimeMessageText(entry: SessionMessageEntry): string {
+  if (entry.message.role === "bashExecution") return "";
+  const content = entry.message.content;
+  if (typeof content === "string") return content;
+  return content
+    .map((block) => block.type === "text" ? block.text : "")
+    .filter(Boolean)
+    .join(" ");
+}
+
+function runtimeMessageActivityMs(entry: SessionMessageEntry): number | undefined {
+  if (entry.message.role !== "user" && entry.message.role !== "assistant") return undefined;
+  if (typeof entry.message.timestamp === "number") return entry.message.timestamp;
+  const timestamp = new Date(entry.timestamp).getTime();
+  return Number.isNaN(timestamp) ? undefined : timestamp;
+}
+
+/** 返回尚未落盘或正在运行的内存会话投影，供会话列表合并。 */
+export function getRpcSessionInfos(): SessionInfo[] {
+  const sessions: SessionInfo[] = [];
+  for (const session of getRegistry().values()) {
+    if (!session.isAlive()) continue;
+    const manager = session.inner.sessionManager;
+    const header = manager.getHeader();
+    const entries = manager.getEntries() as unknown as Array<
+      { type: string; timestamp: string } | SessionMessageEntry
+    >;
+    const messages = entries.filter((entry): entry is SessionMessageEntry => entry.type === "message");
+    const firstUserMessage = messages.find((entry) => entry.message.role === "user");
+    const sessionFile = manager.getSessionFile() ?? session.sessionFile;
+    const persisted = Boolean(sessionFile && existsSync(sessionFile));
+    const subagent = readSubagentRun(
+      entries as unknown as SessionEntry[],
+      header?.id ?? session.sessionId,
+      sessionFile ?? "",
+    );
+    if (!persisted && (!session.isRunning() || !firstUserMessage)) continue;
+
+    const created = header?.timestamp ?? entries[0]?.timestamp ?? new Date().toISOString();
+    const headerTimestamp = new Date(created).getTime();
+    let lastActivityMs = Number.isNaN(headerTimestamp) ? Date.now() : headerTimestamp;
+    for (const message of messages) {
+      const activityMs = runtimeMessageActivityMs(message);
+      if (activityMs !== undefined) lastActivityMs = Math.max(lastActivityMs, activityMs);
+    }
+
+    sessions.push({
+      path: sessionFile ?? "",
+      id: header?.id ?? session.sessionId,
+      cwd: header?.cwd ?? session.cwd,
+      name: manager.getSessionName(),
+      created,
+      modified: new Date(lastActivityMs).toISOString(),
+      messageCount: messages.length,
+      firstMessage: firstUserMessage ? runtimeMessageText(firstUserMessage) || "(no messages)" : "(no messages)",
+      ...(subagent ? {
+        parentSessionId: subagent.parentSessionId,
+        relation: {
+          kind: "subagent" as const,
+          parentSessionId: subagent.parentSessionId,
+          profile: subagent.profile,
+          description: subagent.description,
+          status: session.isRunning() ? "running" as const : subagent.status,
+        },
+      } : {}),
+      transient: !persisted,
+    });
+  }
+  return sessions;
+}
+
 /** 统一生成会话运行快照，避免 alive/running/busy 在不同路由中产生不同语义。 */
 export async function getRpcSessionSnapshot(sessionId: string): Promise<AgentRuntimeSnapshot> {
   const session = getRpcSession(sessionId);
@@ -1360,6 +1921,16 @@ export function getRunningRpcSessionIds(): string[] {
   const ids = new Set<string>();
   for (const [sessionId, session] of getRegistry()) {
     if (session.isRunning()) ids.add(session.sessionId || sessionId);
+  }
+  return [...ids];
+}
+
+export function getCompletionNotificationSuppressedRpcSessionIds(): string[] {
+  const ids = new Set<string>();
+  for (const [sessionId, session] of getRegistry()) {
+    if (session.isRunning() && session.hasSuppressedCompletionNotifications()) {
+      ids.add(session.sessionId || sessionId);
+    }
   }
   return [...ids];
 }
@@ -1422,7 +1993,10 @@ export async function startRpcSession(
   cwd: string | undefined,
   options: RpcSessionStartOptions = {},
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
-  const { toolNames, initialModel, thinkingLevel, fastEnabled } = options;
+  const { initialModel, allowInitialModelFallback, thinkingLevel, fastEnabled } = options;
+  const requestedToolNames = options.toolNames === undefined
+    ? undefined
+    : validateSessionToolSelection(options.toolNames);
   const registry = getRegistry();
   const locks = getLocks();
 
@@ -1440,19 +2014,30 @@ export async function startRpcSession(
     sessionManager = SessionManager.create(cwd, undefined);
   }
   const sessionCwd = sessionManager.getCwd();
+  const sessionEntries = sessionManager.getEntries() as unknown as SessionEntry[];
+  const subagentResources = sessionFile ? readSubagentSessionResources(sessionEntries) : null;
+  const persistedToolNames = subagentResources ? undefined : readSessionToolSelection(sessionEntries);
+  const selectedToolNames = subagentResources?.tools ?? persistedToolNames ?? requestedToolNames;
+  if (!subagentResources && persistedToolNames === undefined && requestedToolNames !== undefined) {
+    appendSessionToolSelection(sessionManager, requestedToolNames);
+  }
+  const subagentLoadsResources = Boolean(
+    subagentResources?.loadExtensions || subagentResources?.loadSkills,
+  );
+  const chatOnly = selectedToolNames?.length === 0 && !subagentLoadsResources;
   const finishStartingSession = trackStartingSession(sessionCwd);
   const startupStartedAt = performance.now();
   const startupTimings: RpcStartupTimings = {};
   let startupStage = "setup";
   const starting = (async () => {
     // Some extensions access the SDK's global theme even outside the terminal UI.
-    initTheme();
+    if (!chatOnly) initTheme();
     const agentDir = getAgentDir();
 
     // Determine which tools to pass based on requested toolNames.
     // Since v0.68.0, session creation expects string[] tool names instead of Tool[] instances.
-    let toolsOption: string[] | undefined;
-    if (toolNames !== undefined) {
+    let toolsOption: string[] | undefined = subagentResources?.tools;
+    if (!subagentResources && selectedToolNames !== undefined) {
       // toolNames === [] -> "all off" (an empty allow-list disables every tool).
       // Otherwise DO NOT pass a builtin-only allow-list: passing CODING_TOOL_NAMES
       // set allowedToolNames to coding builtins only, which filtered every
@@ -1460,21 +2045,59 @@ export async function startRpcSession(
       // tool registry — so they were unavailable in Pi Web sessions even though the
       // `pi` CLI keeps them. Leaving the allow-list unset lets the SDK register all
       // tools (and activate extension tools); we narrow the ACTIVE set below.
-      toolsOption = toolNames.length === 0 ? [] : undefined;
+      toolsOption = selectedToolNames.length === 0 ? [] : undefined;
     }
 
     // Build services first so extension-registered providers are available
     // before the SDK restores the saved model from the session file.
     // Gate untrusted project extensions so opening a repository does not run
     // its .pi/extensions code automatically (see lib/project-trust.ts, #236).
-    const trustReloadOptions = projectTrustReloadOptions(sessionCwd, agentDir);
+    const trustReloadOptions = subagentResources
+      ? subagentLoadsResources
+        ? projectTrustReloadOptions(sessionCwd, agentDir)
+        : undefined
+      : chatOnly
+        ? undefined
+        : projectTrustReloadOptions(sessionCwd, agentDir);
+    const settingsManager = SettingsManager.create(sessionCwd, agentDir);
     startupStage = "services";
     let stageStartedAt = performance.now();
+    const modelConfigSnapshot = await readModelsConfigSnapshot();
     const services = await createAgentSessionServices({
       cwd: sessionCwd,
       agentDir,
+      settingsManager,
+      resourceLoaderOptions: subagentResources
+        ? {
+            noExtensions: !subagentResources.loadExtensions,
+            noSkills: !subagentResources.loadSkills,
+            noPromptTemplates: true,
+            noThemes: true,
+            noContextFiles: true,
+            ...(chatOnly
+              ? { systemPrompt: " ", systemPromptOverride: () => undefined }
+              : {}),
+            appendSystemPrompt: subagentResources.appendSystemPrompt,
+          }
+        : chatOnly
+          ? CHAT_ONLY_RESOURCE_LOADER_OPTIONS
+          : {
+              extensionFactories: [
+                createProjectCommandBashExtension({ cwd: sessionCwd, settings: settingsManager }),
+                createSubagentExtension(
+                  SUBAGENT_CONTROLLER.extensionRuntime,
+                  () => listSubagentProfiles(sessionCwd),
+                  isBuiltInSubagentsEnabled,
+                ),
+              ],
+              extensionsOverride: (base) => preferUserBashExtension(preferPiWebSubagentExtension(base)),
+            },
       ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),
     });
+    const modelConfigAfterServices = await readModelsConfigSnapshot();
+    if (modelConfigSnapshot.generation !== modelConfigAfterServices.generation) {
+      throw new Error("模型配置在 runtime 创建期间发生变化，请重试");
+    }
     startupTimings.services = elapsedMs(stageStartedAt);
 
     startupStage = "modelScope";
@@ -1487,10 +2110,14 @@ export async function startRpcSession(
     const defaultProvider = services.settingsManager.getDefaultProvider();
     const defaultModelId = services.settingsManager.getDefaultModel();
     const hasExistingMessages = sessionManager.getBranch().some((entry) => entry.type === "message");
+    const effectiveInitialModel = initialModel && (
+      !allowInitialModelFallback
+      || scope.visible.some((model) => model.provider === initialModel.provider && model.id === initialModel.modelId)
+    ) ? initialModel : undefined;
     const initial = hasExistingMessages
       ? { scopedModels: [...scope.scopedModels] }
       : selectInitialModelScope(scope, {
-        ...(initialModel ? { requestedModel: initialModel } : {}),
+        ...(effectiveInitialModel ? { requestedModel: effectiveInitialModel } : {}),
         ...(defaultProvider && defaultModelId
           ? { defaultModel: { provider: defaultProvider, modelId: defaultModelId } }
           : {}),
@@ -1505,6 +2132,7 @@ export async function startRpcSession(
       ...(initial.thinkingLevel ? { thinkingLevel: initial.thinkingLevel } : {}),
       ...(initial.scopedModels.length > 0 ? { scopedModels: initial.scopedModels } : {}),
       ...(toolsOption !== undefined ? { tools: toolsOption } : {}),
+      ...(subagentResources ? { excludeTools: [...SUBAGENT_CONTROL_TOOL_NAMES] } : {}),
     });
     startupTimings.sessionCreate = elapsedMs(stageStartedAt);
 
@@ -1513,7 +2141,7 @@ export async function startRpcSession(
     const persistedPreferences = await persistExplicitStartupPreferences(
       services.settingsManager,
       {
-        ...(initialModel ? { model: initialModel } : {}),
+        ...(effectiveInitialModel ? { model: effectiveInitialModel } : {}),
         ...(thinkingLevel ? { thinkingLevel } : {}),
       },
       {
@@ -1532,18 +2160,26 @@ export async function startRpcSession(
     // If specific tool names were requested (non-empty), set the active tools to the
     // requested builtin coding tools PLUS all extension/package tools, so installed
     // extensions stay usable in Pi Web just like in the `pi` CLI.
-    if (toolNames && toolNames.length > 0) {
-      inner.setActiveToolsByName(withExtensionTools(inner, toolNames));
+    if (!subagentResources && !chatOnly && selectedToolNames) {
+      inner.setActiveToolsByName(withExtensionTools(inner, selectedToolNames));
     }
 
-    const wrapper = new AgentSessionWrapper(inner);
-    // When all tools are disabled, clear the system prompt entirely.
-    // pi's buildSystemPrompt always produces a non-empty prompt even with no tools;
-    // keep this forced after extension resource discovery and reloads as well.
-    if (toolNames?.length === 0) {
-      wrapper.setForceEmptySystemPrompt(true);
-    }
-    wrapper.start();
+    const exactSystemPrompt = chatOnly
+      ? subagentResources
+        ? () => subagentResources.appendSystemPrompt[0] ?? ""
+        : () => contextFilesSystemPrompt(inner.resourceLoader.getAgentsFiles().agentsFiles)
+      : undefined;
+    const wrapper = new AgentSessionWrapper(
+      inner,
+      modelConfigSnapshot.fastModels,
+      modelConfigSnapshot.generation,
+      {
+        exactSystemPrompt,
+        chatOnly,
+        suppressCompletionNotifications: Boolean(subagentResources),
+      },
+    );
+    registerRpcWrapper(wrapper);
     if (fastEnabled !== undefined) {
       await wrapper.send({ type: "set_fast_enabled", enabled: fastEnabled });
     }
@@ -1551,10 +2187,6 @@ export async function startRpcSession(
     const realSessionId = inner.sessionId as string;
     const realSessionFile = inner.sessionFile as string | undefined;
     if (realSessionFile) cacheSessionPath(realSessionId, realSessionFile);
-
-    wrapper.onDestroy(() => registry.delete(realSessionId));
-    registry.set(realSessionId, wrapper);
-    wrapper.beginExtensionBinding({ forceEmptySystemPrompt: toolNames?.length === 0 });
 
     console.info("[pi-web] RPC session startup", {
       sessionId: realSessionId,

@@ -4,25 +4,38 @@ import { promisify } from "util";
 import { NextRequest, NextResponse } from "next/server";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { getRevealCommand } from "@/lib/file-reveal";
+import { isFilePathReferencedBySession } from "@/lib/session-file-references";
 import { isApiRequestAllowed } from "@/lib/request-security";
 
 export const runtime = "nodejs";
 
 const execFileAsync = promisify(execFile);
 
+export async function GET() {
+  const platform = process.platform === "darwin"
+    ? "macos"
+    : process.platform === "win32"
+      ? "windows"
+      : "linux";
+  return NextResponse.json({ platform });
+}
 export async function POST(request: NextRequest) {
   if (!isApiRequestAllowed(request)) {
     return NextResponse.json({ error: "Untrusted API request" }, { status: 403 });
   }
 
   try {
-    const body = await request.json() as { path?: unknown };
+    const body = await request.json() as { path?: unknown; sessionId?: unknown };
     if (typeof body.path !== "string" || !body.path.trim()) {
       return NextResponse.json({ error: "path is required" }, { status: 400 });
     }
 
+    const sessionId = typeof body.sessionId === "string" ? body.sessionId : null;
     const allowedRoots = await getAllowedFileRoots();
-    if (!isExistingFilePathAllowed(body.path, allowedRoots)) {
+    const allowedByRoot = isExistingFilePathAllowed(body.path, allowedRoots);
+    const allowedBySessionReference = !allowedByRoot
+      && await isFilePathReferencedBySession(body.path, sessionId);
+    if (!allowedByRoot && !allowedBySessionReference) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }
 

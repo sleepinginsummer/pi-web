@@ -1,6 +1,12 @@
 import { NextResponse } from "next/server";
 import { invalidateSessionListCache, resolveSessionPath } from "@/lib/session-reader";
-import { getRpcSession, getRpcSessionSnapshot, isShadowSettingCommandResult, startRpcSession } from "@/lib/rpc-manager";
+import {
+  getRpcSession,
+  getRpcSessionSnapshot,
+  isShadowSettingCommandResult,
+  setRpcSessionTools,
+  startRpcSession,
+} from "@/lib/rpc-manager";
 
 /**
  * 会话列表只依赖会话文件中的持久化数据。查询类命令不需要淘汰缓存，
@@ -33,6 +39,19 @@ export async function POST(
 
   try {
     const body = await req.json() as { type: string; [key: string]: unknown };
+
+    if (body.type === "set_tools") {
+      const existing = getRpcSession(id);
+      const filePath = existing?.sessionFile || await resolveSessionPath(id) || undefined;
+      if (!existing?.isAlive() && !filePath) {
+        return NextResponse.json({ error: "Session not found" }, { status: 404 });
+      }
+      const changed = await setRpcSessionTools(id, filePath, body.toolNames);
+      return NextResponse.json({
+        success: true,
+        data: { sessionId: changed.sessionId, recreated: changed.recreated },
+      });
+    }
 
     let session = getRpcSession(id);
     if (!session?.isAlive()) {

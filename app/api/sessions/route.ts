@@ -1,25 +1,37 @@
 import { NextResponse } from "next/server";
-import { listAllSessions, invalidateSessionListCache } from "@/lib/session-reader";
-import { getRunningRpcSessionIds } from "@/lib/rpc-manager";
+import {
+  attachSessionProjectInfo,
+  listAllSessions,
+  mergeSessionLists,
+} from "@/lib/session-reader";
+import {
+  getCompletionNotificationSuppressedRpcSessionIds,
+  getRpcSessionInfos,
+  getRunningRpcSessionIds,
+} from "@/lib/rpc-manager";
 
-export async function GET() {
+export const dynamic = "force-dynamic";
+
+export async function GET(req: Request) {
   try {
-    const runningSessionIds = getRunningRpcSessionIds();
-    let sessions = await listAllSessions();
-
-    // 兜底：正在运行的会话不在列表里，说明其 .jsonl 文件刚落盘而列表缓存
-    // 还是旧的（SSE 断线等场景可能漏掉 events 路由里的失效）。失效后重扫一次。
-    const missingRunning = runningSessionIds.filter((id) => !sessions.some((s) => s.id === id));
-    if (missingRunning.length > 0) {
-      invalidateSessionListCache();
-      sessions = await listAllSessions();
-    }
-
-    return NextResponse.json({ sessions, runningSessionIds });
+    const force = new URL(req.url).searchParams.get("force") === "1";
+    const [persistedSessions, runtimeSessions] = await Promise.all([
+      listAllSessions({ force }),
+      attachSessionProjectInfo(getRpcSessionInfos()),
+    ]);
+    const sessions = mergeSessionLists(persistedSessions, runtimeSessions);
+    return NextResponse.json(
+      {
+        sessions,
+        runningSessionIds: getRunningRpcSessionIds(),
+        completionNotificationSuppressedSessionIds: getCompletionNotificationSuppressedRpcSessionIds(),
+      },
+      { headers: { "Cache-Control": "no-store" } },
+    );
   } catch (error) {
     return NextResponse.json(
       { error: String(error) },
-      { status: 500 }
+      { status: 500, headers: { "Cache-Control": "no-store" } },
     );
   }
 }

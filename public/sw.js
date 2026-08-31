@@ -59,7 +59,14 @@ self.addEventListener("activate", (event) => {
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  const targetUrl = new URL(event.notification.data?.url || "/", self.location.origin).href;
+  let targetUrlValue = new URL("/", self.location.origin);
+  try {
+    const candidate = new URL(event.notification.data?.url || "/", self.location.origin);
+    if (candidate.origin === self.location.origin) targetUrlValue = candidate;
+  } catch {
+    // Keep the root URL when notification data is malformed.
+  }
+  const targetUrl = targetUrlValue.href;
   const sourceClientId = event.notification.data?.sourceClientId;
   event.waitUntil((async () => {
     // 优先定位发送通知的原窗口，避免普通 Chrome 标签页抢占 PWA 通知。
@@ -73,10 +80,12 @@ self.addEventListener("notificationclick", (event) => {
     }
 
     const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    const exactClient = clients.find((candidate) => candidate.url === targetUrl);
+    if (exactClient) return exactClient.focus();
     const sameOriginClient = clients.find((candidate) => candidate.url.startsWith(self.location.origin));
     if (sameOriginClient) {
-      await sameOriginClient.navigate(targetUrl);
-      return sameOriginClient.focus();
+      const navigatedClient = await sameOriginClient.navigate(targetUrl);
+      return (navigatedClient ?? sameOriginClient).focus();
     }
     return self.clients.openWindow(targetUrl);
   })());

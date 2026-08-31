@@ -112,9 +112,13 @@ html, body {
   padding: 0;
   background: var(--bg);
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", Roboto, sans-serif;
   font-size: 14px;
   overscroll-behavior: none;
+}
+
+button {
+  font: inherit;
 }
 
 body {
@@ -1163,15 +1167,29 @@ span.token.table {
   background: var(--bg-hover);
   border-color: var(--accent);
 }
+.chat-window {
+  --ask-max-height: min(620px, calc(100dvh - 150px));
+  --ask-gap: 8px;
+  --ask-collapsed-height: 44px;
+}
 
 .ask-input-flyout {
   position: absolute;
   right: 0;
-  bottom: calc(100% + 8px);
+  bottom: calc(100% + var(--ask-gap));
   left: 0;
   z-index: 60;
   padding-left: 16px;
   pointer-events: none;
+}
+
+/* 浮层覆盖在输入框上方时，为消息区保留同等的可滚动空间。 */
+.chat-scroll-ask-reserve {
+  padding-bottom: calc(var(--ask-max-height) + var(--ask-gap));
+}
+
+.chat-window:has(.ask-input-flyout-content.is-collapsed) .chat-scroll-ask-reserve {
+  padding-bottom: calc(var(--ask-collapsed-height) + var(--ask-gap));
 }
 
 .ask-input-flyout-content {
@@ -1181,10 +1199,74 @@ span.token.table {
   pointer-events: auto;
 }
 
+.ask-expanded-content {
+  position: relative;
+}
+
+
+.ask-expanded-content .ask-questionnaire-tabs {
+  padding-right: 54px;
+}
+
+
+.ask-collapse-button {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  z-index: 2;
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-muted);
+  background: var(--bg-panel);
+  cursor: pointer;
+}
+
+.ask-collapse-button:hover,
+.ask-collapse-button:focus-visible,
+.ask-collapsed-bar:hover,
+.ask-collapsed-bar:focus-visible {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.ask-collapsed-bar {
+  display: flex;
+  width: 100%;
+  min-height: var(--ask-collapsed-height);
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--bg);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+  cursor: pointer;
+  text-align: left;
+}
+
+.ask-collapsed-bar span {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ask-collapsed-bar svg {
+  flex-shrink: 0;
+}
+
 .ask-questionnaire {
   display: flex;
   width: 100%;
-  max-height: min(620px, calc(100dvh - 150px));
+  max-height: var(--ask-max-height);
   flex-direction: column;
   overflow: hidden;
   border: 1px solid var(--border);
@@ -1405,12 +1487,12 @@ span.token.table {
 }
 
 @media (max-width: 640px) {
-  .ask-input-flyout {
-    padding-right: 16px !important;
+  .chat-window {
+    --ask-max-height: min(560px, calc(100dvh - 130px));
   }
 
-  .ask-questionnaire {
-    max-height: min(560px, calc(100dvh - 130px));
+  .ask-input-flyout {
+    padding-right: 16px !important;
   }
 
   .ask-questionnaire-body {
@@ -1503,6 +1585,79 @@ span.token.table {
   background: var(--bg);
   box-shadow: 0 10px 28px -14px rgba(15, 23, 42, 0.36);
 }
+.app-top-bar::-webkit-scrollbar {
+  display: none;
+}
+.mobile-controls-menu > * {
+  flex-shrink: 0;
+}
+
+.extension-status-bar {
+  gap: 8px;
+}
+.extension-widget-triggers {
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 60%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: none;
+  touch-action: pan-x;
+  -webkit-overflow-scrolling: touch;
+}
+.extension-status-bar:not(.has-statuses) .extension-widget-triggers {
+  flex: 1 1 auto;
+  max-width: 100%;
+}
+.extension-status-line {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: none;
+  touch-action: pan-x;
+  -webkit-overflow-scrolling: touch;
+}
+.extension-status-line::-webkit-scrollbar { display: none; }
+.extension-widget-triggers::-webkit-scrollbar { display: none; }
+.extension-widget-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  max-width: 180px;
+  min-height: 24px;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-panel);
+  color: var(--text-muted);
+  font: 11px var(--font-mono);
+  cursor: pointer;
+}
+.extension-widget-trigger[role="status"] { cursor: default; }
+.extension-widget-trigger:hover,
+.extension-widget-trigger:focus-visible,
+.extension-widget-trigger.is-expanded { color: var(--text); border-color: var(--accent); }
+.extension-widget-trigger.is-updating .extension-widget-update-pulse {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: extension-widget-pulse 1.1s ease-out;
+}
+.extension-widget-placement { color: var(--text-dim); }
+.extension-widget-key { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.extension-widget-panels { position: absolute; right: 12px; bottom: 42px; z-index: 4; max-width: min(520px, calc(100vw - 24px)); }
+.extension-widget-panel { border: 1px solid var(--border); border-radius: 4px; background: var(--bg-panel); box-shadow: 0 8px 24px rgba(0,0,0,.18); }
+.extension-widget-panel-heading { padding: 5px 9px; border-bottom: 1px solid var(--border); color: var(--text-dim); font: 11px var(--font-mono); }
+.extension-widget-content { max-height: 260px; overflow: auto; margin: 0; padding: 8px 9px; color: var(--text-muted); font: 12px/1.5 var(--font-mono); white-space: pre-wrap; word-break: break-word; }
+@keyframes extension-widget-pulse { from { opacity: 1; transform: scale(1); } to { opacity: 0; transform: scale(2.4); } }
 
 .notice-shelf-overlay .notice-shelf-item:hover,
 .notice-shelf-overlay .notice-shelf-item:focus-visible {

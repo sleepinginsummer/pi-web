@@ -1,13 +1,19 @@
 "use client";
 
 import React, { memo, useEffect, useRef, useState } from "react";
+import { InputControlsMenu } from "./InputControlsMenu";
 import { useI18n } from "@/hooks/useI18n";
 import type { ModelSelectionViewActions, ModelSelectionViewState } from "@/lib/model-selection-types";
 import { THINKING_LEVEL_OPTIONS, type ThinkingLevelOption } from "@/lib/thinking-levels";
 import { Zap } from "lucide-react";
+import type { ToolPreset } from "@/lib/tool-presets";
+import { TOOL_PRESET_VALUES } from "@/lib/tool-presets";
+const TOOL_PRESET_LABELS = ["off", ...TOOL_PRESET_VALUES.filter((preset) => preset !== "none")] as const;
+type ToolPresetLabel = typeof TOOL_PRESET_LABELS[number];
 
-const TOOL_PRESETS = ["off", "default", "full"] as const;
-const TOOL_PRESET_MAP: Record<"off" | "default" | "full", "none" | "default" | "full"> = { off: "none", default: "default", full: "full" };
+function presetForLabel(label: ToolPresetLabel): ToolPreset {
+  return label === "off" ? "none" : label;
+}
 const THINKING_LEVEL_DESC_KEYS: Record<ThinkingLevelOption, string> = {
   auto: "chat.thinkingUseDefault", off: "chat.thinkingOff", minimal: "chat.thinkingMinimal", low: "chat.thinkingLow",
   medium: "chat.thinkingMedium", high: "chat.thinkingHigh", xhigh: "chat.thinkingXhigh", max: "chat.thinkingMax",
@@ -77,7 +83,7 @@ const ThinkingControl = memo(function ThinkingControl({ isMobile, modelState, on
                 </button>
                 {thinkingDropdownOpen && (
                   <div style={{
-                    position: "absolute", bottom: "calc(100% + 6px)", right: 0,
+                    position: "absolute", bottom: "calc(100% + 6px)", ...(isMobile ? { left: 0 } : { right: 0 }),
                     zIndex: 100, background: "var(--bg)", border: "1px solid var(--border)",
                     borderRadius: 8, boxShadow: "0 -4px 16px rgba(0,0,0,0.10)",
                     overflow: "hidden", minWidth: 180,
@@ -160,15 +166,15 @@ const FastModeControl = memo(function FastModeControl({ isMobile, modelState, on
 
 interface ToolPresetControlProps {
   isMobile: boolean;
-  toolPreset?: "none" | "default" | "full";
-  onChange?: (preset: "none" | "default" | "full") => void;
+  toolPreset?: ToolPreset;
+  onChange?: (preset: ToolPreset) => void;
 }
 
 const ToolPresetControl = memo(function ToolPresetControl({ isMobile, toolPreset, onChange }: ToolPresetControlProps) {
   const { t } = useI18n();
   const [toolDropdownOpen, setToolDropdownOpen] = useState(false);
   const toolDropdownRef = useRef<HTMLDivElement>(null);
-  const toolPresetLabel = Object.entries(TOOL_PRESET_MAP).find(([, value]) => value === (toolPreset ?? "default"))?.[0] ?? "default";
+  const toolPresetLabel = toolPreset === "none" ? "off" : (toolPreset ?? "default");
   useEffect(() => {
     if (!toolDropdownOpen) return;
     const close = (event: MouseEvent) => {
@@ -219,13 +225,17 @@ const ToolPresetControl = memo(function ToolPresetControl({ isMobile, toolPreset
                     borderRadius: 8, boxShadow: "0 -4px 16px rgba(0,0,0,0.10)",
                     overflow: "hidden", minWidth: 120,
                   }}>
-                    {TOOL_PRESETS.map((lvl) => {
-                      const preset = TOOL_PRESET_MAP[lvl];
+                    {TOOL_PRESET_LABELS.map((label) => {
+                      const preset = presetForLabel(label);
                       const isActive = (toolPreset ?? "default") === preset;
-                       const desc = lvl === "off" ? t("chat.noTools") : lvl === "default" ? t("chat.builtInTools", { count: 4 }) : t("chat.allBuiltInTools");
+                      let desc: string;
+                      if (label === "off") desc = t("chat.noTools");
+                      else if (label === "read-only") desc = t("chat.readOnlyTools", { count: 4 });
+                      else if (label === "default") desc = t("chat.builtInTools", { count: 4 });
+                      else desc = t("chat.allBuiltInTools");
                       return (
                         <button
-                          key={lvl}
+                          key={label}
                           onClick={() => { setToolDropdownOpen(false); if (!isActive) onToolPresetChange(preset); }}
                           style={{
                             display: "flex", alignItems: "center", gap: 8,
@@ -243,7 +253,7 @@ const ToolPresetControl = memo(function ToolPresetControl({ isMobile, toolPreset
                           {isActive
                             ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
                             : <span style={{ width: 10, flexShrink: 0 }} />}
-                          <span style={{ flex: 1 }}>{lvl}</span>
+                          <span style={{ flex: 1 }}>{label}</span>
                           <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: 8 }}>{desc}</span>
                         </button>
                       );
@@ -486,8 +496,8 @@ interface InputControlsProps {
   modelState: ModelSelectionViewState;
   modelActions: ModelSelectionViewActions;
   onThinkingLevelChange?: (level: ThinkingLevelOption) => void;
-  toolPreset?: "none" | "default" | "full";
-  onToolPresetChange?: (preset: "none" | "default" | "full") => void;
+  toolPreset?: ToolPreset;
+  onToolPresetChange?: (preset: ToolPreset) => void;
   onCompact?: () => void;
   onAbortCompaction?: () => void;
   isCompacting?: boolean;
@@ -507,9 +517,6 @@ export const InputControls = memo(function InputControls({
 }: InputControlsProps) {
   const { t } = useI18n();
   const { thinkingLevel, thinkingLevelMap } = modelState;
-  const [controlsMenuOpen, setControlsMenuOpen] = useState(false);
-  const controlsMenuRef = useRef<HTMLDivElement>(null);
-
   const thinkingDisplayLabel = (() => {
     const level = thinkingLevel ?? "auto";
     if (level === "auto" || !thinkingLevelMap) return level;
@@ -518,7 +525,8 @@ export const InputControls = memo(function InputControls({
   const runningThinkingDisplayLabel = modelState.fastEnabled
     ? `${thinkingDisplayLabel} + Fast`
     : thinkingDisplayLabel;
-
+  const [controlsMenuOpen, setControlsMenuOpen] = useState(false);
+  const controlsMenuRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const handleOutsideClick = (event: MouseEvent) => {
       const target = event.target as Node;
@@ -584,95 +592,41 @@ export const InputControls = memo(function InputControls({
                 {t("chat.moreControls")}
               </button>
             )}
-            <div style={{
-              display: isMobile ? (controlsMenuOpen ? "flex" : "none") : "flex",
-              alignItems: "center",
-              gap: isMobile ? 1 : 2,
-              ...(isMobile ? {
-                position: "absolute",
-                right: 0,
-                bottom: 0,
-                zIndex: 60,
-                padding: 1,
-                width: "max-content",
-                maxWidth: "calc(100vw - 32px)",
-                flexWrap: "nowrap",
-                justifyContent: "flex-end",
-                border: "1px solid color-mix(in srgb, var(--border) 72%, transparent)",
-                borderRadius: 10,
-                background: "color-mix(in srgb, var(--bg-panel) 92%, var(--bg))",
-                boxShadow: "0 8px 24px rgba(0,0,0,0.14)",
-                backdropFilter: "blur(10px)",
-              } : null),
-            }}>
-            {!isStreaming && (!isMobile || controlsMenuOpen) && (
-              <>
-                <ThinkingControl isMobile={isMobile} modelState={modelState} onChange={onThinkingLevelChange} />
-                <FastModeControl
+            <InputControlsMenu
+              isMobile={isMobile}
+              isOpen={controlsMenuOpen}
+              onClose={() => setControlsMenuOpen(false)}
+              modelControls={!isStreaming && (!isMobile || controlsMenuOpen) ? (
+                <>
+                  <ThinkingControl isMobile={isMobile} modelState={modelState} onChange={onThinkingLevelChange} />
+                  <FastModeControl isMobile={isMobile} modelState={modelState} onChange={modelActions.changeFastEnabled} />
+                  <ToolPresetControl isMobile={isMobile} toolPreset={toolPreset} onChange={onToolPresetChange} />
+                </>
+              ) : null}
+              runControls={(
+                <RunControls
                   isMobile={isMobile}
-                  modelState={modelState}
-                  onChange={modelActions.changeFastEnabled}
+                  isStreaming={isStreaming}
+                  showLabel={!isMobile || controlsMenuOpen}
+                  thinkingLevel={thinkingLevel}
+                  thinkingDisplayLabel={runningThinkingDisplayLabel}
+                  onCompact={onCompact}
+                  onAbortCompaction={onAbortCompaction}
+                  isCompacting={isCompacting}
+                  onAbort={onAbort}
                 />
-                <ToolPresetControl isMobile={isMobile} toolPreset={toolPreset} onChange={onToolPresetChange} />
-              </>
-            )}
-
-            <RunControls
-              isMobile={isMobile}
-              isStreaming={isStreaming}
-              showLabel={!isMobile || controlsMenuOpen}
-              thinkingLevel={thinkingLevel}
-              thinkingDisplayLabel={runningThinkingDisplayLabel}
-              onCompact={onCompact}
-              onAbortCompaction={onAbortCompaction}
-              isCompacting={isCompacting}
-              onAbort={onAbort}
+              )}
+              preferenceControls={(
+                <PreferenceToggles
+                  isMobile={isMobile}
+                  soundEnabled={soundEnabled}
+                  onSoundToggle={onSoundToggle}
+                  notificationEnabled={notificationEnabled}
+                  notificationPermission={notificationPermission}
+                  onNotificationToggle={onNotificationToggle}
+                />
+              )}
             />
-            <PreferenceToggles
-              isMobile={isMobile}
-              soundEnabled={soundEnabled}
-              onSoundToggle={onSoundToggle}
-              notificationEnabled={notificationEnabled}
-              notificationPermission={notificationPermission}
-              onNotificationToggle={onNotificationToggle}
-            />
-            {isMobile && controlsMenuOpen && (
-              <button
-                type="button"
-                 title={t("chat.collapseControls")}
-                 aria-label={t("chat.collapseControls")}
-                aria-expanded={true}
-                onClick={() => setControlsMenuOpen(false)}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  width: 36,
-                  height: 32,
-                  padding: 0,
-                  marginLeft: 0,
-                  background: "var(--bg-hover)",
-                  border: "none",
-                  borderLeft: "1px solid color-mix(in srgb, var(--border) 72%, transparent)",
-                  borderRadius: "0 9px 9px 0",
-                  color: "var(--text)",
-                  cursor: "pointer",
-                  transition: "background 0.12s, color 0.12s",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = "var(--bg-selected)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = "var(--bg-hover)";
-                }}
-              >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                  <line x1="18" y1="6" x2="6" y2="18" />
-                  <line x1="6" y1="6" x2="18" y2="18" />
-                </svg>
-              </button>
-            )}
-            </div>
           </div>
     </>
   );

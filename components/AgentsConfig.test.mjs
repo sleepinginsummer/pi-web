@@ -5,7 +5,7 @@ import test from "node:test";
 const source = await readFile(new URL("./AgentsConfig.tsx", import.meta.url), "utf8");
 const cssSource = await readFile(new URL("../app/settings.css", import.meta.url), "utf8");
 const chatInputSource = await readFile(new URL("./ChatInput.tsx", import.meta.url), "utf8");
-const modelSelectorSource = await readFile(new URL("./ModelSelector.tsx", import.meta.url), "utf8");
+const modelPickerSource = await readFile(new URL("./ModelPicker.tsx", import.meta.url), "utf8");
 
 test("keeps same-name profiles selectable by scope and groups writable sources first", () => {
   assert.match(source, /return `\$\{profile\.scope\}:\$\{profile\.name\}`/);
@@ -73,15 +73,15 @@ test("persists existing profile toggles immediately without submitting unsaved f
   assert.doesNotMatch(source, /method: "PATCH"[\s\S]*?profile: draft/);
 });
 
-test("reuses the ChatInput model selector with scoped models", () => {
+test("reuses ModelPicker in ChatInput and agent configuration", () => {
   assert.match(source, /fetch\(`\/api\/models\?cwd=\$\{encodeURIComponent\(cwd\)\}`/);
-  assert.match(source, /import \{ ModelSelector \} from "\.\/ModelSelector"/);
-  assert.match(chatInputSource, /import \{ ModelSelector, type ModelSelectorOption \} from "\.\/ModelSelector"/);
-  assert.match(source, /<ModelSelector[\s\S]*?options=\{modelSelectorOptions\}[\s\S]*?variant="field"/);
-  assert.match(chatInputSource, /<ModelSelector[\s\S]*?options=\{modelOptions\}/);
-  assert.match(modelSelectorSource, /filterModelOptions\(sortedOptions, filter\)/);
-  assert.match(modelSelectorSource, /modelsByProvider\.map/);
-  assert.match(modelSelectorSource, /event\.key !== "Escape" \|\| !open[\s\S]*?event\.preventDefault\(\)[\s\S]*?event\.stopPropagation\(\)/);
+  assert.match(source, /import \{ ModelPicker \} from "\.\/ModelPicker"/);
+  assert.match(chatInputSource, /import \{ ModelPicker, type ModelPickerOption \} from "\.\/ModelPicker"/);
+  assert.match(source, /<ModelPicker[\s\S]*?options=\{modelPickerOptions\}[\s\S]*?variant="field"/);
+  assert.match(chatInputSource, /<ModelPicker[\s\S]*?options=\{modelPickerOptions\}[\s\S]*?variant="toolbar"/);
+  assert.match(modelPickerSource, /filterModelOptions\(modelOptions, filter\)/);
+  assert.match(modelPickerSource, /groups\.map/);
+  assert.match(modelPickerSource, /event\.key !== "Escape" \|\| !open[\s\S]*?event\.preventDefault\(\)[\s\S]*?event\.stopPropagation\(\)/);
   assert.match(source, /agents\.modelUnavailable/);
   assert.doesNotMatch(source, /placeholder="provider\/modelId"/);
 });
@@ -113,7 +113,7 @@ test("shows disabled controls with a gray background", () => {
   assert.doesNotMatch(source, /agents-system-prompt[^\n]*fontFamily/);
   assert.match(disabledStyle, /background: "var\(--bg-panel\)"/);
   assert.match(disabledStyle, /color: "var\(--text-dim\)"/);
-  assert.match(modelSelectorSource, /background: locked \? "var\(--bg-panel\)" : "var\(--bg\)"/);
+  assert.match(modelPickerSource, /background: locked \? "var\(--bg-panel\)" : "var\(--bg\)"/);
 });
 
 test("keeps a larger resize corner when system instructions need a scrollbar", () => {

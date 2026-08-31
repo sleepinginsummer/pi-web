@@ -3,12 +3,13 @@ import { resolve } from "path";
 import { createAgentSessionServices, getAgentDir, type SettingsManager } from "@earendil-works/pi-coding-agent";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import type { ModelEntry, ModelsData, SelectedModel, ThinkingLevelMap } from "@/lib/model-types";
-import { loadModelsWithCache, withModelRuntimeError } from "@/lib/models-cache";
+import { loadModelsWithCache, withModelRuntimeError, withSafeModelLoadFailure } from "@/lib/models-cache";
 import type { ThinkingLevel } from "@/lib/thinking-levels";
 import { resolveVisibleModels, selectInitialModelScope } from "@/lib/model-scope";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { projectTrustReloadOptions } from "@/lib/project-trust";
 import { isFastModeAvailable } from "@/lib/fast-mode";
+import { readModelsConfigSnapshot } from "@/lib/models-config-commit";
 
 export const dynamic = "force-dynamic";
 
@@ -23,7 +24,7 @@ function compareModelEntries(
     || modelNameCollator.compare(a.id, b.id);
 }
 
-async function loadModels(cwd: string): Promise<ModelsData> {
+async function loadModels(cwd: string, fastModels: ReadonlySet<string>): Promise<ModelsData> {
   const nameMap = new Map<string, string>();
   let modelList: ModelEntry[] = [];
   let defaultModel: SelectedModel | null = null;
@@ -53,7 +54,7 @@ async function loadModels(cwd: string): Promise<ModelsData> {
     id: m.id,
     name: m.name,
     provider: m.provider,
-    fastAvailable: isFastModeAvailable(m),
+    fastAvailable: isFastModeAvailable(m, fastModels),
   })).sort(compareModelEntries);
   for (const m of visible) {
     const key = `${m.provider}:${m.id}`;
@@ -87,6 +88,14 @@ async function loadModels(cwd: string): Promise<ModelsData> {
   );
 }
 
+async function loadModelsConsistently(cwd: string): Promise<ModelsData> {
+  const before = await readModelsConfigSnapshot();
+  const result = await loadModels(cwd, before.fastModels);
+  const after = await readModelsConfigSnapshot();
+  if (before.generation === after.generation) return result;
+  throw new Error("模型配置在目录加载期间发生变化，请重试");
+}
+
 const EMPTY_MODELS: ModelsData = {
   models: {},
   modelList: [],
@@ -115,8 +124,8 @@ export async function GET(req: Request) {
   }
 
   try {
-    return Response.json(await loadModelsWithCache(cwd, () => loadModels(cwd)));
+    return Response.json(await loadModelsWithCache(cwd, () => loadModelsConsistently(cwd)));
   } catch {
-    return Response.json(EMPTY_MODELS);
+    return Response.json(withSafeModelLoadFailure(EMPTY_MODELS));
   }
 }

@@ -3,9 +3,9 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const source = await readFile(new URL("./useAgentSession.ts", import.meta.url), "utf8");
-const loadSessionSource = source.slice(
-  source.indexOf("const loadSession = useCallback"),
-  source.indexOf("const loadContext = useCallback"),
+const contextCommitSource = source.slice(
+  source.indexOf("const commitContextSnapshot = useCallback"),
+  source.indexOf("const startContextBackfill = useCallback"),
 );
 const switchSource = source.slice(
   source.indexOf("const handleModelChange = useCallback"),
@@ -25,7 +25,7 @@ test("existing-session model changes are optimistic and serialized", () => {
 
 test("session reloads cannot clear an in-flight optimistic model", () => {
   assert.match(
-    loadSessionSource,
+    contextCommitSource,
     /setCurrentModelOverride\(\(current\) => modelSwitchPendingRef\.current \? current : null\)/,
   );
 });

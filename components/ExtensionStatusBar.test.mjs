@@ -1,30 +1,19 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { createJiti } from "jiti";
 
 const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const React = await jiti.import("react");
-const { renderToStaticMarkup } = await jiti.import("react-dom/server");
 const {
   ExtensionStatusBar,
   formatExtensionStatusLine,
   sanitizeExtensionStatusText,
 } = await jiti.import("./ExtensionStatusBar.tsx");
-const { I18nProvider } = await jiti.import("@/hooks/useI18n");
-
-function renderStatusBar(props) {
-  return renderToStaticMarkup(
-    React.createElement(
-      I18nProvider,
-      null,
-      React.createElement(ExtensionStatusBar, props),
-    ),
-  );
-}
+const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
 
 test("sorts status text by hidden key like the Pi CLI footer", () => {
   const statuses = [
@@ -40,54 +29,57 @@ test("sorts status text by hidden key like the Pi CLI footer", () => {
   );
 });
 
-test("preserves status line breaks while normalizing horizontal whitespace", () => {
+test("sanitizes status text for a single-line display", () => {
   assert.equal(
     sanitizeExtensionStatusText("  first\tsecond \r\n third  "),
-    "first second\nthird",
+    "first second third",
   );
 });
 
-test("allows multiline status text to wrap and scroll within the footer", async () => {
-  const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
-  const statusLineRule = css.match(/\.extension-status-line\s*\{([^}]*)\}/)?.[1] ?? "";
-  const statusTextRule = css.match(/\.extension-status-text\s*\{([^}]*)\}/)?.[1] ?? "";
+test("removes only a separator that appears at the start of the full status line", () => {
+  const cacheStatus = { key: "pi-cache-stats", text: "· OpenAI cache 0/0·0M/0M 0.0%" };
 
-  assert.match(statusLineRule, /max-height:/);
-  assert.match(statusLineRule, /overflow-y:\s*auto/);
-  assert.match(statusTextRule, /overflow-wrap:\s*anywhere/);
-  assert.match(statusTextRule, /white-space:\s*pre-wrap/);
-  assert.doesNotMatch(statusTextRule, /text-overflow:\s*ellipsis/);
+  assert.equal(formatExtensionStatusLine([cacheStatus]), "OpenAI cache 0/0·0M/0M 0.0%");
+  assert.equal(
+    formatExtensionStatusLine([{ key: "active-goal", text: "goal" }, cacheStatus]),
+    "goal · OpenAI cache 0/0·0M/0M 0.0%",
+  );
 });
 
 test("renders a single status line without identifier keys", () => {
-  const html = renderStatusBar({
-    statuses: [
-      { key: "20-memory", text: "\x1b[32mmemory\x1b[0m" },
-      { key: "05-ponytail", text: "ponytail" },
-    ],
-  });
+  const html = renderToStaticMarkup(
+    React.createElement(ExtensionStatusBar, {
+      statuses: [
+        { key: "20-memory", text: "\x1b[32mmemory\x1b[0m" },
+        { key: "05-ponytail", text: "ponytail" },
+      ],
+    }),
+  );
 
   assert.match(html, /aria-label="ponytail memory"/);
-  assert.match(html, /extension-status-shelf/);
-  assert.match(html, /extension-status-line/);
-  assert.match(html, /extension-status-text/);
-  assert.match(html, />ponytail <span style=/);
+  assert.match(html, /height:36px/);
+  assert.match(html, /border-top:1px solid var\(--border\)/);
+  assert.match(html, /background:transparent/);
+  assert.match(html, /font-family:var\(--font-mono\)/);
+  assert.match(html, />ponytail <\/span>/);
   assert.match(html, />memory</);
   assert.doesNotMatch(html, /05-ponytail|20-memory/);
 });
 
-test("renders widgets and status text in one footer", () => {
-  const html = renderStatusBar({
-    statuses: [{ key: "status", text: "connected" }],
-    widgets: [{
-      key: "usage",
-      lines: ["42%"],
-      placement: "aboveEditor",
-    }],
-  });
+test("keeps widget controls outside the status live region", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(I18nProvider, null,
+      React.createElement(ExtensionStatusBar, {
+        statuses: [{ key: "20-memory", text: "memory ready" }],
+        widgets: [{ key: "tasks", lines: ["first", "second"], placement: "aboveEditor" }],
+      })),
+  );
+  const outerTag = html.match(/<div class="extension-status-bar[^"]*"[^>]*>/)?.[0] ?? "";
+  const statusTag = html.match(/<span class="extension-status-line"[^>]*>/)?.[0] ?? "";
 
-  assert.match(html, /extension-status-shelf has-widgets has-status/);
-  assert.match(html, /extension-widget-triggers/);
-  assert.match(html, /usage/);
-  assert.match(html, /connected/);
+  assert.doesNotMatch(outerTag, /role="status"/);
+  assert.match(statusTag, /role="status"/);
+  assert.match(statusTag, /aria-label="memory ready"/);
+  assert.match(html, /class="extension-widget-trigger is-expanded"/);
+  assert.match(html, /aria-controls=/);
 });

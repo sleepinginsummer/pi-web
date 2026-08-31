@@ -13,14 +13,18 @@ import type {
 import type { AgentRuntimeSnapshot, AgentRuntimeState, AgentSubmitAcknowledgement } from "@/lib/agent-state";
 import type { SelectedModel } from "@/lib/model-types";
 import type { ModelSelectionViewActions, ModelSelectionViewState } from "@/lib/model-selection-types";
+import { resolveFastModeAvailability } from "@/lib/fast-mode";
 import { isThinkingLevel, type ThinkingLevelOption } from "@/lib/thinking-levels";
 import { recordThinkingLevelPreference } from "@/lib/thinking-level-preference-client";
 import { materializeNewSession, releaseNewSessionMaterialization, type NewSessionMaterializationResult } from "@/lib/new-session-materialization-client";
 import { selectPendingNewSession, type PendingNewSessionControl, type PendingNewSessionEvent } from "@/lib/pending-new-session";
 import { useModelSelection } from "@/hooks/useModelSelection";
+import { useFrameBatchedStreamDispatch } from "@/hooks/useFrameBatchedStreamDispatch";
 import { useRunCompletion } from "@/hooks/useRunCompletion";
 export type { ThinkingLevelOption } from "@/lib/thinking-levels";
 import { normalizeAssistantMessage } from "@/lib/normalize";
+import { getPreferredToolPreset, setPreferredToolPreset } from "@/lib/tool-preset-preference";
+import type { ToolPreset } from "@/lib/tool-presets";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { setDraft, type ChatDraft } from "@/lib/draft-store";
 import { getToolNamesForPreset, type ToolEntry } from "@/lib/tool-presets";
@@ -37,30 +41,14 @@ import { LatestContextLoader } from "@/lib/latest-context-loader";
 import { SessionContextRefreshScheduler } from "@/lib/session-context-refresh-scheduler";
 import { ShadowLifecycleCoordinator } from "@/lib/shadow-lifecycle";
 import { useShadowSessionSetting } from "@/hooks/useShadowSessionSetting";
-interface StreamingState {
-  isStreaming: boolean;
-  streamingMessage: Partial<AgentMessage> | null;
-}
-
-type StreamAction =
-  | { type: "start" }
-  | { type: "update"; message: Partial<AgentMessage> }
-  | { type: "end" }
-  | { type: "reset" };
-
-function streamReducer(state: StreamingState, action: StreamAction): StreamingState {
-  switch (action.type) {
-    case "start":
-      return { isStreaming: true, streamingMessage: null };
-    case "update":
-      return { isStreaming: true, streamingMessage: action.message };
-    case "end":
-    case "reset":
-      return { isStreaming: false, streamingMessage: null };
-    default:
-      return state;
-  }
-}
+import type { ChatScrollPosition, ChatScrollPositionRequest } from "@/lib/chat-scroll-position";
+import {
+  INITIAL_STREAMING_STATE,
+  streamReducer,
+  type ClientAssistantMessageEvent,
+} from "@/lib/streaming-message";
+import { getToolExecutionProgress } from "@/lib/tool-execution-progress";
+import type { SessionListRefreshRequest } from "@/lib/session-list-refresh-coordinator";
 type DetachedSubagentMode = "auto-resume" | "next-turn";
 export interface DetachedSubagentStatus {
   id: string;
@@ -88,11 +76,16 @@ export interface TodoItem {
   status: TodoItemStatus;
   description?: string;
   activeForm?: string;
+  blockedBy?: number[];
 }
 
 interface AgentEvent {
   type: string;
   [key: string]: unknown;
+}
+
+function filterVisibleExtensionWidgets(widgets: ExtensionWidgetItem[]): ExtensionWidgetItem[] {
+  return widgets.filter((widget) => widget.lines.length > 0);
 }
 
 
@@ -212,18 +205,22 @@ function normalizeTodoItem(value: unknown): TodoItem | null {
   if (rawStatus === "deleted") return null;
   const status: TodoItemStatus =
     rawStatus === "in_progress" || rawStatus === "completed" ? rawStatus : "pending";
+  const blockedBy = Array.isArray(item.blockedBy)
+    ? item.blockedBy.filter((taskId): taskId is number => typeof taskId === "number")
+    : undefined;
   return {
     id,
     subject,
     status,
     description: typeof item.description === "string" ? item.description : undefined,
     activeForm: typeof item.activeForm === "string" ? item.activeForm : undefined,
+    ...(blockedBy && blockedBy.length > 0 ? { blockedBy } : {}),
   };
 }
 
 // todo 工具是增量 action（create/update/delete/clear），但 harness 每次 toolResult 的
-// details.tasks 都回传全量快照，因此取最后一条 todo toolResult 即为当前列表，无需重放。
-function deriveTodos(messages: AgentMessage[]): TodoItem[] {
+// details.tasks 都回传全量快照，因此最后一条有效结果即为当前列表，无需在前端重放 action。
+export function deriveTodos(messages: AgentMessage[]): TodoItem[] {
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i];
     if (message.role !== "toolResult" || message.toolName !== "todo") continue;
@@ -237,17 +234,6 @@ function deriveTodos(messages: AgentMessage[]): TodoItem[] {
     return todos;
   }
   return [];
-}
-
-// 最后一条 todo toolResult 在 messages 中的下标，用于把 TodoListPanel 锚定到对应 AI 回复下方。
-function findLastTodoResultIndex(messages: AgentMessage[]): number {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i];
-    if (message.role !== "toolResult" || message.toolName !== "todo") continue;
-    const details = message.details as { tasks?: unknown } | undefined;
-    if (details && Array.isArray(details.tasks)) return i;
-  }
-  return -1;
 }
 
 export interface QueuedMessages {
@@ -309,7 +295,7 @@ type NoticeAction =
 export type AgentPhase =
   | { kind: "waiting_model" }
   | { kind: "running_command" }
-  | { kind: "running_tools"; tools: { id: string; name: string }[] }
+  | { kind: "running_tools"; tools: { id: string; name: string; progress?: string }[] }
   | null;
 
 export interface CompactResultInfo {
@@ -341,19 +327,20 @@ export interface UseAgentSessionOptions {
   pendingNewSessionControl: PendingNewSessionControl;
   onPendingNewSessionEvent: (cwd: string, event: PendingNewSessionEvent) => void;
   onSessionCreated?: (session: SessionInfo) => void;
-  // 每条消息落盘（message_end）后通知父组件刷新会话列表，让新会话尽快出现在侧边栏
-  onSessionListRefresh?: () => void;
+  // 新会话首次落盘或一轮运行结束后刷新侧栏列表。
+  onSessionListRefresh?: (request: SessionListRefreshRequest) => void;
   onSessionForked?: (newSessionId: string) => void;
   modelsRefreshKey?: number;
   chatInputRef?: React.RefObject<ChatInputHandle | null>;
   onBranchDataChange?: (tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void) => void;
   onSystemPromptChange?: (prompt: string | null) => void;
+  /** 注册一个非 prompt 的启动动作，供系统面板按需读取系统提示词。 */
+  onSystemPromptLoaderChange?: (loader: (() => Promise<void>) | null) => void;
+  onToolsLoaderChange?: (loader: (() => Promise<ToolEntry[]>) | null) => void;
   onSessionStatsPanelOpen?: () => void;
-  setToolPreset?: (preset: "none" | "default" | "full") => void;
+  setToolPreset?: (preset: ToolPreset) => void;
 }
 
-const PROGRAMMATIC_SCROLL_IGNORE_MS = 700;
-const USER_SCROLL_INTENT_MS = 1200;
 // 父轮结束后，扩展可能异步注入一轮新的 agent run（例如后台子代理完成）。
 const EVENT_STREAM_IDLE_GRACE_MS = 30_000;
 const AGENT_STATE_RECONCILE_MS = 15_000;
@@ -363,10 +350,6 @@ const EVENT_STREAM_CONNECT_TIMEOUT_MS = 15_000;
 const MAX_NOTICES = 5;
 const NOTICE_VISIBLE_MS = 5_000;
 const NOTICE_EXIT_ANIMATION_MS = 180;
-// 流式期间侧栏列表刷新的节流窗口：消息边界过密时合并请求，避免每次
-// message_end 都触发一次全量会话扫描（服务端另有惰性脏标记兜底）。
-const SESSION_LIST_REFRESH_THROTTLE_MS = 4_000;
-const SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " ", "Space", "Spacebar"]);
 
 type EventStreamConnectionStatus = "connected" | "timeout" | "closed";
 
@@ -543,7 +526,7 @@ type SlashCommandsResponse = {
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
     session, newSessionCwd, pendingNewSessionControl, onPendingNewSessionEvent, onSessionCreated, onSessionListRefresh, onSessionForked,
-    modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
+    modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onSessionStatsPanelOpen,
   } = opts;
 
   const isNew = session === null && newSessionCwd !== null;
@@ -561,7 +544,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [activeLeafId, setActiveLeafId] = useState<string | null>(null);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [entryIds, setEntryIds] = useState<string[]>([]);
-  const [streamState, dispatch] = useReducer(streamReducer, { isStreaming: false, streamingMessage: null });
+  const [streamState, dispatch] = useReducer(streamReducer, INITIAL_STREAMING_STATE);
+  const dispatchStreamBatch = useCallback((events: ClientAssistantMessageEvent[]) => {
+    dispatch({ type: "delta_batch", events });
+  }, []);
+  const streamScopeKey = session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : null);
+  const {
+    enqueue: enqueueStreamDelta,
+    flush: flushStreamDeltas,
+    reset: resetStreamDeltas,
+  } = useFrameBatchedStreamDispatch(dispatchStreamBatch, streamScopeKey);
   const [agentRunning, setAgentRunning] = useState(false);
   const [bashRunning, setBashRunning] = useState(false);
   const [pendingBash, setPendingBash] = useState<{ command: string; excludeFromContext: boolean } | null>(null);
@@ -579,14 +571,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     thinkingLevel,
   } = modelSelectionState;
   const [fastEnabled, setFastEnabled] = useState(false);
-  const [fastAvailable, setFastAvailable] = useState(false);
+  const [runtimeFastAvailable, setRuntimeFastAvailable] = useState<boolean | null>(null);
   const [fastPending, setFastPending] = useState(false);
-  const [toolPreset, setToolPreset] = useState<"none" | "default" | "full">("default");
+  const [toolPreset, setToolPreset] = useState<ToolPreset>("default");
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxAttempts: number; errorMessage?: string } | null>(null);
   const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
   const [systemPrompt, setSystemPrompt] = useState<string | null>(null);
   const [forkingEntryId, setForkingEntryId] = useState<string | null>(null);
   const [currentModelOverride, setCurrentModelOverride] = useState<{ provider: string; modelId: string } | null>(null);
+  const [modelSwitching, setModelSwitching] = useState(false);
   const [pendingModel, setPendingModel] = useState<{ provider: string; modelId: string } | null>(null);
   const [isCompacting, setIsCompacting] = useState(false);
   const [compactError, setCompactError] = useState<string | null>(null);
@@ -614,7 +607,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const detachedSubagentStatuses = useMemo(() => deriveDetachedSubagentStatuses(messages), [messages]);
   const shadowReportStatuses = useMemo(() => deriveShadowReportStatus(messages), [messages]);
   const todos = useMemo(() => deriveTodos(messages), [messages]);
-  const todoAnchorIndex = useMemo(() => findLastTodoResultIndex(messages), [messages]);
 
 
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -623,6 +615,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // detached 子代理可能跨越多个父轮，必须按 agentId 保持到对应 completion 到达。
   const pendingDetachedSubagentIdsRef = useRef(new Set<string>());
   const sessionIdRef = useRef<string | null>(session?.id ?? materializedNewSessionId);
+  const modelSwitchPendingRef = useRef(false);
   useEffect(() => {
     if (!newSessionCwd) return;
     if (
@@ -638,19 +631,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const bashRunningRef = useRef(false);
   const bashRecoveryIdRef = useRef(0);
   const handleAgentEventRef = useRef<((event: AgentEvent) => void) | null>(null);
-  const initialScrollDoneRef = useRef(false);
-  const [scrollGeneration, setScrollGeneration] = useState(0);
-  const lastUserMsgRef = useRef<HTMLDivElement | null>(null);
-  const pendingScrollToUserRef = useRef(false);
-  const pendingScrollToRunningEndRef = useRef(false);
-  const pendingInitialScrollRef = useRef(false);
-  const completionScrollAllowedRef = useRef(true);
   const executeBashRef = useRef<(command: string, excludeFromContext: boolean) => Promise<void> | undefined>(undefined);
-  const userScrollIntentUntilRef = useRef(0);
-  const ignoreProgrammaticScrollUntilRef = useRef(0);
-  const messagesEndRef = useRef<HTMLDivElement | null>(null);
-  const lastRenderedMessageRef = useRef<HTMLDivElement | null>(null);
-  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const [scrollPositionRequest, setScrollPositionRequest] = useState<ChatScrollPositionRequest | null>(null);
+  const requestScrollPosition = useCallback((position: ChatScrollPosition) => {
+    setScrollPositionRequest((current) => ({
+      generation: (current?.generation ?? 0) + 1,
+      position,
+    }));
+  }, []);
   const newSessionPromotedRef = useRef(false);
   const initialPendingSettings = pendingNewSessionControl.kind === "staged" ? pendingNewSessionControl : null;
   const newSessionModelOverrideRef = useRef<SelectedModel | null>(initialPendingSettings?.model ?? null);
@@ -673,7 +661,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // 流式期间本地已收齐的消息条数（在 message_end 的 setMessages updater 内同步），
   // 用于 agent_end 时判断是否丢帧、能否跳过全量 context 重载。
   const lastStreamedMessageCountRef = useRef(0);
-  const sessionListRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 统一 reconciliation 定义较晚，通过 ref 供扩展 UI 回调触发，避免再维护独立轮询器。
   const reconcileAgentStateRef = useRef<((sid: string, runId?: number) => Promise<void>) | null>(null);
   const reconcileRequestGenerationRef = useRef(0);
@@ -735,6 +722,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const setToolPresetState = opts.setToolPreset ?? setToolPreset;
 
+  useEffect(() => {
+    if (!isNew || sessionIdRef.current) return;
+    setToolPresetState(getPreferredToolPreset());
+  }, [isNew, setToolPresetState]);
+
   const currentModel = currentModelOverride ?? contextModel ?? pendingModel ?? null;
   const displayModel = isNew ? (newSessionModel ?? newSessionDefaultModel) : currentModel;
   const displayModelFastAvailable = displayModel
@@ -785,15 +777,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const applyRuntimeState = useCallback((state: AgentRuntimeState | undefined) => {
     setIsCompacting(state?.isCompacting ?? false);
     setQueuedMessages(normalizeQueuedMessages(state?.queuedMessages));
-    if (!state) return;
+    if (!state) {
+      setFastEnabled(false);
+      setRuntimeFastAvailable(null);
+      return;
+    }
     setContextUsage(state.contextUsage);
     setSystemPrompt(state.systemPrompt);
     applyShadowRuntimeState(state);
     modelSelectionActions.setThinkingLevel(state.thinkingLevel);
     setFastEnabled(state.fastEnabled);
-    setFastAvailable(state.fastAvailable);
+    setRuntimeFastAvailable(state.fastAvailable);
     setExtensionStatuses(state.extensionStatuses);
-    setExtensionWidgets(state.extensionWidgets);
+    setExtensionWidgets(filterVisibleExtensionWidgets(state.extensionWidgets));
   }, [applyShadowRuntimeState, modelSelectionActions]);
 
   /** context 的所有派生状态统一原子提交，挂载加载和分支导航不得各维护一份字段列表。 */
@@ -809,20 +805,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     pendingDetachedSubagentIdsRef.current = pendingDetachedSubagentIds(snapshot.messages);
     if (!options.preserveScroll) {
       // 首屏、导航和 backfill 属于显式定位；后台 entry 刷新必须保持用户滚动位置。
-      pendingInitialScrollRef.current = true;
-      completionScrollAllowedRef.current = false;
-      setScrollGeneration((generation) => generation + 1);
+      requestScrollPosition("initial");
     }
     setMessages(snapshot.messages);
     setEntryIds(snapshot.entryIds);
-    setCurrentModelOverride(null);
+    setCurrentModelOverride((current) => modelSwitchPendingRef.current ? current : null);
     setError(null);
     if (snapshot.thinkingLevel && snapshot.thinkingLevel !== "off") {
       modelSelectionActions.setThinkingLevel(snapshot.thinkingLevel);
     }
     setLoading(false);
     return true;
-  }, [modelSelectionActions]);
+  }, [modelSelectionActions, requestScrollPosition]);
   const startContextBackfill = useCallback((sid: string, generation: number) => {
     const controller = new AbortController();
     backfillRequestRef.current.controller = controller;
@@ -850,6 +844,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }).catch((error: unknown) => {
           if (!(error instanceof DOMException && error.name === "AbortError")) {
             console.error("Failed to load early session runtime state:", error);
+            if (sessionIdRef.current === sid) applyRuntimeState(undefined);
           }
           return null;
         })
@@ -910,6 +905,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       } catch (error) {
         if (!(error instanceof DOMException && error.name === "AbortError")) {
           console.error("Failed to load session runtime state:", error);
+          if (sessionIdRef.current === sid) applyRuntimeState(undefined);
         }
         return { loaded: true, agentState: null };
       } finally {
@@ -977,10 +973,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (tools) {
         const { getPresetFromTools } = await import("@/lib/tool-presets");
         setToolPresetState(getPresetFromTools(tools));
+        return tools;
       }
     } catch (e) {
       console.error("Failed to load tools:", e);
     }
+    return [];
   }, [setToolPresetState]);
 
   const promoteNewSession = useCallback((messageCount = 0, firstMessage = "(no messages)") => {
@@ -1068,11 +1066,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } else {
       onPendingNewSessionEvent(newSessionCwd, { type: "READY", sessionId: realId });
     }
-    if (result.model) {
+    if (result.model && newSessionModelOverrideRef.current === selectedModel) {
       setPendingModel(result.model);
       if (!newSessionModelOverrideRef.current) modelSelectionActions.setNewSessionDefaultModel(result.model);
     }
-    if (isThinkingLevel(result.thinkingLevel)) {
+    if (
+      isThinkingLevel(result.thinkingLevel)
+      && (thinkingLevelOverrideRef.current ?? recommendedThinkingLevelRef.current) === selectedThinkingLevel
+    ) {
       modelSelectionActions.setThinkingLevel(result.thinkingLevel);
     }
     await loadTools(realId);
@@ -1080,6 +1081,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (result.kind === "initialization-failed") throw new Error(result.error);
     return realId;
   }, [applyShadowRuntimeState, displayModelFastAvailable, fastEnabled, isNew, loadTools, newSessionCwd, onPendingNewSessionEvent, pendingControlKind, pendingNewSessionControl, toolPreset]);
+
+  // 系统面板可在首条消息发送前读取提示词；这里只初始化运行时并查询状态，
+  // 不触发 prompt，也不会向会话历史追加消息。
+  const loadSystemPrompt = useCallback(async () => {
+    const sid = sessionIdRef.current ?? await ensureNewSession();
+    if (!sid) return;
+    const state = await sendAgentCommand<AgentRuntimeState>(sid, { type: "get_state" });
+    if (sessionIdRef.current !== sid) return;
+    setSystemPrompt(state.systemPrompt ?? "");
+  }, [ensureNewSession]);
 
   const loadSlashCommands = useCallback(async () => {
     const sid = await ensureNewSession();
@@ -1372,7 +1383,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "setWidget":
         setExtensionWidgets((prev) => {
           const rest = prev.filter((item) => item.key !== request.widgetKey);
-          return request.widgetLines
+          return request.widgetLines && request.widgetLines.length > 0
             ? [...rest, {
                 key: request.widgetKey,
                 lines: request.widgetLines,
@@ -1421,6 +1432,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   /** 本地发送、外部 agent_start 与挂载恢复统一从这里采用主运行。 */
   const enterMainRun = useCallback((phase: AgentPhase): number => {
     if (!agentRunningRef.current) {
+      resetStreamDeltas();
       const runId = promptRunIdRef.current + 1;
       promptRunIdRef.current = runId;
       beginRun(runId);
@@ -1430,7 +1442,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setAgentPhase(phase);
     dispatch({ type: "start" });
     return promptRunIdRef.current;
-  }, [beginRun]);
+  }, [beginRun, resetStreamDeltas]);
 
   const finishPromptWithoutStream = useCallback(async (sid: string | null = sessionIdRef.current, runId = promptRunIdRef.current) => {
     // completion 控制器负责当前轮校验与重复 settled 拒绝。
@@ -1443,13 +1455,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setAgentRunning(false);
     setAgentPhase(null);
     setRetryInfo(null);
+    flushStreamDeltas();
     dispatch({ type: "end" });
-
     if (sid) {
+      // AppShell coordinator 合并新会话的 settled 与标题刷新。
+      onSessionListRefresh?.({ reason: "run-settled", sessionId: sid });
       // 完成副作用已发布，最终消息同步作为独立刷新执行。
       void loadSession(sid);
     }
-  }, [loadSession, scheduleEventStreamClose, settleRun]);
+  }, [flushStreamDeltas, loadSession, onSessionListRefresh, scheduleEventStreamClose, settleRun]);
 
   const readAgentSnapshot = useCallback(async (sid: string): Promise<AgentRuntimeSnapshot | null> => {
     try {
@@ -1574,13 +1588,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (!agentRunningRef.current) break;
         setAgentPhase(null);
         setRetryInfo(null);
+        flushStreamDeltas();
         dispatch({ type: "end" });
-        // 一轮运行结束：取消流式节流窗口并立即刷新一次，保证侧栏拿到最终状态。
-        if (sessionListRefreshTimerRef.current) {
-          clearTimeout(sessionListRefreshTimerRef.current);
-          sessionListRefreshTimerRef.current = null;
-        }
-        onSessionListRefresh?.();
         if (sessionIdRef.current) {
           // 结束事件后始终从服务端重新读取最终上下文，不能仅依据本地 messageCount 跳过；
           // SSE 可能丢失最后一段 message_end，刷新页面才会暴露这个问题。
@@ -1599,7 +1608,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       case "session_title_generated":
         // 服务端第一轮结束后异步生成的标题已写回会话文件：刷新侧栏列表显示新标题。
-        onSessionListRefresh?.();
+        if (sessionIdRef.current) {
+          onSessionListRefresh?.({ reason: "title-generated", sessionId: sessionIdRef.current });
+        }
         break;
       case "extension_error":
         addNotice({
@@ -1608,17 +1619,27 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
         break;
       case "message_start":
+        // Reconnects may receive the in-flight assistant snapshot before the
+        // next delta. The reducer owns the canonical streaming message shape.
+        if (!agentRunningRef.current) break;
+        resetStreamDeltas();
+        if (event.message) dispatch({ type: "snapshot", message: event.message as AgentMessage });
+        setAgentPhase(null);
+        break;
       case "message_update": {
         // Ignore streaming events arriving after this run already finished
         // (e.g. SSE data buffered while the tab was frozen, flushed after
         // reconcile) — they would resurrect a ghost streaming bubble.
         if (!agentRunningRef.current) break;
-        const msg = event.message as Partial<AgentMessage> | undefined;
-        if (msg?.role === "user") {
-          break;
-        }
-        if (msg) {
-          dispatch({ type: "update", message: normalizeAssistantMessage(msg as AgentMessage) });
+        const msg = event.message as AgentMessage | undefined;
+        if (msg?.role === "user") break;
+        const assistantMessageEvent = event.assistantMessageEvent as ClientAssistantMessageEvent | undefined;
+        if (assistantMessageEvent) {
+          enqueueStreamDelta(assistantMessageEvent);
+        } else if (msg) {
+          // Compatibility with older servers that sent a cumulative partial.
+          resetStreamDeltas();
+          dispatch({ type: "snapshot", message: normalizeAssistantMessage(msg) });
         }
         setAgentPhase(null);
         break;
@@ -1627,15 +1648,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const completed = event.message as AgentMessage | undefined;
         // detached completion 可能在父轮结束后到达，状态区仍必须消费。
         if (!agentRunningRef.current && completed?.role !== "custom") break;
-        // 流式期间节流列表刷新：首条消息立即刷新（新会话快速出现），
-        // 后续 message_end 合并到节流窗口，窗口结束时补一次覆盖落盘时序；
-        // agent_end 会取消窗口并立即刷新，见上。
-        if (!sessionListRefreshTimerRef.current) {
-          onSessionListRefresh?.();
-          sessionListRefreshTimerRef.current = setTimeout(() => {
-            sessionListRefreshTimerRef.current = null;
-            onSessionListRefresh?.();
-          }, SESSION_LIST_REFRESH_THROTTLE_MS);
+        flushStreamDeltas();
+        // 新会话首条用户消息落盘时发布一次；中间工具边界由轻量 running 轮询展示。
+        if (isNew && completed?.role === "user") {
+          const sid = sessionIdRef.current;
+          if (sid) onSessionListRefresh?.({ reason: "new-session-persisted", sessionId: sid });
         }
         if (completed?.role === "toolResult" && completed.toolName === "subagent_spawn" && !completed.isError) {
           const text = contentText(completed.content);
@@ -1681,7 +1698,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             return next;
           });
         }
-        dispatch({ type: "reset" });
+        dispatch({ type: "end" });
         setAgentPhase({ kind: "waiting_model" });
         break;
       }
@@ -1713,6 +1730,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           const tools = prev.tools.filter((t) => t.id !== id);
           if (tools.length === 0) return { kind: "waiting_model" };
           return { kind: "running_tools", tools };
+        });
+        break;
+      }
+      case "tool_execution_update": {
+        const id = typeof event.toolCallId === "string" ? event.toolCallId : "";
+        const progress = getToolExecutionProgress(event.partialResult);
+        if (!id || !progress) break;
+        setAgentPhase((prev) => {
+          if (prev?.kind !== "running_tools") return prev;
+          return {
+            kind: "running_tools",
+            tools: prev.tools.map((tool) => tool.id === id ? { ...tool, progress } : tool),
+          };
         });
         break;
       }
@@ -1762,7 +1792,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
     }
-  }, [addNotice, cancelEventStreamGrace, clearAskQuestionnaire, consumeShadowEntry, enterMainRun, handleExtensionUiRequest, loadCompactedSession, loadSession, onSessionListRefresh, reconcileAgentState, scheduleContextRefresh, scheduleEventStreamClose]);
+  }, [addNotice, cancelEventStreamGrace, clearAskQuestionnaire, consumeShadowEntry, enqueueStreamDelta, enterMainRun, flushStreamDeltas, handleExtensionUiRequest, isNew, loadCompactedSession, loadSession, onSessionListRefresh, reconcileAgentState, resetStreamDeltas, scheduleContextRefresh, scheduleEventStreamClose]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
@@ -1779,10 +1809,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // 分支信息只影响侧栏展示，不应阻塞会话创建、SSE 建连和首条 prompt。
       void fetch(`/api/git/context?cwd=${encodeURIComponent(activeCwd)}`, { cache: "no-store" })
         .then(async (response) => {
-          if (response.ok) {
-            onSessionListRefresh?.();
-            return;
-          }
+          if (response.ok) return;
           console.error("刷新当前 Git 分支失败", await response.text());
         })
         .catch((error) => {
@@ -1811,8 +1838,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setMessages((prev) => [...prev, userMsg]);
     optimisticUserMessageKeyRef.current = userMessageKey(userMsg);
     const promptRunId = enterMainRun(isSlashCommandPrompt ? { kind: "running_command" } : { kind: "waiting_model" });
-    pendingScrollToUserRef.current = true;
-    completionScrollAllowedRef.current = true;
+    requestScrollPosition("user");
 
     const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
     let sentSessionId: string | null = null;
@@ -1885,18 +1911,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           });
         }
         addNotice({ type: "error", message: e.message });
-        // The prompt never reached the agent, so restore the user's text into
-        // the input instead of losing it. Mirrors the shell-command recovery in
-        // executeBash; insertIfEmpty avoids clobbering anything typed since.
-        if (message && sessionIdRef.current === requestSessionId) opts.chatInputRef?.current?.insertIfEmpty(message);
       }
       optimisticUserMessageKeyRef.current = null;
       setAgentRunning(false);
       setAgentPhase(null);
+      resetStreamDeltas();
       dispatch({ type: "end" });
       return false;
     }
-  }, [addNotice, closeEvents, ensureEventsConnected, ensureNewSession, enterMainRun, isNew, newSessionCwd, newSessionModel, onSessionListRefresh, opts.chatInputRef, promoteNewSession, reconcileAgentState, session]);
+  }, [addNotice, closeEvents, ensureEventsConnected, ensureNewSession, enterMainRun, isNew, newSessionCwd, newSessionModel, pendingControlKind, promoteNewSession, reconcileAgentState, requestScrollPosition, resetStreamDeltas, session]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
     if (agentRunningRef.current || bashRunningRef.current) return;
@@ -1923,7 +1946,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setPendingBash(null);
       setBashRunning(false);
     }
-  }, [addNotice, ensureNewSession, loadSession, opts.chatInputRef, promoteNewSession, session]);
+  }, [addNotice, ensureNewSession, loadSession, opts.chatInputRef, promoteNewSession]);
   executeBashRef.current = executeBash;
 
   const handleAbort = useCallback(async () => {
@@ -2023,14 +2046,30 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return;
     }
     const sid = sessionIdRef.current;
-    if (!sid) return;
+    if (!sid || modelSwitchPendingRef.current) return;
+    const target = { provider, modelId };
+    const previousOverride = currentModelOverride;
+    modelSwitchPendingRef.current = true;
+    setCurrentModelOverride(target);
+    setModelSwitching(true);
     try {
       await sendAgentCommand(sid, { type: "set_model", provider, modelId });
-      setCurrentModelOverride({ provider, modelId });
+      modelSwitchPendingRef.current = false;
+      await loadSession(sid);
     } catch (e) {
-      console.error("Failed to set model:", e);
+      console.error("Failed to switch model:", e);
+      modelSwitchPendingRef.current = false;
+      setCurrentModelOverride(previousOverride);
+      addNotice({
+        type: "error",
+        message: `Failed to switch model: ${e instanceof Error ? e.message : String(e)}`,
+      });
+      await loadSession(sid);
+    } finally {
+      modelSwitchPendingRef.current = false;
+      setModelSwitching(false);
     }
-  }, [creationSettingsLocked, isNew, modelSelectionActions, newSessionCwd, onPendingNewSessionEvent]);
+  }, [addNotice, creationSettingsLocked, currentModelOverride, isNew, loadSession, modelSelectionActions, newSessionCwd, onPendingNewSessionEvent]);
 
   const handleCompact = useCallback(async () => {
     const sid = sessionIdRef.current;
@@ -2243,7 +2282,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     try {
       const result = await sendAgentCommand<{ enabled: boolean; available: boolean }>(sid, { type: "set_fast_enabled", enabled });
       setFastEnabled(result.enabled);
-      setFastAvailable(result.available);
+      setRuntimeFastAvailable(result.available);
     } catch (error) {
       console.error("Failed to set Fast mode:", error);
       addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
@@ -2251,7 +2290,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setFastPending(false);
     }
   }, [addNotice, creationSettingsLocked, fastPending]);
-  const handleToolPresetChange = useCallback(async (preset: "none" | "default" | "full") => {
+  const handleToolPresetChange = useCallback(async (preset: ToolPreset) => {
+    setPreferredToolPreset(preset);
     if (creationSettingsLocked) return;
     const toolNames = getToolNamesForPreset(preset);
     setToolPresetState(preset);
@@ -2264,52 +2304,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [creationSettingsLocked, setToolPresetState]);
 
-  const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
-    const container = scrollContainerRef.current;
-    if (behavior === "instant" && container) {
-      // 使用容器相对坐标定位，避免永久修改滚动容器布局。
-      const lastMessage = lastRenderedMessageRef.current;
-      if (lastMessage) {
-        const containerRect = container.getBoundingClientRect();
-        const messageRect = lastMessage.getBoundingClientRect();
-        const desiredTop = container.scrollTop + messageRect.top - containerRect.top - (container.clientHeight - messageRect.height) / 2;
-        const maxTop = Math.max(0, container.scrollHeight - container.clientHeight);
-        container.scrollTop = Math.max(0, Math.min(desiredTop, maxTop));
-      } else {
-        container.scrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
-      }
-      return;
-    }
-    ignoreProgrammaticScrollUntilRef.current = Date.now() + PROGRAMMATIC_SCROLL_IGNORE_MS;
-    messagesEndRef.current?.scrollIntoView({ behavior, block: "end" });
-  }, []);
-
-  const scrollUserMsgToTop = useCallback(() => {
-    const container = scrollContainerRef.current;
-    const el = lastUserMsgRef.current;
-    if (!container || !el) return;
-    const elAbsTop = el.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop;
-    ignoreProgrammaticScrollUntilRef.current = Date.now() + PROGRAMMATIC_SCROLL_IGNORE_MS;
-    container.scrollTo({ top: elAbsTop - 16, behavior: "smooth" });
-  }, []);
-
-  const markUserScrollIntent = useCallback((event: Event) => {
-    if (event instanceof KeyboardEvent) {
-      if (!SCROLL_KEYS.has(event.key)) return;
-      if (event.target instanceof Element && event.target.closest("input, textarea, [contenteditable='true']")) return;
-    }
-    userScrollIntentUntilRef.current = Date.now() + USER_SCROLL_INTENT_MS;
-  }, []);
-
-  const handleScrollPositionChange = useCallback(() => {
-    if (!agentRunningRef.current) return;
-    if (Date.now() < ignoreProgrammaticScrollUntilRef.current) return;
-    if (Date.now() > userScrollIntentUntilRef.current) return;
-    completionScrollAllowedRef.current = false;
-  }, []);
-
   // Load session on mount
   useEffect(() => {
+    applyRuntimeState(undefined);
     if (session) {
       sessionIdRef.current = session.id;
       void connectEvents(session.id);
@@ -2318,7 +2315,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           loadTools(session.id);
           const runtimeState = agentState.state;
           if (agentState.busy && runtimeState && !runtimeState.isBashRunning) {
-            pendingScrollToRunningEndRef.current = true;
+            requestScrollPosition("running-end");
             enterMainRun(runtimeState.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
             void connectEvents(session.id);
           }
@@ -2345,6 +2342,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         .catch((error: unknown) => {
           if (!(error instanceof DOMException && error.name === "AbortError")) {
             console.error("恢复待发送会话 runtime 状态失败:", error);
+            if (sessionIdRef.current === materializedNewSessionId) applyRuntimeState(undefined);
           }
         });
     }
@@ -2378,72 +2376,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [systemPrompt, onSystemPromptChange]);
 
   useEffect(() => {
+    onSystemPromptLoaderChange?.(loadSystemPrompt);
+    return () => onSystemPromptLoaderChange?.(null);
+  }, [loadSystemPrompt, onSystemPromptLoaderChange]);
+
+  useEffect(() => {
+    const loadCurrentTools = async () => {
+      const sid = sessionIdRef.current;
+      return sid ? loadTools(sid) : [];
+    };
+    onToolsLoaderChange?.(loadCurrentTools);
+    return () => onToolsLoaderChange?.(null);
+  }, [loadTools, onToolsLoaderChange]);
+
+  useEffect(() => {
     if (!onBranchDataChange) return;
     onBranchDataChange(details?.tree ?? [], activeLeafId, handleLeafChange);
   }, [details?.tree, activeLeafId, handleLeafChange, onBranchDataChange]);
-
-  useEffect(() => {
-    window.addEventListener("keydown", markUserScrollIntent);
-    window.addEventListener("pointerdown", markUserScrollIntent, { passive: true });
-    return () => {
-      window.removeEventListener("keydown", markUserScrollIntent);
-      window.removeEventListener("pointerdown", markUserScrollIntent);
-    };
-  }, [markUserScrollIntent]);
-
-  useEffect(() => {
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    container.addEventListener("wheel", markUserScrollIntent, { passive: true });
-    container.addEventListener("touchstart", markUserScrollIntent, { passive: true });
-    container.addEventListener("scroll", handleScrollPositionChange, { passive: true });
-    return () => {
-      container.removeEventListener("wheel", markUserScrollIntent);
-      container.removeEventListener("touchstart", markUserScrollIntent);
-      container.removeEventListener("scroll", handleScrollPositionChange);
-    };
-  }, [messages.length, loading, handleScrollPositionChange, markUserScrollIntent]);
-
-  useEffect(() => {
-    if (messages.length === 0) return;
-    const frame = requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-      if (pendingInitialScrollRef.current) {
-        pendingInitialScrollRef.current = false;
-        initialScrollDoneRef.current = true;
-        scrollToBottom("instant");
-      } else if (pendingScrollToUserRef.current) {
-        pendingScrollToUserRef.current = false;
-        initialScrollDoneRef.current = true;
-        scrollUserMsgToTop();
-      } else if (pendingScrollToRunningEndRef.current) {
-        pendingScrollToRunningEndRef.current = false;
-        initialScrollDoneRef.current = true;
-        scrollToBottom("instant");
-      } else if (!initialScrollDoneRef.current) {
-        initialScrollDoneRef.current = true;
-        scrollToBottom("instant");
-      } else if (!agentRunningRef.current && completionScrollAllowedRef.current) {
-        scrollToBottom("smooth");
-      }
-      });
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [scrollGeneration, agentRunning, scrollToBottom, scrollUserMsgToTop]);
-
-  // 用户停留在底部时，流式消息增长自动跟随；用户上翻后不抢夺滚动位置。
-  const streamingContentVersion = streamState.streamingMessage
-    ? JSON.stringify((streamState.streamingMessage as { content?: unknown }).content ?? "")
-    : "";
-  useEffect(() => {
-    if (!agentRunningRef.current || !streamState.isStreaming) return;
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    const distanceToBottom = container.scrollHeight - container.clientHeight - container.scrollTop;
-    if (distanceToBottom <= 48) {
-      container.scrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
-    }
-  }, [streamState.isStreaming, streamingContentVersion]);
 
   // Load model list
   useEffect(() => {
@@ -2500,12 +2449,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       availableThinkingLevels: modelKey ? (modelThinkingLevels[modelKey] ?? null) : null,
       thinkingLevelMap: modelKey ? (modelThinkingLevelMaps[modelKey] ?? null) : null,
       fastEnabled,
-      fastAvailable: isNew && !sessionIdRef.current ? displayModelFastAvailable : fastAvailable,
+      fastAvailable: resolveFastModeAvailability(runtimeFastAvailable, displayModelFastAvailable),
       fastPending,
+      modelSwitching,
     };
   }, [
     displayModel, displayModelFastAvailable, isNew, modelDataDiagnostics, modelError, modelList, modelNames,
-    fastAvailable, fastEnabled, fastPending, modelScopeWarnings, modelThinkingLevelMaps, modelThinkingLevels, newSessionModel, thinkingLevel,
+    fastEnabled, fastPending, modelScopeWarnings, modelSwitching, modelThinkingLevelMaps, modelThinkingLevels, newSessionModel, runtimeFastAvailable, thinkingLevel,
   ]);
 
   const modelViewActions = useMemo<ModelSelectionViewActions>(() => ({
@@ -2524,12 +2474,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     retryInfo, contextUsage, systemPrompt, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
-    notices: noticeState.visible, dismissNotice, extensionDialog, extensionCustomUi, askQuestionnaire, submitAskQuestionnaire, cancelAskQuestionnaire, extensionStatuses, extensionWidgets, detachedSubagentStatuses: [...detachedSubagentStatuses, ...shadowReportStatuses], todos, todoAnchorIndex, respondToExtensionUi, sendExtensionCustomInput, armCustomAnswer,
+    notices: noticeState.visible, dismissNotice, extensionDialog, extensionCustomUi, askQuestionnaire, submitAskQuestionnaire, cancelAskQuestionnaire, extensionStatuses, extensionWidgets, detachedSubagentStatuses: [...detachedSubagentStatuses, ...shadowReportStatuses], todos, respondToExtensionUi, sendExtensionCustomInput, armCustomAnswer,
     agentPhase, completion,
-    isNew, creationSettingsLocked,
+    isNew, creationSettingsLocked, scrollPositionRequest,
     // Refs
-    sessionIdRef, eventSourceRef, messagesEndRef, lastRenderedMessageRef, scrollContainerRef,
-    lastUserMsgRef, pendingScrollToUserRef, initialScrollDoneRef,
+    sessionIdRef, eventSourceRef,
     // Actions
     handleSend, handleAbort, handleFork,
     handleCompact, handleQueuedSubmit, handleAbortCompaction,
@@ -2546,11 +2495,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     retryInfo, contextUsage, systemPrompt, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
-    noticeState.visible, dismissNotice, extensionDialog, extensionCustomUi, askQuestionnaire, submitAskQuestionnaire, cancelAskQuestionnaire, extensionStatuses, extensionWidgets, detachedSubagentStatuses, todos, todoAnchorIndex, respondToExtensionUi, sendExtensionCustomInput, armCustomAnswer,
-    isNew, creationSettingsLocked,
+    noticeState.visible, dismissNotice, extensionDialog, extensionCustomUi, askQuestionnaire, submitAskQuestionnaire, cancelAskQuestionnaire, extensionStatuses, extensionWidgets, detachedSubagentStatuses, todos, respondToExtensionUi, sendExtensionCustomInput, armCustomAnswer,
+    isNew, creationSettingsLocked, scrollPositionRequest,
     agentPhase, completion,
-    sessionIdRef, eventSourceRef, messagesEndRef, lastRenderedMessageRef, scrollContainerRef,
-    lastUserMsgRef, pendingScrollToUserRef, initialScrollDoneRef,
+    sessionIdRef, eventSourceRef,
     handleSend, handleAbort, handleFork,
     handleCompact, handleQueuedSubmit, handleAbortCompaction,
     handleRecallQueue,

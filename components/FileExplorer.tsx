@@ -371,9 +371,12 @@ function TreeNode({
             cwd={cwd}
             onAtMention={onAtMention}
             labels={{
+              download: t("files.download"),
               insertPath: t("files.insertPath"),
               mention: t("files.mention"),
               reveal: t("files.reveal"),
+              revealWindows: t("files.revealWindows"),
+              revealLinux: t("files.revealLinux"),
               revealError: t("files.revealError"),
             }}
           />

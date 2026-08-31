@@ -21,8 +21,10 @@ import { FileMentionPalette, HistoryPalette, SlashPalette } from "./InputPalette
 import { buildSlashCommandLayout, getSlashDescription, SLASH_SOURCE_ORDER, type SlashCommandPaletteItem } from "@/lib/slash-command-palette";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useI18n } from "@/hooks/useI18n";
-import { ModelPicker } from "./ModelPicker";
+import { useOptimisticInputSubmission, type OptimisticInputSnapshot } from "@/hooks/useOptimisticInputSubmission";
+import { ModelPicker, type ModelPickerOption } from "./ModelPicker";
 import { InputControls } from "./InputControls";
+import type { ToolPreset } from "@/lib/tool-presets";
 
 export interface AttachedImage {
   data: string;   // base64, no prefix
@@ -44,8 +46,8 @@ interface Props {
   isCompacting?: boolean;
   compactError?: string | null;
   compactResult?: CompactResultInfo | null;
-  toolPreset?: "none" | "default" | "full";
-  onToolPresetChange?: (preset: "none" | "default" | "full") => void;
+  toolPreset?: ToolPreset;
+  onToolPresetChange?: (preset: ToolPreset) => void;
   retryInfo?: { attempt: number; maxAttempts: number; errorMessage?: string } | null;
   queuedMessages?: QueuedMessages | null;
   inputHistory?: string[];
@@ -260,6 +262,16 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   } = modelState;
   const { changeModel: onModelChange, changeThinkingLevel: onThinkingLevelChange } = modelActions;
   const isMobile = useIsMobile();
+  const modelPickerOptions = useMemo<ModelPickerOption[]>(() => {
+    if (modelState.list?.length) {
+      return modelState.list.map((model) => ({ provider: model.provider, modelId: model.id, name: model.name }));
+    }
+    return Object.entries(modelState.names ?? {}).map(([modelId, name]) => ({
+      provider: modelState.model?.provider ?? "unknown",
+      modelId,
+      name,
+    }));
+  }, [modelState.list, modelState.model?.provider, modelState.names]);
   const [value, setValue] = useState(() => (draftKey ? getDraft(draftKey)?.value ?? "" : ""));
   const [queuedSubmitPending, setQueuedSubmitPending] = useState(false);
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
@@ -438,14 +450,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     });
   }, []);
 
-  const clearImages = useCallback(() => {
+  const clearImages = useCallback((revoke = true) => {
     setAttachedImages((prev) => {
-      prev.forEach(revokeImagePreview);
+      if (revoke) prev.forEach(revokeImagePreview);
       return [];
     });
   }, []);
 
-  const clearInput = useCallback(() => {
+  const clearInput = useCallback((revokeImages = true) => {
     valueRef.current = "";
     setValue("");
     setAtQuery(null);
@@ -454,8 +466,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (draftKey) clearDraft(draftKey);
     if (draftKeyRef.current && draftKeyRef.current !== draftKey) clearDraft(draftKeyRef.current);
     attachedImagesRef.current = [];
+    textAttachmentRef.current = null;
     setTextAttachment(null);
-    clearImages();
+    clearImages(revokeImages);
     if (textareaRef.current) {
       // 发送成功后立即同步 DOM，避免异步会话切换期间旧草稿短暂回写到输入框。
       textareaRef.current.value = "";
@@ -465,6 +478,65 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     }
   }, [clearImages, draftKey]);
 
+  const canRestoreSubmittedInput = useCallback((snapshot: OptimisticInputSnapshot<AttachedImage>) => (
+    draftKeyRef.current === snapshot.draftKey
+    && !valueRef.current.trim()
+    && attachedImagesRef.current.length === 0
+    && textAttachmentRef.current === null
+  ), []);
+
+  const restoreSubmittedInput = useCallback((snapshot: OptimisticInputSnapshot<AttachedImage>) => {
+    valueRef.current = snapshot.value;
+    attachedImagesRef.current = snapshot.images;
+    textAttachmentRef.current = snapshot.textAttachment;
+    setValue(snapshot.value);
+    setAttachedImages(snapshot.images);
+    setTextAttachment(snapshot.textAttachment);
+    setAtQuery(null);
+    if (snapshot.draftKey) {
+      setDraft(snapshot.draftKey, {
+        value: snapshot.value,
+        images: snapshot.images.map(imageToDraftImage),
+        textAttachment: snapshot.textAttachment ?? undefined,
+      });
+    }
+    requestAnimationFrame(() => {
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      textarea.value = snapshot.value;
+      textarea.focus();
+      textarea.setSelectionRange(snapshot.value.length, snapshot.value.length);
+      resizeTextarea(true);
+    });
+  }, [resizeTextarea]);
+
+  const releaseSubmittedImages = useCallback((images: AttachedImage[]) => {
+    images.forEach(revokeImagePreview);
+  }, []);
+
+  const handleSubmissionError = useCallback((error: unknown) => {
+    console.error("发送消息失败", error);
+  }, []);
+
+  const discardSubmittedInput = useCallback((snapshot: OptimisticInputSnapshot<AttachedImage>) => {
+    if (snapshot.draftKey && draftKeyRef.current !== snapshot.draftKey) {
+      setDraft(snapshot.draftKey, {
+        value: snapshot.value,
+        images: snapshot.images.map(imageToDraftImage),
+        textAttachment: snapshot.textAttachment ?? undefined,
+      });
+    }
+    releaseSubmittedImages(snapshot.images);
+  }, [releaseSubmittedImages]);
+
+  const submitOptimistically = useOptimisticInputSubmission({
+    clearInput,
+    canRestore: canRestoreSubmittedInput,
+    restore: restoreSubmittedInput,
+    discard: discardSubmittedInput,
+    releaseImages: releaseSubmittedImages,
+    onError: handleSubmissionError,
+  });
   useEffect(() => {
     // 发送清空或切换草稿 key 时，跳过已排队的旧 render effect，避免旧输入回写。
     if (!draftKey || draftKeyRef.current !== draftKey || valueRef.current !== value) return;
@@ -524,9 +596,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         return;
       }
     }
-    const accepted = await onSend(messageWithTextAttachment, attachedImages.length ? attachedImages : undefined);
-    if (accepted !== false) clearInput();
-  }, [value, textAttachment, attachedImages, isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock]);
+    const submittedImages = [...attachedImages];
+    await submitOptimistically(
+      { value, images: submittedImages, textAttachment, draftKey: draftKeyRef.current ?? null },
+      () => onSend(messageWithTextAttachment, submittedImages.length ? submittedImages : undefined),
+    );
+  }, [value, textAttachment, attachedImages, isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock, submitOptimistically]);
 
   const slashInputEnd = Math.min(slashCursor ?? value.length, value.length);
   const slashInputPrefix = value.slice(0, slashInputEnd);
@@ -1492,9 +1567,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             </label>
             <ModelPicker
               isMobile={isMobile}
-              isStreaming={isStreaming || creationSettingsLocked}
-              modelState={modelState}
-              onModelChange={onModelChange}
+              options={modelPickerOptions}
+              value={modelState.model}
+              onChange={onModelChange}
+              disabled={isStreaming || creationSettingsLocked}
+              busy={modelState.modelSwitching}
+              isAutoSelection={modelState.isAutoModelSelection}
+              variant="toolbar"
             />
           </div>
 

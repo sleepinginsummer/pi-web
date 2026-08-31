@@ -8,11 +8,13 @@ export async function GET(
 ) {
   const { id } = await params;
   try {
+    const snapshot = await getRpcSessionSnapshot(id);
+    if (snapshot.alive) return NextResponse.json(snapshot);
+
     if (!await resolveSessionPath(id)) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
-
-    return NextResponse.json(await getRpcSessionSnapshot(id));
+    return NextResponse.json(snapshot);
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }

@@ -4,8 +4,14 @@ import { useState } from "react";
 import { getFileIcon } from "./FileIcons";
 import { useI18n } from "@/hooks/useI18n";
 import type { FileTab } from "@/lib/file-panel-model";
+import type { FileViewerState } from "@/lib/file-viewer-state";
+
+export type Tab = FileTab & {
+  viewerState?: FileViewerState;
+  viewerRevision?: number;
+};
 interface Props {
-  tabs: FileTab[];
+  tabs: Tab[];
   activeTabId: string;
   onSelectTab: (id: string) => void;
   onCloseTab: (id: string) => void;

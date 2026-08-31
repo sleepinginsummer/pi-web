@@ -4,6 +4,7 @@ import { useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "reac
 import { useI18n } from "@/hooks/useI18n";
 import type { ExtensionUiRequest } from "@/lib/types";
 import styles from "./AskDialog.module.css";
+import { ChevronDown } from "lucide-react";
 
 type AskDialogRequest = Extract<ExtensionUiRequest, { method: "select" }>;
 
@@ -124,11 +125,12 @@ function CustomAnswerOption({
 }
 
 // RPC fallback 会把 "Type something." sentinel 作为最后一项；该项点击后切换为内联输入。
-export function AskDialog({ request, onSelect, onCustomSubmit, onStop }: {
+export function AskDialog({ request, onSelect, onCustomSubmit, onStop, onCollapse }: {
   request: AskDialogRequest;
   onSelect: (request: AskDialogRequest, value: string) => void;
   onCustomSubmit: (request: AskDialogRequest, sentinelText: string, text: string) => void;
   onStop: () => void;
+  onCollapse: () => void;
 }) {
   const { t } = useI18n();
   const interaction = useAskDialogInteraction(request, onSelect, onCustomSubmit);
@@ -137,7 +139,12 @@ export function AskDialog({ request, onSelect, onCustomSubmit, onStop }: {
     <div role="dialog" aria-label={request.title} onKeyDown={interaction.handleOptionsKeyDown} className={styles.card}>
       <div className={styles.header}>
         <div className={styles.title}>{request.title}</div>
-        <button type="button" onClick={onStop} className={styles.stop}>{t("chat.stop")}</button>
+        <div className={styles.actions}>
+          <button type="button" onClick={onCollapse} className={styles.collapse} aria-label={t("chat.askCollapse")} title={t("chat.askCollapse")}>
+            <ChevronDown size={17} aria-hidden="true" />
+          </button>
+          <button type="button" onClick={onStop} className={styles.stop}>{t("chat.stop")}</button>
+        </div>
       </div>
       <div ref={interaction.optionsRef} className={styles.options}>
         {request.options.map((option, index) => index === interaction.customOptionIndex ? (

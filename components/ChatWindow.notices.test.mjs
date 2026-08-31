@@ -4,12 +4,8 @@ import test from "node:test";
 
 const source = await readFile(new URL("./ChatWindow.tsx", import.meta.url), "utf8");
 
-test("renders temporary notices once at the top center of the chat column", () => {
-  const noticeShelfUsages = source.match(/<NoticeShelf notices=\{notices\}/g) ?? [];
-
-  assert.equal(noticeShelfUsages.length, 1);
-  assert.match(
-    source,
-    /position: "absolute",\s*top: 12,\s*left: 0,\s*right: isMobile \? 0 : CHAT_MINIMAP_WIDTH,[\s\S]*?justifyContent: "center",[\s\S]*?<NoticeShelf notices=\{notices\} floating \/>/,
-  );
+test("keeps local temporary notices in the chat shelf instead of the upstream top-right toast", () => {
+  assert.match(source, /className="notice-shelf-overlay"[\s\S]*?<NoticeShelf notices=\{notices\} onDismiss=\{dismissNotice\} floating \/>/);
+  assert.match(source, /<NoticeShelf notices=\{notices\} onDismiss=\{dismissNotice\} \/>/);
+  assert.doesNotMatch(source, /top: 12,\s*right: 12/);
 });

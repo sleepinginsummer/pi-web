@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const source = await readFile(new URL("./FileExplorer.tsx", import.meta.url), "utf8");
+const actionsSource = await readFile(new URL("./FileTreeNodeActions.tsx", import.meta.url), "utf8");
 const apiSource = await readFile(new URL("../app/api/files/[...path]/route.ts", import.meta.url), "utf8");
 
 test("provides a debounced file search UI and opens selected results", () => {
@@ -20,9 +21,9 @@ test("renders search results with the existing expandable file tree", () => {
 });
 
 test("search result rows offer mention and download actions like the file tree", () => {
-  assert.match(source, /onAtMention\(getRelativeFilePath\(node\.fullPath, cwd\), node\.isDir\)/);
-  assert.match(source, /<MentionIcon \/>/);
-  assert.match(source, /encodeFilePathForApi\(node\.fullPath\)\}\?type=download/);
+  assert.match(source, /<FileTreeNodeActions/);
+  assert.match(actionsSource, /onAtMention\(getRelativeFilePath\(fullPath, cwd\), isDirectory\)/);
+  assert.match(actionsSource, /encodeFilePathForApi\(fullPath\)\}\?type=download/);
 });
 
 test("keeps search on the bounded index and reports request failures", () => {

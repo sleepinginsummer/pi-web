@@ -5,10 +5,16 @@ export const FAST_SESSION_STATE = "pi-web-fast-mode-state";
 
 export type FastStateEntryLike = { type: string; customType?: string; data?: unknown };
 
+export interface FastRuntimeSnapshot {
+  generation: string;
+  catalogModel: (provider: string, modelId: string) => ModelLike | undefined;
+  fastModels: ReadonlySet<string>;
+}
+
 export type FastSessionSettingHost = {
   entries: () => readonly FastStateEntryLike[];
   currentModel: () => ModelLike | undefined;
-  catalogModel: (provider: string, modelId: string) => ModelLike | undefined;
+  runtimeSnapshot: () => FastRuntimeSnapshot;
   setModel: (model: ModelLike) => Promise<void>;
   appendState: (enabled: boolean) => void;
 };
@@ -37,14 +43,20 @@ export class FastSessionSetting {
   }
 
   get current(): boolean { return this.desired; }
-  get available(): boolean { return isFastModeAvailable(this.resolveBaseModel()); }
+  get available(): boolean {
+    const runtime = this.host.runtimeSnapshot();
+    return isFastModeAvailable(this.resolveBaseModel(runtime), runtime.fastModels);
+  }
 
   async setEnabled(enabled: boolean): Promise<boolean> {
-    if (enabled && !this.available) throw new Error("Fast 模式仅支持具备 Priority 能力的 OpenAI-compatible provider");
+    const runtime = this.host.runtimeSnapshot();
+    if (enabled && !isFastModeAvailable(this.resolveBaseModel(runtime), runtime.fastModels)) {
+      throw new Error("Fast 模式仅支持具备 Priority 能力的 OpenAI-compatible provider");
+    }
     this.desired = enabled;
     const requestRevision = ++this.revision;
     try {
-      await this.enqueue();
+      await this.enqueue(runtime);
       return this.desired;
     } catch (error) {
       if (this.revision === requestRevision) this.desired = this.applied;
@@ -66,15 +78,16 @@ export class FastSessionSetting {
     if (this.desired) await this.enqueue();
   }
 
-  private enqueue(): Promise<void> {
-    this.queue = this.queue.catch(() => undefined).then(() => this.reconcile());
+  private enqueue(runtime = this.host.runtimeSnapshot()): Promise<void> {
+    this.queue = this.queue.catch(() => undefined).then(() => this.reconcile(runtime));
     return this.queue;
   }
 
-  private async reconcile(): Promise<void> {
-    const baseModel = this.resolveBaseModel();
+  private async reconcile(runtime: FastRuntimeSnapshot): Promise<void> {
+    if (this.host.runtimeSnapshot().generation !== runtime.generation) return;
+    const baseModel = this.resolveBaseModel(runtime);
     if (!baseModel) return;
-    const effective = this.desired && isFastModeAvailable(baseModel);
+    const effective = this.desired && isFastModeAvailable(baseModel, runtime.fastModels);
     await this.host.setModel(createFastSessionModel(baseModel, effective));
     this.applied = this.desired;
     if (this.persistedRevision < this.revision) {
@@ -84,11 +97,11 @@ export class FastSessionSetting {
     }
   }
 
-  private resolveBaseModel(): ModelLike | undefined {
+  private resolveBaseModel(runtime: FastRuntimeSnapshot): ModelLike | undefined {
     if (this.targetModel) {
-      return this.host.catalogModel(this.targetModel.provider, this.targetModel.modelId);
+      return runtime.catalogModel(this.targetModel.provider, this.targetModel.modelId);
     }
     const current = this.host.currentModel();
-    return current ? this.host.catalogModel(current.provider, current.id) : undefined;
+    return current ? runtime.catalogModel(current.provider, current.id) : undefined;
   }
 }

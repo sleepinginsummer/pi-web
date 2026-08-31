@@ -43,6 +43,8 @@ export interface ToolCallContent {
   toolCallId: string;
   toolName: string;
   input: Record<string, unknown>;
+  /** Client-only buffer for streamed tool input. Never persisted to session files. */
+  rawInput?: string;
 }
 
 export type AssistantContentBlock = TextContent | ImageContent | ThinkingContent | ToolCallContent;
@@ -53,6 +55,20 @@ export interface UserMessage {
   timestamp?: number;
 }
 
+export interface AgentUsage {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cost: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    total: number;
+  };
+}
+
 export interface AssistantMessage {
   role: "assistant";
   content: AssistantContentBlock[];
@@ -61,19 +77,7 @@ export interface AssistantMessage {
   stopReason?: string;
   errorMessage?: string;
   timestamp?: number;
-  usage?: {
-    input: number;
-    output: number;
-    cacheRead: number;
-    cacheWrite: number;
-    cost: {
-      input: number;
-      output: number;
-      cacheRead: number;
-      cacheWrite: number;
-      total: number;
-    };
-  };
+  usage?: AgentUsage;
 }
 
 export interface ToolResultMessage {
@@ -84,6 +88,7 @@ export interface ToolResultMessage {
   isError?: boolean;
   details?: unknown;
   timestamp?: number;
+  usage?: AgentUsage;
 }
 
 export interface CustomMessage {
@@ -193,6 +198,11 @@ export type ExtensionUiResponse =
   | { type: "extension_ui_response"; id: string; confirmed: boolean }
   | { type: "extension_ui_response"; id: string; cancelled: true };
 
+export type BlockingExtensionUiRequest = Extract<
+  ExtensionUiRequest,
+  { method: "select" | "confirm" | "input" | "editor" | "custom" }
+>;
+
 export interface ExtensionStatusItem {
   key: string;
   text: string;
@@ -227,6 +237,7 @@ export interface CompactionEntry extends SessionEntryBase {
   tokensBefore: number;
   details?: unknown;
   fromHook?: boolean;
+  usage?: AgentUsage;
 }
 
 export interface BranchSummaryEntry extends SessionEntryBase {
@@ -235,6 +246,7 @@ export interface BranchSummaryEntry extends SessionEntryBase {
   summary: string;
   details?: unknown;
   fromHook?: boolean;
+  usage?: AgentUsage;
 }
 
 export interface CustomEntry extends SessionEntryBase {
@@ -275,11 +287,25 @@ export type SessionEntry =
 
 export type FileEntry = SessionHeader | SessionEntry;
 
+export interface BranchPreview {
+  role?: "user" | "assistant";
+  text: string;
+}
+
+export type SubagentSessionStatus =
+  | "starting"
+  | "running"
+  | "completed"
+  | "failed"
+  | "aborted"
+  | "interrupted";
+
 export interface SessionTreeNode {
   entry: SessionEntry;
   children: SessionTreeNode[];
   label?: string;
   compressedEntryIds?: string[];
+  branchPreview?: BranchPreview;
 }
 
 export interface SessionInfo {
@@ -291,15 +317,28 @@ export interface SessionInfo {
   modified: string;
   messageCount: number;
   firstMessage: string;
-  parentSessionId?: string; // set if this session was forked from another
+  parentSessionId?: string; // source session for a fork, or parent session for a subagent
+  relation?:
+    | { kind: "fork"; originSessionId?: string }
+    | {
+        kind: "subagent";
+        parentSessionId: string;
+        profile: string;
+        description: string;
+        status: SubagentSessionStatus;
+      };
   /** Main repo root shared by all worktrees of this cwd (cwd itself for non-git dirs).
    *  Always set by the server; optional because the client builds transient
    *  SessionInfo objects before the first refresh. Fall back to cwd. */
   projectRoot?: string;
+  projectKey?: string;
+  /** 上游会话投影使用的当前分支字段。 */
+  branch?: string;
   /** cwd 当前检出的 Git 分支；detached HEAD 显示 detached@<short-sha>，非 Git 目录为空 */
   currentBranch?: string;
   /** cwd 是否为 linked worktree 的顶层目录 */
   isWorktree?: boolean;
+  transient?: boolean;
 }
 
 /** /api/worktrees 返回的 worktree 数据。 */
@@ -320,12 +359,16 @@ export interface WorktreeState {
   projectRoot: string;
   isGit: boolean;
   isTopLevel: boolean;
+  /** 服务端按 Git 元数据解析出的当前 checkout 路径。 */
+  currentWorktreePath: string | null;
   worktrees: WorktreeInfo[];
 }
 
 export interface SessionContext {
   messages: AgentMessage[];
   entryIds: string[]; // parallel to messages — the session entry id for each message
+  oldestEntryId: string | null;
+  hasMore: boolean;
   thinkingLevel: string;
   model: { provider: string; modelId: string } | null;
 }

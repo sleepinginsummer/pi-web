@@ -16,6 +16,7 @@ interface Props {
   streamingMessage: Partial<AgentMessage> | null;
   scrollContainer: RefObject<HTMLDivElement | null>;
   messageRefs: RefObject<(HTMLDivElement | null)[]>;
+  onNavigate?: () => void;
   onRevealHistory: () => void;
 }
 
@@ -231,6 +232,7 @@ export function ChatMinimap({
   streamingMessage,
   scrollContainer,
   messageRefs,
+  onNavigate,
   onRevealHistory,
 }: Props) {
   const [visible, setVisible] = useState(false);
@@ -278,7 +280,8 @@ export function ChatMinimap({
       until: Date.now() + NAVIGATION_ACTIVE_LOCK_MS,
     };
     setActiveIndex(index);
-  }, []);
+    onNavigate?.();
+  }, [onNavigate]);
 
   const syncActiveNode = useCallback((scrollEl: HTMLDivElement, nextNodes: NodeInfo[]) => {
     const activeLock = activeNodeLockRef.current;

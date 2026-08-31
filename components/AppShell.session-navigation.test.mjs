@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
 
-const source = fs.readFileSync(new URL("./AppShell.tsx", import.meta.url), "utf8");
 const navigationSource = fs.readFileSync(new URL("../hooks/useSessionNavigation.ts", import.meta.url), "utf8");
+const sidebarSource = fs.readFileSync(new URL("./SessionSidebar.tsx", import.meta.url), "utf8");
 const urlSource = fs.readFileSync(new URL("../lib/session-navigation-url.ts", import.meta.url), "utf8");
 
 test("重复选择当前会话不会重挂载聊天窗口", () => {
@@ -20,7 +20,7 @@ test("新会话转正后清理对应目录的临时草稿", () => {
 });
 
 test("页面重新可见时刷新当前会话分支", () => {
-  assert.match(source, /\/api\/git\/context\?cwd=\$\{encodeURIComponent\(selectedSession\.cwd\)\}/);
-  assert.match(source, /document\.addEventListener\("visibilitychange", onVisibilityChange\)/);
-  assert.match(source, /if \(response\.ok\) handleSessionListRefresh\(\)/);
+  assert.match(sidebarSource, /\/api\/git\/context\?cwd=\$\{encodeURIComponent\(cwd\)\}/);
+  assert.match(sidebarSource, /document\.addEventListener\("visibilitychange", handleVisibilityChange\)/);
+  assert.match(sidebarSource, /if \(!stopped\) await loadSessions\(false\)/);
 });

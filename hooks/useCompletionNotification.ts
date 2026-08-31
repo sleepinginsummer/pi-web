@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { openNotificationTarget } from "@/lib/notification-navigation";
+import type { SessionNotificationIntent, SessionNotificationOptions } from "@/lib/session-notifications";
 
 const STORAGE_KEY = "pi-notification-enabled";
 const PROMPT_DISMISSED_KEY = "pi-notification-prompt-dismissed";
@@ -14,7 +15,11 @@ function getPermission(): CompletionNotificationPermission {
   return Notification.permission;
 }
 
-export function useCompletionNotification() {
+interface CompletionNotificationOptionsInput {
+  onNotification?: (intent: SessionNotificationIntent) => void;
+}
+
+export function useCompletionNotification({ onNotification }: CompletionNotificationOptionsInput = {}) {
   const [permission, setPermission] = useState<CompletionNotificationPermission>(getPermission);
   const [enabled, setEnabled] = useState(() => (
     typeof window !== "undefined"
@@ -27,11 +32,12 @@ export function useCompletionNotification() {
     && localStorage.getItem(PROMPT_DISMISSED_KEY) !== "true"
   ));
   const enabledRef = useRef(enabled);
+  const onNotificationRef = useRef(onNotification);
+  onNotificationRef.current = onNotification;
 
   useEffect(() => {
     enabledRef.current = enabled;
   }, [enabled]);
-
 
   const toggle = useCallback(async () => {
     if (!("Notification" in window)) return;
@@ -62,11 +68,22 @@ export function useCompletionNotification() {
     setShowPrompt(false);
   }, []);
 
-  const notifySession = useCallback(async (title: string, body: string, sessionId?: string | null) => {
-    if (!enabledRef.current || Notification.permission !== "granted") return;
-
+  const notifySession = useCallback(async (
+    title: string,
+    body: string,
+    sessionId?: string | null,
+    policy: SessionNotificationOptions = {},
+  ) => {
     const url = sessionId ? `/?session=${encodeURIComponent(sessionId)}` : "/";
-    const options: CompletionNotificationOptions = {
+    try {
+      onNotificationRef.current?.({ title, body, sessionId, url, showWhenActive: policy.showWhenActive });
+    } catch (error) {
+      // 站内观察者异常不能阻断系统通知投递。
+      console.error("站内通知分发失败", { sessionId, error });
+    }
+
+    if (!enabledRef.current || Notification.permission !== "granted") return;
+    const notificationOptions: CompletionNotificationOptions = {
       body,
       icon: "/icons/icon-192.png",
       badge: "/icons/icon-192.png",
@@ -82,7 +99,7 @@ export function useCompletionNotification() {
         : null;
       if (controllingWorker) {
         // 后台页面可能延迟异步注册查询；已有 controller 时必须同步投递消息。
-        controllingWorker.postMessage({ type: "SHOW_NOTIFICATION", title, options });
+        controllingWorker.postMessage({ type: "SHOW_NOTIFICATION", title, options: notificationOptions });
         return;
       }
 
@@ -90,11 +107,11 @@ export function useCompletionNotification() {
         ? await navigator.serviceWorker.getRegistration()
         : undefined;
       if (registration?.active) {
-        registration.active.postMessage({ type: "SHOW_NOTIFICATION", title, options });
+        registration.active.postMessage({ type: "SHOW_NOTIFICATION", title, options: notificationOptions });
         return;
       }
 
-      const notification = new Notification(title, options);
+      const notification = new Notification(title, notificationOptions);
       notification.onclick = () => {
         window.focus();
         openNotificationTarget(url);

@@ -44,6 +44,23 @@ export function buildSessionInfoModel(
       { label: translate("session.output"), value: sessionStats.tokens.output.toLocaleString(locale) },
       ...(sessionStats.tokens.cacheRead > 0 ? [{ label: translate("session.cacheRead"), value: sessionStats.tokens.cacheRead.toLocaleString(locale) }] : []),
       ...(sessionStats.tokens.cacheWrite > 0 ? [{ label: translate("session.cacheWrite"), value: sessionStats.tokens.cacheWrite.toLocaleString(locale) }] : []),
+      ...(
+        sessionStats.tokens.cacheRead + sessionStats.tokens.cacheWrite > 0
+        && sessionStats.tokens.cacheRead + sessionStats.tokens.cacheWrite + sessionStats.tokens.input > 0
+          ? [{
+              label: translate("session.cacheHitRate"),
+              value: `${(
+                sessionStats.tokens.cacheRead
+                / (
+                  sessionStats.tokens.cacheRead
+                  + sessionStats.tokens.cacheWrite
+                  + sessionStats.tokens.input
+                )
+                * 100
+              ).toFixed(1)}%`,
+            }]
+          : []
+      ),
       { label: translate("session.total"), value: sessionStats.tokens.total.toLocaleString(locale) },
       ...(sessionStats.cost > 0 ? [{ label: translate("session.cost"), value: `$${sessionStats.cost.toFixed(4)}` }] : []),
       ...(context?.contextWindow ? [{ label: translate("session.context"), value: `${context.percent !== null ? `${context.percent.toFixed(1)}%` : "?"} / ${formatCompact(context.contextWindow)}` }] : []),

@@ -22,6 +22,9 @@ export interface BrowserNotificationOptions {
   tag?: string;
 }
 
+export type CompletionNotificationEnvironment = BrowserNotificationEnvironment;
+export type CompletionNotificationOptions = BrowserNotificationOptions;
+
 export type NotificationDelivery = "service-worker" | "window" | null;
 
 type DocumentAttentionState = Pick<Document, "visibilityState" | "hasFocus">;
@@ -74,7 +77,6 @@ export async function showBrowserNotification(
     body: options.body,
     ...(options.tag ? { tag: options.tag } : {}),
   };
-
   if (environment.getServiceWorkerRegistration) {
     try {
       const registration = await environment.getServiceWorkerRegistration();
@@ -101,4 +103,11 @@ export async function showBrowserNotification(
     // Most mobile browsers expose Notification but require service-worker delivery.
     return null;
   }
+}
+
+export function showCompletionNotification(
+  options: CompletionNotificationOptions,
+  environment: CompletionNotificationEnvironment = getBrowserEnvironment(),
+): Promise<NotificationDelivery> {
+  return showBrowserNotification(options, environment);
 }

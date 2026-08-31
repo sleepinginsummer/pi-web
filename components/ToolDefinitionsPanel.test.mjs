@@ -5,11 +5,14 @@ import test from "node:test";
 const panelSource = await readFile(new URL("./ToolDefinitionsPanel.tsx", import.meta.url), "utf8");
 const systemSource = await readFile(new URL("./SystemPromptPanel.tsx", import.meta.url), "utf8");
 const appShellSource = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
+const topBarSource = await readFile(new URL("./AppTopBar.tsx", import.meta.url), "utf8");
+const topPanelsSource = await readFile(new URL("./AppTopPanels.tsx", import.meta.url), "utf8");
 
 test("keeps System and Tools in separate adjacent toolbar actions", () => {
-  assert.match(appShellSource, /handleSystemInfoToggle\("system", mobile\)[\s\S]*?handleSystemInfoToggle\("tools", mobile\)/);
-  assert.match(appShellSource, /activeTopPanel === "system"[\s\S]*?<SystemPromptPanel/);
-  assert.match(appShellSource, /activeTopPanel === "tools"[\s\S]*?<ToolDefinitionsPanel/);
+  assert.match(topBarSource, /onTogglePanel\("system"\)[\s\S]*?onTogglePanel\("tools"\)/);
+  assert.match(topPanelsSource, /activePanel === "system"[\s\S]*?<SystemPromptPanel/);
+  assert.match(topPanelsSource, /activePanel === "tools"[\s\S]*?<ToolDefinitionsPanel/);
+  assert.match(appShellSource, /onToolsLoaderChange=\{handleToolsLoaderChange\}/);
   assert.doesNotMatch(systemSource, /ToolEntry|tools/);
   assert.doesNotMatch(systemSource, /system-prompt-heading/);
   assert.doesNotMatch(panelSource, /tool-definitions-heading/);

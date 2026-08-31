@@ -33,7 +33,7 @@ import {
   ConfigStatusDot,
   ConfigSwitch,
 } from "./SettingsUi";
-import { ModelSelector } from "./ModelSelector";
+import { ModelPicker } from "./ModelPicker";
 
 const TOOL_OPTIONS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const THINKING_OPTIONS = ["", "off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -173,7 +173,7 @@ export function AgentsConfig({
     () => profiles.find((profile) => profileKey(profile) === selectedKey) ?? null,
     [profiles, selectedKey],
   );
-  const modelSelectorOptions = useMemo(() => modelOptions.map((model) => ({
+  const modelPickerOptions = useMemo(() => modelOptions.map((model) => ({
     provider: model.provider,
     modelId: model.id,
     name: model.name,
@@ -566,8 +566,9 @@ export function AgentsConfig({
                   <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "minmax(0, 1.5fr) minmax(120px, 0.75fr) minmax(100px, 0.5fr)", gap: 12 }}>
                     <Field label={t("agents.model")}>
                       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                        <ModelSelector
-                          options={modelSelectorOptions}
+                        <ModelPicker
+                          isMobile={isMobile}
+                          options={modelPickerOptions}
                           value={selectedModel}
                           onChange={(provider, modelId) => update("model", `${provider}/${modelId}`)}
                           onClear={() => update("model", undefined)}

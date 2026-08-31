@@ -10,6 +10,11 @@ export interface AgentEventStreamSession {
   onEvent(listener: (event: AgentEventLike) => void): () => void;
 }
 
+export interface AgentEventStreamOptions {
+  /** 在事件投影前通知路由侧的持久化缓存失效逻辑。 */
+  onEvent?(event: AgentEventLike): void;
+}
+
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
 function errorMessage(error: unknown): string {
@@ -24,6 +29,7 @@ export function createAgentEventStream(
   req: Request,
   sessionId: string,
   sessionPromise: Promise<AgentEventStreamSession>,
+  options: AgentEventStreamOptions = {},
 ): ReadableStream<Uint8Array> {
   let cancelStream: (closeController: boolean) => void = () => {};
 
@@ -77,6 +83,7 @@ export function createAgentEventStream(
               bufferedEvents.push(event);
               return;
             }
+            options.onEvent?.(event);
             forwardEvent(event, snapshot);
           };
 
@@ -93,7 +100,10 @@ export function createAgentEventStream(
             sessionId,
             isStreaming: session.isStreaming,
           });
-          for (const event of bufferedEvents) forwardEvent(event, snapshot);
+          for (const event of bufferedEvents) {
+            options.onEvent?.(event);
+            forwardEvent(event, snapshot);
+          }
           if (snapshot !== undefined && snapshot !== null) {
             encode({ type: "message_start", message: snapshot });
           }

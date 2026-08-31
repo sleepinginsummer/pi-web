@@ -225,13 +225,14 @@ interface CodeBlockProps {
   code: string;
   lang: string;
   headerAction?: ReactNode;
+  isStreaming?: boolean;
 }
 
 /**
  * Syntax-highlighted code block with copy button.
  * Used as the "source" view for mermaid blocks and for all non-mermaid code fences.
  */
-export function CodeBlock({ code, lang, headerAction }: CodeBlockProps) {
+export function CodeBlock({ code, lang, headerAction, isStreaming }: CodeBlockProps) {
   const { isDark } = useTheme();
   const { t } = useI18n();
   const [copied, setCopied] = useState(false);
@@ -257,7 +258,11 @@ export function CodeBlock({ code, lang, headerAction }: CodeBlockProps) {
           </button>
         </div>
       </div>
-      <Suspense
+      {isStreaming ? (
+        <pre className="markdown-code-plain" style={{ margin: 0, padding: "11px 13px", fontSize: 12.5, lineHeight: 1.62, borderRadius: 0, overflow: "auto" }}>
+          <code style={{ fontFamily: "var(--font-mono)", background: "none" }}>{code}</code>
+        </pre>
+      ) : <Suspense
         fallback={(
           <pre className="markdown-code-plain" style={{ margin: 0, padding: "11px 13px", fontSize: 12.5, lineHeight: 1.62, borderRadius: 0, overflow: "auto" }}>
             <code style={{ fontFamily: "var(--font-mono)", background: "none" }}>{code}</code>
@@ -265,7 +270,7 @@ export function CodeBlock({ code, lang, headerAction }: CodeBlockProps) {
         )}
       >
         <LazyCodeHighlight code={code} lang={lang || "text"} isDark={isDark} />
-      </Suspense>
+      </Suspense>}
     </div>
   );
 }

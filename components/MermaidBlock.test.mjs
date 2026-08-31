@@ -68,11 +68,11 @@ function renderCode(props) {
   );
 }
 
-test("CodeBlock highlights code when not streaming", () => {
+test("CodeBlock defers highlighting behind a lazy fallback when not streaming", () => {
   const html = renderCode({ code: "const x = 1;", lang: "javascript" });
 
-  assert.match(html, /class="token/);
-  assert.match(html, /const/);
+  assert.doesNotMatch(html, /class="token/);
+  assert.match(html, /const x = 1;/);
 });
 
 test("CodeBlock renders plain text without tokenization while streaming", () => {

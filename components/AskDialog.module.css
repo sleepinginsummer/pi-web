@@ -4,7 +4,10 @@
 }
 
 .card {
+  display: flex;
   width: 100%;
+  max-height: var(--ask-max-height);
+  flex-direction: column;
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -31,6 +34,32 @@
   white-space: normal;
 }
 
+.actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.collapse {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-muted);
+  background: var(--bg-panel);
+  cursor: pointer;
+}
+
+.collapse:hover,
+.collapse:focus-visible {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
 .stop {
   flex-shrink: 0;
   padding: 4px 10px;
@@ -44,8 +73,12 @@
 
 .options {
   display: grid;
+  min-height: 0;
   gap: 6px;
   padding: 10px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
 }
 
 .option {

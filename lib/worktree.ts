@@ -4,6 +4,7 @@ import { basename, dirname, join, resolve } from "path";
 import { promisify } from "util";
 import { getUpstreamDisplayBranch } from "./git-remote-display";
 import { allowFileRoot } from "./allowed-roots";
+import { samePath, toNativePath } from "./paths";
 import type { WorktreeInfo } from "./types";
 
 const execFileAsync = promisify(execFile);
@@ -141,7 +142,15 @@ export async function resolveProject(cwd: string): Promise<ProjectInfo> {
 /** Main repo root (parent of the shared .git dir), or throws for non-git dirs */
 async function getRepoRoot(cwd: string): Promise<string> {
   const commonDir = await git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
-  return dirname(commonDir);
+  return realPathOrSelf(dirname(toNativePath(commonDir)));
+}
+
+function realPathOrSelf(filePath: string): string {
+  try {
+    return realpathSync(filePath);
+  } catch {
+    return filePath;
+  }
 }
 
 async function loadWorktrees(cwd: string): Promise<WorktreeInfo[]> {
@@ -168,7 +177,7 @@ async function loadWorktrees(cwd: string): Promise<WorktreeInfo[]> {
   for (const line of out.split("\n")) {
     if (line.startsWith("worktree ")) {
       flush();
-      current = { path: line.slice("worktree ".length).trim() };
+      current = { path: toNativePath(line.slice("worktree ".length).trim()) };
     } else if (line.startsWith("branch ") && current) {
       current.branch = line.slice("branch ".length).trim().replace(/^refs\/heads\//, "");
     } else if (line.startsWith("prunable") && current) {
@@ -206,6 +215,14 @@ async function loadWorktrees(cwd: string): Promise<WorktreeInfo[]> {
         })()
       : {}),
   }));
+}
+
+function findWorktreeByPath(worktrees: readonly WorktreeInfo[], candidate: string): WorktreeInfo | undefined {
+  return worktrees.find((worktree) => samePath(worktree.path, candidate));
+}
+
+export function findCurrentWorktreePath(worktrees: readonly WorktreeInfo[], cwd: string): string | null {
+  return findWorktreeByPath(worktrees, realPathOrSelf(cwd))?.path ?? null;
 }
 
 export function listWorktrees(cwd: string): Promise<WorktreeInfo[]> {

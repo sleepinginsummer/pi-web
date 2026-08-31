@@ -40,11 +40,11 @@ test("session reads use the live SessionManager before requiring a JSONL path", 
 });
 
 test("live agent state is available before the session file is persisted", () => {
-  const liveLookup = stateRoute.indexOf("getRpcSession(id)");
+  const liveLookup = stateRoute.indexOf("getRpcSessionSnapshot(id)");
   const pathLookup = stateRoute.indexOf("resolveSessionPath(id)");
   assert.ok(liveLookup >= 0);
   assert.ok(pathLookup > liveLookup);
-  assert.match(stateRoute, /if \(rpc\?\.isAlive\(\)\)/);
+  assert.match(stateRoute, /if \(snapshot\.alive\)/);
 });
 
 test("deleting an intermediate subagent reparents both relation representations", async (t) => {
@@ -155,7 +155,8 @@ test("live detail and state routes work without a persisted JSONL file", async (
   assert.deepEqual(detail.context.messages.map((message) => message.content), ["hello live"]);
   assert.equal(stateResponse.status, 200);
   assert.deepEqual(await stateResponse.json(), {
-    running: true,
+    alive: true,
+    busy: true,
     state: { isStreaming: true },
   });
 });

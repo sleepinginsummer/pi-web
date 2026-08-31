@@ -15,6 +15,7 @@ export function parseWorktreeState(cwd: string, data: WorktreeResponse): Worktre
     projectRoot: data.projectRoot,
     isGit: data.isGit ?? false,
     isTopLevel: data.isTopLevel ?? false,
+    currentWorktreePath: data.currentWorktreePath ?? null,
     worktrees: data.worktrees ?? [],
   };
 }
@@ -29,6 +30,7 @@ export function appendCreatedWorktree(
   return {
     ...snapshot,
     forCwd: worktree.path,
+    currentWorktreePath: worktree.path,
     worktrees: [...snapshot.worktrees, worktree],
   };
 }

@@ -1,31 +1,34 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { SessionSidebar } from "./SessionSidebar";
 import { ChatWindow } from "./ChatWindow";
 import { FileViewer } from "./FileViewer";
 import { TabBar } from "./TabBar";
-import { ModelsConfig } from "./ModelsConfig";
-import { SkillsConfig } from "./SkillsConfig";
-import { PluginsConfig } from "./PluginsConfig";
+import { SettingsPanel, SettingsSectionIcon } from "./SettingsPanel";
 import { ProjectTrustDialog } from "./ProjectTrustDialog";
 import { AppTopBar } from "./AppTopBar";
-import { useTheme } from "@/hooks/useTheme";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useViewportHeight } from "@/hooks/useViewportHeight";
 import { useResizablePanel } from "@/hooks/useResizablePanel";
 import { useFilePanel } from "@/hooks/useFilePanel";
-import { useTopPanel } from "@/hooks/useTopPanel";
+import { useTopPanel, type TopPanel } from "@/hooks/useTopPanel";
 import { useSessionNavigation } from "@/hooks/useSessionNavigation";
 import { useProjectTrust } from "@/hooks/useProjectTrust";
 import { useSessionPresentation } from "@/hooks/useSessionPresentation";
 import { useSessionAutoName } from "@/hooks/useSessionAutoName";
 import { useWorktreeState } from "@/hooks/useWorktreeState";
-import { useCompletionNotification } from "@/hooks/useCompletionNotification";
+import { useSessionNotifications } from "@/hooks/useSessionNotifications";
+import { useRunningSessions } from "@/hooks/useRunningSessions";
+import { useRunningSessionTransitions } from "@/hooks/useRunningSessionTransitions";
+import { useBackgroundCompletionNotifications } from "@/hooks/useBackgroundCompletionNotifications";
+import { useSessionListRefreshCoordinator } from "@/hooks/useSessionListRefreshCoordinator";
+import { FloatingSessionNotifications } from "./FloatingSessionNotifications";
 import { useGlobalAttentionNotifications } from "@/hooks/useGlobalAttentionNotifications";
+import { openNotificationTarget } from "@/lib/notification-navigation";
 import { getFileName } from "@/lib/file-paths";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
 import { getInitialNavigation } from "@/lib/initial-navigation";
@@ -43,19 +46,16 @@ import {
 import { DEFAULT_PENDING_NEW_SESSION_CONTROL, type PendingNewSessionControl } from "@/lib/pending-new-session";
 import type { ChatInputHandle } from "./ChatInput";
 import { AppTopPanels } from "./AppTopPanels";
+import { getLastSettingsSection, type SettingsSection } from "@/lib/settings-navigation";
+import { getSessionFamily } from "@/lib/session-family";
+import type { SessionInfo } from "@/lib/types";
+import type { ToolEntry } from "@/lib/tool-presets";
 
 export function AppShell() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [initialNavigation] = useState(() => getInitialNavigation(searchParams ?? new URLSearchParams()));
-  const { isDark, toggleTheme } = useTheme();
-  const { locale, setLocale, t: translate, supportedLocales } = useI18n();
-  const notificationController = useCompletionNotification();
-  useGlobalAttentionNotifications({
-    notifySession: notificationController.notifySession,
-    attentionTitle: translate("chat.notificationAttentionTitle"),
-    attentionBody: translate("chat.notificationAttentionBody"),
-  });
+  const { locale, t: translate } = useI18n();
   const isMobile = useIsMobile();
   const [initialCwdStatus, setInitialCwdStatus] = useState<"idle" | "validating" | "ready" | "error">(
     () => initialNavigation.requestedCwd ? "validating" : "idle",
@@ -63,10 +63,9 @@ export function AppShell() {
   const [initialCwdError, setInitialCwdError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0);
-  const [modelsConfigOpen, setModelsConfigOpen] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<SettingsSection | null>(null);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
-  const [skillsConfigOpen, setSkillsConfigOpen] = useState(false);
-  const [pluginsConfigOpen, setPluginsConfigOpen] = useState(false);
+  const [sessionCatalog, setSessionCatalog] = useState<SessionInfo[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const closeMobileSidebar = useCallback(() => setSidebarOpen(false), []);
   const {
@@ -76,14 +75,17 @@ export function AppShell() {
     closeTab: handleCloseFileTab,
     isOpen: rightPanelOpen,
     openFile: handleOpenFile,
+    saveViewerState: saveFileViewerStateForTab,
     selectTab: setActiveFileTabId,
     tabs: fileTabs,
     toggle: toggleFilePanel,
   } = useFilePanel({ isMobile, onMobileOpen: closeMobileSidebar });
+  const handleFileViewerStateChange = useCallback((tabId: string, viewerRevision: number, viewerState: import("@/lib/file-viewer-state").FileViewerState) => {
+    saveFileViewerStateForTab(tabId, viewerRevision, viewerState);
+  }, [saveFileViewerStateForTab]);
   const {
     activePanel: activeTopPanel,
     close: closeTopPanel,
-    languageButtonRef: languageBtnRef,
     open: openTopPanel,
     position: topPanelPos,
     toggle: toggleTopPanel,
@@ -159,6 +161,57 @@ export function AppShell() {
     reclampRightPanelWidth();
   }, [reclampRightPanelWidth, reclampSidebarWidth, rightPanelOpen]);
   const chatInputRef = useRef<ChatInputHandle | null>(null);
+  const [systemPromptLoading, setSystemLoading] = useState(false);
+  const systemPromptLoaderRef = useRef<(() => Promise<void>) | null>(null);
+  const systemPromptLoadIdRef = useRef(0);
+  const [systemTools, setSystemTools] = useState<ToolEntry[] | null>(null);
+  const [systemToolsLoading, setSystemToolsLoading] = useState(false);
+  const toolsLoaderRef = useRef<(() => Promise<ToolEntry[]>) | null>(null);
+  const toolsLoadIdRef = useRef(0);
+
+  const handleSystemPromptLoaderChange = useCallback((loader: (() => Promise<void>) | null) => {
+    systemPromptLoadIdRef.current += 1;
+    systemPromptLoaderRef.current = loader;
+    setSystemLoading(false);
+  }, []);
+
+  const handleToolsLoaderChange = useCallback((loader: (() => Promise<ToolEntry[]>) | null) => {
+    toolsLoadIdRef.current += 1;
+    toolsLoaderRef.current = loader;
+    setSystemToolsLoading(false);
+  }, []);
+
+  const handleTopPanelToggle = useCallback((panel: TopPanel) => {
+    const openingSystemPrompt = panel === "system" && activeTopPanel !== "system";
+    const openingTools = panel === "tools" && activeTopPanel !== "tools";
+    toggleTopPanel(panel);
+    if (openingSystemPrompt && !systemPromptLoading) {
+      const load = systemPromptLoaderRef.current;
+      if (load) {
+        const loadId = ++systemPromptLoadIdRef.current;
+        setSystemLoading(true);
+        void load().catch((error: unknown) => {
+          console.error("加载系统提示词失败:", error);
+        }).finally(() => {
+          if (systemPromptLoadIdRef.current === loadId) setSystemLoading(false);
+        });
+      }
+    }
+    if (openingTools && !systemToolsLoading) {
+      const load = toolsLoaderRef.current;
+      if (load) {
+        const loadId = ++toolsLoadIdRef.current;
+        setSystemToolsLoading(true);
+        void load().then((tools) => {
+          if (toolsLoadIdRef.current === loadId) setSystemTools(tools);
+        }).catch((error: unknown) => {
+          console.error("加载工具定义失败:", error);
+        }).finally(() => {
+          if (toolsLoadIdRef.current === loadId) setSystemToolsLoading(false);
+        });
+      }
+    }
+  }, [activeTopPanel, systemPromptLoading, systemToolsLoading, toggleTopPanel]);
 
   const {
     branchActiveLeafId,
@@ -192,12 +245,14 @@ export function AppShell() {
     newSession: handleNewSession,
     newSessionCwd,
     pendingNewSessions,
+    restoreWorkspaceContext,
     selectSession: handleSelectSession,
     selectedSession,
     sessionCreated: handleSessionCreated,
     sessionDeleted: handleSessionDeleted,
     sessionForked: handleSessionForked,
     sessionKey,
+    syncWorkspaceKey,
     updateDraftCwd,
   } = useSessionNavigation({
     initialSessionId: initialNavigation.sessionId,
@@ -206,6 +261,32 @@ export function AppShell() {
     onRefresh: refreshSessions,
     resetSessionViews,
   });
+  const sessionsWithSelection = useMemo(() => selectedSession
+    ? [...sessionCatalog.filter((session) => session.id !== selectedSession.id), selectedSession]
+    : sessionCatalog, [selectedSession, sessionCatalog]);
+  const activeSessionFamily = useMemo(
+    () => getSessionFamily(sessionsWithSelection, selectedSession?.id),
+    [selectedSession?.id, sessionsWithSelection],
+  );
+  const {
+    dismissNotification,
+    notificationController,
+    notifications: floatingNotifications,
+  } = useSessionNotifications(selectedSession?.id ?? null);
+  const { notifySession } = notificationController;
+  useGlobalAttentionNotifications({
+    notifySession,
+    attentionTitle: translate("chat.notificationAttentionTitle"),
+    attentionBody: translate("chat.notificationAttentionBody"),
+  });
+  const { runningSessionIds } = useRunningSessions();
+  const runningSessionTransitions = useRunningSessionTransitions(runningSessionIds, selectedSession?.id ?? null);
+  useBackgroundCompletionNotifications(
+    runningSessionTransitions,
+    notifySession,
+    translate("i18n.sessionComplete"),
+    translate("chat.notificationDoneBody"),
+  );
 
   const {
     generate: handleAutoName,
@@ -284,11 +365,12 @@ export function AppShell() {
     remove: handleRemoveWorktree,
   } = useWorktreeState(worktreeCwd);
 
-  const handleCwdChange = useCallback((cwd: string | null, projectRoot?: string | null) => {
+  const handleCwdChange = useCallback((cwd: string | null, projectRoot?: string | null, projectKey?: string | null) => {
     setActiveCwd(cwd);
     // Skip if cwd is null (initial mount).
     if (!cwd) return;
-    const newProject = projectRoot ?? cwd;
+    const newProject = projectKey ?? projectRoot ?? cwd;
+    syncWorkspaceKey(newProject);
     const currentProject = activeProjectRootRef.current
       ?? (selectedSession ? (selectedSession.projectRoot ?? selectedSession.cwd) : null);
     activeProjectRootRef.current = newProject;
@@ -314,8 +396,9 @@ export function AppShell() {
     // matches the selected project directory.
     leaveWorkspace(cwd);
     clearFilePanel();
+    restoreWorkspaceContext(newProject);
     router.replace("/", { scroll: false });
-  }, [clearFilePanel, consumeCwdSyncSuppression, leaveWorkspace, router, selectedSession]);
+  }, [clearFilePanel, consumeCwdSyncSuppression, leaveWorkspace, restoreWorkspaceContext, router, selectedSession, syncWorkspaceKey]);
 
 
   // Global keyboard shortcuts (handles Esc, Ctrl+Alt+N etc.)
@@ -326,30 +409,14 @@ export function AppShell() {
 
 
   const handleAgentEnd = useCallback(() => {
-    setRefreshKey((k) => k + 1);
     setExplorerRefreshKey((k) => k + 1);
   }, []);
 
-  // 每条消息落盘后刷新会话列表（useAgentSession 内部已节流）
   const handleSessionListRefresh = useCallback(() => {
     setRefreshKey((k) => k + 1);
   }, []);
+  const requestAgentSessionListRefresh = useSessionListRefreshCoordinator(handleSessionListRefresh);
 
-  useEffect(() => {
-    const refreshVisibleSessionBranch = async () => {
-      if (document.visibilityState !== "visible" || !selectedSession?.cwd) return;
-      try {
-        const response = await fetch(`/api/git/context?cwd=${encodeURIComponent(selectedSession.cwd)}`, { cache: "no-store" });
-        if (response.ok) handleSessionListRefresh();
-        else console.error("刷新当前 Git 分支失败", await response.text());
-      } catch (error) {
-        console.error("刷新当前 Git 分支失败", error);
-      }
-    };
-    const onVisibilityChange = () => { void refreshVisibleSessionBranch(); };
-    document.addEventListener("visibilitychange", onVisibilityChange);
-    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
-  }, [handleSessionListRefresh, selectedSession?.cwd]);
 
   const handleExplorerRefresh = useCallback(() => {
     setExplorerRefreshKey((k) => k + 1);
@@ -428,6 +495,8 @@ export function AppShell() {
         onInitialRestoreDone={handleInitialRestoreDone}
         refreshKey={refreshKey}
         onSessionDeleted={handleSessionDeleted}
+        runningSessionIds={runningSessionIds}
+        runningSessionTransitions={runningSessionTransitions}
         selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? null}
         onCwdChange={handleCwdChange}
         worktreeState={worktreeState}
@@ -438,70 +507,80 @@ export function AppShell() {
         onExplorerRefresh={handleExplorerRefresh}
         onAtMention={handleAtMention}
         onAtMentions={handleAtMentions}
+        onSessionsChange={setSessionCatalog}
       />
       <div style={{ padding: "8px", flexShrink: 0, display: "flex", justifyContent: "space-between", gap: 4 }}>
         {([
-          {
-             label: translate("common.models"),
-            onClick: () => setModelsConfigOpen(true),
-            disabled: false,
-            icon: (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="4" y="4" width="16" height="16" rx="2" /><rect x="9" y="9" width="6" height="6" />
-                <line x1="9" y1="1" x2="9" y2="4" /><line x1="15" y1="1" x2="15" y2="4" />
-                <line x1="9" y1="20" x2="9" y2="23" /><line x1="15" y1="20" x2="15" y2="23" />
-                <line x1="20" y1="9" x2="23" y2="9" /><line x1="20" y1="14" x2="23" y2="14" />
-                <line x1="1" y1="9" x2="4" y2="9" /><line x1="1" y1="14" x2="4" y2="14" />
-              </svg>
-            ),
-          },
-          {
-             label: translate("common.skills"),
-            onClick: () => setSkillsConfigOpen(true),
-            disabled: !activeCwd && !selectedSession?.cwd && !newSessionCwd,
-            icon: (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M12 2L2 7l10 5 10-5-10-5z" />
-                <path d="M2 17l10 5 10-5" />
-                <path d="M2 12l10 5 10-5" />
-              </svg>
-            ),
-          },
-          {
-             label: translate("common.plugins"),
-            onClick: () => setPluginsConfigOpen(true),
-            disabled: !activeCwd && !selectedSession?.cwd && !newSessionCwd,
-            icon: (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M9 7V2" />
-                <path d="M15 7V2" />
-                <path d="M6 13V8a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v5a6 6 0 0 1-12 0Z" />
-                <path d="M12 19v3" />
-              </svg>
-            ),
-          },
-        ] as { label: string; onClick: () => void; disabled: boolean; icon: React.ReactNode }[]).map(({ label, onClick, disabled, icon }) => (
-          <button
-            key={label}
-            onClick={onClick}
-            disabled={disabled}
-            title={label}
-            style={{
-              flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-              height: 32, padding: 0, background: "none", border: "none",
-              borderRadius: 9, color: "var(--text-muted)", cursor: disabled ? "default" : "pointer",
-              fontSize: 12, opacity: disabled ? 0.35 : 1,
-              transition: "background 0.12s, color 0.12s",
-            }}
-            onMouseEnter={(e) => { if (!disabled) { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; } }}
-            onMouseLeave={(e) => { e.currentTarget.style.background = "none"; e.currentTarget.style.color = "var(--text-muted)"; }}
-          >
-            {icon}
-            {label}
-          </button>
-        ))}
+          ["models", translate("common.models")],
+          ["skills", translate("common.skills")],
+        ] as const).map(([section, label]) => {
+          const disabled = section !== "models" && !projectTrustCwd;
+          return (
+            <button
+              key={section}
+              type="button"
+              onClick={() => setSettingsSection(section)}
+              disabled={disabled}
+              title={disabled ? translate("settings.projectRequired") : label}
+              aria-label={label}
+              style={{
+                flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+                height: 32, padding: 0, background: "none", border: "none",
+                borderRadius: 9, color: "var(--text-muted)", cursor: disabled ? "default" : "pointer",
+                fontSize: 12, opacity: disabled ? 0.35 : 1,
+                transition: "background 0.12s, color 0.12s",
+              }}
+              onMouseEnter={(event) => { if (!disabled) { event.currentTarget.style.background = "var(--bg-hover)"; event.currentTarget.style.color = "var(--text)"; } }}
+              onMouseLeave={(event) => { event.currentTarget.style.background = "none"; event.currentTarget.style.color = "var(--text-muted)"; }}
+            >
+              <SettingsSectionIcon section={section} size={14} strokeWidth={2} />
+              <span>{label}</span>
+            </button>
+          );
+        })}
+        <button
+          type="button"
+          onClick={() => setSettingsSection(getLastSettingsSection(projectTrustCwd))}
+          title={translate("common.settings")}
+          aria-label={translate("common.settings")}
+          style={{
+            flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+            height: 32, padding: 0, background: "none", border: "none",
+            borderRadius: 9, color: "var(--text-muted)", cursor: "pointer",
+            fontSize: 12, transition: "background 0.12s, color 0.12s",
+          }}
+          onMouseEnter={(event) => { event.currentTarget.style.background = "var(--bg-hover)"; event.currentTarget.style.color = "var(--text)"; }}
+          onMouseLeave={(event) => { event.currentTarget.style.background = "none"; event.currentTarget.style.color = "var(--text-muted)"; }}
+        >
+          <SettingsSectionIcon section="general" size={14} strokeWidth={2} />
+          <span>{translate("common.settings")}</span>
+        </button>
       </div>
     </>
+  );
+
+  const filePanelToggle = (
+    <button
+      type="button"
+      onClick={toggleFilePanel}
+      aria-controls="file-panel"
+      aria-expanded={rightPanelOpen}
+      title={rightPanelOpen ? translate("files.hidePanel") : translate("files.showPanel")}
+      aria-label={rightPanelOpen ? translate("files.hidePanel") : translate("files.showPanel")}
+      style={{
+        display: "flex", alignItems: "center", justifyContent: "center", flex: "0 0 36px",
+        width: 36, height: 36, padding: 0,
+        background: "var(--bg-panel)", border: "none", borderLeft: "1px solid var(--border)", borderBottom: "1px solid var(--border)",
+        color: rightPanelOpen ? "var(--text)" : "var(--text-muted)",
+        cursor: "pointer", transition: "color 0.12s",
+      }}
+      onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
+      onMouseLeave={(e) => { e.currentTarget.style.color = rightPanelOpen ? "var(--text)" : "var(--text-muted)"; }}
+    >
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" />
+      </svg>
+    </button>
   );
 
   return (
@@ -636,12 +715,8 @@ export function AppShell() {
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
         <AppTopBar
           activePanel={activeTopPanel}
-          appearance={{
-            isDark,
-            languageButtonRef: languageBtnRef,
-            locale,
-            toggleTheme,
-          }}
+          endAction={filePanelToggle}
+          locale={locale}
           navigation={{
             activeLeafId: branchActiveLeafId,
             branchTree,
@@ -651,15 +726,16 @@ export function AppShell() {
             sidebarOpen,
             topBarRef,
           }}
-          onTogglePanel={toggleTopPanel}
+          onTogglePanel={handleTopPanelToggle}
           session={{
+            agentCount: activeSessionFamily?.subagents.length ?? 0,
             autoNameStatus,
             contextUsage,
             hasPersistedSession: Boolean(selectedSession),
+            identityKey: selectedSession?.id ?? effectiveNewSessionCwd ?? "none",
             messageCount: selectedSession?.messageCount ?? 0,
             onAutoName: () => void handleAutoName(),
             onHistory: handleViewFullHistory,
-            rightPanelOpen,
             shadowControl: activeShadowSessionControl,
             show: showChat,
             stats: sessionStats,
@@ -673,19 +749,23 @@ export function AppShell() {
         />
           <AppTopPanels
             activePanel={activeTopPanel}
+            agentFamily={activeSessionFamily}
             locale={locale}
-            onClose={closeTopPanel}
             onCopySessionField={handleCopySessionField}
-            onLocaleSelect={(nextLocale) => setLocale(nextLocale as typeof locale)}
+            onSelectSession={handleSelectSession}
             position={topPanelPos}
+            runningSessionIds={runningSessionIds}
+            selectedSessionId={selectedSession?.id ?? null}
             session={{
               contextUsage,
               copiedField: copiedSessionField,
               isMobile,
               stats: sessionStats,
             }}
-            supportedLocales={supportedLocales}
             systemPrompt={systemPrompt}
+            systemPromptLoading={systemPromptLoading}
+            tools={systemTools}
+            toolsLoading={systemToolsLoading}
             translate={translate}
           />
 
@@ -706,12 +786,14 @@ export function AppShell() {
               onNewSessionCwdChange={updateDraftCwd}
               onAgentEnd={handleAgentEnd}
               onSessionCreated={handleSessionCreated}
-              onSessionListRefresh={handleSessionListRefresh}
+              onSessionListRefresh={requestAgentSessionListRefresh}
               onSessionForked={handleSessionForked}
               modelsRefreshKey={modelsRefreshKey}
               chatInputRef={chatInputRef}
               onBranchDataChange={handleBranchDataChange}
               onSystemPromptChange={handleSystemPromptChange}
+        onSystemPromptLoaderChange={handleSystemPromptLoaderChange}
+        onToolsLoaderChange={handleToolsLoaderChange}
               onShadowMindControlChange={handleShadowMindControlChange}
               onSessionStatsChange={handleSessionStatsChange}
               onSessionStatsPanelOpen={openSessionStatsPanel}
@@ -805,13 +887,22 @@ export function AppShell() {
 
         {/* File content */}
         <div style={{ flex: 1, overflow: "hidden" }}>
+          {/* Only the active viewer is mounted so inactive tabs do not keep watchers alive. */}
           {activeFileTab?.filePath ? (
             <FileViewer
+              key={`${activeFileTab.id}:${activeFileTab.viewerRevision ?? 0}`}
               filePath={activeFileTab.filePath}
               cwd={activeCwd ?? undefined}
               sourceSessionId={activeFileTab.sourceSessionId}
               gitRefreshKey={explorerRefreshKey}
               initialDisplayMode={activeFileTab.initialDisplayMode}
+              initialState={activeFileTab.viewerState}
+              onStateChange={(viewerState) => handleFileViewerStateChange(
+                activeFileTab.id,
+                activeFileTab.viewerRevision ?? 0,
+                viewerState,
+              )}
+              watchEnabled={rightPanelOpen}
               onMentionLines={rightPanelOpen ? handleFileLineMention : undefined}
               onOpenFile={(filePath) => handleOpenFile(
                 filePath,
@@ -827,29 +918,26 @@ export function AppShell() {
         </div>
       </div>
     </div>
-    {/* File panel toggle — always visible at top-right */}
-    <button
-      onClick={toggleFilePanel}
-       aria-controls="file-panel"
-       aria-expanded={rightPanelOpen}
-       title={rightPanelOpen ? translate("files.hidePanel") : translate("files.showPanel")}
-       aria-label={rightPanelOpen ? translate("files.hidePanel") : translate("files.showPanel")}
-      style={{
-        position: "fixed", top: 0, right: 0, zIndex: 300,
-        display: "flex", alignItems: "center", justifyContent: "center",
-        width: 36, height: 36, padding: 0,
-        background: "var(--bg-panel)", border: "none", borderLeft: "1px solid var(--border)", borderBottom: "1px solid var(--border)",
-        color: rightPanelOpen ? "var(--text)" : "var(--text-muted)",
-        cursor: "pointer", transition: "color 0.12s",
-      }}
-      onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-      onMouseLeave={(e) => { e.currentTarget.style.color = rightPanelOpen ? "var(--text)" : "var(--text-muted)"; }}
-    >
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" />
-      </svg>
-    </button>
-    {modelsConfigOpen && <ModelsConfig onClose={() => { setModelsConfigOpen(false); setModelsRefreshKey((k) => k + 1); }} />}
+    <FloatingSessionNotifications
+      notifications={floatingNotifications}
+      closeLabel={translate("i18n.close")}
+      regionLabel={translate("chat.inAppNotifications")}
+      openSessionLabel={(title, body) => translate("chat.openNotificationSession", { title, body })}
+      onDismiss={dismissNotification}
+      onNavigate={openNotificationTarget}
+    />
+    {settingsSection && (
+      <SettingsPanel
+        cwd={projectTrustCwd}
+        sessionId={selectedSession?.id ?? null}
+        initialSection={settingsSection}
+        onClose={() => {
+          setSettingsSection(null);
+          setModelsRefreshKey((key) => key + 1);
+        }}
+        onSessionReloaded={bumpSessionKey}
+      />
+    )}
     {projectTrustDialogOpen && projectTrustCwd && (
       <ProjectTrustDialog
         cwd={projectTrustCwd}
@@ -857,17 +945,6 @@ export function AppShell() {
         error={projectTrustError}
         onCancel={closeProjectTrustDialog}
         onConfirm={() => void handleTrustProject()}
-      />
-    )}
-    {skillsConfigOpen && projectTrustCwd && (
-      <SkillsConfig cwd={projectTrustCwd} onClose={() => setSkillsConfigOpen(false)} />
-    )}
-    {pluginsConfigOpen && projectTrustCwd && (
-      <PluginsConfig
-        cwd={projectTrustCwd}
-        sessionId={selectedSession?.id ?? null}
-        onClose={() => setPluginsConfigOpen(false)}
-        onReloaded={bumpSessionKey}
       />
     )}
     </>

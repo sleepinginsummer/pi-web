@@ -6,15 +6,15 @@ import { normalizeCustomPanelLines, parseAnsiLine } from "@/lib/ansi";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
 import { countToolCallBlocks, getAssistantErrorMessage, getDisplayableAssistantBlocks, splitFinalAssistantBlocks } from "@/lib/message-display";
 import { MessageView } from "./MessageView";
-import { AskDialog } from "./AskDialog";
-import { AskQuestionnaire } from "./AskQuestionnaire";
+import { AskInputFlyout } from "./AskInputFlyout";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
+import { ChatScrollFollowButton } from "./ChatScrollFollowButton";
 import { ExtensionStatusBar } from "./ExtensionStatusBar";
 import { useI18n } from "@/hooks/useI18n";
 import { useAgentSession, type AgentPhase, type NoticeItem } from "@/hooks/useAgentSession";
+import { useChatScrollFollow } from "@/hooks/useChatScrollFollow";
 import { DetachedSubagentStatusPanel } from "./DetachedSubagentStatusPanel";
-import { TodoListPanel } from "./TodoListPanel";
 import { useAudio } from "@/hooks/useAudio";
 import type { CompletionNotificationController } from "@/hooks/useCompletionNotification";
 import { useCompletionEffects } from "@/hooks/useCompletionEffects";
@@ -24,6 +24,7 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { PendingNewSessionControl, PendingNewSessionEvent } from "@/lib/pending-new-session";
 import type { ShadowSessionControl } from "@/lib/shadow-session-control";
+import type { SessionListRefreshRequest } from "@/lib/session-list-refresh-coordinator";
 import {
   captureScrollDistance,
   getNextVisibleCount,
@@ -32,6 +33,8 @@ import {
   VISIBLE_PAGE_SIZE,
 } from "@/lib/chat-lazy-load";
 import { buildMessageRenderGroups, type MessageRenderGroup } from "@/lib/message-render-groups";
+import { withTodoWidget } from "@/lib/todo-widget";
+import type { ToolEntry } from "@/lib/tool-presets";
 
 interface Props {
   session: SessionInfo | null;
@@ -42,12 +45,14 @@ interface Props {
   notificationController: CompletionNotificationController;
   onAgentEnd?: () => void;
   onSessionCreated?: (session: SessionInfo) => void;
-  onSessionListRefresh?: () => void;
+  onSessionListRefresh?: (request: SessionListRefreshRequest) => void;
   onSessionForked?: (newSessionId: string) => void;
   modelsRefreshKey?: number;
   chatInputRef?: React.RefObject<ChatInputHandle | null>;
   onBranchDataChange?: (tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void) => void;
   onSystemPromptChange?: (prompt: string | null) => void;
+  onSystemPromptLoaderChange?: (loader: (() => Promise<void>) | null) => void;
+  onToolsLoaderChange?: (loader: (() => Promise<ToolEntry[]>) | null) => void;
   onShadowMindControlChange?: (control: ShadowSessionControl) => void;
   onSessionStatsChange?: (stats: SessionStatsInfo | null) => void;
   onSessionStatsPanelOpen?: () => void;
@@ -58,6 +63,8 @@ interface Props {
 
 function phaseLabel(phase: AgentPhase, t: (key: string, params?: Record<string, string | number>) => string): string {
   if (phase?.kind === "running_tools") {
+    const progress = phase.tools.find((tool) => tool.progress)?.progress;
+    if (progress) return progress;
     const names = phase.tools.map((t) => t.name);
     if (names.length === 0) return t("chat.runningTool");
     if (names.length === 1) return t("chat.runningNamedTool", { name: names[0] });
@@ -163,8 +170,8 @@ function withAssistantBlocks(
   return next;
 }
 
-function ProcessDetailsGroup({ messageCount, toolCallCount, renderChildren, t }: { messageCount: number; toolCallCount: number; renderChildren: () => ReactNode; t: (key: string, params?: Record<string, string | number>) => string }) {
-  const [expanded, setExpanded] = useState(false);
+function ProcessDetailsGroup({ messageCount, toolCallCount, defaultExpanded = false, renderChildren, t }: { messageCount: number; toolCallCount: number; defaultExpanded?: boolean; renderChildren: () => ReactNode; t: (key: string, params?: Record<string, string | number>) => string }) {
+  const [expanded, setExpanded] = useState(defaultExpanded);
   const parts = [t("chat.processDetails"), `${messageCount} ${t(messageCount === 1 ? "chat.message" : "chat.messages")}`];
   if (toolCallCount > 0) parts.push(`${toolCallCount} ${t(toolCallCount === 1 ? "chat.toolCall" : "chat.toolCalls")}`);
 
@@ -206,7 +213,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, renderChildren, t }:
   );
 }
 
-export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, newSessionWorktrees, pendingNewSessionControl, onPendingNewSessionEvent, notificationController, onAgentEnd, onSessionCreated, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onShadowMindControlChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onNewSessionCwdChange }: Props) {
+export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, newSessionWorktrees, pendingNewSessionControl, onPendingNewSessionEvent, notificationController, onAgentEnd, onSessionCreated, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onShadowMindControlChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onNewSessionCwdChange }: Props) {
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
   const {
@@ -226,11 +233,10 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
     retryInfo, contextUsage, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
-    notices, dismissNotice, extensionDialog, extensionCustomUi, askQuestionnaire, submitAskQuestionnaire, cancelAskQuestionnaire, extensionStatuses, extensionWidgets, detachedSubagentStatuses, todos, todoAnchorIndex, respondToExtensionUi, sendExtensionCustomInput, armCustomAnswer,
+    notices, dismissNotice, extensionDialog, extensionCustomUi, askQuestionnaire, submitAskQuestionnaire, cancelAskQuestionnaire, extensionStatuses, extensionWidgets, detachedSubagentStatuses, todos, respondToExtensionUi, sendExtensionCustomInput, armCustomAnswer,
     agentPhase, completion,
-    isNew, creationSettingsLocked,
-    sessionIdRef, messagesEndRef, lastRenderedMessageRef, scrollContainerRef,
-    lastUserMsgRef,
+    isNew, creationSettingsLocked, scrollPositionRequest,
+    sessionIdRef,
     handleSend, handleAbort, handleFork,
     handleCompact, handleQueuedSubmit, handleAbortCompaction,
     handleRecallQueue,
@@ -238,7 +244,27 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
     handleShadowMindToggle, handleToolPresetChange, loadSlashCommands,
   } = useAgentSession({
     session, newSessionCwd, pendingNewSessionControl, onPendingNewSessionEvent, onSessionCreated, onSessionListRefresh, onSessionForked,
-    modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
+    modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onSessionStatsPanelOpen,
+  });
+  const displayExtensionWidgets = useMemo(
+    () => withTodoWidget(extensionWidgets, todos),
+    [extensionWidgets, todos],
+  );
+  const {
+    isFollowing: isFollowingLatest,
+    isNearBottom: isNearBottomLatest,
+    lastRenderedMessageRef,
+    lastUserMsgRef,
+    pauseFollowing,
+    scrollContainerRef,
+    scrollToLatest,
+  } = useChatScrollFollow({
+    agentRunning,
+    isStreaming: streamState.isStreaming,
+    loading,
+    messageCount: messages.length,
+    positionRequest: scrollPositionRequest,
+    streamingContent: (streamState.streamingMessage as { content?: unknown } | null)?.content,
   });
   useEffect(() => {
     const scopeKey = session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : null);
@@ -452,41 +478,33 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
     />
   );
 
-  // ask 浮层卡片统一锚定在输入框上方。外层不拦截页面事件，只有卡片本身接收点击，
-  // 因此问卷打开时消息区仍可滚动和查看；多题问卷只在卡片内部滚动。
-  const askDialogElement = askQuestionnaire || extensionDialog?.method === "select" ? (
-    <div
-      className="ask-input-flyout"
-      style={{ paddingRight: isMobile ? 16 : 52 }}
-    >
-      <div className="ask-input-flyout-content">
-        {askQuestionnaire ? (
-          <AskQuestionnaire
-            key={askQuestionnaire.toolCallId}
-            questionnaire={askQuestionnaire}
-            onSubmit={submitAskQuestionnaire}
-            onCancel={cancelAskQuestionnaire}
-          />
-        ) : extensionDialog?.method === "select" ? (
-          <AskDialog
-            request={extensionDialog}
-            onSelect={(request, value) => respondToExtensionUi(request, { value })}
-            onCustomSubmit={(request, sentinelText, text) => {
-              // 先回送 sentinel 原文触发 pi 的 input 分支，同时登记待提交文本，
-              // 随后的 input 请求到达时由 useAgentSession 自动应答（不弹窗）。
-              const prefix = request.title.split("\n\n--- ")[0];
-              armCustomAnswer(prefix, text);
-              respondToExtensionUi(request, { value: sentinelText });
-            }}
-            onStop={handleAbort}
-          />
-        ) : null}
-      </div>
-    </div>
+  // ask 浮层锚定在输入框上方，内部自行管理折叠和新请求重置。
+  const selectAskRequest = extensionDialog?.method === "select" ? extensionDialog : null;
+  const askFlyoutRequest = askQuestionnaire
+    ? { kind: "questionnaire" as const, value: askQuestionnaire }
+    : selectAskRequest
+      ? { kind: "select" as const, value: selectAskRequest }
+      : null;
+  const askDialogElement = askFlyoutRequest ? (
+    <AskInputFlyout
+      ask={askFlyoutRequest}
+      isMobile={isMobile}
+      actions={{
+        submitQuestionnaire: submitAskQuestionnaire,
+        cancelQuestionnaire: cancelAskQuestionnaire,
+        select: (request, value) => respondToExtensionUi(request, { value }),
+        submitCustom: (request, sentinelText, text) => {
+          // 先回送 sentinel 原文触发 pi 的 input 分支，同时登记待提交文本，
+          // 随后的 input 请求到达时由 useAgentSession 自动应答（不弹窗）。
+          const prefix = request.title.split("\n\n--- ")[0];
+          armCustomAnswer(prefix, text);
+          respondToExtensionUi(request, { value: sentinelText });
+        },
+        stop: handleAbort,
+      }}
+    />
   ) : null;
 
-  const aboveEditorWidgets = extensionWidgets.filter((widget) => widget.placement !== "belowEditor");
-  const belowEditorWidgets = extensionWidgets.filter((widget) => widget.placement === "belowEditor");
 
   if (loading) {
     return (
@@ -506,7 +524,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
 
   return (
     <div
-      className="relative flex h-full flex-col overflow-hidden"
+      className="chat-window relative flex h-full flex-col overflow-hidden"
       onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
@@ -639,11 +657,9 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
         <div className="notice-shelf-overlay">
           <NoticeShelf notices={notices} onDismiss={dismissNotice} floating />
         </div>
-        <div ref={scrollContainerRef} className="flex-1 overflow-x-hidden overflow-y-auto pt-4 [scrollbar-width:none]">
+        <div ref={scrollContainerRef} className={`flex-1 overflow-x-hidden overflow-y-auto pt-4 [scrollbar-width:none]${askDialogElement ? " chat-scroll-ask-reserve" : ""}`}>
           <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
             <div style={{ maxWidth: 820, margin: "0 auto" }}>
-              <ExtensionWidgets widgets={aboveEditorWidgets} />
-
             {(() => {
               const { toolResults, visibleRefIndexByMessage, assistantTimestampIndices } = messageRenderIndex;
               // Anchor for live-tail detection and scroll positioning: the last
@@ -720,14 +736,8 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
               const renderGroup = (group: MessageRenderGroup): ReactNode => {
                 const { start, end, finalAssistantIdx, isLiveTail } = group;
                 const nodes: ReactNode[] = [];
-                const appendTodoPanel = () => {
-                  if (todos.length > 0 && todoAnchorIndex >= start && todoAnchorIndex < end) {
-                    nodes.push(<TodoListPanel key={`todo-panel-${start}`} todos={todos} t={t} />);
-                  }
-                };
                 if (finalAssistantIdx === -1 || isLiveTail) {
                   for (let index = start; index < end; index++) nodes.push(renderMessage(index));
-                  appendTodoPanel();
                   return <Fragment key={`group-${start}`}>{nodes}</Fragment>;
                 }
 
@@ -756,6 +766,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
                     >
                       <ProcessDetailsGroup
                         messageCount={processCount}
+                        defaultExpanded={!finalAnswerMessage}
                         t={t}
                         toolCallCount={countToolCalls(messages, visibleProcessIndices) + countToolCallBlocks(finalSplit.processBlocks)}
                         renderChildren={() => (
@@ -770,7 +781,6 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
                 }
                 if (finalAnswerMessage) nodes.push(renderMessage(finalAssistantIdx, { messageOverride: finalAnswerMessage }));
                 for (let index = finalAssistantIdx + 1; index < end; index++) nodes.push(renderMessage(index));
-                appendTodoPanel();
                 return <Fragment key={`group-${start}`}>{nodes}</Fragment>;
               };
 
@@ -797,7 +807,6 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
                 <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelState.names} cwd={messageCwd} onOpenFile={onOpenFile} />
               </div>
             )}
-            <div ref={messagesEndRef} />
 
             {agentRunning && !streamState.streamingMessage && (
               <div className="py-2 text-[13px] text-text-muted">
@@ -826,12 +835,20 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
             </div>
           </div>
         </div>
+        {!isFollowingLatest && !isNearBottomLatest && (
+          <ChatScrollFollowButton
+            isMobile={isMobile}
+            label={t("chat.jumpToLatest")}
+            onClick={() => scrollToLatest("smooth")}
+          />
+        )}
         {isMobile ? null : (
           <ChatMinimap
             messages={messages}
             streamingMessage={streamState.streamingMessage}
             scrollContainer={scrollContainerRef}
             messageRefs={messageRefs}
+            onNavigate={pauseFollowing}
             onRevealHistory={revealHistoryForMinimap}
           />
         )}
@@ -845,7 +862,6 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
           }}
         >
           <div style={{ maxWidth: 820, margin: "0 auto" }}>
-            <ExtensionWidgets widgets={belowEditorWidgets} />
             {detachedSubagentStatuses.length > 0 && (
               <DetachedSubagentStatusPanel statuses={detachedSubagentStatuses} t={t} />
             )}
@@ -855,39 +871,13 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
           {askDialogElement}
           {chatInputElement}
         </div>
-        <ExtensionStatusBar statuses={extensionStatuses} />
+        <ExtensionStatusBar statuses={extensionStatuses} widgets={displayExtensionWidgets} />
       </div>
       </>
       )}
     </div>
   );
 });
-function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; lines: string[] }> }) {
-  if (widgets.length === 0) return null;
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 10 }}>
-      {widgets.map((widget) => (
-        <div
-          key={widget.key}
-          style={{
-            border: "1px solid var(--border)",
-            borderRadius: 7,
-            background: "var(--bg-panel)",
-            overflow: "hidden",
-          }}
-        >
-          <div style={{ padding: "5px 9px", borderBottom: "1px solid var(--border)", color: "var(--text-dim)", fontSize: 11, fontFamily: "var(--font-mono)" }}>
-            {widget.key}
-          </div>
-          <pre style={{ margin: 0, padding: "8px 9px", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "var(--font-mono)" }}>
-            {widget.lines.join("\n")}
-          </pre>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 function NoticeShelf({ notices, onDismiss, floating = false }: { notices: NoticeItem[]; onDismiss: (id: string) => void; floating?: boolean }) {
   const { t } = useI18n();
   if (notices.length === 0) return null;

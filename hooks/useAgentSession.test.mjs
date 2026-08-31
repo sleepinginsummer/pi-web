@@ -202,12 +202,13 @@ test("发送消息时异步刷新当前工作目录的 Git 分支", () => {
   );
 
   assert.match(sendSource, /void fetch\(`\/api\/git\/context\?cwd=\$\{encodeURIComponent\(activeCwd\)\}`/);
-  assert.match(sendSource, /if \(response\.ok\) \{[\s\S]*?onSessionListRefresh\?\.\(\)/);
+  assert.match(sendSource, /if \(response\.ok\) return/);
+  assert.doesNotMatch(sendSource, /onSessionListRefresh/);
   assert.match(sendSource, /刷新当前 Git 分支失败/);
   assert.doesNotMatch(sendSource, /await fetch\(`\/api\/git\/context/);
 });
 
-test("首条消息落盘时在节流窗口结束后补刷会话列表", () => {
+test("运行中只在新会话首次落盘与权威 idle 边界刷新完整会话列表", () => {
   const eventSource = source.slice(
     source.lastIndexOf("const handleAgentEvent = useCallback"),
     source.indexOf("handleAgentEventRef.current = handleAgentEvent"),
@@ -216,8 +217,20 @@ test("首条消息落盘时在节流窗口结束后补刷会话列表", () => {
     eventSource.indexOf('case "message_end"'),
     eventSource.indexOf('case "tool_execution_start"'),
   );
+  const agentEndSource = eventSource.slice(
+    eventSource.indexOf('case "agent_end"'),
+    eventSource.indexOf('case "agent_settled"'),
+  );
+  const settledSource = source.slice(
+    source.indexOf("const finishPromptWithoutStream = useCallback"),
+    source.indexOf("const readAgentSnapshot = useCallback"),
+  );
 
-  assert.match(messageEndSource, /onSessionListRefresh\?\.\(\);[\s\S]*?setTimeout\(\(\) => \{[\s\S]*?onSessionListRefresh\?\.\(\)/);
+  assert.match(messageEndSource, /reason: "new-session-persisted"/);
+  assert.doesNotMatch(messageEndSource, /setTimeout|SESSION_LIST_REFRESH_THROTTLE_MS/);
+  assert.doesNotMatch(agentEndSource, /onSessionListRefresh/);
+  assert.ok(settledSource.indexOf("settleRun(runId, sid)") < settledSource.indexOf('reason: "run-settled"'));
+  assert.match(eventSource, /reason: "title-generated"/);
 });
 
 test("临时会话升级前同步清空已提交输入，避免旧草稿在 key 切换时回写", () => {

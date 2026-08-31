@@ -1,4 +1,5 @@
 import type { ModelsData } from "./model-types";
+export type { ModelsData } from "./model-types";
 
 interface ModelsCacheState {
   entries: Map<string, { data: ModelsData; expiresAt: number }>;

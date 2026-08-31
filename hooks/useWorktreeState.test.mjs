@@ -15,12 +15,14 @@ test("parseWorktreeState 只提交完整的活动项目快照", () => {
     projectRoot: "/repo",
     isGit: true,
     isTopLevel: true,
+    currentWorktreePath: "/repo",
     worktrees: [{ path: "/repo", branch: "main", isMain: true }],
   }), {
     forCwd: "/repo",
     projectRoot: "/repo",
     isGit: true,
     isTopLevel: true,
+    currentWorktreePath: "/repo",
     worktrees: [{ path: "/repo", branch: "main", isMain: true }],
   });
   assert.throws(() => parseWorktreeState("/repo", {}), /missing projectRoot/);
@@ -32,6 +34,7 @@ test("appendCreatedWorktree 乐观追加且不制造重复项", () => {
     projectRoot: "/repo",
     isGit: true,
     isTopLevel: true,
+    currentWorktreePath: "/repo",
     worktrees: [{ path: "/repo", branch: "main", isMain: true }],
   };
   const created = { path: "/repo-wt", branch: "feature", isMain: false };

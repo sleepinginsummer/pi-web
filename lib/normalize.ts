@@ -4,9 +4,16 @@ function isObject(val: unknown): val is Record<string, unknown> {
   return typeof val === "object" && val !== null && !Array.isArray(val);
 }
 
-function normalizeToolCallBlock(block: unknown): ToolCallContent | null {
+function streamingRawInput(block: Record<string, unknown>): string | undefined {
+  if (typeof block.rawInput === "string") return block.rawInput;
+  if (typeof block.partialJson === "string") return block.partialJson;
+  if (typeof block.partialArgs === "string") return block.partialArgs;
+  return undefined;
+}
+
+function normalizeToolCallBlock(block: unknown, includeStreamingRawInput = false): ToolCallContent | null {
   if (!isObject(block) || block.type !== "toolCall") return null;
-  return {
+  const normalized: ToolCallContent = {
     type: "toolCall",
     toolCallId: typeof block.toolCallId === "string" ? block.toolCallId : (typeof block.id === "string" ? block.id : ""),
     toolName: typeof block.toolName === "string" ? block.toolName : (typeof block.name === "string" ? block.name : ""),
@@ -16,6 +23,8 @@ function normalizeToolCallBlock(block: unknown): ToolCallContent | null {
         ? block.arguments as Record<string, unknown>
         : {}),
   };
+  const rawInput = includeStreamingRawInput ? streamingRawInput(block) : undefined;
+  return rawInput === undefined ? normalized : { ...normalized, rawInput };
 }
 
 /**
@@ -33,7 +42,7 @@ function normalizeThinkingTextBlock(block: unknown): AssistantContentBlock[] | n
   return result;
 }
 
-export function normalizeAssistantMessage(msg: AgentMessage): AgentMessage {
+function normalizeAssistantMessageWithOptions(msg: AgentMessage, includeStreamingRawInput: boolean): AgentMessage {
   // Non-assistant roles (user, toolResult, bashExecution, custom) are returned
   // unchanged — only assistant messages go through assistant content normalization.
   if (msg.role !== "assistant") return msg;
@@ -46,7 +55,20 @@ export function normalizeAssistantMessage(msg: AgentMessage): AgentMessage {
       normalized.push(...thinking);
       continue;
     }
-    normalized.push(normalizeToolCallBlock(block) ?? block as AssistantContentBlock);
+    normalized.push(normalizeToolCallBlock(block, includeStreamingRawInput) ?? block as AssistantContentBlock);
   }
   return { ...msg, content: normalized } as AgentMessage;
+}
+
+export function normalizeAssistantMessage(msg: AgentMessage): AgentMessage {
+  return normalizeAssistantMessageWithOptions(msg, false);
+}
+
+/** 规范化持久化消息中的工具调用字段，同时保留本地 thinking 文本兼容处理。 */
+export function normalizeToolCalls(msg: AgentMessage): AgentMessage {
+  return normalizeAssistantMessageWithOptions(msg, false);
+}
+
+export function normalizeStreamingToolCalls(msg: AgentMessage): AgentMessage {
+  return normalizeAssistantMessageWithOptions(msg, true);
 }

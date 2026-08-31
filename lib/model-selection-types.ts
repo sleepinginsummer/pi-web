@@ -31,6 +31,7 @@ export interface ModelSelectionViewState {
   fastEnabled: boolean;
   fastAvailable: boolean;
   fastPending: boolean;
+  modelSwitching: boolean;
 }
 
 export interface ModelSelectionViewActions {

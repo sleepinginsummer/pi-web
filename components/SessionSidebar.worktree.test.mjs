@@ -3,9 +3,10 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const source = await readFile(new URL("./SessionSidebar.tsx", import.meta.url), "utf8");
+const typeSource = await readFile(new URL("../lib/types.ts", import.meta.url), "utf8");
 
 test("uses the server-resolved current worktree identity", () => {
-  assert.match(source, /currentWorktreePath: string \| null/);
+  assert.match(typeSource, /currentWorktreePath: string \| null/);
   assert.match(
     source,
     /const currentWorktree =[\s\S]*?worktreeState\.currentWorktreePath[\s\S]*?worktree\.path === worktreeState\.currentWorktreePath/,
