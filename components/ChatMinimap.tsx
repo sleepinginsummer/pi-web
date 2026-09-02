@@ -266,6 +266,7 @@ export function ChatMinimap({
   );
   const allMessagesRef = useRef(allMessages);
   allMessagesRef.current = allMessages;
+  const isStreaming = streamingMessage !== null;
 
   const nodeLayout = useMemo(
     () => layoutNodes(allNodes, minimapHeight),
@@ -413,7 +414,8 @@ export function ChatMinimap({
     const el = scrollContainer.current;
     if (!el) return;
     const syncLayout = () => {
-      measureNodes();
+      // 流式内容会高频改变高度；处理期间沿用已有节点位置，结束后再完整测量。
+      if (!isStreaming) measureNodes();
       updateScroll();
     };
     const ro = new ResizeObserver(syncLayout);
@@ -427,7 +429,7 @@ export function ChatMinimap({
         measureThrottleRef.current = null;
       }
     };
-  }, [measureNodes, scrollContainer, updateScroll]);
+  }, [isStreaming, measureNodes, scrollContainer, updateScroll]);
 
   useEffect(() => {
     const timeout = setTimeout(() => {

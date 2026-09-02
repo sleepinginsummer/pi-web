@@ -22,6 +22,7 @@ import notificationStyles from "./CompletionNotificationPrompt.module.css";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import type { SessionStatsInfo } from "@/lib/pi-types";
+import type { AppUpdateResponse } from "@/lib/api-types";
 import type { PendingNewSessionControl, PendingNewSessionEvent } from "@/lib/pending-new-session";
 import type { ShadowSessionControl } from "@/lib/shadow-session-control";
 import type { SessionListRefreshRequest } from "@/lib/session-list-refresh-coordinator";
@@ -32,9 +33,12 @@ import {
   restoreScrollTop,
   VISIBLE_PAGE_SIZE,
 } from "@/lib/chat-lazy-load";
-import { buildMessageRenderGroups, type MessageRenderGroup } from "@/lib/message-render-groups";
+import { buildMessageRenderGroups, buildRecentItemWindow, type MessageRenderGroup } from "@/lib/message-render-groups";
 import { withTodoWidget } from "@/lib/todo-widget";
 import type { ToolEntry } from "@/lib/tool-presets";
+import { extractTurnWrittenFiles, type WrittenFile } from "@/lib/turn-written-files";
+import { getFileName } from "@/lib/file-paths";
+import { copyText } from "@/lib/clipboard";
 
 interface Props {
   session: SessionInfo | null;
@@ -79,6 +83,39 @@ function phaseLabel(phase: AgentPhase, t: (key: string, params?: Record<string, 
 const CHAT_MINIMAP_WIDTH = 36;
 const CHAT_COLUMN_PADDING = 16;
 const CHAT_INPUT_RIGHT_PADDING = CHAT_COLUMN_PADDING + CHAT_MINIMAP_WIDTH;
+
+function NewSessionUpdateLink({ label }: { label: (version: string) => string }) {
+  const [update, setUpdate] = useState<AppUpdateResponse | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void fetch("/api/app-update", { signal: controller.signal })
+      .then(async (response) => response.ok ? response.json() as Promise<AppUpdateResponse> : null)
+      .then((result) => {
+        if (result?.updateAvailable && result.latestVersion && result.releaseUrl) setUpdate(result);
+      })
+      .catch(() => {
+        // 版本检查是非关键网络请求，失败不能影响新会话输入。
+      });
+    return () => controller.abort();
+  }, []);
+
+  if (!update) return null;
+  const accessibleLabel = label(update.latestVersion);
+  return (
+    <a
+      href={update.releaseUrl}
+      target="_blank"
+      rel="noopener noreferrer"
+      title={accessibleLabel}
+      aria-label={accessibleLabel}
+      style={{ display: "inline-flex", alignItems: "center", alignSelf: "center", gap: 3, minHeight: 32, minWidth: 0, padding: "0 4px", borderRadius: 5, color: "var(--accent)", fontSize: 12, fontWeight: 600, lineHeight: 1.2, textDecoration: "none", whiteSpace: "nowrap" }}
+    >
+      <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>v{update.latestVersion}</span>
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M7 17 17 7" /><path d="M7 7h10v10" /></svg>
+    </a>
+  );
+}
 
 function hasFinalAssistantAnswer(message: AgentMessage): boolean {
   if (message.role !== "assistant") return false;
@@ -213,6 +250,46 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, defaultExpanded = fa
   );
 }
 
+const LIVE_PROCESS_ITEM_LIMIT = 3;
+
+function LiveProcessDetailsGroup({ hiddenCount, renderAll, renderRecent, t }: { hiddenCount: number; renderAll: () => ReactNode; renderRecent: () => ReactNode; t: (key: string, params?: Record<string, string | number>) => string }) {
+  const [expanded, setExpanded] = useState(false);
+
+  return (
+    <div>
+      {hiddenCount > 0 && (
+        <button
+          type="button"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((value) => !value)}
+          title={expanded ? t("chat.collapseProcess") : t("chat.expandProcess")}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            width: "auto",
+            minHeight: 24,
+            marginBottom: 8,
+            padding: "2px 0",
+            border: "none",
+            background: "transparent",
+            color: "var(--text-muted)",
+            cursor: "pointer",
+            fontSize: 12,
+            textAlign: "left",
+          }}
+        >
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, transform: expanded ? "rotate(90deg)" : "none", transition: "transform 0.15s" }}>
+            <polyline points="4 2.5 7.5 6 4 9.5" />
+          </svg>
+          <span>{t("chat.earlierProcessItems", { count: hiddenCount })}</span>
+        </button>
+      )}
+      {expanded ? renderAll() : renderRecent()}
+    </div>
+  );
+}
+
 export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, newSessionWorktrees, pendingNewSessionControl, onPendingNewSessionEvent, notificationController, onAgentEnd, onSessionCreated, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onShadowMindControlChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onNewSessionCwdChange }: Props) {
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
@@ -228,7 +305,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
 
 
   const {
-    loading, error, messages, entryIds, streamState,
+    loading, error, messages, entryIds, streamState, hasEarlierMessages, loadingEarlierMessages,
     agentRunning, bashRunning, pendingBash, modelState, modelActions, toolPreset,
     retryInfo, contextUsage, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,
@@ -237,7 +314,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
     agentPhase, completion,
     isNew, creationSettingsLocked, scrollPositionRequest,
     sessionIdRef,
-    handleSend, handleAbort, handleFork,
+    handleSend, handleAbort, handleFork, loadEarlierMessages,
     handleCompact, handleQueuedSubmit, handleAbortCompaction,
     handleRecallQueue,
     handleBuiltinSlashCommand,
@@ -264,7 +341,6 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
     loading,
     messageCount: messages.length,
     positionRequest: scrollPositionRequest,
-    streamingContent: (streamState.streamingMessage as { content?: unknown } | null)?.content,
   });
   useEffect(() => {
     const scopeKey = session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : null);
@@ -278,7 +354,6 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
       onToggle: handleShadowMindToggle,
     });
   }, [handleShadowMindToggle, materializedNewSessionId, newSessionCwd, onShadowMindControlChange, session, shadowMindAvailable, shadowMindEnabled, shadowMindTogglePending]);
-  const notificationSessionId = sessionIdRef.current ?? session?.id ?? null;
   const notificationTitle = compactNotificationText(
     session?.name || session?.firstMessage || t("i18n.newSession"),
     48,
@@ -291,6 +366,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
     notifySession,
     title: notificationTitle || t("i18n.newSession"),
     body: notificationPreview || t("chat.notificationDoneBody"),
+    folderName: getFileName(session?.cwd ?? newSessionCwd ?? "") || undefined,
     onComplete: onAgentEnd,
   });
   const sessionBusy = agentRunning || bashRunning;
@@ -321,17 +397,21 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
         if (entries[0]?.isIntersecting) {
           // Save distance from top before prepending to restore scroll later
           prevScrollDistanceRef.current = captureScrollDistance(container.scrollHeight, container.scrollTop);
-          setRenderWindow((current) => ({
-            key: renderWindowKey,
-            count: getNextVisibleCount(current.key === renderWindowKey ? current.count : VISIBLE_PAGE_SIZE),
-          }));
+          if (visibleCount < messages.length) {
+            setRenderWindow((current) => ({
+              key: renderWindowKey,
+              count: getNextVisibleCount(current.key === renderWindowKey ? current.count : VISIBLE_PAGE_SIZE),
+            }));
+          } else if (hasEarlierMessages && !loadingEarlierMessages) {
+            void loadEarlierMessages();
+          }
         }
       },
       { root: container, threshold: 0 }
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [visibleCount, messages.length, renderWindowKey, scrollContainerRef]);
+  }, [hasEarlierMessages, loadEarlierMessages, loadingEarlierMessages, messages.length, renderWindowKey, scrollContainerRef, visibleCount]);
 
   // After visibleCount increases (more messages prepended), restore the
   // scroll position so the viewport doesn't jump.
@@ -341,7 +421,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
     if (!container) return;
     container.scrollTop = restoreScrollTop(container.scrollHeight, prevScrollDistanceRef.current);
     prevScrollDistanceRef.current = null;
-  }, [visibleCount, scrollContainerRef]);
+  }, [messages.length, visibleCount, scrollContainerRef]);
   // Push session stats up to AppShell for the top bar.
   // Compare scalar fields to avoid loops from new object identity each render.
   const statsKey = sessionStats
@@ -387,15 +467,55 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
 
   const { isDragOver, handleDragEnter, handleDragOver, handleDragLeave, handleDrop } = useDragDrop(onDrop);
 
+  const messageCwd = session?.cwd ?? newSessionCwd ?? undefined;
   const messageRenderIndex = useMemo(() => {
     const toolResults = new Map<string, ToolResultMessage>();
     const visibleRefIndexByMessage = new Map<number, number>();
     const assistantTimestampIndices = new Set<number>();
+    const writtenFilesByFinalAssistant = new Map<number, WrittenFile[]>();
     let visibleCount = 0;
     let lastAssistantIndex = -1;
+    let turnStarted = false;
+    let turnContent: AssistantContentBlock[] = [];
+    let turnLastAssistantIndex = -1;
+    let turnFinalAnswerIndex = -1;
+    let turnFinalAnswerContentLength = 0;
+
+    const commitWrittenFilesForTurn = () => {
+      const finalAssistantIndex = turnFinalAnswerIndex >= 0
+        ? turnFinalAnswerIndex
+        : turnLastAssistantIndex;
+      if (finalAssistantIndex < 0) return;
+      const contentLength = turnFinalAnswerIndex >= 0
+        ? turnFinalAnswerContentLength
+        : turnContent.length;
+      const writtenFiles = extractTurnWrittenFiles(
+        turnContent.slice(0, contentLength),
+        toolResults,
+        messageCwd,
+      );
+      if (writtenFiles.length > 0) {
+        writtenFilesByFinalAssistant.set(finalAssistantIndex, writtenFiles);
+      }
+    };
 
     for (let index = 0; index < messages.length; index++) {
       const message = messages[index];
+      if (isGroupAnchor(message)) {
+        if (turnStarted) commitWrittenFilesForTurn();
+        turnStarted = true;
+        turnContent = [];
+        turnLastAssistantIndex = -1;
+        turnFinalAnswerIndex = -1;
+        turnFinalAnswerContentLength = 0;
+      } else if (turnStarted && message.role === "assistant") {
+        if (Array.isArray(message.content)) turnContent.push(...message.content);
+        turnLastAssistantIndex = index;
+        if (hasFinalAssistantAnswer(message)) {
+          turnFinalAnswerIndex = index;
+          turnFinalAnswerContentLength = turnContent.length;
+        }
+      }
       if (message.role === "toolResult") {
         toolResults.set((message as ToolResultMessage).toolCallId, message as ToolResultMessage);
       }
@@ -410,9 +530,10 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
       }
     }
     if (lastAssistantIndex >= 0) assistantTimestampIndices.add(lastAssistantIndex);
+    if (turnStarted) commitWrittenFilesForTurn();
 
-    return { toolResults, visibleRefIndexByMessage, assistantTimestampIndices, visibleCount };
-  }, [messages]);
+    return { toolResults, visibleRefIndexByMessage, assistantTimestampIndices, visibleCount, writtenFilesByFinalAssistant };
+  }, [messageCwd, messages]);
   const inputHistory = useMemo(() => {
     const seen = new Set<string>();
     const history: string[] = [];
@@ -431,7 +552,6 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
   }, [messages.length, renderWindowKey]);
 
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
-  const messageCwd = session?.cwd ?? newSessionCwd ?? undefined;
   // 新会话引导区：π Pi Web 正下方显示当前文件夹名
   const newSessionFolderName = (() => {
     if (!newSessionCwd) return null;
@@ -612,6 +732,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
                 <div style={{ display: "flex", alignItems: "baseline", gap: 10, minWidth: 0, overflow: "hidden" }}>
                   <span style={{ fontSize: 28, fontWeight: 700, letterSpacing: 0, color: "var(--text)", flexShrink: 0, whiteSpace: "nowrap" }}>π</span>
                   <span style={{ fontSize: 22, color: "var(--text)", fontWeight: 700, letterSpacing: 0, flexShrink: 0, whiteSpace: "nowrap" }}>Pi Web</span>
+                  <NewSessionUpdateLink label={(version) => t("appUpdate.releaseNotes", { version })} />
                 </div>
                 {newSessionFolderName && (
                   <div style={{ display: "flex", alignItems: "center", gap: 5, minWidth: 0, overflow: "hidden" }}>
@@ -661,7 +782,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
           <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
             <div style={{ maxWidth: 820, margin: "0 auto" }}>
             {(() => {
-              const { toolResults, visibleRefIndexByMessage, assistantTimestampIndices } = messageRenderIndex;
+              const { toolResults, visibleRefIndexByMessage, assistantTimestampIndices, writtenFilesByFinalAssistant } = messageRenderIndex;
               // Anchor for live-tail detection and scroll positioning: the last
               // user message, or a compaction summary when compaction replaced it.
               let lastAnchorIdx = -1;
@@ -678,7 +799,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
                 if (idx === lastAnchorIdx) { (lastUserMsgRef as { current: HTMLDivElement | null }).current = el; }
               };
 
-              const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean } = {}): ReactNode => {
+              const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; writtenFiles?: WrittenFile[]; visibleBlockOffset?: number } = {}): ReactNode => {
                 const msg = options.messageOverride ?? messages[idx];
                 const isVisible = msg.role === "user" || msg.role === "assistant";
                 const currentRefIdx = visibleRefIndexByMessage.get(idx);
@@ -703,6 +824,8 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
                     showTimestamp={showTimestamp}
                     prevTimestamp={idx > 0 ? (messages[idx - 1] as AgentMessage & { timestamp?: number }).timestamp : undefined}
                     sessionId={session?.id ?? sessionIdRef.current ?? undefined}
+                    writtenFiles={options.writtenFiles}
+                    visibleBlockOffset={options.visibleBlockOffset}
                   />
                 );
                 if (idx === lastAnchorIdx && (!isVisible || currentRefIdx === undefined)) {
@@ -733,10 +856,81 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
                 lastAnchorIndex: lastAnchorIdx,
               });
 
+              const streamingAssistant = streamState.isStreaming && streamState.streamingMessage?.role === "assistant"
+                ? streamState.streamingMessage as AssistantMessage
+                : null;
+              const renderStreamingMessage = (visibleBlockOffset = 0): ReactNode => {
+                if (!streamingAssistant) return null;
+                return (
+                  <div ref={lastRenderedMessageRef}>
+                    <MessageView
+                      message={streamingAssistant}
+                      isStreaming
+                      toolResults={toolResults}
+                      modelNames={modelState.names}
+                      cwd={messageCwd}
+                      onOpenFile={onOpenFile}
+                      visibleBlockOffset={visibleBlockOffset}
+                    />
+                  </div>
+                );
+              };
+
               const renderGroup = (group: MessageRenderGroup): ReactNode => {
                 const { start, end, finalAssistantIdx, isLiveTail } = group;
                 const nodes: ReactNode[] = [];
-                if (finalAssistantIdx === -1 || isLiveTail) {
+                if (isLiveTail) {
+                  nodes.push(renderMessage(start));
+                  const sources: Array<{ index: number; itemCount: number }> = [];
+                  for (let index = start + 1; index < end; index++) {
+                    const message = messages[index];
+                    if (message.role === "assistant") {
+                      const itemCount = getDisplayableAssistantBlocks(message as AssistantMessage).length;
+                      if (itemCount > 0) sources.push({ index, itemCount });
+                    } else if (message.role === "custom" || message.role === "bashExecution") {
+                      sources.push({ index, itemCount: 1 });
+                    }
+                  }
+                  const streamingItemCount = streamingAssistant
+                    ? getDisplayableAssistantBlocks(streamingAssistant, { isStreaming: true }).length
+                    : 0;
+                  const recentWindow = buildRecentItemWindow(
+                    [...sources.map((source) => source.itemCount), streamingItemCount],
+                    LIVE_PROCESS_ITEM_LIMIT,
+                  );
+                  const renderAll = () => (
+                    <>
+                      {Array.from({ length: end - start - 1 }, (_, offset) => renderMessage(start + offset + 1))}
+                      {renderStreamingMessage()}
+                    </>
+                  );
+                  const renderRecent = () => (
+                    <>
+                      {sources.map((source, sourceIndex) => {
+                        const visibleBlockOffset = recentWindow.visibleOffsets[sourceIndex];
+                        if (visibleBlockOffset >= source.itemCount) return null;
+                        const message = messages[source.index];
+                        return renderMessage(source.index, {
+                          attachRef: false,
+                          keyPrefix: "live-process",
+                          visibleBlockOffset: message.role === "assistant" ? visibleBlockOffset : undefined,
+                        });
+                      })}
+                      {renderStreamingMessage(recentWindow.visibleOffsets[sources.length] ?? 0)}
+                    </>
+                  );
+                  nodes.push(
+                    <LiveProcessDetailsGroup
+                      key={`live-process-group-${start}`}
+                      hiddenCount={recentWindow.hiddenCount}
+                      renderAll={renderAll}
+                      renderRecent={renderRecent}
+                      t={t}
+                    />,
+                  );
+                  return <Fragment key={`group-${start}`}>{nodes}</Fragment>;
+                }
+                if (finalAssistantIdx === -1) {
                   for (let index = start; index < end; index++) nodes.push(renderMessage(index));
                   return <Fragment key={`group-${start}`}>{nodes}</Fragment>;
                 }
@@ -753,6 +947,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
                 const finalAnswerMessage = finalSplit.answerBlocks.length > 0 || getAssistantErrorMessage(finalAssistant)
                   ? withAssistantBlocks(finalAssistant, finalSplit.answerBlocks)
                   : null;
+                const writtenFiles = writtenFilesByFinalAssistant.get(finalAssistantIdx);
                 const processCount = visibleProcessIndices.length + (finalProcessMessage ? 1 : 0);
                 if (processCount > 0) {
                   const processRefIdx = visibleProcessIndices
@@ -779,7 +974,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
                     </div>,
                   );
                 }
-                if (finalAnswerMessage) nodes.push(renderMessage(finalAssistantIdx, { messageOverride: finalAnswerMessage }));
+                if (finalAnswerMessage) nodes.push(renderMessage(finalAssistantIdx, { messageOverride: finalAnswerMessage, writtenFiles }));
                 for (let index = finalAssistantIdx + 1; index < end; index++) nodes.push(renderMessage(index));
                 return <Fragment key={`group-${start}`}>{nodes}</Fragment>;
               };
@@ -790,23 +985,19 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
               const startIndex = liveTailStartIndex === null
                 ? window.startIndex
                 : Math.min(window.startIndex, liveTailStartIndex);
-              const hasMore = startIndex > 0;
+              const hasMore = startIndex > 0 || hasEarlierMessages;
               return (
                 <>
                   {hasMore && (
                      <div ref={sentinelRef} className="py-3 text-center text-xs text-text-muted">
-                       {t("chat.loadEarlier", { count: startIndex })}
+                       {loadingEarlierMessages ? t("i18n.loading") : t("chat.loadEarlier", { count: startIndex })}
                     </div>
                   )}
                   {groups.slice(startIndex).map(renderGroup)}
+                  {liveTailStartIndex === null && renderStreamingMessage()}
                 </>
               );
             })()}
-            {streamState.isStreaming && streamState.streamingMessage && (
-              <div ref={lastRenderedMessageRef}>
-                <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelState.names} cwd={messageCwd} onOpenFile={onOpenFile} />
-              </div>
-            )}
 
             {agentRunning && !streamState.streamingMessage && (
               <div className="py-2 text-[13px] text-text-muted">
@@ -880,6 +1071,34 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
 });
 function NoticeShelf({ notices, onDismiss, floating = false }: { notices: NoticeItem[]; onDismiss: (id: string) => void; floating?: boolean }) {
   const { t } = useI18n();
+  const [copiedNoticeId, setCopiedNoticeId] = useState<string | null>(null);
+  const pressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longPressedRef = useRef(false);
+
+  const clearPressTimer = useCallback(() => {
+    if (pressTimerRef.current) clearTimeout(pressTimerRef.current);
+    pressTimerRef.current = null;
+  }, []);
+
+  useEffect(() => () => {
+    clearPressTimer();
+    if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+  }, [clearPressTimer]);
+
+  const startLongPress = (notice: NoticeItem) => {
+    clearPressTimer();
+    longPressedRef.current = false;
+    pressTimerRef.current = setTimeout(() => {
+      longPressedRef.current = true;
+      void copyText(notice.message).then(() => {
+        setCopiedNoticeId(notice.id);
+        if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+        copiedTimerRef.current = setTimeout(() => setCopiedNoticeId(null), 1_500);
+      }).catch(() => undefined);
+    }, 500);
+  };
+
   if (notices.length === 0) return null;
   return (
     <div className="notice-shelf" style={{ marginBottom: floating ? 0 : 10 }}>
@@ -895,7 +1114,21 @@ function NoticeShelf({ notices, onDismiss, floating = false }: { notices: Notice
           <button
             key={notice.id}
             type="button"
-            onClick={() => onDismiss(notice.id)}
+            onPointerDown={(event) => {
+              if (event.button === 0) startLongPress(notice);
+            }}
+            onPointerUp={clearPressTimer}
+            onPointerCancel={clearPressTimer}
+            onPointerLeave={clearPressTimer}
+            onContextMenu={(event) => event.preventDefault()}
+            onClick={(event) => {
+              if (longPressedRef.current) {
+                longPressedRef.current = false;
+                event.preventDefault();
+                return;
+              }
+              onDismiss(notice.id);
+            }}
             aria-label={`${notice.message}，${t("i18n.close")}`}
             className="notice-shelf-item"
             style={{
@@ -906,7 +1139,9 @@ function NoticeShelf({ notices, onDismiss, floating = false }: { notices: Notice
             }}
           >
             <span className="notice-shelf-dot" style={{ background: color }} />
-            <span className="notice-shelf-message">{notice.message}</span>
+            <span className="notice-shelf-message">
+              {copiedNoticeId === notice.id ? t("session.copied") : notice.message}
+            </span>
           </button>
         );
       })}

@@ -1,12 +1,14 @@
 import type { SessionStatsInfo } from "./pi-types";
+import type { SessionInfo } from "./types";
 
 export type SessionContextUsage = { percent: number | null; contextWindow: number; tokens: number | null } | null;
-export type SessionCopyField = "file" | "id";
+export type SessionCopyField = "file" | "id" | "projectDir" | "gitBranch" | "gitWorktree";
 export type SessionInfoRow = { label: string; value: string };
 export type SessionDetailRow = SessionInfoRow & { copyField: SessionCopyField | null };
 
 export interface SessionInfoModel {
   sessionRows: SessionDetailRow[];
+  projectRows: SessionDetailRow[];
   messageRows: SessionInfoRow[];
   tokenRows: SessionInfoRow[];
 }
@@ -19,11 +21,22 @@ export function formatCompact(value: number): string {
   return String(value);
 }
 
+export function formatDuration(milliseconds: number): string {
+  const totalSeconds = Math.floor(milliseconds / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
 export function buildSessionInfoModel(
   sessionStats: SessionStatsInfo,
   contextUsage: SessionContextUsage,
   locale: string,
   translate: Translate,
+  session?: SessionInfo | null,
 ): SessionInfoModel {
   const context = contextUsage ?? sessionStats.contextUsage;
   return {
@@ -31,6 +44,16 @@ export function buildSessionInfoModel(
       ...(sessionStats.sessionName ? [{ label: translate("session.name"), value: sessionStats.sessionName, copyField: null }] : []),
       { label: translate("session.file"), value: sessionStats.sessionFile ?? translate("session.inMemory"), copyField: "file" },
       { label: translate("session.id"), value: sessionStats.sessionId, copyField: "id" },
+      ...(sessionStats.totalActiveMs && sessionStats.totalActiveMs > 0
+        ? [{ label: translate("session.totalActive"), value: formatDuration(sessionStats.totalActiveMs), copyField: null }]
+        : []),
+    ],
+    projectRows: [
+      ...(session ? [{ label: translate("session.projectDir"), value: session.projectRoot ?? session.cwd, copyField: "projectDir" as const }] : []),
+      ...(session?.currentBranch || session?.branch
+        ? [{ label: translate("session.gitBranch"), value: session.currentBranch ?? session.branch!, copyField: "gitBranch" as const }]
+        : []),
+      ...(session?.isWorktree ? [{ label: translate("session.gitWorktree"), value: session.cwd, copyField: "gitWorktree" as const }] : []),
     ],
     messageRows: [
       { label: translate("session.user"), value: sessionStats.userMessages.toLocaleString(locale) },

@@ -25,6 +25,7 @@ interface AppTopPanelsProps {
     copiedField: SessionCopyField | null;
     isMobile: boolean;
     stats: SessionStatsInfo | null;
+    selectedSession: SessionInfo | null;
   };
   systemPrompt: string | null;
   systemPromptLoading: boolean;
@@ -77,6 +78,7 @@ export function AppTopPanels({
             locale={locale}
             onCopy={onCopySessionField}
             sessionStats={session.stats}
+            selectedSession={session.selectedSession}
             translate={translate}
           />
         </div>

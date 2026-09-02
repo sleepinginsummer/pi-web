@@ -4,8 +4,11 @@ import type { AgentMessage, SessionTreeNode } from "./types";
 export interface SessionContextSnapshot {
   messages: AgentMessage[];
   entryIds: string[];
+  oldestEntryId: string | null;
+  hasMore: boolean;
   thinkingLevel: string;
   model: { provider: string; modelId: string } | null;
+  totalActiveMs?: number;
 }
 
 export interface SessionDetails {
@@ -35,7 +38,7 @@ function drainPrefetchQueue(): void {
     activePrefetches += 1;
     const controller = new AbortController();
     activePrefetchControllers.set(sid, controller);
-    const request = fetchSessionContext(sid, controller.signal, { skipCache: true, messageLimit: SESSION_CONTEXT_CACHE_LIMIT }).catch(() => {
+    const request = fetchSessionContext(sid, controller.signal, { skipCache: true, tail: SESSION_CONTEXT_CACHE_LIMIT }).catch(() => {
       sessionContextCache.delete(sid);
       return { kind: "missing" } as SessionContextResult;
     }).finally(() => {
@@ -86,14 +89,15 @@ export function invalidateSessionContext(sid: string): void {
 export async function fetchSessionContext(
   sid: string,
   signal: AbortSignal,
-  options: { leafId?: string | null; deferThinking?: boolean; deferMedia?: boolean; skipCache?: boolean; messageLimit?: number } = {},
+  options: { leafId?: string | null; before?: string; deferThinking?: boolean; deferMedia?: boolean; skipCache?: boolean; tail?: number } = {},
 ): Promise<SessionContextResult> {
   const params = new URLSearchParams();
   if (options.leafId) params.set("leafId", options.leafId);
   if (options.deferThinking !== false) params.set("deferThinking", "1");
   if (options.deferMedia !== false) params.set("deferMedia", "1");
-  if (options.messageLimit) params.set("messageLimit", String(options.messageLimit));
-  const cached = !options.leafId && !options.skipCache ? sessionContextCache.get(sid) : undefined;
+  if (options.before) params.set("before", options.before);
+  if (options.tail) params.set("tail", String(options.tail));
+  const cached = !options.leafId && !options.before && !options.skipCache ? sessionContextCache.get(sid) : undefined;
   if (cached) {
     if (Date.now() - cached.createdAt < SESSION_CONTEXT_CACHE_TTL_MS) return cached.promise;
     sessionContextCache.delete(sid);
@@ -101,10 +105,18 @@ export async function fetchSessionContext(
   const response = await fetch(`/api/sessions/${encodeURIComponent(sid)}/context?${params}`, { signal });
   if (response.status === 404) return { kind: "missing" };
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  const payload = await response.json() as { context: SessionContextSnapshot; leafId: string | null };
+  const payload = await response.json() as { context: SessionContextSnapshot; leafId: string | null; totalActiveMs?: number };
   const entryIds = payload.context.entryIds ?? [];
   if (payload.context.messages.length !== entryIds.length) throw new Error("服务端会话上下文的 messages 与 entryIds 长度不一致");
-  return { kind: "loaded", snapshot: { ...payload.context, entryIds }, leafId: payload.leafId };
+  if (payload.context.oldestEntryId !== null && typeof payload.context.oldestEntryId !== "string") {
+    throw new Error("服务端会话上下文缺少有效的 oldestEntryId");
+  }
+  if (typeof payload.context.hasMore !== "boolean") throw new Error("服务端会话上下文缺少有效的 hasMore");
+  return {
+    kind: "loaded",
+    snapshot: { ...payload.context, entryIds, totalActiveMs: payload.totalActiveMs },
+    leafId: payload.leafId,
+  };
 }
 
 export async function fetchSessionDetails(sid: string, signal: AbortSignal): Promise<SessionDetails> {

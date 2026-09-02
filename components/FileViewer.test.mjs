@@ -20,3 +20,9 @@ test("large source previews bypass the per-line syntax highlighter", () => {
   assert.match(lightweightSource, /className="file-source-line-content"/);
   assert.match(lightweightSource, /style=\{FILE_LINE_NUMBER_STYLE\}/);
 });
+
+test("renders parsed frontmatter in markdown preview", () => {
+  assert.match(source, /import \{ parseFrontmatter \} from "@\/lib\/frontmatter"/);
+  assert.match(source, /const frontmatter = useMemo/);
+  assert.match(source, /frontmatter\?\.data && <FrontmatterCard data=\{frontmatter\.data\} \/>/);
+});

@@ -2,6 +2,7 @@ export interface FloatingSessionNotification {
   sessionId: string;
   title: string;
   body: string;
+  folderName?: string;
   url: string;
 }
 

@@ -11,3 +11,10 @@ test("expands process details when a completed turn has no final answer", () => 
     /<ProcessDetailsGroup[\s\S]*?defaultExpanded=\{!finalAnswerMessage\}/,
   );
 });
+
+test("运行中的处理过程只挂载最近三项并可按需展开", () => {
+  assert.match(source, /const LIVE_PROCESS_ITEM_LIMIT = 3/);
+  assert.match(source, /buildRecentItemWindow\([\s\S]*?LIVE_PROCESS_ITEM_LIMIT/);
+  assert.match(source, /expanded \? renderAll\(\) : renderRecent\(\)/);
+  assert.match(source, /visibleBlockOffset=\{options\.visibleBlockOffset\}/);
+});

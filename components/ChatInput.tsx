@@ -98,6 +98,7 @@ const BUILTIN_SLASH_COMMANDS: SlashCommandPaletteItem[] = [
   { name: "name", description: "chat.commandName", source: "builtin" },
   { name: "session", description: "chat.commandSession", source: "builtin" },
   { name: "copy", description: "chat.commandCopy", source: "builtin" },
+  { name: "clone", description: "chat.commandClone", source: "builtin" },
 ];
 
 function slashMatchRank(command: SlashCommandPaletteItem, query: string, t: (key: string) => string): number {

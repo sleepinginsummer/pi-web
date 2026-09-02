@@ -49,6 +49,7 @@ import {
 } from "@/lib/streaming-message";
 import { getToolExecutionProgress } from "@/lib/tool-execution-progress";
 import type { SessionListRefreshRequest } from "@/lib/session-list-refresh-coordinator";
+const SESSION_CONTEXT_PAGE_SIZE = 50;
 type DetachedSubagentMode = "auto-resume" | "next-turn";
 export interface DetachedSubagentStatus {
   id: string;
@@ -422,7 +423,7 @@ function noticeReducer(state: NoticeState, action: NoticeAction): NoticeState {
 function parseAskQuestionnaire(input: unknown): AskQuestionnaireQuestion[] | null {
   if (!input || typeof input !== "object") return null;
   const questions = (input as { questions?: unknown }).questions;
-  if (!Array.isArray(questions) || questions.length < 2) return null;
+  if (!Array.isArray(questions) || questions.length < 1) return null;
 
   const parsed: AskQuestionnaireQuestion[] = [];
   for (const value of questions) {
@@ -544,6 +545,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [activeLeafId, setActiveLeafId] = useState<string | null>(null);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [entryIds, setEntryIds] = useState<string[]>([]);
+  const messagesRef = useRef(messages);
+  const entryIdsRef = useRef(entryIds);
+  messagesRef.current = messages;
+  entryIdsRef.current = entryIds;
+  const [historyPage, setHistoryPage] = useState<{
+    sid: string | null;
+    oldestEntryId: string | null;
+    hasMore: boolean;
+    loading: boolean;
+  }>({ sid: null, oldestEntryId: null, hasMore: false, loading: false });
   const [streamState, dispatch] = useReducer(streamReducer, INITIAL_STREAMING_STATE);
   const dispatchStreamBatch = useCallback((events: ClientAssistantMessageEvent[]) => {
     dispatch({ type: "delta_batch", events });
@@ -589,6 +600,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [slashCommandsLoading, setSlashCommandsLoading] = useState(false);
   const [noticeState, dispatchNotice] = useReducer(noticeReducer, { visible: [], pending: [] });
   const [sessionStatsOverride, setSessionStatsOverride] = useState<SessionStatsInfo | null>(null);
+  const [sessionTotalActiveMs, setSessionTotalActiveMs] = useState(0);
   const [extensionDialog, setExtensionDialog] = useState<ExtensionUiDialogRequest | null>(null);
   // 同步弹窗状态：settlement 判定需要知道当前是否有 dialog 在等用户输入
   const extensionDialogRef = useRef<ExtensionUiDialogRequest | null>(null);
@@ -600,6 +612,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     cancel: () => void;
   } | null>(null);
   const askQuestionnaireRequestIdsRef = useRef(new Set<string>());
+  // 最后一题已回送但工具尚未结束时，重连重放不能重新创建同一问卷。
+  const submittedAskToolCallIdsRef = useRef(new Set<string>());
   const [extensionCustomUi, setExtensionCustomUi] = useState<ExtensionUiCustomRequest | null>(null);
   const [extensionStatuses, setExtensionStatuses] = useState<ExtensionStatusItem[]>([]);
   const [extensionWidgets, setExtensionWidgets] = useState<ExtensionWidgetItem[]>([]);
@@ -734,7 +748,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     : false;
 
   const sessionStats = useMemo(() => {
-    if (sessionStatsOverride) return sessionStatsOverride;
+    if (sessionStatsOverride) return {
+      ...sessionStatsOverride,
+      ...(sessionTotalActiveMs > 0 ? { totalActiveMs: sessionTotalActiveMs } : {}),
+    };
     const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
     let cost = 0;
     let userMessages = 0;
@@ -769,8 +786,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       tokens,
       cost,
       ...(contextUsage ? { contextUsage } : {}),
+      ...(sessionTotalActiveMs > 0 ? { totalActiveMs: sessionTotalActiveMs } : {}),
     } satisfies SessionStatsInfo;
-  }, [messages, sessionStatsOverride, contextUsage, details?.filePath, session?.id, session?.name]);
+  }, [messages, sessionStatsOverride, contextUsage, details?.filePath, session?.id, session?.name, sessionTotalActiveMs]);
 
 
   /** 所有服务端运行状态都通过这一入口投影，避免挂载、reload、reconcile 字段漂移。 */
@@ -800,7 +818,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     options: { preserveScroll?: boolean } = {},
   ): boolean => {
     if (sessionIdRef.current !== sid) return false;
+    backfillRequestRef.current.controller?.abort();
+    backfillRequestRef.current = {
+      sid,
+      generation: backfillRequestRef.current.generation + 1,
+      controller: null,
+    };
     setContextModel(snapshot.model);
+    setSessionTotalActiveMs(snapshot.totalActiveMs ?? 0);
     setActiveLeafId(leafId);
     pendingDetachedSubagentIdsRef.current = pendingDetachedSubagentIds(snapshot.messages);
     if (!options.preserveScroll) {
@@ -809,6 +834,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     setMessages(snapshot.messages);
     setEntryIds(snapshot.entryIds);
+    messagesRef.current = snapshot.messages;
+    entryIdsRef.current = snapshot.entryIds;
+    setHistoryPage({
+      sid,
+      oldestEntryId: snapshot.oldestEntryId,
+      hasMore: snapshot.hasMore,
+      loading: false,
+    });
     setCurrentModelOverride((current) => modelSwitchPendingRef.current ? current : null);
     setError(null);
     if (snapshot.thinkingLevel && snapshot.thinkingLevel !== "off") {
@@ -817,25 +850,74 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setLoading(false);
     return true;
   }, [modelSelectionActions, requestScrollPosition]);
-  const startContextBackfill = useCallback((sid: string, generation: number) => {
-    const controller = new AbortController();
-    backfillRequestRef.current.controller = controller;
-    void fetchSessionContext(sid, controller.signal, { skipCache: true }).then((loaded) => {
-      const current = backfillRequestRef.current;
-      if (loaded.kind === "loaded" && current.sid === sid && current.generation === generation && sessionIdRef.current === sid) {
-        commitContextSnapshot(sid, loaded.snapshot, loaded.leafId);
-      }
-    }).catch((error: unknown) => {
-      if (!(error instanceof DOMException && error.name === "AbortError")) console.error("Failed to backfill session context:", error);
-    }).finally(() => {
-      if (backfillRequestRef.current.generation === generation) backfillRequestRef.current.controller = null;
-    });
-  }, [commitContextSnapshot]);
 
+  /** 按活动分支游标向前加载一页；请求串行且只允许提交到发起时的会话和边界。 */
+  const loadEarlierMessages = useCallback(async (): Promise<boolean> => {
+    const sid = sessionIdRef.current;
+    const page = historyPage;
+    if (!sid || page.sid !== sid || !page.hasMore || page.loading || !page.oldestEntryId) return false;
+
+    const before = page.oldestEntryId;
+    const generation = backfillRequestRef.current.generation + 1;
+    backfillRequestRef.current.controller?.abort();
+    const controller = new AbortController();
+    backfillRequestRef.current = { sid, generation, controller };
+    setHistoryPage((current) => current.sid === sid && current.oldestEntryId === before
+      ? { ...current, loading: true }
+      : current);
+
+    try {
+      const result = await fetchSessionContext(sid, controller.signal, {
+        before,
+        tail: SESSION_CONTEXT_PAGE_SIZE,
+        skipCache: true,
+      });
+      const currentRequest = backfillRequestRef.current;
+      if (
+        result.kind !== "loaded"
+        || currentRequest.sid !== sid
+        || currentRequest.generation !== generation
+        || sessionIdRef.current !== sid
+      ) return false;
+
+      const existingIds = new Set(entryIdsRef.current);
+      if (result.snapshot.entryIds.some((id) => existingIds.has(id))) {
+        throw new Error("历史分页返回了重复 entryId，已拒绝前插");
+      }
+      setMessages((current) => {
+        const next = [...result.snapshot.messages, ...current];
+        messagesRef.current = next;
+        return next;
+      });
+      setEntryIds((current) => {
+        const next = [...result.snapshot.entryIds, ...current];
+        entryIdsRef.current = next;
+        return next;
+      });
+      setHistoryPage({
+        sid,
+        oldestEntryId: result.snapshot.oldestEntryId,
+        hasMore: result.snapshot.hasMore,
+        loading: false,
+      });
+      return true;
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === "AbortError")) {
+        console.error("Failed to load earlier session messages:", error);
+      }
+      return false;
+    } finally {
+      if (backfillRequestRef.current.generation === generation) {
+        backfillRequestRef.current.controller = null;
+        setHistoryPage((current) => current.sid === sid && current.loading
+          ? { ...current, loading: false }
+          : current);
+      }
+    }
+  }, [historyPage]);
   const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false) => {
     backfillRequestRef.current.controller?.abort();
-    const backfillGeneration = backfillRequestRef.current.generation + 1;
-    backfillRequestRef.current = { sid, generation: backfillGeneration, controller: null };
+    backfillRequestRef.current = { sid, generation: backfillRequestRef.current.generation + 1, controller: null };
     const earlyRuntimeController = includeState ? new AbortController() : null;
     const earlyRuntimePromise = earlyRuntimeController
       ? fetchRuntimeState(sid, earlyRuntimeController.signal).then((snapshot) => {
@@ -863,6 +945,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               setActiveLeafId(null);
               setMessages([]);
               setEntryIds([]);
+              messagesRef.current = [];
+              entryIdsRef.current = [];
+              setHistoryPage({ sid, oldestEntryId: null, hasMore: false, loading: false });
               setError(null);
             }
             setLoading(false);
@@ -872,8 +957,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       });
       if (!contextResult.committed || !contextResult.value) return { loaded: false, agentState: null };
 
-      // 首屏先显示预加载消息，再后台补齐完整历史。
-      startContextBackfill(sid, backfillGeneration);
       detailsRequestRef.current.controller?.abort();
       const controller = new AbortController();
       const generation = detailsRequestRef.current.generation + 1;
@@ -921,7 +1004,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       return { loaded: false, agentState: null };
     }
-  }, [applyRuntimeState, commitContextSnapshot, startContextBackfill]);
+  }, [applyRuntimeState, commitContextSnapshot]);
 
   /** Shadow lifecycle entry 使用单次 context-only 刷新，避免触发 details/backfill 或改变滚动位置。 */
   const scheduleContextRefresh = useCallback((sid: string) => {
@@ -1321,6 +1404,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           await sendExtensionUiResponse(request, { value: option });
         }
       }
+      submittedAskToolCallIdsRef.current.add(questionnaire.toolCallId);
       clearAskQuestionnaire();
     } catch (error) {
       // 中止或工具已结束时不要让迟到的超时回调重新弹出已关闭问卷。
@@ -1431,6 +1515,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   /** 本地发送、外部 agent_start 与挂载恢复统一从这里采用主运行。 */
   const enterMainRun = useCallback((phase: AgentPhase): number => {
+    backfillRequestRef.current.controller?.abort();
+    backfillRequestRef.current.generation += 1;
     if (!agentRunningRef.current) {
       resetStreamDeltas();
       const runId = promptRunIdRef.current + 1;
@@ -1707,7 +1793,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const name = event.toolName as string;
         if (name === "ask_user_question") {
           const questions = parseAskQuestionnaire(event.args);
-          if (questions) {
+          // SSE 重连会重放同一工具开始事件；保留当前页、已选答案和请求去重状态。
+          if (
+            questions
+            && !submittedAskToolCallIdsRef.current.has(id)
+            && askQuestionnaireRef.current?.toolCallId !== id
+          ) {
             const questionnaire = { toolCallId: id, questions, submitting: false };
             askQuestionnaireRequestQueueRef.current = [];
             askQuestionnaireRequestIdsRef.current.clear();
@@ -1724,6 +1815,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       case "tool_execution_end": {
         const id = event.toolCallId as string;
+        submittedAskToolCallIdsRef.current.delete(id);
         if (askQuestionnaireRef.current?.toolCallId === id) clearAskQuestionnaire();
         setAgentPhase((prev) => {
           if (prev?.kind !== "running_tools") return prev;
@@ -2184,6 +2276,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           return complete({ handled: true, message: "Copied last assistant message" });
         }
 
+        case "clone": {
+          if (!sid) return complete({ handled: true, error: "No active session to clone" });
+          if (agentRunningRef.current || bashRunningRef.current) {
+            return complete({ handled: true, error: "Cannot clone while the session is running" });
+          }
+          const result = await sendAgentCommand<{ cancelled?: boolean; newSessionId?: string }>(sid, {
+            type: "clone",
+            leafId: activeLeafId,
+          });
+          if (result.cancelled || !result.newSessionId) {
+            return complete({ handled: true, error: "Cannot clone an empty or unsaved session" });
+          }
+          const completed = complete({ handled: true, message: "Cloned current session branch" });
+          onSessionForked?.(result.newSessionId);
+          return completed;
+        }
+
         default:
           return { handled: false };
       }
@@ -2192,7 +2301,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       if (commandName === "compact") setIsCompacting(false);
     }
-  }, [addNotice, ensureNewSession, isCompacting, loadCompactedSession, loadModels, loadSession, loadSlashCommands, loadTools, promoteNewSession, onSessionStatsPanelOpen, runShadowSlashCommand]);
+  }, [activeLeafId, addNotice, ensureNewSession, isCompacting, loadCompactedSession, loadModels, loadSession, loadSlashCommands, loadTools, onSessionForked, promoteNewSession, onSessionStatsPanelOpen, runShadowSlashCommand]);
 
   // 运行中提交统一走确认式契约：只有服务端确认 Pi 已接受后才允许输入框清空。
   // 斜杠命令需要保留 prompt 的模板展开语义，普通文本则使用原生 steer/followUp 队列。
@@ -2470,6 +2579,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   return useMemo(() => ({
     // State
     data: details, loading, error, activeLeafId, messages, entryIds, streamState,
+    hasEarlierMessages: historyPage.sid === sessionIdRef.current && historyPage.hasMore,
+    loadingEarlierMessages: historyPage.sid === sessionIdRef.current && historyPage.loading,
     agentRunning, modelState: modelViewState, modelActions: modelViewActions, toolPreset,
     retryInfo, contextUsage, systemPrompt, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,
@@ -2480,7 +2591,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // Refs
     sessionIdRef, eventSourceRef,
     // Actions
-    handleSend, handleAbort, handleFork,
+    handleSend, handleAbort, handleFork, loadEarlierMessages,
     handleCompact, handleQueuedSubmit, handleAbortCompaction,
     handleRecallQueue,
     handleBuiltinSlashCommand,
@@ -2490,7 +2601,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // Subscriptions
     handleAgentEventRef,
   }), [
-    details, loading, error, activeLeafId, messages, entryIds, streamState,
+    details, loading, error, activeLeafId, messages, entryIds, streamState, historyPage,
     agentRunning, modelViewState, modelViewActions, toolPreset,
     retryInfo, contextUsage, systemPrompt, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,
@@ -2499,7 +2610,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     isNew, creationSettingsLocked, scrollPositionRequest,
     agentPhase, completion,
     sessionIdRef, eventSourceRef,
-    handleSend, handleAbort, handleFork,
+    handleSend, handleAbort, handleFork, loadEarlierMessages,
     handleCompact, handleQueuedSubmit, handleAbortCompaction,
     handleRecallQueue,
     handleBuiltinSlashCommand,

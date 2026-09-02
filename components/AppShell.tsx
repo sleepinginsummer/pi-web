@@ -274,6 +274,10 @@ export function AppShell() {
     notifications: floatingNotifications,
   } = useSessionNotifications(selectedSession?.id ?? null);
   const { notifySession } = notificationController;
+  const getNotificationFolderName = useCallback((sessionId: string) => {
+    const cwd = sessionsWithSelection.find((session) => session.id === sessionId)?.cwd;
+    return cwd ? getFileName(cwd) || undefined : undefined;
+  }, [sessionsWithSelection]);
   useGlobalAttentionNotifications({
     notifySession,
     attentionTitle: translate("chat.notificationAttentionTitle"),
@@ -286,6 +290,7 @@ export function AppShell() {
     notifySession,
     translate("i18n.sessionComplete"),
     translate("chat.notificationDoneBody"),
+    getNotificationFolderName,
   );
 
   const {
@@ -760,6 +765,7 @@ export function AppShell() {
               contextUsage,
               copiedField: copiedSessionField,
               isMobile,
+              selectedSession,
               stats: sessionStats,
             }}
             systemPrompt={systemPrompt}

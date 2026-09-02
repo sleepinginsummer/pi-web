@@ -185,6 +185,7 @@ export const enLocale: LocalePlugin = {
     "chat.toolCalls": "tool calls",
     "chat.collapseProcess": "Collapse process details",
     "chat.expandProcess": "Expand process details",
+    "chat.earlierProcessItems": "{count} earlier process items",
     "chat.loadEarlier": "Scroll up to load earlier messages ({count} hidden)",
     "chat.jumpToLatest": "Jump to the latest message and keep following",
     "chat.extensionRequest": "extension request",

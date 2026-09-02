@@ -478,7 +478,6 @@ export function buildSessionContext(
   const { tail, excludeLeaf } = options;
   // Restrict SDK conversion and the response payload to the requested page.
   const sliced = tail && tail > 0 ? sliceActiveBranch(entries, leafId ?? null, tail, excludeLeaf) : entries;
-  const hasMore = Boolean(tail && tail > 0 && sliced[0]?.parentId);
   const byId = new Map<string, SessionEntry>();
   for (const e of sliced) byId.set(e.id, e);
 
@@ -521,10 +520,17 @@ export function buildSessionContext(
     }
   }
 
+  // Compaction-aware conversion may filter raw entries at the front of a page.
+  // Advancing from such a filtered entry would skip it forever on the next page.
+  const returnedEntryIds = new Set(entryIds);
+  const oldestReturnedEntry = sliced.find((entry) => returnedEntryIds.has(entry.id));
+  const oldestCursorEntry = oldestReturnedEntry ?? sliced[0];
+  const hasMore = Boolean(tail && tail > 0 && oldestCursorEntry?.parentId);
+
   return {
     messages,
     entryIds,
-    oldestEntryId: sliced[0]?.id ?? null,
+    oldestEntryId: oldestCursorEntry?.id ?? null,
     hasMore,
     ...getSessionSettings(entries, leafId),
   };

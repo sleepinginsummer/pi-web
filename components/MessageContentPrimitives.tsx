@@ -2,6 +2,7 @@
 
 import { getImageSource } from "@/lib/image-content";
 import type { CustomMessage, ImageContent, TextContent, UserMessage } from "@/lib/types";
+import { ImagePreview } from "./ImagePreview";
 
 export function formatMessageTime(timestamp?: number): string | null {
   if (!timestamp) return null;
@@ -40,18 +41,21 @@ export function MessageImage({ image, variant }: { image: ImageContent; variant:
   const isAssistant = variant === "assistant";
   const border = variant === "user" ? "1px solid rgba(59,130,246,0.15)" : "1px solid var(--border)";
   return (
-    // eslint-disable-next-line @next/next/no-img-element
-    <img
-      src={src}
-      alt=""
-      style={{
-        maxWidth: isAssistant ? "100%" : 240,
-        maxHeight: isAssistant ? 480 : 240,
-        borderRadius: 6,
-        objectFit: "contain",
-        display: "block",
-        border,
-      }}
-    />
+    <ImagePreview src={src} style={{ maxWidth: "100%" }}>
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={src}
+        alt=""
+        loading={isAssistant ? "lazy" : undefined}
+        style={{
+          maxWidth: isAssistant ? "100%" : 240,
+          maxHeight: isAssistant ? 480 : 240,
+          borderRadius: 6,
+          objectFit: "contain",
+          display: "block",
+          border,
+        }}
+      />
+    </ImagePreview>
   );
 }

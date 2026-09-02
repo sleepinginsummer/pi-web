@@ -4,6 +4,7 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createJiti } from "jiti";
+import { readFile } from "node:fs/promises";
 
 registerHooks({
   load(url, context, nextLoad) {
@@ -21,6 +22,7 @@ const jiti = createJiti(import.meta.url, {
   tsconfigPaths: true,
 });
 const { AssistantOutline } = await jiti.import("./ChatMinimap.tsx");
+const source = await readFile(new URL("./ChatMinimap.tsx", import.meta.url), "utf8");
 
 test("renders math in headings without disabling heading navigation", () => {
   const html = renderToStaticMarkup(
@@ -36,4 +38,9 @@ test("renders math in headings without disabling heading navigation", () => {
   assert.match(html, /data-preview-heading-index="0"/);
   assert.match(html, /data-preview-heading-index="1"/);
   assert.doesNotMatch(html, /disabled=""/);
+});
+
+test("流式尺寸变化不触发 Minimap 全量消息测量", () => {
+  assert.match(source, /if \(!isStreaming\) measureNodes\(\);/);
+  assert.match(source, /const isStreaming = streamingMessage !== null/);
 });

@@ -121,6 +121,11 @@ test("renders compact errors above the input as a wrapping alert", () => {
   assert.ok(html.indexOf('role="alert"') < html.indexOf("<textarea"));
 });
 
+test("offers the built-in clone command", async () => {
+  const source = await readFile(new URL("./ChatInput.tsx", import.meta.url), "utf8");
+  assert.match(source, /name: "clone", description: "chat\.commandClone"/);
+});
+
 test("renders the worktree selector only for a new session", () => {
   const html = renderToStaticMarkup(
     React.createElement(

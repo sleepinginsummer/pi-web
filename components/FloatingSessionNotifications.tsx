@@ -37,9 +37,15 @@ export function FloatingSessionNotifications({
           <button
             type="button"
             className={styles.contentButton}
-            aria-label={openSessionLabel(notification.title, notification.body)}
+            aria-label={openSessionLabel(
+              [notification.folderName, notification.title].filter(Boolean).join(" "),
+              notification.body,
+            )}
             onClick={() => openFloatingSessionNotification(notification, onDismiss, onNavigate)}
           >
+            {notification.folderName && (
+              <span className={styles.folderName}>{notification.folderName}</span>
+            )}
             <span className={styles.title}>{notification.title}</span>
             <span className={styles.body}>{notification.body}</span>
           </button>

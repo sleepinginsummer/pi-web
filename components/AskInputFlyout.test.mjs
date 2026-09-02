@@ -8,12 +8,22 @@ const questionnaireSource = await readFile(new URL("./AskQuestionnaire.tsx", imp
 const askDialogSource = await readFile(new URL("./AskDialog.tsx", import.meta.url), "utf8");
 const askDialogStyles = await readFile(new URL("./AskDialog.module.css", import.meta.url), "utf8");
 const globalStyles = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
+const agentSessionSource = await readFile(new URL("../hooks/useAgentSession.ts", import.meta.url), "utf8");
 
 test("multi-question ask supports previous navigation and final review", () => {
   assert.match(questionnaireSource, /chat\.askPrevious/);
   assert.match(questionnaireSource, /chat\.askReview/);
   assert.match(questionnaireSource, /answers\.some\(\(answer, index\) => !isAnswerComplete\(answer, index\)\)/);
   assert.match(questionnaireSource, /onSubmit\(answers as AskQuestionnaireAnswer\[\]\)/);
+});
+
+test("单问题结构化 ask 保留问题、描述和预览换行", () => {
+  assert.match(agentSessionSource, /questions\.length < 1/);
+  assert.doesNotMatch(agentSessionSource, /questions\.length < 2/);
+  assert.match(questionnaireSource, /<small>\{option\.description\}<\/small>/);
+  assert.match(questionnaireSource, /option\.preview && <pre>\{normalizeAskQuestionnairePreview\(option\.preview\)\}<\/pre>/);
+  assert.match(globalStyles, /\.ask-questionnaire-body h2\s*\{[\s\S]*?white-space: pre-wrap/);
+  assert.match(globalStyles, /\.ask-questionnaire-options pre\s*\{[\s\S]*?white-space: pre-wrap/);
 });
 
 test("ask flyout supports collapse and preserves transcript scrolling", () => {

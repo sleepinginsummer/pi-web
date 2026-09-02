@@ -17,9 +17,13 @@ export function isWriteToolName(toolName: string): boolean {
 export function isEditToolName(toolName: string): boolean {
   const name = toolName.toLowerCase();
   return name === "edit" ||
+    name === "replace" ||
     name.startsWith("edit_") ||
+    name.startsWith("replace_") ||
     name.endsWith(".edit") ||
+    name.endsWith(".replace") ||
     name.endsWith("_edit") ||
+    name.endsWith("_replace") ||
     name.includes("str_replace") ||
     name.includes("replace_editor");
 }

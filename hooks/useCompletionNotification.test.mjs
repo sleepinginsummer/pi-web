@@ -53,14 +53,21 @@ test("completion notifications use the controlling service worker without waitin
   assert.doesNotMatch(hookSource, /document\.visibilityState/);
   assert.doesNotMatch(hookSource, /document\.hasFocus/);
   assert.match(hookSource, /const controllingWorker = [\s\S]*?navigator\.serviceWorker\.controller/);
-  assert.match(hookSource, /controllingWorker\.postMessage\(\{ type: "SHOW_NOTIFICATION", title, options: notificationOptions \}\)/);
+  assert.match(hookSource, /controllingWorker\.postMessage\(\{ type: "SHOW_NOTIFICATION", title: notificationTitle, options: notificationOptions \}\)/);
   assert.ok(
     hookSource.indexOf("controllingWorker.postMessage") < hookSource.indexOf("await navigator.serviceWorker.getRegistration()"),
   );
   assert.match(serviceWorkerSource, /event\.source\?\.id/);
   assert.match(serviceWorkerSource, /sourceClientId/);
   assert.match(serviceWorkerSource, /self\.registration\.showNotification\(title, notificationOptions\)/);
-  assert.match(hookSource, /new Notification\(title, notificationOptions\)/);
+  assert.match(hookSource, /new Notification\(notificationTitle, notificationOptions\)/);
+});
+
+test("completion notification titles start with the source folder", () => {
+  assert.match(hookSource, /const notificationTitle = policy\.folderName \? `\$\{policy\.folderName\} · \$\{title\}` : title/);
+  assert.match(hookSource, /folderName: policy\.folderName/);
+  assert.match(backgroundCompletionSource, /folderName: getFolderName\(sessionId\)/);
+  assert.match(completionEffectsSource, /\{ folderName, showWhenActive: true \}/);
 });
 
 test("re-notifies when a session notification replaces the previous one", () => {
@@ -74,13 +81,13 @@ test("exposes a session notification sender for completion and input requests", 
 });
 
 test("completion notifications explicitly allow the active session", () => {
-  assert.match(completionEffectsSource, /notifySession\(title, body, completion\.sessionId, \{ showWhenActive: true \}\)/);
+  assert.match(completionEffectsSource, /notifySession\(title, body, completion\.sessionId, \{ folderName, showWhenActive: true \}\)/);
   assert.match(hookSource, /showWhenActive: policy\.showWhenActive/);
 });
 
 test("publishes the in-app intent independently of the system notification gate", () => {
   const permissionGate = hookSource.indexOf('if (!enabledRef.current || Notification.permission !== "granted") return');
-  const intentDispatch = hookSource.indexOf("onNotificationRef.current?.({ title, body, sessionId, url, showWhenActive");
+  const intentDispatch = hookSource.indexOf("onNotificationRef.current?.({");
   assert.ok(intentDispatch >= 0 && permissionGate > intentDispatch);
 });
 
@@ -90,7 +97,7 @@ test("AppShell only orchestrates the shared system and in-app notification contr
   assert.match(appShellSource, /notificationController=\{notificationController\}/);
   assert.match(appShellSource, /useBackgroundCompletionNotifications\(/);
   assert.match(backgroundCompletionSource, /for \(const sessionId of transition\.completedInBackground\)/);
-  assert.match(backgroundCompletionSource, /notifySession\(title, body, sessionId\)/);
+  assert.match(backgroundCompletionSource, /notifySession\(title, body, sessionId, \{ folderName: getFolderName\(sessionId\) \}\)/);
   assert.match(appShellSource, /<FloatingSessionNotifications/);
   assert.doesNotMatch(appShellSource, /useCompletionNotification\(/);
   assert.match(sessionNotificationsSource, /useCompletionNotification\(\{/);

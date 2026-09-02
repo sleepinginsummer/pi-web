@@ -12,13 +12,15 @@ const notification = {
   sessionId: "session-1",
   title: "后台会话已完成",
   body: "任务结果已准备",
+  folderName: "test",
   url: "/?session=session-1",
 };
 
 test("通知 live region 常驻且可访问名称包含标题和正文", () => {
   assert.match(source, /role="region"/);
   assert.match(source, /aria-live="polite"/);
-  assert.match(source, /aria-label=\{openSessionLabel\(notification\.title, notification\.body\)\}/);
+  assert.match(source, /\[notification\.folderName, notification\.title\]\.filter\(Boolean\)\.join\(" "\)/);
+  assert.match(source, /className=\{styles\.folderName\}/);
   assert.doesNotMatch(source, /notifications\.length === 0|createPortal/);
   assert.doesNotMatch(source, /FloatingSessionNotificationList|NotificationClassNames|classes=/);
 });
@@ -38,6 +40,7 @@ test("打开操作先移除通知再导航", () => {
 test("通知固定在右上角并提供移动端、安全区和键盘焦点样式", () => {
   assert.match(styles, /\.stack\s*\{[\s\S]*?position: fixed;[\s\S]*?top: calc\(env\(safe-area-inset-top\) \+ 12px\);[\s\S]*?right:/);
   assert.match(styles, /\.contentButton:focus-visible/);
+  assert.match(styles, /\.folderName\s*\{[\s\S]*?font-size: 11px/);
   assert.match(styles, /@media \(max-width: 640px\)/);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
 });

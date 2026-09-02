@@ -3,7 +3,7 @@ import test from "node:test";
 import { createJiti } from "jiti";
 
 const jiti = createJiti(import.meta.url);
-const { buildSessionInfoModel, formatCompact } = await jiti.import("../lib/session-info-model.ts");
+const { buildSessionInfoModel, formatCompact, formatDuration } = await jiti.import("../lib/session-info-model.ts");
 const translate = (key) => key;
 
 const stats = {
@@ -24,6 +24,12 @@ test("formats compact token counts", () => {
   assert.equal(formatCompact(999), "999");
   assert.equal(formatCompact(1200), "1k");
   assert.equal(formatCompact(1_250_000), "1.3M");
+});
+
+test("formats session active time", () => {
+  assert.equal(formatDuration(9_000), "9s");
+  assert.equal(formatDuration(65_000), "1m 5s");
+  assert.equal(formatDuration(3_660_000), "1h 1m");
 });
 
 test("derives session information rows without UI state", () => {
@@ -49,4 +55,20 @@ test("prefers live context usage over the stats snapshot", () => {
   );
 
   assert.deepEqual(model.tokenRows.at(-1), { label: "session.context", value: "75.0% / 100k" });
+});
+
+test("derives active time and project information", () => {
+  const model = buildSessionInfoModel(
+    { ...stats, totalActiveMs: 65_000 },
+    null,
+    "en",
+    translate,
+    { cwd: "/repo-wt", projectRoot: "/repo", currentBranch: "feature", isWorktree: true },
+  );
+  assert.deepEqual(model.sessionRows.at(-1), { label: "session.totalActive", value: "1m 5s", copyField: null });
+  assert.deepEqual(model.projectRows, [
+    { label: "session.projectDir", value: "/repo", copyField: "projectDir" },
+    { label: "session.gitBranch", value: "feature", copyField: "gitBranch" },
+    { label: "session.gitWorktree", value: "/repo-wt", copyField: "gitWorktree" },
+  ]);
 });

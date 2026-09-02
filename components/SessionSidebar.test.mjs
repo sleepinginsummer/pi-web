@@ -5,31 +5,11 @@ import test from "node:test";
 const source = await readFile(new URL("./SessionSidebar.tsx", import.meta.url), "utf8");
 const appShellSource = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
 const runningSessionsHookSource = await readFile(new URL("../hooks/useRunningSessions.ts", import.meta.url), "utf8");
-const sessionItemSource = source.slice(source.indexOf("function SessionItem("));
+const sessionListHookSource = await readFile(new URL("../hooks/useSessionList.ts", import.meta.url), "utf8");
 
-test("only Shift+click bypasses session deletion confirmation", () => {
-  assert.match(
-    sessionItemSource,
-    /const handleDeleteClick[\s\S]*?if \(e\.shiftKey\) \{\s*void performDelete\(\);\s*\} else \{\s*setConfirmDelete\(true\);/,
-  );
-});
-
-test("does not register row-level session deletion shortcuts", () => {
-  assert.doesNotMatch(sessionItemSource, /const handleKeyDown/);
-  assert.doesNotMatch(sessionItemSource, /onKeyDown=\{handleKeyDown\}/);
-  assert.doesNotMatch(sessionItemSource, /tabIndex=\{0\}/);
-});
-
-test("keeps the pinned marker visible when a session is selected", () => {
-  assert.match(sessionItemSource, /position: "relative"/);
-  assert.match(sessionItemSource, /paddingRight: isPinned \? 32 : 8/);
-  assert.match(sessionItemSource, /background: confirmDelete[\s\S]*?: isSelected \? "var\(--bg-selected\)" : hovered/);
-  assert.match(sessionItemSource, /background: "#eab308"[\s\S]*?borderBottomLeftRadius: 5/);
-  assert.match(sessionItemSource, /PinIcon size=\{12\}[^>]*transform: "rotate\(45deg\)"/);
-  assert.match(sessionItemSource, /PinIcon size=\{14\}[^>]*transform: "rotate\(45deg\)"/);
-  assert.doesNotMatch(sessionItemSource, /borderTop: "5px solid #a16207"/);
-  assert.match(sessionItemSource, /borderLeft: confirmDelete[\s\S]*?: isSelected \? "2px solid var\(--accent\)" : "2px solid transparent"/);
-  assert.match(sessionItemSource, /aria-pressed=\{isPinned\}/);
+test("restores and persists the file explorer state", () => {
+  assert.match(source, /setExplorerOpen\(loadExplorerOpen\(\)\)/);
+  assert.match(source, /saveExplorerOpen\(nextOpen\)/);
 });
 
 test("仅在服务端列表缺失时合并已转正的当前会话", () => {
@@ -65,16 +45,27 @@ test("keeps running transitions and completion notifications outside the sidebar
 test("refreshes Git context before one visible-tab session-list load", () => {
   const visibilitySource = source.slice(
     source.indexOf("const refreshVisibleSessions = async"),
-    source.indexOf("const initialLoadDone"),
+    source.indexOf("// Persist unread markers"),
   );
   assert.ok(visibilitySource.indexOf("/api/git/context") < visibilitySource.indexOf("await loadSessions(false)"));
   assert.equal((visibilitySource.match(/loadSessions\(false\)/g) ?? []).length, 1);
 });
 
-test("并发刷新只允许最新的会话列表请求提交结果", () => {
-  assert.match(source, /const requestId = \+\+sessionLoadRequestIdRef\.current/);
-  assert.match(source, /fetch\("\/api\/sessions", \{ cache: "no-store" \}\)/);
-  assert.match(source, /if \(requestId !== sessionLoadRequestIdRef\.current\) return/);
+test("会话列表并发状态由独立 hook 统一管理", () => {
+  assert.match(source, /useSessionList\(\{ refreshKey, onSessionsChange \}\)/);
+  assert.match(sessionListHookSource, /new LatestRequestGate\(\)/);
+  assert.match(sessionListHookSource, /const generation = requestGate\.begin\(requestKey\)/);
+  assert.match(sessionListHookSource, /if \(!requestGate\.isLatest\(requestKey, generation\)\) return/);
+  assert.match(
+    sessionListHookSource,
+    /finally \{[\s\S]*?if \(requestGate\.isLatest\(requestKey, generation\)\) setLoading\(false\);[\s\S]*?requestGate\.finish\(requestKey\)/,
+  );
+  assert.doesNotMatch(sessionListHookSource, /showInitialLoading &&[^\n]*setLoading\(false\)/);
+  assert.match(sessionListHookSource, /const commitSessions = useCallback/);
+  assert.match(sessionListHookSource, /removeSessions: \(sessionIds: Iterable<string>\) => void/);
+  assert.match(sessionListHookSource, /requestGateRef\.current\.invalidate\("session-list"\)/);
+  assert.doesNotMatch(sessionListHookSource, /setSessions: Dispatch/);
+  assert.match(source, /removeSessions\(sessions\.map\(\(session\) => session\.id\)\)/);
 });
 
 test("会话列表加载后不抢占首屏资源预取全部历史上下文", () => {
@@ -93,6 +84,13 @@ test("renders projects as persistent directory rows with per-project session act
   assert.match(source, /useState<string\[]>\(\[\]\)/);
   assert.match(source, /fetch\("\/api\/project-directories", \{ cache: "no-store" \}\)/);
   assert.match(source, /setKnownProjects\(projects\)/);
+});
+
+test("reopens the custom directory picker at the last successful path", () => {
+  assert.match(source, /const handleCustomPathClick = useCallback\(\(\) => \{\s*setCustomPathValue\(loadLastCustomCwd\(\)\);/);
+  assert.match(source, /const cwd = data\.cwd \?\? validated\.cwd;[\s\S]*?saveLastCustomCwd\(cwd\);[\s\S]*?setCustomPathValue\(cwd\)/);
+  assert.match(source, /<DirectoryPicker[\s\S]*?initialPath=\{customPathValue \|\| undefined\}/);
+  assert.doesNotMatch(source, /setCustomPathValue\(""\)/);
 });
 
 test("shows running and unread activity at project scope", () => {

@@ -54,6 +54,36 @@ function resolveAssistantLeaf(entry: SessionMessageEntry, entries: SessionEntry[
   return leafId;
 }
 
+/** 拒绝复制仍有工具调用等待结果的分支，避免生成无法继续的会话历史。 */
+function assertCompleteToolCallHistory(branch: SessionEntry[]): void {
+  const pendingToolCallIds = new Set<string>();
+  for (const entry of branch) {
+    if (isMessageEntry(entry) && entry.message.role === "assistant") {
+      for (const toolCallId of getToolCallIds(entry)) pendingToolCallIds.add(toolCallId);
+      continue;
+    }
+    if (isToolResultEntry(entry)) pendingToolCallIds.delete(entry.message.toolCallId);
+  }
+  if (pendingToolCallIds.size > 0) {
+    throw new Error("Cannot clone a branch with unfinished tool calls");
+  }
+}
+
+/** 压缩边界之前且未被保留的原始消息不属于克隆后的有效模型上下文。 */
+function getCloneValidationBranch(branch: SessionEntry[]): SessionEntry[] {
+  const compactionIndex = branch.findLastIndex((entry) => entry.type === "compaction");
+  if (compactionIndex < 0) return branch;
+
+  const compaction = branch[compactionIndex] as SessionEntry & { firstKeptEntryId?: unknown };
+  const firstKeptIndex = typeof compaction.firstKeptEntryId === "string"
+    ? branch.findIndex((entry) => entry.id === compaction.firstKeptEntryId)
+    : -1;
+  return [
+    ...(firstKeptIndex >= 0 ? branch.slice(firstKeptIndex, compactionIndex) : []),
+    ...branch.slice(compactionIndex + 1),
+  ];
+}
+
 /** SDK 可能延迟写盘，统一从 manager 序列化完整 JSONL。 */
 function serializeSession(manager: SessionManager): string {
   const header = manager.getHeader();
@@ -140,6 +170,41 @@ export function createForkedSession(sourceSessionFile: string, entryId: string):
     };
   } finally {
     // Commit 前完成所有暂存清理；此后不再执行可能覆盖成功返回的资源清理。
+    rmSync(stagingDir, { recursive: true, force: true });
+  }
+
+  const newSessionFile = join(sessionDir, prepared.fileName);
+  publishValidatedSession(prepared.content, newSessionFile, sessionDir, prepared.sessionId);
+  return { newSessionId: prepared.sessionId, newSessionFile };
+}
+
+/** 将当前分支完整复制为独立会话，源会话及其运行实例保持不变。 */
+export function createClonedSession(sourceSessionFile: string, leafId: string): ForkedSession {
+  const sourceManager = SessionManager.open(sourceSessionFile);
+  const branch = sourceManager.getBranch(leafId);
+  if (!branch.some((entry) => isMessageEntry(entry) && entry.message.role === "assistant")) {
+    throw new Error("Cannot clone an empty or assistant-free session branch");
+  }
+  assertCompleteToolCallHistory(getCloneValidationBranch(branch));
+
+  const sessionDir = sourceManager.getSessionDir();
+  const stagingDir = mkdtempSync(join(sessionDir, ".pi-web-clone-"));
+  let prepared: { content: string; fileName: string; sessionId: string };
+  try {
+    const clonedManager = SessionManager.open(sourceSessionFile, stagingDir);
+    const stagedSessionFile = clonedManager.createBranchedSession(leafId);
+    if (!stagedSessionFile) throw new Error("Failed to clone current session branch");
+    const sessionId = clonedManager.getSessionId();
+    if (!existsSync(stagedSessionFile)) {
+      writePrivateFileCreateAtomicSync(stagedSessionFile, serializeSession(clonedManager));
+    }
+    validateSessionFile(stagedSessionFile, stagingDir, sessionId);
+    prepared = {
+      content: readFileSync(stagedSessionFile, "utf8"),
+      fileName: basename(stagedSessionFile),
+      sessionId,
+    };
+  } finally {
     rmSync(stagingDir, { recursive: true, force: true });
   }
 

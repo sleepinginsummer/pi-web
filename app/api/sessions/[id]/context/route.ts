@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { resolveSessionPath, buildSessionContext } from "@/lib/session-reader";
 import { getRpcSession } from "@/lib/rpc-manager";
+import { computeSessionTotalActiveMs } from "@/lib/session-timing";
 
 export async function GET(
   req: Request,
@@ -28,9 +29,10 @@ export async function GET(
     }
 
     const sm = liveRpc?.inner.sessionManager ?? SessionManager.open(filePath!);
+    const activeLeafId = leafId ?? sm.getLeafId();
     // `before` is the oldest entry already on the client; fetch its ancestors
     // only (excludeLeaf) so prepending the page does not duplicate `before`.
-    const context = buildSessionContext(sm.getEntries() as never, before ?? leafId, {
+    const context = buildSessionContext(sm.getEntries() as never, before ?? activeLeafId, {
       deferThinking,
       deferToolResultImages,
       tail,
@@ -38,7 +40,13 @@ export async function GET(
       sessionId: id,
     });
 
-    return NextResponse.json({ context, tail, before: before ?? null });
+    return NextResponse.json({
+      context,
+      leafId: activeLeafId,
+      totalActiveMs: computeSessionTotalActiveMs(sm.getEntries()),
+      tail,
+      before: before ?? null,
+    });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }

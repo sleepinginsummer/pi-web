@@ -185,6 +185,7 @@ export const zhCNLocale: LocalePlugin = {
     "chat.toolCalls": "次工具调用",
     "chat.collapseProcess": "收起处理详情",
     "chat.expandProcess": "展开处理详情",
+    "chat.earlierProcessItems": "较早的 {count} 条处理记录",
     "chat.loadEarlier": "向上滚动以加载更早的消息（隐藏 {count} 条）",
     "chat.jumpToLatest": "跳转到最新消息并继续跟随",
     "chat.extensionRequest": "扩展请求",

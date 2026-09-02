@@ -19,8 +19,10 @@ import {
 } from "@/lib/file-types";
 import { encodeFilePathForApi, getFileDirectory, getFileName, getRelativeFilePath } from "@/lib/file-paths";
 import { resolveLocalFileHref } from "@/lib/file-links";
+import { parseFrontmatter } from "@/lib/frontmatter";
 import { markdownPreviewRehypePlugins, markdownPreviewRemarkPlugins, normalizeDisplayMath } from "@/lib/markdown";
 import { CodeBlock, MermaidBlock } from "./MermaidBlock";
+import { FrontmatterCard } from "./FrontmatterCard";
 import { RevealFileButton } from "./RevealFileButton";
 import { parseUnifiedPatch } from "@/lib/patch";
 import type { GitFileDiffResponse } from "@/lib/git-types";
@@ -1249,6 +1251,10 @@ function TextFileViewer({
     () => (data?.language === "markdown" ? normalizeDisplayMath(data.content) : ""),
     [data],
   );
+  const frontmatter = useMemo(
+    () => (data?.language === "markdown" ? parseFrontmatter(data.content) : null),
+    [data],
+  );
 
   useEffect(() => {
     const updateSelectedLineRange = () => {
@@ -1502,6 +1508,7 @@ function TextFileViewer({
             className="markdown-body markdown-file-preview"
             style={{ padding: "24px 32px" }}
           >
+            {frontmatter?.data && <FrontmatterCard data={frontmatter.data} />}
             <ReactMarkdown
               remarkPlugins={markdownPreviewRemarkPlugins}
               rehypePlugins={markdownPreviewRehypePlugins}

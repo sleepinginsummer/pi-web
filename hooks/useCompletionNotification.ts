@@ -75,8 +75,16 @@ export function useCompletionNotification({ onNotification }: CompletionNotifica
     policy: SessionNotificationOptions = {},
   ) => {
     const url = sessionId ? `/?session=${encodeURIComponent(sessionId)}` : "/";
+    const notificationTitle = policy.folderName ? `${policy.folderName} · ${title}` : title;
     try {
-      onNotificationRef.current?.({ title, body, sessionId, url, showWhenActive: policy.showWhenActive });
+      onNotificationRef.current?.({
+        title,
+        body,
+        folderName: policy.folderName,
+        sessionId,
+        url,
+        showWhenActive: policy.showWhenActive,
+      });
     } catch (error) {
       // 站内观察者异常不能阻断系统通知投递。
       console.error("站内通知分发失败", { sessionId, error });
@@ -99,7 +107,7 @@ export function useCompletionNotification({ onNotification }: CompletionNotifica
         : null;
       if (controllingWorker) {
         // 后台页面可能延迟异步注册查询；已有 controller 时必须同步投递消息。
-        controllingWorker.postMessage({ type: "SHOW_NOTIFICATION", title, options: notificationOptions });
+        controllingWorker.postMessage({ type: "SHOW_NOTIFICATION", title: notificationTitle, options: notificationOptions });
         return;
       }
 
@@ -107,11 +115,11 @@ export function useCompletionNotification({ onNotification }: CompletionNotifica
         ? await navigator.serviceWorker.getRegistration()
         : undefined;
       if (registration?.active) {
-        registration.active.postMessage({ type: "SHOW_NOTIFICATION", title, options: notificationOptions });
+        registration.active.postMessage({ type: "SHOW_NOTIFICATION", title: notificationTitle, options: notificationOptions });
         return;
       }
 
-      const notification = new Notification(title, notificationOptions);
+      const notification = new Notification(notificationTitle, notificationOptions);
       notification.onclick = () => {
         window.focus();
         openNotificationTarget(url);

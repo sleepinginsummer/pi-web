@@ -131,6 +131,7 @@ hooks/
 - Idle timeout: 10 minutes. Concurrent `startRpcSession()` calls share a single start Promise (`globalThis.__piStartLocks`)
 - Do not cache or share complete `AgentSessionServices`: its settings manager, resource loader, and extension runtime are mutable and cwd/session-bound. Cold startup cost is measured in the `services` stage; optimize concrete immutable discovery inputs only, never by reusing services or executing extension factories in a throwaway warmup.
 - Pi SDK 0.84.3 has a single-cwd extension-module cache, so concurrent projects evict one another and repeatedly pay TypeScript/Jiti import cost. `scripts/patch-pi-sdk-extension-cache.mjs` applies a version-locked postinstall patch that caches factory modules for the eight most-recent cwd values while every session still gets a fresh runtime. The patch must fail closed on SDK upgrades; review upstream `extensions/loader` and update or remove it before changing the SDK version.
+- Pi SDK 0.84.3 normally checks automatic compaction only after `agent_end`, so one long tool-calling run can cross the configured threshold before the run settles. `scripts/patch-pi-sdk-mid-run-compaction.mjs` applies a version-locked postinstall patch that checks the same SDK threshold after a completed tool-result batch and before the next model request, then gives the loop the rebuilt compacted context without aborting the run. Keep this at the tool-complete boundary, reuse the SDK's `contextWindow - reserveTokens` policy, and review or remove the patch before changing the SDK version.
 
 ### Session first-paint loading
 - Existing sessions load `/api/sessions/[id]/context` first and commit messages immediately. `/details` (file path + projected branch tree) and `/state` use independent abort controllers and load afterward; details failures must not hide a valid context or runtime snapshot.
@@ -169,6 +170,8 @@ The `enabledModels` setting uses pi's `--models` syntax: minimatch globs against
 
 ### SSE reconnect on page refresh mid-stream
 On `ChatWindow` mount, `GET /api/agent/[id]` is called. If `state.isStreaming === true`, SSE is reconnected automatically. `thinkingLevel` and `isCompacting` are also synced from this response.
+
+Active `ask_user_question` tool starts are retained by `AgentSessionWrapper` for the wrapper lifetime. A new SSE listener receives those starts before pending extension UI requests so a multi-question ask is reconstructed before its first per-question `select` request. Replaying the same tool-call id must preserve the mounted questionnaire state and its request deduplication state so transient reconnects cannot erase answers or duplicate queued questions.
 
 ### Compaction SSE events
 Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `auto_compaction_start` / `auto_compaction_end`. `handleAgentEvent` accepts both sets to keep `isCompacting` in sync. Manual compact is a blocking POST — the button stays disabled until the response returns.
@@ -242,6 +245,7 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 - Browser autoplay policy means sound must be unlocked from a user gesture; `ChatInput` calls the unlock hook from interactive controls, and `ChatWindow` plays the tone from `onAgentEnd`.
 
 ### PWA 版本与 Service Worker 更新策略
+- 当前 Pi Web 版本使用 `0.8.11-37` 格式；此后每次代码变更都必须将最后一位递增 1（例如 `0.8.11-37` -> `0.8.11-38`），并同步更新 `package.json` 与 `package-lock.json`。
 - 生产环境必须使用每次构建唯一的版本标识注册 `/sw.js?v=<build-version>`，静态缓存名称也必须包含同一个版本；不能只使用长期不变的 `package.json` 版本，否则代码变化后浏览器可能继续命中旧 chunk。
 - 新 Service Worker 安装完成后保持 `waiting`，由界面提示“发现新版本”；用户确认后发送 `SKIP_WAITING`，并在 `controllerchange` 后刷新页面。不要在 `install` 阶段无条件调用 `skipWaiting()`。
 - 激活新 Service Worker 时只清理 `pi-web-` 前缀下的旧版本缓存，不得清理其它站点数据或认证信息。`/sw.js`、页面导航和 API 请求必须绕过静态资源缓存。

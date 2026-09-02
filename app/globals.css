@@ -1330,6 +1330,8 @@ span.token.table {
   color: var(--text);
   font-size: 18px;
   line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .ask-questionnaire-options,
@@ -1383,6 +1385,12 @@ span.token.table {
 .ask-questionnaire-options strong,
 .ask-questionnaire-options small {
   display: block;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.ask-questionnaire-options > button > span:nth-child(2) {
+  min-width: 0;
 }
 
 .ask-questionnaire-options small {
@@ -1402,6 +1410,7 @@ span.token.table {
   background: var(--bg);
   font-family: var(--font-mono);
   font-size: 11px;
+  overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
 
@@ -1433,6 +1442,13 @@ span.token.table {
   grid-column: 1;
   color: var(--text);
   font-weight: 600;
+}
+
+.ask-questionnaire-review span,
+.ask-questionnaire-review strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .ask-questionnaire-review small {
@@ -1565,6 +1581,9 @@ span.token.table {
   overflow: hidden;
   padding: 7px 10px;
   cursor: pointer;
+  touch-action: manipulation;
+  -webkit-touch-callout: none;
+  user-select: none;
   text-align: left;
   color: var(--text-muted);
   background: color-mix(in srgb, var(--bg) 94%, transparent);

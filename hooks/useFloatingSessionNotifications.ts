@@ -27,6 +27,7 @@ export function useFloatingSessionNotifications(activeSessionId: string | null) 
       sessionId,
       title: intent.title,
       body: intent.body,
+      folderName: intent.folderName,
       url: intent.url,
     }));
   }, []);

@@ -57,6 +57,8 @@ export interface SessionStatsInfo {
   };
   cost: number;
   contextUsage?: ContextUsage;
+  /** 会话文件中相邻活动条目推算出的累计活跃时长。 */
+  totalActiveMs?: number;
 }
 
 interface PromptTemplateLike {

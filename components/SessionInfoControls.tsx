@@ -1,6 +1,7 @@
 "use client";
 
 import type { SessionStatsInfo } from "@/lib/pi-types";
+import type { SessionInfo } from "@/lib/types";
 
 import {
   buildSessionInfoModel,
@@ -46,10 +47,17 @@ function CopyButton({ copied, field, onCopy, translate, value }: {
   translate: Translate;
   value: string;
 }) {
+  const titleKey: Record<SessionCopyField, string> = {
+    file: "session.copyFile",
+    id: "session.copyId",
+    projectDir: "session.copyProjectDir",
+    gitBranch: "session.copyGitBranch",
+    gitWorktree: "session.copyGitWorktree",
+  };
   return (
     <button
       type="button"
-      title={copied ? translate("session.copied") : translate(field === "file" ? "session.copyFile" : "session.copyId")}
+      title={copied ? translate("session.copied") : translate(titleKey[field])}
       onClick={() => onCopy(field, value)}
       style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, marginTop: -2, color: copied ? "var(--accent)" : "var(--text-dim)", background: "transparent", border: "1px solid var(--border)", borderRadius: 4, cursor: "pointer" }}
     >
@@ -62,15 +70,16 @@ function CopyButton({ copied, field, onCopy, translate, value }: {
   );
 }
 
-function SessionDetailsSection({ copiedSessionField, onCopy, rows, translate }: {
+function SessionDetailsSection({ copiedSessionField, onCopy, rows, title, translate }: {
   copiedSessionField: SessionCopyField | null;
   onCopy: (field: SessionCopyField, value: string) => void;
   rows: SessionInfoRow[];
+  title: string;
   translate: Translate;
 }) {
   return (
     <div style={{ minWidth: 0 }}>
-      <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>{translate("session.infoSection")}</div>
+      <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>{title}</div>
       <div style={{ display: "grid", gridTemplateColumns: "auto minmax(0, 1fr) auto", columnGap: 12, rowGap: 8, alignItems: "start" }}>
         {rows.map((row) => (
           <div key={`session-info:${row.label}`} style={{ display: "contents" }}>
@@ -131,15 +140,19 @@ interface SessionInfoPopoverProps {
   locale: string;
   onCopy: (field: SessionCopyField, value: string) => void;
   sessionStats: SessionStatsInfo | null;
+  selectedSession?: SessionInfo | null;
   translate: Translate;
 }
 
-export function SessionInfoPopover({ contextUsage, copiedSessionField, isMobile, locale, onCopy, sessionStats, translate }: SessionInfoPopoverProps) {
+export function SessionInfoPopover({ contextUsage, copiedSessionField, isMobile, locale, onCopy, sessionStats, selectedSession, translate }: SessionInfoPopoverProps) {
   if (!sessionStats) return <div style={{ fontSize: 12, color: "var(--text-muted)", fontStyle: "italic" }}>{translate("session.load")}</div>;
-  const model = buildSessionInfoModel(sessionStats, contextUsage, locale, translate);
+  const model = buildSessionInfoModel(sessionStats, contextUsage, locale, translate, selectedSession);
   return (
     <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "minmax(360px, 1.7fr) minmax(140px, 0.55fr) minmax(190px, 0.75fr)", gap: isMobile ? 16 : 24, fontSize: 12, lineHeight: 1.5, fontFamily: "var(--font-mono)" }}>
-      <SessionDetailsSection copiedSessionField={copiedSessionField} onCopy={onCopy} rows={model.sessionRows} translate={translate} />
+      <div style={{ display: "flex", flexDirection: "column", gap: isMobile ? 16 : 20 }}>
+        <SessionDetailsSection copiedSessionField={copiedSessionField} onCopy={onCopy} rows={model.sessionRows} title={translate("session.infoSection")} translate={translate} />
+        {model.projectRows.length > 0 && <SessionDetailsSection copiedSessionField={copiedSessionField} onCopy={onCopy} rows={model.projectRows} title={translate("session.projectSection")} translate={translate} />}
+      </div>
       <InfoSection rows={model.messageRows} title={translate("session.messages")} />
       <InfoSection align="right" compact rows={model.tokenRows} title={translate("session.tokens")} />
     </div>

@@ -1,16 +1,18 @@
 "use client";
 
 import { useEffect, useState, useCallback, useMemo, useRef, type CSSProperties, type ReactNode } from "react";
-import { Pin as PinIcon } from "lucide-react";
 import type { SessionInfo, WorktreeInfo, WorktreeState } from "@/lib/types";
 import { useI18n } from "@/hooks/useI18n";
-import { pruneSessionContextCache } from "@/lib/session-load-client";
+import { useIsMobile } from "@/hooks/useIsMobile";
+import { useSessionList } from "@/hooks/useSessionList";
 import { useSessionOrder } from "@/hooks/useSessionOrder";
 import type { RunningSessionTransitionEvent } from "@/hooks/useRunningSessionTransitions";
 import { usePinnedSessions } from "@/hooks/usePinnedSessions";
+import { loadExplorerOpen, saveExplorerOpen } from "@/lib/file-explorer-state";
 import { WorktreeMutationError } from "@/lib/worktree-client";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
+import { SessionItem } from "./SessionItem";
 import { TrashPanel } from "./TrashPanel";
 
 declare global {
@@ -108,6 +110,25 @@ interface Props {
 
 const UNREAD_SESSIONS_STORAGE_KEY = "pi-web:unread-session-ids";
 const PROJECT_DIRECTORIES_STORAGE_KEY = "pi-web:project-directories";
+const LAST_CUSTOM_CWD_STORAGE_KEY = "pi-web:last-custom-cwd";
+
+function loadLastCustomCwd(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    return window.localStorage.getItem(LAST_CUSTOM_CWD_STORAGE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function saveLastCustomCwd(cwd: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(LAST_CUSTOM_CWD_STORAGE_KEY, cwd);
+  } catch {
+    // 浏览器隐私模式或存储配额异常不应阻断目录切换。
+  }
+}
 
 function loadUnreadSessionIds(): Set<string> {
   if (typeof window === "undefined") return new Set();
@@ -139,20 +160,6 @@ function loadLegacyProjectDirectories(): string[] {
   } catch {
     return [];
   }
-}
-
-function formatRelativeTime(dateStr: string): string {
-  const date = new Date(dateStr);
-  const now = new Date();
-  const diff = now.getTime() - date.getTime();
-  const mins = Math.floor(diff / 60000);
-  const hours = Math.floor(diff / 3600000);
-  const days = Math.floor(diff / 86400000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
-  if (hours < 24) return `${hours}h ago`;
-  if (days < 7) return `${days}d ago`;
-  return date.toLocaleDateString();
 }
 
 /**
@@ -403,11 +410,17 @@ function PiWebTitle() {
 }
 export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, runningSessionIds, runningSessionTransitions, selectedCwd: selectedCwdProp, onCwdChange, worktreeState = null, onCreateWorktree, onRemoveWorktree, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onSessionsChange }: Props) {
   const { t } = useI18n();
-  const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
+  const isMobile = useIsMobile();
+  const {
+    sessions: allSessions,
+    removeSessions,
+    loading,
+    error,
+    refreshDone: sessionRefreshDone,
+    loadSessions,
+  } = useSessionList({ refreshKey, onSessionsChange });
   const { order: sessionOrder, moveSession } = useSessionOrder(allSessions);
   const { pinnedIds, togglePinned } = usePinnedSessions(allSessions);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [selectedCwd, setSelectedCwd] = useState<string | null>(null);
   const [validatedProject, setValidatedProject] = useState<{ cwd: string; projectRoot?: string; projectKey?: string } | null>(null);
   // 服务端与客户端首屏都从空列表开始，挂载后再恢复本地目录，避免 hydration 不一致。
@@ -434,48 +447,29 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
   const [explorerOpen, setExplorerOpen] = useState(false);
   const [explorerKey, setExplorerKey] = useState(0);
   const [explorerUploadBusy, setExplorerUploadBusy] = useState(false);
+  const [fileSearchOpen, setFileSearchOpen] = useState(false);
+  const [openSwipeSessionId, setOpenSwipeSessionId] = useState<string | null>(null);
   const [changesCount, setChangesCount] = useState(0);
   const [changesCollapsed, setChangesCollapsed] = useState(true);
   const [trashOpen, setTrashOpen] = useState(false);
-  const [sessionRefreshDone, setSessionRefreshDone] = useState(false);
   const [explorerRefreshDone, setExplorerRefreshDone] = useState(false);
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => loadUnreadSessionIds());
-  // 会话列表可能被初始加载、刷新事件和可见性恢复并发触发，只允许最新请求提交结果。
-  const sessionLoadRequestIdRef = useRef(0);
-  const sessionRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const explorerRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fileExplorerRef = useRef<FileExplorerHandle>(null);
 
-  const loadSessions = useCallback(async (showLoading = false) => {
-    const requestId = ++sessionLoadRequestIdRef.current;
-    try {
-      if (showLoading) setLoading(true);
-      const res = await fetch("/api/sessions", { cache: "no-store" });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json() as { sessions: SessionInfo[] };
-      if (requestId !== sessionLoadRequestIdRef.current) return;
-      setAllSessions(data.sessions);
-      onSessionsChange?.(data.sessions);
-      pruneSessionContextCache(data.sessions.map((session) => session.id));
-      // Drop unread markers for sessions that no longer exist (e.g. deleted).
-      const existingIds = new Set(data.sessions.map((s) => s.id));
-      setUnreadSessionIds((prev) => {
-        if (prev.size === 0) return prev;
-        const next = new Set([...prev].filter((id) => existingIds.has(id)));
-        return next.size === prev.size ? prev : next;
-      });
-      setError(null);
-      if (!showLoading) {
-        setSessionRefreshDone(true);
-        if (sessionRefreshTimerRef.current) clearTimeout(sessionRefreshTimerRef.current);
-        sessionRefreshTimerRef.current = setTimeout(() => setSessionRefreshDone(false), 2000);
-      }
-    } catch (e) {
-      if (requestId === sessionLoadRequestIdRef.current) setError(String(e));
-    } finally {
-      if (showLoading && requestId === sessionLoadRequestIdRef.current) setLoading(false);
-    }
-  }, [onSessionsChange]);
+  useEffect(() => {
+    setExplorerOpen(loadExplorerOpen());
+  }, []);
+
+  useEffect(() => {
+    if (loading || error) return;
+    const existingIds = new Set(allSessions.map((session) => session.id));
+    setUnreadSessionIds((current) => {
+      if (current.size === 0) return current;
+      const next = new Set([...current].filter((id) => existingIds.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [allSessions, error, loading]);
 
   useEffect(() => {
     let stopped = false;
@@ -504,13 +498,6 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [loadSessions, selectedCwd, selectedCwdProp]);
-
-  const initialLoadDone = useRef(false);
-  useEffect(() => {
-    const isFirst = !initialLoadDone.current;
-    initialLoadDone.current = true;
-    loadSessions(isFirst);
-  }, [loadSessions, refreshKey]);
 
   // Persist unread markers so they survive a browser refresh before the user
   // has actually opened the completed session.
@@ -705,12 +692,13 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
         return;
       }
       setSelectedCwd(data.cwd ?? validated.cwd);
+      const cwd = data.cwd ?? validated.cwd;
+      saveLastCustomCwd(cwd);
+      setCustomPathValue(cwd);
       setKnownProjects((current) => {
-        const cwd = data.cwd ?? validated.cwd;
         return data.projects ?? [cwd, ...current.filter((project) => project !== cwd)].filter((project): project is string => typeof project === "string");
       });
       setCustomPathOpen(false);
-      setCustomPathValue("");
     } catch (e) {
       setCustomPathError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -719,6 +707,7 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
   }, [customPathValue, customPathValidating]);
 
   const handleCustomPathClick = useCallback(() => {
+    setCustomPathValue(loadLastCustomCwd());
     setCustomPathOpen(true);
     setCustomPathError(null);
   }, []);
@@ -780,6 +769,7 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
   // works when the prop value won't change — e.g. re-clicking the already
   // open session after manually switching worktrees.
   const handleSelectSessionFromList = useCallback((s: SessionInfo) => {
+    setOpenSwipeSessionId(null);
     if (s.id === selectedSessionId) return;
     if (s.cwd) setSelectedCwd(s.cwd);
     if (!s.path) return;
@@ -854,7 +844,7 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
       const removeData = await removeResponse.json().catch(() => ({})) as { projects?: string[]; error?: string };
       if (!removeResponse.ok || removeData.error) throw new Error(removeData.error ?? `HTTP ${removeResponse.status}`);
 
-      setAllSessions((current) => current.filter((session) => (session.projectRoot ?? session.cwd) !== projectPendingRemoval));
+      removeSessions(sessions.map((session) => session.id));
       setKnownProjects(removeData.projects ?? []);
       setCollapsedProjects((current) => {
         const next = new Set(current);
@@ -874,12 +864,13 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
     } finally {
       setProjectRemovalBusy(false);
     }
-  }, [allSessions, commitCustomPath, loadSessions, onSessionDeleted, projectPendingRemoval, projectRemovalBusy, selectedProject, visibleProjects]);
+  }, [allSessions, commitCustomPath, loadSessions, onSessionDeleted, projectPendingRemoval, projectRemovalBusy, removeSessions, selectedProject, visibleProjects]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
       {customPathOpen && (
         <DirectoryPicker
+          initialPath={customPathValue || undefined}
           busy={customPathValidating}
           error={customPathError}
           onCancel={() => {
@@ -1435,6 +1426,9 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
             runningSessionIds,
             unreadSessionIds,
             pinnedSessionIds: pinnedIds,
+            isMobile,
+            openSwipeSessionId,
+            onOpenSwipeSessionChange: (sessionId, open) => setOpenSwipeSessionId(open ? sessionId : null),
             onSelectSession: handleSelectSessionFromList,
             onRenamed: loadSessions,
             onMoveSession: moveSession,
@@ -1581,7 +1575,11 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
         >
           <div style={{ display: "flex", alignItems: "center", flexShrink: 0 }}>
             <button
-              onClick={() => setExplorerOpen((v) => !v)}
+              onClick={() => setExplorerOpen((open) => {
+                const nextOpen = !open;
+                saveExplorerOpen(nextOpen);
+                return nextOpen;
+              })}
               style={{
                 display: "flex",
                 alignItems: "center",
@@ -1620,6 +1618,19 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
                   <circle cx="12" cy="12" r="3" />
                   <path d="M3 12h6" />
                   <path d="M15 12h6" />
+                </svg>
+              </ToolbarIconButton>
+            )}
+            {explorerOpen && (
+              <ToolbarIconButton
+                onClick={() => setFileSearchOpen((open) => !open)}
+                title={t("sidebar.searchFiles")}
+                ariaPressed={fileSearchOpen}
+                color={fileSearchOpen ? "var(--accent)" : "var(--text-dim)"}
+                background={fileSearchOpen ? "var(--bg-selected)" : "none"}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" />
                 </svg>
               </ToolbarIconButton>
             )}
@@ -1675,6 +1686,8 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
                 onUploadBusyChange={setExplorerUploadBusy}
                 changesCollapsed={changesCollapsed}
                 onChangesCountChange={setChangesCount}
+                fileSearchOpen={fileSearchOpen}
+                onFileSearchOpenChange={setFileSearchOpen}
               />
             </div>
           )}
@@ -1688,6 +1701,9 @@ interface SessionTreeSharedProps {
   runningSessionIds: ReadonlySet<string>;
   unreadSessionIds: Set<string>;
   pinnedSessionIds: Set<string>;
+  isMobile: boolean;
+  openSwipeSessionId: string | null;
+  onOpenSwipeSessionChange: (sessionId: string, open: boolean) => void;
   onSelectSession: (session: SessionInfo) => void;
   onRenamed?: () => void;
   onMoveSession: (sourceId: string, targetId: string) => void;
@@ -1704,14 +1720,14 @@ function SessionTreeItem({
   treeProps: SessionTreeSharedProps;
   depth: number;
 }) {
-  const { selectedSessionId, runningSessionIds, unreadSessionIds, pinnedSessionIds, onSelectSession, onRenamed, onMoveSession, onTogglePinned, onSessionDeleted } = treeProps;
+  const { selectedSessionId, runningSessionIds, unreadSessionIds, pinnedSessionIds, isMobile, openSwipeSessionId, onOpenSwipeSessionChange, onSelectSession, onRenamed, onMoveSession, onTogglePinned, onSessionDeleted } = treeProps;
   const [collapsed, setCollapsed] = useState(false);
   const hasChildren = node.children.length > 0;
 
   return (
     <div>
       <div
-        draggable
+        draggable={!isMobile}
         onDragStart={(event) => {
           event.dataTransfer.effectAllowed = "move";
           event.dataTransfer.setData("text/plain", node.session.id);
@@ -1742,18 +1758,29 @@ function SessionTreeItem({
         )}
         <SessionItem
           session={node.session}
-          isSelected={node.session.id === selectedSessionId}
-          isRunning={runningSessionIds.has(node.session.id)}
-          isUnread={unreadSessionIds.has(node.session.id)}
-          isPinned={pinnedSessionIds.has(node.session.id)}
-          onClick={() => onSelectSession(node.session)}
-          onRenamed={onRenamed}
-          onDeleted={(id) => onSessionDeleted?.(id)}
-          onTogglePinned={() => onTogglePinned(node.session.id)}
-          depth={depth}
-          hasChildren={hasChildren}
-          collapsed={collapsed}
-          onToggleCollapse={() => setCollapsed((v) => !v)}
+          status={{
+            isSelected: node.session.id === selectedSessionId,
+            isRunning: runningSessionIds.has(node.session.id),
+            isUnread: unreadSessionIds.has(node.session.id),
+            isPinned: pinnedSessionIds.has(node.session.id),
+          }}
+          mobile={{
+            enabled: isMobile,
+            swipeOpen: openSwipeSessionId === node.session.id,
+            onSwipeOpenChange: (open) => onOpenSwipeSessionChange(node.session.id, open),
+          }}
+          actions={{
+            onClick: () => onSelectSession(node.session),
+            onRenamed,
+            onDeleted: (id) => onSessionDeleted?.(id),
+            onTogglePinned: () => onTogglePinned(node.session.id),
+          }}
+          tree={{
+            depth,
+            hasChildren,
+            collapsed,
+            onToggleCollapse: () => setCollapsed((value) => !value),
+          }}
         />
       </div>
       {hasChildren && !collapsed && (
@@ -1772,71 +1799,6 @@ function SessionTreeItem({
   );
 }
 
-function RunningSessionIndicator() {
-  const { t } = useI18n();
-  return (
-    <span
-      title={t("sidebar.agentRunning")}
-      aria-label={t("sidebar.agentRunning")}
-      style={{
-        width: 14,
-        height: 14,
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        flexShrink: 0,
-        color: "var(--accent)",
-      }}
-    >
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ display: "block" }}>
-        <g>
-          <path
-            d="M21 12a9 9 0 1 1-3.8-7.4"
-            stroke="currentColor"
-            strokeWidth="2.8"
-            strokeLinecap="round"
-          />
-          <animateTransform
-            attributeName="transform"
-            type="rotate"
-            from="0 12 12"
-            to="360 12 12"
-            dur="0.9s"
-            repeatCount="indefinite"
-          />
-        </g>
-      </svg>
-    </span>
-  );
-}
-
-function UnreadSessionIndicator() {
-  const { t } = useI18n();
-  return (
-    <span
-      title={t("sidebar.newActivity")}
-      aria-label={t("sidebar.newSessionActivity")}
-      style={{
-        width: 14,
-        height: 14,
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        flexShrink: 0,
-        color: "#0891b2",
-      }}
-    >
-      <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true" style={{ display: "block" }}>
-        <circle cx="7" cy="7" r="2.5" fill="currentColor" />
-        <circle cx="7" cy="7" r="3" stroke="currentColor" strokeWidth="1.4" opacity="0.32">
-          <animate attributeName="r" values="3;6;3" dur="1.6s" repeatCount="indefinite" />
-          <animate attributeName="opacity" values="0.32;0;0.32" dur="1.6s" repeatCount="indefinite" />
-        </circle>
-      </svg>
-    </span>
-  );
-}
-
 function showProjectActivity(
   activity: { running: number; unread: number } | undefined,
   t: (key: string) => string,
@@ -1847,388 +1809,5 @@ function showProjectActivity(
       {activity.running > 0 && <span title={t("sidebar.agentRunning")} aria-label={`${t("sidebar.agentRunning")} (${activity.running})`} style={{ color: "var(--accent)" }}>~{activity.running}</span>}
       {activity.unread > 0 && <span title={t("sidebar.newSessionActivity")} aria-label={`${t("sidebar.newSessionActivity")} (${activity.unread})`} style={{ color: "#0891b2" }}>+{activity.unread}</span>}
     </span>
-  );
-}
-
-function SessionItem({
-  session,
-  isSelected,
-  isRunning,
-  isUnread,
-  isPinned,
-  onClick,
-  onRenamed,
-  onDeleted,
-  onTogglePinned,
-  depth = 0,
-  hasChildren = false,
-  collapsed = false,
-  onToggleCollapse,
-}: {
-  session: SessionInfo;
-  isSelected: boolean;
-  isRunning?: boolean;
-  isUnread?: boolean;
-  isPinned?: boolean;
-  onClick: () => void;
-  onRenamed?: () => void;
-  onDeleted?: (id: string) => void;
-  onTogglePinned?: () => void;
-  depth?: number;
-  hasChildren?: boolean;
-  collapsed?: boolean;
-  onToggleCollapse?: () => void;
-}) {
-  const { t } = useI18n();
-  const [hovered, setHovered] = useState(false);
-  const [renaming, setRenaming] = useState(false);
-  const [renameValue, setRenameValue] = useState("");
-  const [confirmDelete, setConfirmDelete] = useState(false);
-  const [deleting, setDeleting] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  const title = session.name || session.firstMessage.slice(0, 50) || session.id.slice(0, 12);
-
-  const startRename = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
-    setRenameValue(session.name ?? "");
-    setRenaming(true);
-    setTimeout(() => inputRef.current?.select(), 0);
-  }, [session.name]);
-
-  const commitRename = useCallback(async () => {
-    const name = renameValue.trim();
-    setRenaming(false);
-    if (name === (session.name ?? "")) return;
-    try {
-      await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name }),
-      });
-      onRenamed?.();
-    } catch {
-      // ignore
-    }
-  }, [renameValue, session.id, session.name, onRenamed]);
-
-  const performDelete = useCallback(async () => {
-    setConfirmDelete(false);
-    setDeleting(true);
-    try {
-      const res = await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, { method: "DELETE" });
-      if (!res.ok) {
-        // 删除失败（如移入回收站出错）时保留会话，避免列表闪动和选中态丢失
-        console.error(`删除会话失败: HTTP ${res.status}`);
-        return;
-      }
-      onDeleted?.(session.id);
-    } catch (e) {
-      console.error("删除会话失败", e);
-    } finally {
-      setDeleting(false);
-    }
-  }, [session.id, onDeleted]);
-
-
-  const handleDeleteClick = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (e.shiftKey) {
-      void performDelete();
-    } else {
-      setConfirmDelete(true);
-    }
-  }, [performDelete]);
-
-  const handleDeleteConfirm = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
-    void performDelete();
-  }, [performDelete]);
-
-  const handleDeleteCancel = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
-    setConfirmDelete(false);
-  }, []);
-
-  // Fixed-height outer wrapper — content swaps in place so the list never reflows
-  const ITEM_HEIGHT = 54;
-
-  return (
-    <div
-      onClick={confirmDelete || renaming ? undefined : onClick}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => { setHovered(false); }}
-      style={{
-        height: ITEM_HEIGHT,
-        display: "flex",
-        position: "relative",
-        alignItems: "center",
-        paddingLeft: depth > 0 ? depth * 12 + 14 : 14,
-        paddingRight: isPinned ? 32 : 8,
-        cursor: confirmDelete || renaming ? "default" : "pointer",
-        background: confirmDelete
-          ? "rgba(239,68,68,0.06)"
-          : isSelected ? "var(--bg-selected)" : hovered ? "var(--bg-hover)" : "transparent",
-        borderLeft: confirmDelete
-          ? "2px solid #ef4444"
-          : isSelected ? "2px solid var(--accent)" : "2px solid transparent",
-        transition: "background 0.1s",
-        opacity: deleting ? 0.5 : 1,
-        gap: 6,
-        overflow: "hidden",
-      }}
-    >
-      {isPinned && (
-        <span
-          aria-hidden="true"
-          style={{
-            position: "absolute",
-            top: 0,
-            right: 0,
-            width: 24,
-            height: 16,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            background: "#eab308",
-            borderBottomLeftRadius: 5,
-            color: "#713f12",
-            boxShadow: "0 1px 2px rgba(161,98,7,0.24)",
-            pointerEvents: "none",
-            zIndex: 1,
-          }}
-        >
-          <PinIcon size={12} strokeWidth={2.4} aria-hidden="true" style={{ transform: "rotate(45deg)" }} />
-        </span>
-      )}
-      {confirmDelete ? (
-        /* ── Delete confirmation: same height, two flat buttons ── */
-        <>
-          <div style={{ flex: 1, minWidth: 0, fontSize: 12, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {t("sidebar.deleteSession", { title: title.slice(0, 22) + (title.length > 22 ? "…" : "") })}
-          </div>
-          <div style={{ display: "flex", gap: 5, flexShrink: 0 }}>
-            <button
-              onClick={handleDeleteConfirm}
-              style={{
-                display: "flex", alignItems: "center", justifyContent: "center", gap: 4,
-                height: 30, padding: "0 11px",
-                background: "#ef4444", border: "none",
-                borderRadius: 6, color: "#fff",
-                cursor: "pointer", fontSize: 12, fontWeight: 600,
-                whiteSpace: "nowrap",
-              }}
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="3 6 5 6 21 6" />
-                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-                <path d="M10 11v6M14 11v6" />
-                <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
-              </svg>
-              {t("sidebar.delete")}
-            </button>
-            <button
-              onClick={handleDeleteCancel}
-              style={{
-                display: "flex", alignItems: "center", justifyContent: "center",
-                height: 30, padding: "0 11px",
-                background: "var(--bg)", border: "1px solid var(--border)",
-                borderRadius: 6, color: "var(--text-muted)",
-                cursor: "pointer", fontSize: 12, fontWeight: 500,
-                whiteSpace: "nowrap",
-              }}
-            >
-              {t("sidebar.cancel")}
-            </button>
-          </div>
-        </>
-      ) : renaming ? (
-        /* ── Rename: input fills the same row ── */
-        <input
-          ref={inputRef}
-          value={renameValue}
-          onChange={(e) => setRenameValue(e.target.value)}
-          onBlur={commitRename}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") commitRename();
-            if (e.key === "Escape") setRenaming(false);
-          }}
-          autoFocus
-          style={{
-            flex: 1,
-            fontSize: 12,
-            padding: "5px 8px",
-            border: "1px solid var(--accent)",
-            borderRadius: 5,
-            outline: "none",
-            background: "var(--bg)",
-            color: "var(--text)",
-            height: 30,
-          }}
-        />
-      ) : (
-        /* ── Normal view ── */
-        <>
-          {/* 子代理会话使用统一的机器人标识。 */}
-          {depth > 0 && (
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-              <rect x="5" y="7" width="14" height="11" rx="2" />
-              <path d="M9 11h.01M15 11h.01M9 15h6M12 7V4M10 4h4" />
-            </svg>
-          )}
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 5,
-                minWidth: 0,
-                fontSize: 12,
-                fontWeight: isSelected ? 500 : 400,
-                lineHeight: 1.4,
-                color: "var(--text)",
-              }}
-              title={title}
-            >
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
-                {title}
-              </span>
-            </div>
-            <div style={{ marginTop: 2, display: "flex", alignItems: "center", gap: 8, color: "var(--text-dim)", fontSize: 11, minWidth: 0 }}>
-              {isRunning ? (
-                <RunningSessionIndicator />
-              ) : isUnread ? (
-                <UnreadSessionIndicator />
-              ) : (
-                <span title={session.modified}>{formatRelativeTime(session.modified)}</span>
-              )}
-              <span>{t("sidebar.messagesCount", { count: session.messageCount })}</span>
-              {session.currentBranch && (
-                <span
-                  title={`${session.isWorktree ? "Worktree" : "当前分支"}: ${session.currentBranch}\n${session.cwd}`}
-                  style={{ display: "flex", alignItems: "center", gap: 3, color: "var(--accent)", minWidth: 0, overflow: "hidden" }}
-                >
-                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                    <line x1="6" y1="3" x2="6" y2="15" />
-                    <circle cx="18" cy="6" r="3" />
-                    <circle cx="6" cy="18" r="3" />
-                    <path d="M18 9a9 9 0 0 1-9 9" />
-                  </svg>
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{session.currentBranch}</span>
-                </span>
-              )}
-            </div>
-          </div>
-
-          {/* Collapse toggle — always visible when has children */}
-          {hasChildren && (
-            <button
-              onClick={(e) => { e.stopPropagation(); onToggleCollapse?.(); }}
-              title={collapsed ? "Expand forks" : "Collapse forks"}
-              style={{
-                display: "flex", alignItems: "center", justifyContent: "center",
-                width: 20, height: 20, padding: 0, flexShrink: 0,
-                background: "none", border: "none",
-                color: "var(--text-dim)", cursor: "pointer",
-                transform: collapsed ? "rotate(-90deg)" : "none",
-                transition: "transform 0.15s",
-              }}
-            >
-              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="2 3.5 5 6.5 8 3.5" />
-              </svg>
-            </button>
-          )}
-
-          {/* Action buttons — shown on hover, always for the selected session */}
-          {(hovered || isSelected) && (
-            <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
-              <button
-                onClick={(e) => { e.stopPropagation(); onTogglePinned?.(); }}
-                title={t(isPinned ? "sidebar.unpin" : "sidebar.pin")}
-                aria-label={t(isPinned ? "sidebar.unpin" : "sidebar.pin")}
-                aria-pressed={isPinned}
-                style={{
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  width: 32, height: 32, padding: 0,
-                  background: isPinned ? "color-mix(in srgb, #f59e0b 12%, var(--bg-hover))" : "var(--bg-hover)",
-                  border: `1px solid ${isPinned ? "rgba(217,119,6,0.42)" : "var(--border)"}`,
-                  borderRadius: 7, color: isPinned ? "#d97706" : "var(--text-muted)",
-                  cursor: "pointer", flexShrink: 0,
-                  transition: "background 0.12s, color 0.12s, border-color 0.12s",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = "color-mix(in srgb, #f59e0b 18%, var(--bg-hover))";
-                  e.currentTarget.style.color = "#d97706";
-                  e.currentTarget.style.borderColor = "rgba(217,119,6,0.5)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = isPinned ? "color-mix(in srgb, #f59e0b 12%, var(--bg-hover))" : "var(--bg-hover)";
-                  e.currentTarget.style.color = isPinned ? "#d97706" : "var(--text-muted)";
-                  e.currentTarget.style.borderColor = isPinned ? "rgba(217,119,6,0.42)" : "var(--border)";
-                }}
-              >
-                <PinIcon size={14} strokeWidth={2} aria-hidden="true" style={{ transform: "rotate(45deg)" }} />
-              </button>
-              <button
-                onClick={startRename}
-                title={t("sidebar.rename")}
-                style={{
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  width: 32, height: 32, padding: 0,
-                  background: "var(--bg-hover)", border: "1px solid var(--border)",
-                  borderRadius: 7, color: "var(--text-muted)",
-                  cursor: "pointer", flexShrink: 0,
-                  transition: "background 0.12s, color 0.12s, border-color 0.12s",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = "var(--bg-selected)";
-                  e.currentTarget.style.color = "var(--accent)";
-                  e.currentTarget.style.borderColor = "rgba(37,99,235,0.35)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = "var(--bg-hover)";
-                  e.currentTarget.style.color = "var(--text-muted)";
-                  e.currentTarget.style.borderColor = "var(--border)";
-                }}
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
-                </svg>
-              </button>
-              <button
-                onClick={handleDeleteClick}
-                title={t("sidebar.deleteWithShiftClick")}
-                style={{
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  width: 32, height: 32, padding: 0,
-                  background: "var(--bg-hover)", border: "1px solid var(--border)",
-                  borderRadius: 7, color: "var(--text-muted)",
-                  cursor: "pointer", flexShrink: 0,
-                  transition: "background 0.12s, color 0.12s, border-color 0.12s",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = "rgba(239,68,68,0.08)";
-                  e.currentTarget.style.color = "#ef4444";
-                  e.currentTarget.style.borderColor = "rgba(239,68,68,0.35)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = "var(--bg-hover)";
-                  e.currentTarget.style.color = "var(--text-muted)";
-                  e.currentTarget.style.borderColor = "var(--border)";
-                }}
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="3 6 5 6 21 6" />
-                  <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-                  <path d="M10 11v6M14 11v6" />
-                  <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
-                </svg>
-              </button>
-            </div>
-          )}
-        </>
-      )}
-    </div>
   );
 }

@@ -11,6 +11,7 @@ import {
 } from "@/lib/chat-scroll-position";
 
 const BOTTOM_THRESHOLD_PX = 48;
+const STREAMING_SCROLL_INTERVAL_MS = 50;
 const PROGRAMMATIC_SCROLL_IGNORE_MS = 700;
 const USER_SCROLL_INTENT_MS = 1200;
 const SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " ", "Space", "Spacebar"]);
@@ -23,7 +24,6 @@ interface UseChatScrollFollowOptions {
   loading: boolean;
   messageCount: number;
   positionRequest: ChatScrollPositionRequest | null;
-  streamingContent: unknown;
 }
 
 function useUserScrollFollow(
@@ -143,7 +143,6 @@ export function useChatScrollFollow({
   loading,
   messageCount,
   positionRequest,
-  streamingContent,
 }: UseChatScrollFollowOptions) {
   const lastRenderedMessageRef = useRef<HTMLDivElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
@@ -167,11 +166,17 @@ export function useChatScrollFollow({
   const scrollToLatest = useCallback((behavior: ScrollBehavior = "smooth") => {
     const container = scrollContainerRef.current;
     if (!container) return;
+    const targetTop = getBottomScrollTop(container.scrollHeight, container.clientHeight);
+    if (Math.abs(container.scrollTop - targetTop) < 1) {
+      beginProgrammaticScroll();
+      markNearBottom();
+      return;
+    }
     beginProgrammaticScroll();
     // 这是明确的“跳到最新”操作，先同步按钮状态，等待最终 scroll 事件校正实际位置。
     markNearBottom();
     container.scrollTo({
-      top: getBottomScrollTop(container.scrollHeight, container.clientHeight),
+      top: targetTop,
       behavior,
     });
   }, [beginProgrammaticScroll, markNearBottom]);
@@ -209,8 +214,8 @@ export function useChatScrollFollow({
     container.scrollTo({ top: absoluteTop - 16, behavior: "smooth" });
   }, [beginProgrammaticScroll]);
 
-  // 流式消息高度变化时，浏览器不一定发出 scroll 事件；用内容尺寸变化
-  // 重新校正“接近底部”和跟随状态，避免底部按钮停留在过期状态。
+  // 流式消息高度变化时统一完成状态校正和自动跟随，并限制刷新频率。
+  // 这样无需让每个 token 各自触发布局读取和滚动写入。
   useEffect(() => {
     if (!agentRunning || !isStreaming) return;
     const container = scrollContainerRef.current;
@@ -220,13 +225,18 @@ export function useChatScrollFollow({
       return;
     }
 
-    let frame: number | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let lastRunAt = 0;
     const scheduleSync = () => {
-      if (frame !== null) return;
-      frame = requestAnimationFrame(() => {
-        frame = null;
+      if (timer !== null) return;
+      const delay = Math.max(0, STREAMING_SCROLL_INTERVAL_MS - (performance.now() - lastRunAt));
+      timer = setTimeout(() => {
+        timer = null;
+        lastRunAt = performance.now();
+        const shouldFollow = isFollowingRef.current;
         syncScrollPosition();
-      });
+        if (shouldFollow) scrollToLatest("instant");
+      }, delay);
     };
     const observer = typeof ResizeObserver === "undefined"
       ? null
@@ -235,9 +245,9 @@ export function useChatScrollFollow({
     scheduleSync();
     return () => {
       observer?.disconnect();
-      if (frame !== null) cancelAnimationFrame(frame);
+      if (timer !== null) clearTimeout(timer);
     };
-  }, [agentRunning, isStreaming, messageCount, scrollContainerRef, syncScrollPosition]);
+  }, [agentRunning, isFollowingRef, isStreaming, messageCount, scrollContainerRef, scrollToLatest, syncScrollPosition]);
 
   useEffect(() => {
     const wasRunning = previousAgentRunningRef.current;
@@ -271,15 +281,6 @@ export function useChatScrollFollow({
       if (layoutFrame !== null) cancelAnimationFrame(layoutFrame);
     };
   }, [agentRunning, isFollowingRef, messageCount, positionRequest, scrollToInitialPosition, scrollToLatest, scrollUserMessageToTop]);
-
-  useEffect(() => {
-    if (!agentRunning || !isStreaming) return;
-    const frame = requestAnimationFrame(() => {
-      syncScrollPosition();
-      if (isFollowingRef.current) scrollToLatest("instant");
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [agentRunning, isFollowingRef, isStreaming, scrollToLatest, streamingContent, syncScrollPosition]);
 
   return {
     isFollowing,

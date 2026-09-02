@@ -13,6 +13,8 @@ import { getAssistantErrorMessage, isDisplayableAssistantBlock } from "@/lib/mes
 import { parseUnifiedPatch, type SplitDiffCell } from "@/lib/patch";
 import { parseSkillMessage } from "@/lib/skill-block";
 import { getLongUserMessageStats } from "@/lib/long-user-message";
+import { TurnWrittenFiles } from "./TurnWrittenFiles";
+import type { WrittenFile } from "@/lib/turn-written-files";
 import type {
   AgentMessage,
   UserMessage,
@@ -29,6 +31,74 @@ import type {
 
 const MAX_THINKING_CACHE_ENTRIES = 100;
 const thinkingContentCache = new Map<string, Promise<string>>();
+const MAX_MARKDOWN_CHARS = 100_000;
+const CJK_PATTERN = /[\u3000-\u30ff\u3400-\u9fff\uf900-\ufaff\u{20000}-\u{2fa1f}\uac00-\ud7af]/u;
+
+interface TokenEstimateCacheEntry {
+  text: string;
+  tokens: number;
+}
+
+function estimateTokens(text: string): number {
+  let cjk = 0;
+  let rest = 0;
+  for (const character of text) {
+    if (CJK_PATTERN.test(character)) cjk++;
+    else rest++;
+  }
+  return cjk + rest / 4;
+}
+
+function getTokenEstimateText(block: AssistantContentBlock): string | null {
+  if (block.type === "text") return block.text;
+  if (block.type === "thinking") return block.thinking;
+  if (block.type === "toolCall") return block.rawInput ?? JSON.stringify(block.input ?? {});
+  return null;
+}
+
+function estimateUpdatedTokens(previous: TokenEstimateCacheEntry | undefined, text: string): number {
+  if (!previous || !text.startsWith(previous.text)) return estimateTokens(text);
+  let baseTokens = previous.tokens;
+  let suffixStart = previous.text.length;
+  if (
+    suffixStart > 0
+    && suffixStart < text.length
+    && previous.text.charCodeAt(suffixStart - 1) >= 0xd800
+    && previous.text.charCodeAt(suffixStart - 1) <= 0xdbff
+    && text.charCodeAt(suffixStart) >= 0xdc00
+    && text.charCodeAt(suffixStart) <= 0xdfff
+  ) {
+    baseTokens -= 1 / 4;
+    suffixStart--;
+  }
+  return baseTokens + estimateTokens(text.slice(suffixStart));
+}
+
+function formatMessageBytes(size: number): string {
+  if (size >= 1_000_000) return `${(size / 1_000_000).toFixed(1)} MB`;
+  if (size >= 1_000) return `${Math.round(size / 1_000)} KB`;
+  return `${size} B`;
+}
+
+function SafeMarkdownBody({ children, className, ...props }: React.ComponentProps<typeof MarkdownBody>) {
+  const { t } = useI18n();
+  const [showRaw, setShowRaw] = useState(false);
+  if (children.length <= MAX_MARKDOWN_CHARS) {
+    return <MarkdownBody className={className} {...props}>{children}</MarkdownBody>;
+  }
+  if (!showRaw) {
+    return (
+      <button type="button" onClick={() => setShowRaw(true)} style={{ display: "block", width: "100%", margin: "4px 0", padding: "7px 10px", border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg-panel)", color: "var(--text-muted)", cursor: "pointer", fontSize: 12, textAlign: "left" }}>
+        {t("i18n.largeMessageReveal", { size: formatMessageBytes(children.length) })}
+      </button>
+    );
+  }
+  return (
+    <div className={className} style={{ maxHeight: 420, overflow: "auto", fontSize: 12, lineHeight: 1.5 }}>
+      <pre style={{ margin: 0, padding: "8px 10px", whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>{children}</pre>
+    </div>
+  );
+}
 
 function downloadTextFile(content: string): void {
   const url = URL.createObjectURL(new Blob([content], { type: "text/plain;charset=utf-8" }));
@@ -84,6 +154,8 @@ interface Props {
   showTimestamp?: boolean;
   prevTimestamp?: number;
   sessionId?: string;
+  writtenFiles?: WrittenFile[];
+  visibleBlockOffset?: number;
 }
 function haveSameRelevantToolResults(
   message: AgentMessage,
@@ -99,12 +171,12 @@ function haveSameRelevantToolResults(
   return true;
 }
 
-export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, onFork, forking, showTimestamp, prevTimestamp, sessionId }: Props) {
+export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, onFork, forking, showTimestamp, prevTimestamp, sessionId, writtenFiles, visibleBlockOffset }: Props) {
   if (message.role === "user") {
     return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} />;
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} onFork={onFork} forking={forking} />;
+    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} onFork={onFork} forking={forking} writtenFiles={writtenFiles} visibleBlockOffset={visibleBlockOffset} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
@@ -132,7 +204,9 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     && prev.forking === next.forking
     && prev.showTimestamp === next.showTimestamp
     && prev.prevTimestamp === next.prevTimestamp
-    && prev.sessionId === next.sessionId;
+    && prev.sessionId === next.sessionId
+    && prev.writtenFiles === next.writtenFiles
+    && prev.visibleBlockOffset === next.visibleBlockOffset;
 });
 
 function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking }: {
@@ -288,6 +362,8 @@ function AssistantMessageView({
   entryId,
   onFork,
   forking,
+  writtenFiles,
+  visibleBlockOffset = 0,
 }: {
   message: AssistantMessage;
   isStreaming?: boolean;
@@ -301,20 +377,44 @@ function AssistantMessageView({
   entryId?: string;
   onFork?: (entryId: string, draft?: ChatDraft) => void;
   forking?: boolean;
+  writtenFiles?: WrittenFile[];
+  visibleBlockOffset?: number;
 }) {
   const { t } = useI18n();
   const time = showTimestamp ? formatTime(message.timestamp) : null;
-  const blockItems = (message.content ?? [])
+  const allBlockItems = (message.content ?? [])
     .map((block, originalIndex) => ({ block, originalIndex }))
     .filter(({ block }) => isDisplayableAssistantBlock(block, { isStreaming }));
+  const blockItems = allBlockItems.slice(Math.max(0, visibleBlockOffset));
+  const allBlocks = allBlockItems.map(({ block }) => block);
   const blocks = blockItems.map(({ block }) => block);
   const providerError = getAssistantErrorMessage(message, { isStreaming });
   const [hovered, setHovered] = useState(false);
   const [copied, setCopied] = useState(false);
   const streamStartRef = useRef<number | null>(null);
   const [tps, setTps] = useState<number | null>(null);
-  const blockItemsRef = useRef(blockItems);
-  blockItemsRef.current = blockItems;
+  const blockItemsRef = useRef(allBlockItems);
+  blockItemsRef.current = allBlockItems;
+  const tokenEstimateCacheRef = useRef<Map<number, TokenEstimateCacheEntry>>(new Map());
+  const estimatedTokens = useMemo(() => {
+    if (!isStreaming) {
+      tokenEstimateCacheRef.current = new Map();
+      return 0;
+    }
+    const nextCache = new Map<number, TokenEstimateCacheEntry>();
+    let total = 0;
+    for (const { block, originalIndex } of allBlockItems) {
+      const text = getTokenEstimateText(block);
+      if (text === null) continue;
+      const tokens = estimateUpdatedTokens(tokenEstimateCacheRef.current.get(originalIndex), text);
+      nextCache.set(originalIndex, { text, tokens });
+      total += tokens;
+    }
+    tokenEstimateCacheRef.current = nextCache;
+    return total;
+  }, [allBlockItems, isStreaming]);
+  const estimatedTokensRef = useRef(estimatedTokens);
+  estimatedTokensRef.current = estimatedTokens;
 
   // Streaming-based timing for thinking blocks
   const blockStartTimesRef = useRef<Map<number, number>>(new Map());
@@ -343,7 +443,7 @@ function AssistantMessageView({
     return map;
   }, [toolResults, message.timestamp]);
 
-  const textContent = blocks
+  const textContent = allBlocks
     .filter((b): b is TextContent => b.type === "text")
     .map((b) => b.text)
     .join("\n");
@@ -355,7 +455,7 @@ function AssistantMessageView({
     });
   };
 
-  const toolCallsComplete = blocks.every((block) => block.type !== "toolCall" || toolResults?.has(block.toolCallId));
+  const toolCallsComplete = allBlocks.every((block) => block.type !== "toolCall" || toolResults?.has(block.toolCallId));
   const canFork = !!entryId && !!onFork && !isStreaming && toolCallsComplete;
 
   useEffect(() => {
@@ -375,7 +475,6 @@ function AssistantMessageView({
     }
     const tick = () => {
       const items = blockItemsRef.current;
-      const bs = items.map(({ block }) => block);
       const now = Date.now();
 
       // Record start time for each block the first time we see it
@@ -400,16 +499,11 @@ function AssistantMessageView({
         return changed ? next : prev;
       });
 
-      let chars = 0;
-      for (const b of bs) {
-        if (b.type === "text") chars += (b as TextContent).text?.length ?? 0;
-        else if (b.type === "thinking") chars += (b as ThinkingContent).thinking?.length ?? 0;
-        else if (b.type === "toolCall") chars += JSON.stringify((b as ToolCallContent).input ?? {}).length;
-      }
-      if (chars === 0) return;
+      const tokens = estimatedTokensRef.current;
+      if (tokens === 0) return;
       if (streamStartRef.current === null) streamStartRef.current = now;
       const elapsed = (now - streamStartRef.current) / 1000;
-      if (elapsed > 0.5) setTps(chars / 4 / elapsed);
+      if (elapsed > 0.5) setTps(tokens / elapsed);
     };
     const id = setInterval(tick, 300);
     return () => clearInterval(id);
@@ -456,13 +550,7 @@ function AssistantMessageView({
           <span>{modelNames?.[`${message.provider}:${message.model}`] ?? modelNames?.[message.model] ?? message.model}</span>
         )}
         {isStreaming && (() => {
-          let chars = 0;
-          for (const b of blocks) {
-            if (b.type === "text") chars += (b as TextContent).text?.length ?? 0;
-            else if (b.type === "thinking") chars += (b as ThinkingContent).thinking?.length ?? 0;
-            else if (b.type === "toolCall") chars += JSON.stringify((b as ToolCallContent).input ?? {}).length;
-          }
-          const est = Math.round(chars / 4);
+          const est = Math.round(estimatedTokens);
           return (
             <>
 
@@ -516,6 +604,10 @@ function AssistantMessageView({
         </div>
       )}
 
+      {writtenFiles && writtenFiles.length > 0 && (
+        <TurnWrittenFiles files={writtenFiles} onOpenFile={onOpenFile} />
+      )}
+
       <div style={{
         display: "flex", alignItems: "center", gap: 8, marginTop: 4,
       }}>
@@ -553,7 +645,7 @@ function BlockView({ block, toolResults, isStreaming, streamingDuration, toolCal
 }
 
 function TextBlock({ block, isStreaming, cwd, onOpenFile }: { block: TextContent; isStreaming?: boolean; cwd?: string; onOpenFile?: (filePath: string) => void }) {
-  return <MarkdownBody isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile}>{block.text}</MarkdownBody>;
+  return <SafeMarkdownBody isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile}>{block.text}</SafeMarkdownBody>;
 }
 
 function ImageBlock({ block }: { block: ImageContent }) {
@@ -643,8 +735,10 @@ function ThinkingBlock({ block, duration, sessionId, entryId, blockIndex }: {
 
 
 function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number }) {
+  const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
-  const inputStr = JSON.stringify(block.input, null, 2);
+  const inputStr = block.rawInput ?? JSON.stringify(block.input, null, 2);
+  const isStreamingInput = block.rawInput !== undefined;
   const isEditTool = isEditToolName(block.toolName);
   const resultDiff = result && !result.isError ? getResultDiff(result) : null;
 
@@ -652,6 +746,7 @@ function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; re
   const resultText = result
     ? result.content.filter((b): b is { type: "text"; text: string } => b.type === "text").map((b) => b.text).join("\n")
     : null;
+  const resultImages = getMessageImages(result?.content ?? []);
   const resultIsEmpty = resultText === null ? false : (resultText.trim() === "(no output)" || resultText.trim() === "");
   const isError = result?.isError ?? false;
 
@@ -687,7 +782,7 @@ function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; re
           {block.toolName}
         </span>
         <span style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
-          {getToolPreview(block)}
+          {isStreamingInput ? t("chat.generatingToolInput") : getToolPreview(block)}
         </span>
         {duration !== undefined && (
           <span style={{ fontSize: 11, color: "var(--text-dim)", flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>{duration}s</span>
@@ -698,7 +793,7 @@ function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; re
       </button>
 
       {/* ── Expanded: input args ── */}
-      {expanded && !isEditTool && (
+      {expanded && (isStreamingInput || !isEditTool) && (
         <pre
           style={{
             margin: 0,
@@ -726,6 +821,7 @@ function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; re
         ) : (
           <PairedResult
             text={resultText ?? ""}
+            images={resultImages}
             isEmpty={resultIsEmpty}
             isError={isError}
           />
@@ -981,12 +1077,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function PairedResult({ text, isEmpty, isError }: {
+function PairedResult({ text, images, isEmpty, isError }: {
   text: string;
+  images: ImageContent[];
   isEmpty: boolean;
   isError: boolean;
 }) {
   const { t } = useI18n();
+  const showText = !isEmpty || images.length === 0;
   return (
     <div
       style={{
@@ -994,7 +1092,12 @@ function PairedResult({ text, isEmpty, isError }: {
         background: isError ? "rgba(248,113,113,0.04)" : "var(--bg-subtle)",
       }}
     >
-      <pre
+      {images.length > 0 && (
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", padding: 10, background: "var(--bg)" }}>
+          {images.map((image, index) => <MessageImage key={index} image={image} variant="assistant" />)}
+        </div>
+      )}
+      {showText && <pre
         style={{
           margin: 0,
           padding: "8px 10px",
@@ -1011,7 +1114,7 @@ function PairedResult({ text, isEmpty, isError }: {
         }}
       >
          {isEmpty ? t("i18n.noOutput") : text}
-      </pre>
+      </pre>}
     </div>
   );
 }

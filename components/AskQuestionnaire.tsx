@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import type { AskQuestionnaireAnswer, AskQuestionnaireState } from "@/hooks/useAgentSession";
+import { normalizeAskQuestionnairePreview } from "@/lib/ask-questionnaire-preview";
 
 export function AskQuestionnaire({
   questionnaire,
@@ -116,7 +117,7 @@ export function AskQuestionnaire({
                     >
                       <span className="ask-questionnaire-choice">{selected ? "✓" : ""}</span>
                       <span><strong>{option.label}</strong><small>{option.description}</small></span>
-                      {option.preview && <pre>{option.preview}</pre>}
+                      {option.preview && <pre>{normalizeAskQuestionnairePreview(option.preview)}</pre>}
                     </button>
                   );
                 })}

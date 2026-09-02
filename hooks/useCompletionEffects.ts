@@ -11,6 +11,7 @@ interface CompletionEffectsOptions {
   notifySession: (title: string, body: string, sessionId?: string | null, options?: SessionNotificationOptions) => Promise<void>;
   title: string;
   body: string;
+  folderName?: string;
   onComplete?: () => void;
 }
 
@@ -22,6 +23,7 @@ export function useCompletionEffects({
   notifySession,
   title,
   body,
+  folderName,
   onComplete,
 }: CompletionEffectsOptions) {
   const handledRunIdRef = useRef<number | null>(null);
@@ -31,7 +33,7 @@ export function useCompletionEffects({
     handledRunIdRef.current = completion.runId;
 
     if (soundEnabled) playDoneSound();
-    void notifySession(title, body, completion.sessionId, { showWhenActive: true });
+    void notifySession(title, body, completion.sessionId, { folderName, showWhenActive: true });
     onComplete?.();
-  }, [body, completion, notifySession, onComplete, playDoneSound, soundEnabled, title]);
+  }, [body, completion, folderName, notifySession, onComplete, playDoneSound, soundEnabled, title]);
 }

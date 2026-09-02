@@ -13,7 +13,7 @@ import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
 import { cacheSessionPath, invalidateSessionListCache, resolveSessionPath } from "./session-reader";
 import { restoreShadowSessionSettingSafely, ShadowSessionSetting } from "./shadow-session-setting";
 import { parseShadowMindToggleCommand, SHADOW_MIND_SESSION_STATE } from "./shadow-session-protocol";
-import { createForkedSession } from "./session-fork";
+import { createClonedSession, createForkedSession } from "./session-fork";
 import { generateTitleForSessionFile } from "./session-file-title";
 import { getProjectTrustStatus, projectTrustReloadOptions } from "./project-trust";
 import { persistExplicitStartupPreferences } from "./startup-preferences";
@@ -261,6 +261,8 @@ export class AgentSessionWrapper {
   private listeners: EventListener[] = [];
   private pendingUiResponses = new Map<string, PendingUiResponse>();
   private pendingUiRequests = new Map<string, AgentEvent>();
+  // SSE 重连时必须先恢复 ask 的完整问题定义，否则逐题 select 会被前端误判为普通单题弹窗。
+  private activeAskToolStarts = new Map<string, AgentEvent>();
   private activeCustomUis = new Map<string, ActiveCustomUi>();
   private extensionStatuses = new Map<string, string>();
   private extensionWidgets = new Map<string, ExtensionWidgetItem>();
@@ -599,6 +601,7 @@ export class AgentSessionWrapper {
       this.closeCustomUi(id, undefined);
     }
     this.pendingUiRequests.clear();
+    this.activeAskToolStarts.clear();
   }
 
   private async restoreShadowSessionSetting(): Promise<void> {
@@ -639,6 +642,19 @@ export class AgentSessionWrapper {
     };
   }
   private emit(event: AgentEvent): void {
+    if (
+      event.type === "tool_execution_start"
+      && event.toolName === "ask_user_question"
+      && typeof event.toolCallId === "string"
+    ) {
+      this.activeAskToolStarts.set(event.toolCallId, event);
+    } else if (
+      event.type === "tool_execution_end"
+      && event.toolName === "ask_user_question"
+      && typeof event.toolCallId === "string"
+    ) {
+      this.activeAskToolStarts.delete(event.toolCallId);
+    }
     for (const listener of this.listeners) listener(event);
     // 统一出口确保扩展 UI 等直接事件不会漏掉；发布器只转发需要用户关注的事件。
     publishAttentionEvent(this.sessionId, event);
@@ -679,6 +695,8 @@ export class AgentSessionWrapper {
 
   onEvent(listener: EventListener): () => void {
     this.listeners.push(listener);
+    // ask 插件会把多问题拆成多个扩展 UI 请求；重放顺序与首次执行保持一致。
+    for (const event of this.activeAskToolStarts.values()) listener(event);
     for (const event of this.pendingUiRequests.values()) listener(event);
     return () => {
       const i = this.listeners.indexOf(listener);
@@ -825,6 +843,21 @@ export class AgentSessionWrapper {
 
         // 文件级 Fork 不改变当前 AgentSession，因此原会话生成期间也可复制已落盘历史。
         const { newSessionId, newSessionFile } = createForkedSession(currentSessionFile, entryId);
+        cacheSessionPath(newSessionId, newSessionFile);
+        invalidateSessionListCache();
+        return { cancelled: false, newSessionId };
+      }
+
+      case "clone": {
+        if (this.isRunning()) throw new Error("Cannot clone while the session is running");
+        const sessionManager = this.inner.sessionManager;
+        const currentSessionFile = this.inner.sessionFile;
+        const leafId = typeof command.leafId === "string" ? command.leafId : sessionManager.getLeafId();
+        if (!sessionManager.isPersisted() || !currentSessionFile || !existsSync(currentSessionFile) || !leafId) {
+          return { cancelled: true };
+        }
+
+        const { newSessionId, newSessionFile } = createClonedSession(currentSessionFile, leafId);
         cacheSessionPath(newSessionId, newSessionFile);
         invalidateSessionListCache();
         return { cancelled: false, newSessionId };
@@ -1043,6 +1076,7 @@ export class AgentSessionWrapper {
     for (const id of Array.from(this.activeCustomUis.keys())) this.closeCustomUi(id, undefined);
     this.pendingUiResponses.clear();
     this.pendingUiRequests.clear();
+    this.activeAskToolStarts.clear();
     this.clearExtensionWidgets(false);
     try {
       this.inner.dispose();

@@ -185,6 +185,20 @@ test("context loads atomically through the shared latest loader", () => {
   assert.equal((navigationSource.match(/sendAgentCommand\(sid, \{ type: "navigate_tree"/g) ?? []).length, 1);
 });
 
+test("历史分页按游标串行前插并拒绝重复 entryId", () => {
+  const paginationSource = source.slice(
+    source.indexOf("const loadEarlierMessages = useCallback"),
+    source.indexOf("const loadSession = useCallback"),
+  );
+
+  assert.match(paginationSource, /const before = page\.oldestEntryId/);
+  assert.match(paginationSource, /fetchSessionContext\(sid, controller\.signal, \{[\s\S]*?before,/);
+  assert.match(paginationSource, /page\.loading/);
+  assert.match(paginationSource, /result\.snapshot\.entryIds\.some\(\(id\) => existingIds\.has\(id\)\)/);
+  assert.match(paginationSource, /setMessages\(\(current\) => \{[\s\S]*?\.\.\.result\.snapshot\.messages, \.\.\.current/);
+  assert.match(paginationSource, /setEntryIds\(\(current\) => \{[\s\S]*?\.\.\.result\.snapshot\.entryIds, \.\.\.current/);
+});
+
 test("refuses a normal send while the hook knows an asynchronous run is active", () => {
   const sendSource = source.slice(
     source.indexOf("  const handleSend = useCallback"),
@@ -285,6 +299,8 @@ test("buffers multi-question ask answers until final submission", () => {
   );
 
   assert.match(eventSource, /name === "ask_user_question"[\s\S]*?parseAskQuestionnaire\(event\.args\)/);
+  assert.match(eventSource, /!submittedAskToolCallIdsRef\.current\.has\(id\)/);
+  assert.match(questionnaireSource, /submittedAskToolCallIdsRef\.current\.add\(questionnaire\.toolCallId\)/);
   assert.match(questionnaireSource, /for \(let index = 0; index < answers\.length; index\+\+\)/);
   assert.match(questionnaireSource, /await takeAskQuestionnaireRequest\(\)/);
   assert.match(questionnaireSource, /answer\.optionIndexes\.map\(\(value\) => value \+ 1\)\.join\(","\)/);

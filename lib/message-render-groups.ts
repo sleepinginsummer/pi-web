@@ -5,6 +5,33 @@ export interface MessageRenderGroup {
   isLiveTail: boolean;
 }
 
+export interface RecentItemWindow {
+  hiddenCount: number;
+  visibleOffsets: number[];
+}
+
+/**
+ * 从多个有序来源的末尾分配可见项；offset 等于来源项数时表示该来源完全隐藏。
+ * 调用方据此在创建 JSX 前裁掉旧处理项，避免折叠内容继续参与渲染。
+ */
+export function buildRecentItemWindow(itemCounts: number[], limit: number): RecentItemWindow {
+  const normalizedCounts = itemCounts.map((count) => Math.max(0, Math.floor(count)));
+  const visibleOffsets = [...normalizedCounts];
+  let remaining = Math.max(0, Math.floor(limit));
+  let visibleCount = 0;
+
+  for (let index = normalizedCounts.length - 1; index >= 0 && remaining > 0; index--) {
+    const count = normalizedCounts[index];
+    const sourceVisibleCount = Math.min(count, remaining);
+    visibleOffsets[index] = count - sourceVisibleCount;
+    remaining -= sourceVisibleCount;
+    visibleCount += sourceVisibleCount;
+  }
+
+  const totalCount = normalizedCounts.reduce((sum, count) => sum + count, 0);
+  return { hiddenCount: totalCount - visibleCount, visibleOffsets };
+}
+
 /** 只生成索引描述，不创建 JSX；调用方可先截取可见窗口再物化消息组件。 */
 export function buildMessageRenderGroups<T>(
   messages: T[],

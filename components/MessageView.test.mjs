@@ -3,6 +3,7 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createJiti } from "jiti";
+import { readFile } from "node:fs/promises";
 
 const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
@@ -10,6 +11,7 @@ const jiti = createJiti(import.meta.url, {
 });
 const { MessageView } = await jiti.import("./MessageView.tsx");
 const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+const source = await readFile(new URL("./MessageView.tsx", import.meta.url), "utf8");
 
 function renderMessage(message, props = {}) {
   return renderToStaticMarkup(
@@ -140,4 +142,57 @@ test("流式或工具调用未完成的助手消息不显示新会话动作", ()
 
   assert.doesNotMatch(streamingHtml, />New session</);
   assert.doesNotMatch(unfinishedHtml, />New session</);
+});
+
+test("guards oversized assistant markdown behind plain-text reveal", () => {
+  const html = renderMessage({
+    role: "assistant",
+    provider: "openai",
+    model: "test",
+    content: [{ type: "text", text: "x".repeat(100_001) }],
+  });
+  assert.match(html, /Message content is very large/);
+  assert.doesNotMatch(html, /<p>x{100}/);
+});
+
+test("shows streamed tool input state and keeps raw input available", () => {
+  const html = renderMessage({
+    role: "assistant",
+    provider: "openai",
+    model: "test",
+    content: [{ type: "toolCall", toolCallId: "call-1", toolName: "write", input: {}, rawInput: '{"path":' }],
+  }, { isStreaming: true });
+  assert.match(html, /Generating parameters/);
+  assert.match(source, /const inputStr = block\.rawInput \?\?/);
+});
+
+test("connects written files, tool-result images, previews, and CJK token estimates", () => {
+  const html = renderMessage({
+    role: "assistant",
+    provider: "openai",
+    model: "test",
+    content: [{ type: "text", text: "完成" }],
+  }, { writtenFiles: [{ filePath: "/repo/output.txt" }] });
+  assert.match(html, /output\.txt/);
+  assert.match(source, /const resultImages = getMessageImages\(result\?\.content \?\? \[\]\)/);
+  assert.match(source, /CJK_PATTERN/);
+  assert.match(source, /estimateUpdatedTokens/);
+});
+
+test("运行态处理窗口从渲染前裁掉较早内容块", () => {
+  const html = renderMessage({
+    role: "assistant",
+    provider: "openai",
+    model: "test",
+    content: [
+      { type: "text", text: "较早处理" },
+      { type: "text", text: "最近处理一" },
+      { type: "text", text: "最近处理二" },
+    ],
+  }, { visibleBlockOffset: 1 });
+
+  assert.doesNotMatch(html, /较早处理/);
+  assert.match(html, /最近处理一/);
+  assert.match(html, /最近处理二/);
+  assert.match(source, /prev\.visibleBlockOffset === next\.visibleBlockOffset/);
 });
