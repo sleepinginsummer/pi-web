@@ -102,6 +102,7 @@ interface Props {
   onCreateWorktree?: (branch: string) => Promise<WorktreeInfo>;
   onRemoveWorktree?: (path: string, force: boolean) => Promise<void>;
   onOpenFile?: (filePath: string, fileName: string, options?: { sourceSessionId?: string | null; modeHint?: "diff" }) => void;
+  onOpenTerminal?: (cwd: string) => void;
   explorerRefreshKey?: number;
   onExplorerRefresh?: () => void;
   onAtMention?: (relativePath: string, isDir: boolean) => void;
@@ -409,7 +410,7 @@ function PiWebTitle() {
     </button>
   );
 }
-export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, runningSessionIds, runningSessionTransitions, selectedCwd: selectedCwdProp, onCwdChange, worktreeState = null, onCreateWorktree, onRemoveWorktree, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onSessionsChange }: Props) {
+export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, runningSessionIds, runningSessionTransitions, selectedCwd: selectedCwdProp, onCwdChange, worktreeState = null, onCreateWorktree, onRemoveWorktree, onOpenFile, onOpenTerminal, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onSessionsChange }: Props) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
   const {
@@ -1660,6 +1661,17 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
               </svg>
               {t("files.explorer")}
             </button>
+            {onOpenTerminal && (
+              <ToolbarIconButton
+                onClick={() => onOpenTerminal(selectedCwd ?? selectedCwdProp!)}
+                title={t("terminal.open")}
+                color="var(--text-dim)"
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <polyline points="4 17 10 11 4 5" /><line x1="12" y1="19" x2="20" y2="19" />
+                </svg>
+              </ToolbarIconButton>
+            )}
             {explorerOpen && changesCount > 0 && (
               <ToolbarIconButton
                 onClick={() => setChangesCollapsed((v) => !v)}

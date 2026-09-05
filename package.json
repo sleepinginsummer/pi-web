@@ -30,13 +30,14 @@
     "package.json"
   ],
   "scripts": {
+    "postinstall": "node bin/prepare-terminal.js && node scripts/patch-pi-sdk-extension-cache.mjs",
     "dev": "next dev -H 127.0.0.1 -p 30141",
     "dev:lan": "next dev -H 0.0.0.0 -p 30141",
     "build": "next build --webpack",
     "start": "next start -H 127.0.0.1 -p 30141",
     "start:lan": "next start -H 0.0.0.0 -p 30141",
     "lint": "eslint .",
-    "postinstall": "node scripts/patch-pi-sdk-extension-cache.mjs",
+    "test:terminal": "node e2e/terminal.mjs",
     "test:e2e": "node e2e/run.mjs",
     "test": "node --experimental-strip-types --test \"app/**/*.test.mjs\" \"components/**/*.test.mjs\" \"hooks/**/*.test.mjs\" \"lib/**/*.test.mjs\" \"public/**/*.test.mjs\"",
     "release": "npm run build && npm publish --access public"
@@ -46,9 +47,12 @@
     "@earendil-works/pi-ai": "0.84.4",
     "@earendil-works/pi-coding-agent": "0.84.4",
     "@earendil-works/pi-tui": "0.84.4",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0",
     "ansi_up": "^6.0.6",
     "js-yaml": "^5.2.3",
     "next": "16.3.1",
+    "node-pty": "1.1.0",
     "proper-lockfile": "4.1.2",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",

@@ -6,10 +6,12 @@ import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { SessionSidebar } from "./SessionSidebar";
 import { ChatWindow } from "./ChatWindow";
 import { FileViewer } from "./FileViewer";
-import { TabBar } from "./TabBar";
+import { TabBar, type Tab } from "./TabBar";
 import { SettingsPanel, SettingsSectionIcon } from "./SettingsPanel";
 import { ProjectTrustDialog } from "./ProjectTrustDialog";
 import { AppTopBar } from "./AppTopBar";
+import { TerminalPanel } from "./TerminalPanel";
+import { newTerminalTab, restoreTerminalTabs, TERMINAL_TABS_KEY, type TerminalTab } from "./terminal-tab-state";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useViewportHeight } from "@/hooks/useViewportHeight";
@@ -68,22 +70,83 @@ export function AppShell() {
   const [sessionCatalog, setSessionCatalog] = useState<SessionInfo[]>([]);
   const [searchTarget, setSearchTarget] = useState<{ sessionId: string; entryId: string; blockIndex?: number } | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([]);
+  const [activeTerminalTabId, setActiveTerminalTabId] = useState<string | null>(null);
+  const [terminalsRestored, setTerminalsRestored] = useState(false);
   const closeMobileSidebar = useCallback(() => setSidebarOpen(false), []);
   const {
+    activateTab: activatePanelTab,
     activeTabId: activeFileTabId,
-    clear: clearFilePanel,
+    clear: clearFileTabs,
     close: closeFilePanel,
-    closeTab: handleCloseFileTab,
+    closeTab: closeFileTab,
     isOpen: rightPanelOpen,
-    openFile: handleOpenFile,
+    open: openFilePanel,
+    openFile: openFileTab,
     saveViewerState: saveFileViewerStateForTab,
-    selectTab: setActiveFileTabId,
+    selectTab: selectFileTab,
     tabs: fileTabs,
-    toggle: toggleFilePanel,
+    toggle: toggleFilePanelState,
   } = useFilePanel({ isMobile, onMobileOpen: closeMobileSidebar });
+  const handleOpenFile = useCallback((
+    filePath: string,
+    fileName: string,
+    options?: { sourceSessionId?: string | null; modeHint?: "diff" },
+  ) => {
+    setActiveTerminalTabId(null);
+    openFileTab(filePath, fileName, options);
+  }, [openFileTab]);
+  const clearFilePanel = useCallback(() => {
+    clearFileTabs();
+    if (terminalTabs.length > 0) openFilePanel();
+  }, [clearFileTabs, openFilePanel, terminalTabs.length]);
+  const toggleFilePanel = useCallback(() => {
+    if (fileTabs.length > 0 || terminalTabs.length > 0) toggleFilePanelState();
+  }, [fileTabs.length, terminalTabs.length, toggleFilePanelState]);
+  const panelTabs: Tab[] = [...fileTabs, ...terminalTabs.map((tab) => ({
+    id: tab.id,
+    label: getFileName(tab.cwd) || tab.cwd,
+    filePath: tab.cwd,
+    kind: "terminal" as const,
+    closing: Boolean(tab.closing),
+  }))];
+  const activePanelTabId = activeTerminalTabId ?? activeFileTabId;
+  const handleSelectPanelTab = useCallback((tabId: string) => {
+    if (terminalTabs.some((tab) => tab.id === tabId)) {
+      setActiveTerminalTabId(tabId);
+      activatePanelTab(tabId);
+      return;
+    }
+    setActiveTerminalTabId(null);
+    selectFileTab(tabId);
+  }, [activatePanelTab, selectFileTab, terminalTabs]);
   const handleFileViewerStateChange = useCallback((tabId: string, viewerRevision: number, viewerState: import("@/lib/file-viewer-state").FileViewerState) => {
     saveFileViewerStateForTab(tabId, viewerRevision, viewerState);
   }, [saveFileViewerStateForTab]);
+
+  useEffect(() => {
+    try {
+      const saved = restoreTerminalTabs(window.sessionStorage.getItem(TERMINAL_TABS_KEY));
+      setTerminalTabs(saved.tabs);
+      if (saved.activeId) {
+        setActiveTerminalTabId(saved.activeId);
+        activatePanelTab(saved.activeId);
+        if (!saved.open) closeFilePanel();
+      }
+    } catch { /* sessionStorage 不可用时跳过恢复。 */ }
+    setTerminalsRestored(true);
+  }, [activatePanelTab, closeFilePanel]);
+
+  useEffect(() => {
+    if (!terminalsRestored) return;
+    try {
+      window.sessionStorage.setItem(TERMINAL_TABS_KEY, JSON.stringify({
+        tabs: terminalTabs.map(({ id, cwd }) => ({ id, cwd })),
+        activeId: activeTerminalTabId,
+        open: rightPanelOpen,
+      }));
+    } catch { /* sessionStorage 不可用不影响终端运行。 */ }
+  }, [activeTerminalTabId, rightPanelOpen, terminalTabs, terminalsRestored]);
   const {
     activePanel: activeTopPanel,
     close: closeTopPanel,
@@ -413,7 +476,6 @@ export function AppShell() {
     router.replace(typeof window !== "undefined" ? window.location.pathname : "/", { scroll: false });
   }, [clearFilePanel, consumeCwdSyncSuppression, leaveWorkspace, restoreWorkspaceContext, router, selectedSession, syncWorkspaceKey]);
 
-
   // Global keyboard shortcuts (handles Esc, Ctrl+Alt+N etc.)
   useGlobalKeyboardShortcuts({
     onNewSession: (cwd: string) => handleNewSession(`kb-${Date.now()}`, cwd),
@@ -444,6 +506,41 @@ export function AppShell() {
     handleOpenFile(filePath, getFileName(filePath), { sourceSessionId: selectedSession?.id ?? null });
   }, [handleOpenFile, selectedSession?.id]);
 
+  const handleOpenTerminal = useCallback((cwd: string) => {
+    const existing = terminalTabs.find((tab) => tab.cwd === cwd);
+    const tab = existing ?? newTerminalTab(cwd);
+    if (!existing) setTerminalTabs((tabs) => [...tabs, tab]);
+    setActiveTerminalTabId(tab.id);
+    activatePanelTab(tab.id);
+    if (isMobile) setSidebarOpen(false);
+  }, [activatePanelTab, terminalTabs, isMobile]);
+
+  const handleTerminalClosed = (tab: TerminalTab) => {
+    const replacement = tab.closing === "restart" ? newTerminalTab(tab.cwd) : null;
+    const remaining = terminalTabs.filter((item) => item.id !== tab.id);
+    setTerminalTabs((tabs) => tabs.flatMap((item) => item.id !== tab.id ? [item] : replacement ? [replacement] : []));
+    if (activeTerminalTabId === tab.id) {
+      const nextTerminalId = replacement?.id ?? remaining.at(-1)?.id ?? null;
+      setActiveTerminalTabId(nextTerminalId);
+      if (nextTerminalId) activatePanelTab(nextTerminalId);
+      else if (fileTabs.length === 0) closeFilePanel();
+    }
+  };
+
+  const handleClosePanelTab = useCallback((tabId: string) => {
+    if (terminalTabs.some((tab) => tab.id === tabId)) {
+      setTerminalTabs((tabs) => tabs.map((tab) => tab.id === tabId && !tab.closing ? { ...tab, closing: "close" } : tab));
+      return;
+    }
+    const closingActiveFile = activeTerminalTabId === null && activeFileTabId === tabId;
+    const remainingFiles = fileTabs.filter((tab) => tab.id !== tabId);
+    closeFileTab(tabId);
+    if (closingActiveFile && remainingFiles.length === 0 && terminalTabs.length > 0) {
+      const nextTerminalId = terminalTabs.at(-1)!.id;
+      setActiveTerminalTabId(nextTerminalId);
+      activatePanelTab(nextTerminalId);
+    }
+  }, [activatePanelTab, activeFileTabId, activeTerminalTabId, closeFileTab, fileTabs, terminalTabs]);
 
   const handleViewFullHistory = useCallback(() => {
     if (!selectedSession) return;
@@ -516,6 +613,7 @@ export function AppShell() {
         onCreateWorktree={handleCreateWorktree}
         onRemoveWorktree={handleRemoveWorktree}
         onOpenFile={handleOpenFile}
+        onOpenTerminal={handleOpenTerminal}
         explorerRefreshKey={explorerRefreshKey}
         onExplorerRefresh={handleExplorerRefresh}
         onAtMention={handleAtMention}
@@ -892,19 +990,18 @@ export function AppShell() {
         <div style={{ display: "flex", alignItems: "center", flexShrink: 0, background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", height: 36 }}>
           <div style={{ flex: 1, overflow: "hidden" }}>
             <TabBar
-              tabs={fileTabs}
-              activeTabId={activeFileTabId ?? ""}
-              onSelectTab={setActiveFileTabId}
-              onCloseTab={handleCloseFileTab}
+              tabs={panelTabs}
+              activeTabId={activePanelTabId ?? ""}
+              onSelectTab={handleSelectPanelTab}
+              onCloseTab={handleClosePanelTab}
             />
           </div>
 
         </div>
 
-        {/* File content */}
-        <div style={{ flex: 1, overflow: "hidden" }}>
-          {/* Only the active viewer is mounted so inactive tabs do not keep watchers alive. */}
-          {activeFileTab?.filePath ? (
+        {/* Only the active viewer is mounted. Lightweight per-tab state is restored on activation. */}
+        <div style={{ flex: 1, minHeight: 0, overflow: "hidden", paddingBottom: "env(safe-area-inset-bottom)" }}>
+          {!activeTerminalTabId && activeFileTab?.filePath ? (
             <FileViewer
               key={`${activeFileTab.id}:${activeFileTab.viewerRevision ?? 0}`}
               filePath={activeFileTab.filePath}
@@ -926,11 +1023,22 @@ export function AppShell() {
                 { sourceSessionId: activeFileTab.sourceSessionId },
               )}
             />
-          ) : (
+          ) : !activeTerminalTabId ? (
             <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 12 }}>
                {translate("files.noneOpen")}
             </div>
-          )}
+          ) : null}
+          {terminalTabs.map((tab) => (
+            <div key={tab.id} hidden={tab.id !== activeTerminalTabId} style={{ width: "100%", height: "100%" }}>
+              <TerminalPanel
+                tab={tab}
+                active={rightPanelOpen && tab.id === activeTerminalTabId}
+                onRestart={() => setTerminalTabs((tabs) => tabs.map((item) => item.id === tab.id ? { ...item, closing: "restart" } : item))}
+                onClosed={() => handleTerminalClosed(tab)}
+                onCloseError={() => setTerminalTabs((tabs) => tabs.map((item) => item.id === tab.id ? { ...item, closing: undefined } : item))}
+              />
+            </div>
+          ))}
         </div>
       </div>
     </div>

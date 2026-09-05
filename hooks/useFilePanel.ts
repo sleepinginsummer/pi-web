@@ -31,8 +31,13 @@ export function useFilePanel({ isMobile, onMobileOpen }: { isMobile: boolean; on
 
   const clear = useCallback(() => setState(EMPTY_FILE_PANEL), []);
   const close = useCallback(() => setState((current) => ({ ...current, isOpen: false })), []);
-  const open = useCallback(() => setState((current) => current.tabs.length > 0 ? { ...current, isOpen: true } : current), []);
-  const toggle = useCallback(() => setState((current) => current.tabs.length > 0 ? { ...current, isOpen: !current.isOpen } : current), []);
+  const open = useCallback(() => setState((current) => ({ ...current, isOpen: true })), []);
+  const toggle = useCallback(() => setState((current) => ({ ...current, isOpen: !current.isOpen })), []);
+  const activateTab = useCallback((tabId: string) => setState((current) => ({
+    ...current,
+    activeTabId: tabId,
+    isOpen: true,
+  })), []);
   const selectTab = useCallback((tabId: string) => setState((current) => (
     current.tabs.some((tab) => tab.id === tabId) ? { ...current, activeTabId: tabId } : current
   )), []);
@@ -50,6 +55,7 @@ export function useFilePanel({ isMobile, onMobileOpen }: { isMobile: boolean; on
 
   return {
     activeTabId: state.activeTabId,
+    activateTab,
     clear,
     close,
     closeTab,
