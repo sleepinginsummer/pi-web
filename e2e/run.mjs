@@ -9,6 +9,7 @@ import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
+import { checkExtensionDialogs, extensionSource } from "./extension-dialog.mjs";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const mode = process.env.E2E_SERVER_MODE || "dev";
@@ -56,6 +57,8 @@ process.once("SIGTERM", interrupt);
 
 try {
   // Seed before startup so the first catalogue scan sees every fixture.
+  mkdirSync(join(agentDir, "extensions"));
+  writeFileSync(join(agentDir, "extensions", "e2e-dialog.js"), extensionSource);
   writeSession(LONG, Array.from({ length: 5000 }, (_, i) =>
     message(`e${i}`, i ? `e${i - 1}` : null, i % 2 ? "assistant" : "user", text(i))));
   writeSession(BRANCH, [
@@ -280,6 +283,7 @@ try {
       });
       await page.screenshot({ path: join(artifacts, "compaction-minimap.png") });
     }
+    await checkExtensionDialogs(page, artifacts, viewport.width);
     assert.deepEqual(errors, [], `Browser errors at width ${viewport.width}`);
     console.log(`PASS: ${viewport.width}px browser pagination, branch, markdown, code, tool call, and compaction navigation`);
     await context.tracing.stop();

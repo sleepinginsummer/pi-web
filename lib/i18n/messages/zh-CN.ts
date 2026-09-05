@@ -189,6 +189,7 @@ export const zhCNLocale: LocalePlugin = {
     "chat.loadEarlier": "向上滚动以加载更早的消息（隐藏 {count} 条）",
     "chat.jumpToLatest": "跳转到最新消息并继续跟随",
     "chat.extensionRequest": "扩展请求",
+    "chat.extensionExpiresIn": "{seconds} 秒后过期",
     "chat.extensionPending": "待回答",
     "chat.extensionCollapse": "收起",
     "chat.extensionExpand": "展开",
