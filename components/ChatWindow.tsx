@@ -42,6 +42,8 @@ import { NoticeShelf } from "./NoticeShelf";
 
 interface Props {
   session: SessionInfo | null;
+  searchTarget?: { sessionId: string; entryId: string; blockIndex?: number } | null;
+  onSearchTargetHandled?: (target: { sessionId: string; entryId: string }) => void;
   newSessionCwd: string | null;
   newSessionWorktrees: WorktreeInfo[];
   pendingNewSessionControl: PendingNewSessionControl;
@@ -207,8 +209,9 @@ function withAssistantBlocks(
   return next;
 }
 
-function ProcessDetailsGroup({ messageCount, toolCallCount, defaultExpanded = false, renderChildren, t }: { messageCount: number; toolCallCount: number; defaultExpanded?: boolean; renderChildren: () => ReactNode; t: (key: string, params?: Record<string, string | number>) => string }) {
+function ProcessDetailsGroup({ messageCount, toolCallCount, defaultExpanded = false, reveal = false, renderChildren, t }: { messageCount: number; toolCallCount: number; defaultExpanded?: boolean; reveal?: boolean; renderChildren: () => ReactNode; t: (key: string, params?: Record<string, string | number>) => string }) {
   const [expanded, setExpanded] = useState(defaultExpanded);
+  const contentVisible = expanded || reveal;
   const parts = [t("chat.processDetails"), `${messageCount} ${t(messageCount === 1 ? "chat.message" : "chat.messages")}`];
   if (toolCallCount > 0) parts.push(`${toolCallCount} ${t(toolCallCount === 1 ? "chat.toolCall" : "chat.toolCalls")}`);
 
@@ -216,7 +219,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, defaultExpanded = fa
     <div style={{ marginBottom: 14 }}>
       <button
         type="button"
-        aria-expanded={expanded}
+        aria-expanded={contentVisible}
         onClick={() => setExpanded((v) => !v)}
         style={{
           display: "flex",
@@ -241,7 +244,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, defaultExpanded = fa
           {parts.join(" · ")}
         </span>
       </button>
-      {expanded && (
+      {contentVisible && (
         <div style={{ marginTop: 8 }}>
           {renderChildren()}
         </div>
@@ -290,7 +293,7 @@ function LiveProcessDetailsGroup({ hiddenCount, renderAll, renderRecent, t }: { 
   );
 }
 
-export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, newSessionWorktrees, pendingNewSessionControl, onPendingNewSessionEvent, notificationController, onAgentEnd, onSessionCreated, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onShadowMindControlChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onNewSessionCwdChange }: Props) {
+export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSearchTargetHandled, newSessionCwd, newSessionWorktrees, pendingNewSessionControl, onPendingNewSessionEvent, notificationController, onAgentEnd, onSessionCreated, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onShadowMindControlChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onNewSessionCwdChange }: Props) {
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
   const {
@@ -385,6 +388,45 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
   const visibleCount = renderWindow.key === renderWindowKey ? renderWindow.count : VISIBLE_PAGE_SIZE;
   const sentinelRef = useRef<HTMLDivElement>(null);
   const prevScrollDistanceRef = useRef<number | null>(null);
+  const searchLoadRef = useRef(false);
+  const [pendingSearchScroll, setPendingSearchScroll] = useState<Props["searchTarget"]>(null);
+
+  useEffect(() => {
+    if (!searchTarget || loading || searchLoadRef.current) return;
+    if (entryIds.includes(searchTarget.entryId)) {
+      setRenderWindow({ key: renderWindowKey, count: Math.max(VISIBLE_PAGE_SIZE, messages.length * 2) });
+      setPendingSearchScroll(searchTarget);
+      return;
+    }
+    if (sessionBusy || loadingEarlierMessages || !hasEarlierMessages) {
+      if (!sessionBusy && !loadingEarlierMessages) onSearchTargetHandled?.(searchTarget);
+      return;
+    }
+    searchLoadRef.current = true;
+    void loadEarlierMessages().then((loaded) => {
+      if (!loaded) onSearchTargetHandled?.(searchTarget);
+    }).finally(() => {
+      searchLoadRef.current = false;
+    });
+  }, [entryIds, hasEarlierMessages, loadEarlierMessages, loading, loadingEarlierMessages, messages.length, onSearchTargetHandled, renderWindowKey, searchTarget, sessionBusy]);
+
+  useEffect(() => {
+    if (!pendingSearchScroll || pendingSearchScroll !== searchTarget) return;
+    const frame = requestAnimationFrame(() => {
+      const selector = `[data-entry-id="${CSS.escape(pendingSearchScroll.entryId)}"]`;
+      const element = scrollContainerRef.current?.querySelector<HTMLElement>(selector);
+      if (element) {
+        element.scrollIntoView({ block: "start", behavior: "instant" });
+        element.animate(
+          [{ backgroundColor: "var(--bg-selected)" }, { backgroundColor: "transparent" }],
+          { duration: 2500 },
+        );
+      }
+      setPendingSearchScroll(null);
+      onSearchTargetHandled?.(pendingSearchScroll);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [onSearchTargetHandled, pendingSearchScroll, scrollContainerRef, searchTarget, visibleCount]);
 
   // IntersectionObserver on the sentinel div at the top of the message list.
   // When it becomes visible, load the next page of older messages.
@@ -831,6 +873,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
                     cwd={messageCwd}
                     onOpenFile={onOpenFile}
                     entryId={entryIds[idx]}
+                    searchBlockIndex={entryIds[idx] === pendingSearchScroll?.entryId ? pendingSearchScroll.blockIndex : undefined}
                     onFork={isNew || !entryIds[idx] || bashRunning ? undefined : handleFork}
                     forking={forkingEntryId === entryIds[idx]}
                     showTimestamp={showTimestamp}
@@ -842,7 +885,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
                 );
                 if (idx === lastAnchorIdx && (!isVisible || currentRefIdx === undefined)) {
                   return (
-                    <div key={`${keyPrefix}-${messageKey}`} ref={(el) => {
+                    <div key={`${keyPrefix}-${messageKey}`} data-entry-id={entryIds[idx]} ref={(el) => {
                       (lastUserMsgRef as { current: HTMLDivElement | null }).current = el;
                       if (idx === lastRenderedMessageIdx) lastRenderedMessageRef.current = el;
                     }}>
@@ -850,9 +893,9 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
                     </div>
                   );
                 }
-                if (!isVisible || options.attachRef === false || currentRefIdx === undefined) return view;
+                if (!isVisible || currentRefIdx === undefined) return view;
                 return (
-                  <div key={`${keyPrefix}-${messageKey}`} ref={(el) => {
+                  <div key={`${keyPrefix}-${messageKey}`} data-entry-id={entryIds[idx]} ref={options.attachRef === false ? undefined : (el) => {
                     attachVisibleRef(idx, currentRefIdx)(el);
                     if (idx === lastRenderedMessageIdx) lastRenderedMessageRef.current = el;
                   }}>
@@ -972,8 +1015,12 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
                       ref={processRefIdx === undefined ? undefined : (element) => { messageRefs.current[processRefIdx] = element; }}
                     >
                       <ProcessDetailsGroup
-                        messageCount={processCount}
-                        defaultExpanded={!finalAnswerMessage}
+                      messageCount={processCount}
+                      defaultExpanded={!finalAnswerMessage}
+                      reveal={Boolean(pendingSearchScroll && (
+                        visibleProcessIndices.some((index) => entryIds[index] === pendingSearchScroll.entryId)
+                        || entryIds[finalAssistantIdx] === pendingSearchScroll.entryId
+                      ))}
                         t={t}
                         toolCallCount={countToolCalls(messages, visibleProcessIndices) + countToolCallBlocks(finalSplit.processBlocks)}
                         renderChildren={() => (

@@ -14,6 +14,7 @@ import { DirectoryPicker } from "./DirectoryPicker";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import { SessionItem } from "./SessionItem";
 import { TrashPanel } from "./TrashPanel";
+import { SessionSearch } from "./SessionSearch";
 
 declare global {
   interface Window {
@@ -86,7 +87,7 @@ interface Props {
   selectedSessionId: string | null;
   /** 新会话转正后、服务端列表扫描到文件前用于立即渲染当前会话。 */
   selectedSession?: SessionInfo | null;
-  onSelectSession: (session: SessionInfo, isRestore?: boolean) => void;
+  onSelectSession: (session: SessionInfo, isRestore?: boolean, entryId?: string, blockIndex?: number) => void;
   onNewSession?: (sessionId: string, cwd: string) => void;
   initialSessionId?: string | null;
   skipInitialProjectSelection?: boolean;
@@ -448,6 +449,8 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
   const [explorerKey, setExplorerKey] = useState(0);
   const [explorerUploadBusy, setExplorerUploadBusy] = useState(false);
   const [fileSearchOpen, setFileSearchOpen] = useState(false);
+  const [sessionSearchOpen, setSessionSearchOpen] = useState(false);
+  const [sessionSearchQuery, setSessionSearchQuery] = useState("");
   const [openSwipeSessionId, setOpenSwipeSessionId] = useState<string | null>(null);
   const [changesCount, setChangesCount] = useState(0);
   const [changesCollapsed, setChangesCollapsed] = useState(true);
@@ -768,12 +771,12 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
   // Done on the click path (not via the selectedCwd prop sync) so it also
   // works when the prop value won't change — e.g. re-clicking the already
   // open session after manually switching worktrees.
-  const handleSelectSessionFromList = useCallback((s: SessionInfo) => {
+  const handleSelectSessionFromList = useCallback((s: SessionInfo, entryId?: string, blockIndex?: number) => {
     setOpenSwipeSessionId(null);
-    if (s.id === selectedSessionId) return;
+    if (s.id === selectedSessionId && !entryId) return;
     if (s.cwd) setSelectedCwd(s.cwd);
     if (!s.path) return;
-    onSelectSession(s);
+    onSelectSession(s, false, entryId, blockIndex);
   }, [onSelectSession, selectedSessionId]);
 
   const handleNewSession = useCallback((cwd: string) => {
@@ -975,6 +978,26 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
               </svg>
             </button>
             <button
+              type="button"
+              onClick={() => setSessionSearchOpen((open) => !open)}
+              title={t("sidebar.toggleSessionSearch")}
+              aria-label={t("sidebar.toggleSessionSearch")}
+              aria-expanded={sessionSearchOpen}
+              aria-controls="session-search-input"
+              style={{
+                display: "flex", alignItems: "center", justifyContent: "center",
+                background: sessionSearchOpen ? "var(--bg-selected)" : "var(--bg-hover)",
+                border: "1px solid var(--border)",
+                color: sessionSearchOpen ? "var(--accent)" : "var(--text-muted)",
+                cursor: "pointer", width: 32, height: 32, padding: 0,
+                borderRadius: 7, flexShrink: 0,
+              }}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" />
+              </svg>
+            </button>
+            <button
               onClick={() => loadSessions(false)}
               style={{
                 display: "flex", alignItems: "center", justifyContent: "center",
@@ -1048,6 +1071,29 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
             </button>
           </div>
         </div>
+
+        {sessionSearchOpen && (
+          <input
+            id="session-search-input"
+            type="search"
+            autoFocus
+            value={sessionSearchQuery}
+            maxLength={200}
+            aria-label={t("sidebar.searchSessions")}
+            placeholder={t("sidebar.searchSessions")}
+            onChange={(event) => setSessionSearchQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key !== "Escape") return;
+              event.stopPropagation();
+              setSessionSearchQuery("");
+            }}
+            style={{
+              display: "block", width: "100%", minWidth: 0, height: 29,
+              marginTop: 6, padding: "0 10px", border: "1px solid var(--border)",
+              borderRadius: 7, background: "var(--bg)", color: "var(--text)", fontSize: 12,
+            }}
+          />
+        )}
 
         {/* Worktree switcher — shown only for git projects at a checkout top
             level (repo subdirs keep their own project identity, so switching
@@ -1399,6 +1445,13 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
         )}
       </div>
 
+      <SessionSearch
+        open={sessionSearchOpen}
+        query={sessionSearchQuery}
+        refreshKey={refreshKey ?? null}
+        selectedSessionId={selectedSessionId}
+        onSelectSession={handleSelectSessionFromList}
+      >
       {/* 项目目录与会话组成同一棵导航树，减少在目录选择器和会话列表之间切换。 */}
       <div style={{ flex: explorerOpen && (selectedCwdProp || selectedCwd) ? "1 1 0" : "1 1 auto", overflowY: "auto", padding: "0", minHeight: 80 }}>
         {loading && (
@@ -1560,6 +1613,7 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
           );
         })}
       </div>
+      </SessionSearch>
 
       {/* File Explorer section */}
       {(selectedCwdProp || selectedCwd) && (

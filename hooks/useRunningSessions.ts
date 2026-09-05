@@ -8,6 +8,7 @@ const RUNNING_SESSIONS_POLL_MS = 2500;
 /** 轮询运行会话，并在服务端集合未变化时保持 Set 引用稳定。 */
 export function useRunningSessions() {
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
+  const [sessionListVersion, setSessionListVersion] = useState<number | null>(null);
 
   const commitSnapshot = useCallback((ids: string[]) => {
     setRunningSessionIds((current) => stabilizeStringSet(current, ids));
@@ -41,9 +42,10 @@ export function useRunningSessions() {
           signal: current.signal,
         });
         if (!response.ok) return;
-        const data = await response.json() as { runningSessionIds?: string[] };
+        const data = await response.json() as { runningSessionIds?: string[]; sessionListVersion?: number };
         if (stopped || controller !== current) return;
         commitSnapshot(data.runningSessionIds ?? []);
+        if (typeof data.sessionListVersion === "number") setSessionListVersion(data.sessionListVersion);
       } catch {
         // 保留最后一次成功状态；下一个可见页轮询会重试。
       } finally {
@@ -72,5 +74,5 @@ export function useRunningSessions() {
     };
   }, [commitSnapshot]);
 
-  return { runningSessionIds };
+  return { runningSessionIds, sessionListVersion };
 }

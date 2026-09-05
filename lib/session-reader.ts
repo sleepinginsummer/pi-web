@@ -318,6 +318,10 @@ export function invalidateSessionListCache(): void {
   globalThis.__piSessionListCache = undefined;
 }
 
+export function getSessionListVersion(): number {
+  return globalThis.__piSessionListGeneration ?? 0;
+}
+
 /** 只更新现有会话列表缓存中的 Git 展示信息，不触发额外的磁盘扫描。 */
 export function updateCachedSessionProject(
   cwd: string,

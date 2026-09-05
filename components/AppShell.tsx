@@ -66,6 +66,7 @@ export function AppShell() {
   const [settingsSection, setSettingsSection] = useState<SettingsSection | null>(null);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
   const [sessionCatalog, setSessionCatalog] = useState<SessionInfo[]>([]);
+  const [searchTarget, setSearchTarget] = useState<{ sessionId: string; entryId: string; blockIndex?: number } | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const closeMobileSidebar = useCallback(() => setSidebarOpen(false), []);
   const {
@@ -283,7 +284,14 @@ export function AppShell() {
     attentionTitle: translate("chat.notificationAttentionTitle"),
     attentionBody: translate("chat.notificationAttentionBody"),
   });
-  const { runningSessionIds } = useRunningSessions();
+  const handleSidebarSelectSession = useCallback((session: SessionInfo, isRestore = false, entryId?: string, blockIndex?: number) => {
+    setSearchTarget(entryId ? { sessionId: session.id, entryId, blockIndex } : null);
+    handleSelectSession(session, isRestore);
+  }, [handleSelectSession]);
+  const handleSearchTargetHandled = useCallback((target: { sessionId: string; entryId: string }) => {
+    setSearchTarget((current) => current?.sessionId === target.sessionId && current.entryId === target.entryId ? null : current);
+  }, []);
+  const { runningSessionIds, sessionListVersion } = useRunningSessions();
   const runningSessionTransitions = useRunningSessionTransitions(runningSessionIds, selectedSession?.id ?? null);
   useBackgroundCompletionNotifications(
     runningSessionTransitions,
@@ -493,12 +501,12 @@ export function AppShell() {
       <SessionSidebar
         selectedSessionId={selectedSession?.id ?? null}
         selectedSession={selectedSession}
-        onSelectSession={handleSelectSession}
+        onSelectSession={handleSidebarSelectSession}
         onNewSession={handleNewSession}
         initialSessionId={initialNavigation.sessionId}
         skipInitialProjectSelection={initialNavigation.requestedCwd !== null}
         onInitialRestoreDone={handleInitialRestoreDone}
-        refreshKey={refreshKey}
+        refreshKey={refreshKey + (sessionListVersion ?? 0)}
         onSessionDeleted={handleSessionDeleted}
         runningSessionIds={runningSessionIds}
         runningSessionTransitions={runningSessionTransitions}
@@ -782,6 +790,8 @@ export function AppShell() {
       <ChatWindow
               key={sessionKey}
               session={selectedSession}
+              searchTarget={searchTarget?.sessionId === selectedSession?.id ? searchTarget : null}
+              onSearchTargetHandled={handleSearchTargetHandled}
               newSessionCwd={effectiveNewSessionCwd}
               newSessionWorktrees={effectiveNewSessionCwd && worktreeState?.worktrees.some((worktree) => worktree.path === effectiveNewSessionCwd)
                 ? worktreeState.worktrees
