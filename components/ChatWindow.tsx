@@ -4,7 +4,7 @@ import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, CustomMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage, WorktreeInfo } from "@/lib/types";
 import { normalizeCustomPanelLines, parseAnsiLine } from "@/lib/ansi";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
-import { countToolCallBlocks, getAssistantErrorMessage, getDisplayableAssistantBlocks, splitFinalAssistantBlocks } from "@/lib/message-display";
+import { countToolCallBlocks, getAssistantErrorMessage, getDisplayableAssistantBlocks, isMessageGroupAnchor, splitFinalAssistantBlocks } from "@/lib/message-display";
 import { MessageView } from "./MessageView";
 import { AskInputFlyout } from "./AskInputFlyout";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
@@ -184,19 +184,6 @@ function hasDisplayableProcessMessage(message: AgentMessage): boolean {
     return getDisplayableAssistantBlocks(message as AssistantMessage).length > 0;
   }
   return message.role === "custom";
-}
-
-// A user message normally anchors a turn (user prompt → process → final
-// answer), and the process messages in between get folded into a collapsed
-// ProcessDetailsGroup. When compaction fires mid-turn, pi drops the original
-// user prompt and inserts a compaction summary (role "custom", customType
-// "compaction") in its place; the agent then keeps producing tool calls and a
-// final answer with no user message left to anchor them. Treat a compaction
-// summary as an anchor too, otherwise every post-compaction message renders
-// standalone and never collapses.
-function isGroupAnchor(message: AgentMessage): boolean {
-  if (message.role === "user") return true;
-  return message.role === "custom" && (message as CustomMessage).customType === "compaction";
 }
 
 function withAssistantBlocks(
@@ -543,7 +530,7 @@ export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSe
 
     for (let index = 0; index < messages.length; index++) {
       const message = messages[index];
-      if (isGroupAnchor(message)) {
+      if (isMessageGroupAnchor(message)) {
         if (turnStarted) commitWrittenFilesForTurn();
         turnStarted = true;
         turnContent = [];
@@ -561,7 +548,7 @@ export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSe
       if (message.role === "toolResult") {
         toolResults.set((message as ToolResultMessage).toolCallId, message as ToolResultMessage);
       }
-      if (message.role === "user" || message.role === "assistant") {
+      if (isMessageGroupAnchor(message) || message.role === "assistant") {
         visibleRefIndexByMessage.set(index, visibleCount++);
       }
       if (message.role === "user") {
@@ -844,7 +831,7 @@ export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSe
                 if (messages[i].role === "user" || messages[i].role === "assistant") { lastRenderedMessageIdx = i; break; }
               }
               for (let i = messages.length - 1; i >= 0; i--) {
-                if (isGroupAnchor(messages[i])) { lastAnchorIdx = i; break; }
+                if (isMessageGroupAnchor(messages[i])) { lastAnchorIdx = i; break; }
               }
 
               const attachVisibleRef = (idx: number, refIndex: number) => (el: HTMLDivElement | null) => {
@@ -854,7 +841,7 @@ export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSe
 
               const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; writtenFiles?: WrittenFile[]; visibleBlockOffset?: number } = {}): ReactNode => {
                 const msg = options.messageOverride ?? messages[idx];
-                const isVisible = msg.role === "user" || msg.role === "assistant";
+                const isVisible = isMessageGroupAnchor(msg) || msg.role === "assistant";
                 const currentRefIdx = visibleRefIndexByMessage.get(idx);
                 const keyPrefix = options.keyPrefix ?? "message";
                 const messageKey = entryIds[idx] ?? idx;
@@ -905,7 +892,7 @@ export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSe
               };
 
               const { groups, liveTailStartIndex } = buildMessageRenderGroups(messages, {
-                isAnchor: isGroupAnchor,
+                isAnchor: isMessageGroupAnchor,
                 findFinalAssistantIndex,
                 busy: sessionBusy || streamState.isStreaming,
                 lastAnchorIndex: lastAnchorIdx,

@@ -1,8 +1,13 @@
 import { getImageSource } from "./image-content";
-import type { AssistantContentBlock, AssistantMessage, ToolCallContent } from "./types";
+import type { AgentMessage, AssistantContentBlock, AssistantMessage, ToolCallContent } from "./types";
 
 interface DisplayOptions {
   isStreaming?: boolean;
+}
+
+export function isMessageGroupAnchor(message: { role?: AgentMessage["role"]; customType?: string }): boolean {
+  return message.role === "user"
+    || (message.role === "custom" && message.customType === "compaction");
 }
 
 export function isDisplayableAssistantBlock(
