@@ -2587,6 +2587,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   return useMemo(() => ({
     // State
     data: details, loading, error, activeLeafId, messages, entryIds, streamState,
+    historyCursor: historyPage.sid === sessionIdRef.current ? historyPage.oldestEntryId : null,
     hasEarlierMessages: historyPage.sid === sessionIdRef.current && historyPage.hasMore,
     loadingEarlierMessages: historyPage.sid === sessionIdRef.current && historyPage.loading,
     agentRunning, modelState: modelViewState, modelActions: modelViewActions, toolPreset,

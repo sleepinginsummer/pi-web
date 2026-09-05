@@ -24,6 +24,7 @@ interface UseChatScrollFollowOptions {
   loading: boolean;
   messageCount: number;
   positionRequest: ChatScrollPositionRequest | null;
+  deferInitialScroll?: boolean;
 }
 
 function useUserScrollFollow(
@@ -143,11 +144,12 @@ export function useChatScrollFollow({
   loading,
   messageCount,
   positionRequest,
+  deferInitialScroll = false,
 }: UseChatScrollFollowOptions) {
   const lastRenderedMessageRef = useRef<HTMLDivElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const lastUserMsgRef = useRef<HTMLDivElement | null>(null);
-  const initialScrollDoneRef = useRef(false);
+  const initialScrollDoneRef = useRef(deferInitialScroll);
   const handledPositionGenerationRef = useRef(0);
   const previousAgentRunningRef = useRef(agentRunning);
   const {
@@ -213,6 +215,17 @@ export function useChatScrollFollow({
     beginProgrammaticScroll();
     container.scrollTo({ top: absoluteTop - 16, behavior: "smooth" });
   }, [beginProgrammaticScroll]);
+
+  const scrollToElement = useCallback((element: HTMLElement, viewportOffset = 16) => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const absoluteTop = element.getBoundingClientRect().top
+      - container.getBoundingClientRect().top
+      + container.scrollTop;
+    beginProgrammaticScroll();
+    pauseFollowing();
+    container.scrollTo({ top: absoluteTop - viewportOffset, behavior: "instant" });
+  }, [beginProgrammaticScroll, pauseFollowing]);
 
   // 流式消息高度变化时统一完成状态校正和自动跟随，并限制刷新频率。
   // 这样无需让每个 token 各自触发布局读取和滚动写入。
@@ -289,6 +302,7 @@ export function useChatScrollFollow({
     lastUserMsgRef,
     pauseFollowing,
     scrollContainerRef,
+    scrollToElement,
     scrollToLatest,
   };
 }

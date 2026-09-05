@@ -1,5 +1,20 @@
 export type ChatScrollPosition = "initial" | "user" | "running-end";
 
+export type ChatReadingPosition =
+  | { atBottom: true }
+  | {
+      atBottom: false;
+      anchorEntryId: string;
+      anchorOffset: number;
+      oldestEntryId: string | null;
+    };
+
+export interface ChatScrollAnchorCandidate {
+  entryId: string;
+  top: number;
+  bottom: number;
+}
+
 export interface ChatScrollPositionRequest {
   generation: number;
   position: ChatScrollPosition;
@@ -64,4 +79,20 @@ export function getInitialScrollTop(position: InitialScrollPosition): number {
     - containerTop
     - (containerHeight - messageHeight) / 2;
   return Math.max(0, Math.min(desiredTop, getBottomScrollTop(scrollHeight, containerHeight)));
+}
+
+export function findChatScrollAnchor(
+  candidates: ChatScrollAnchorCandidate[],
+  viewportTop: number,
+): Pick<Extract<ChatReadingPosition, { atBottom: false }>, "anchorEntryId" | "anchorOffset"> | null {
+  let candidate = candidates[0];
+  for (const item of candidates) {
+    if (item.top > viewportTop) break;
+    candidate = item;
+  }
+  if (!candidate) return null;
+  return {
+    anchorEntryId: candidate.entryId,
+    anchorOffset: candidate.top - viewportTop,
+  };
 }

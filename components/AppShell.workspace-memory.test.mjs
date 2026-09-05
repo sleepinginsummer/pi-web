@@ -30,6 +30,14 @@ test("persists every selected-session transition through one effect", () => {
   );
 });
 
+test("keeps chat scroll positions in page memory by session id", () => {
+  assert.match(appShellSource, /useRef\(new Map<string, ChatReadingPosition>\(\)\)/);
+  assert.match(appShellSource, /sessionScrollPositionsRef\.current\.set\(sessionId, position\)/);
+  assert.match(appShellSource, /initialScrollPosition=\{selectedSession \? sessionScrollPositionsRef\.current\.get\(selectedSession\.id\) \?\? null : null\}/);
+  assert.match(appShellSource, /onScrollPositionChange=\{handleSessionScrollPositionChange\}/);
+  assert.doesNotMatch(appShellSource, /localStorage[^\n]*sessionScroll/i);
+});
+
 test("restores only a live session that still belongs to the workspace", () => {
   assert.match(navigationSource, /const restoreWorkspaceContext = useCallback/);
   assert.match(navigationSource, /token !== workspaceRestoreTokenRef\.current/);

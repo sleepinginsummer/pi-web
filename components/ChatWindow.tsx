@@ -1,6 +1,6 @@
 "use client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
-import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, CustomMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage, WorktreeInfo } from "@/lib/types";
 import { normalizeCustomPanelLines, parseAnsiLine } from "@/lib/ansi";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
@@ -26,6 +26,7 @@ import type { AppUpdateResponse } from "@/lib/api-types";
 import type { PendingNewSessionControl, PendingNewSessionEvent } from "@/lib/pending-new-session";
 import type { ShadowSessionControl } from "@/lib/shadow-session-control";
 import type { SessionListRefreshRequest } from "@/lib/session-list-refresh-coordinator";
+import { findChatScrollAnchor, type ChatReadingPosition } from "@/lib/chat-scroll-position";
 import {
   captureScrollDistance,
   getNextVisibleCount,
@@ -44,6 +45,8 @@ interface Props {
   session: SessionInfo | null;
   searchTarget?: { sessionId: string; entryId: string; blockIndex?: number } | null;
   onSearchTargetHandled?: (target: { sessionId: string; entryId: string }) => void;
+  initialScrollPosition?: ChatReadingPosition | null;
+  onScrollPositionChange?: (sessionId: string, position: ChatReadingPosition) => void;
   newSessionCwd: string | null;
   newSessionWorktrees: WorktreeInfo[];
   pendingNewSessionControl: PendingNewSessionControl;
@@ -262,7 +265,7 @@ function LiveProcessDetailsGroup({ hiddenCount, renderAll, renderRecent, t }: { 
   );
 }
 
-export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSearchTargetHandled, newSessionCwd, newSessionWorktrees, pendingNewSessionControl, onPendingNewSessionEvent, notificationController, onAgentEnd, onSessionCreated, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onShadowMindControlChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onNewSessionCwdChange }: Props) {
+export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, newSessionCwd, newSessionWorktrees, pendingNewSessionControl, onPendingNewSessionEvent, notificationController, onAgentEnd, onSessionCreated, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onShadowMindControlChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onNewSessionCwdChange }: Props) {
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
   const {
@@ -274,10 +277,16 @@ export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSe
     || pendingNewSessionControl.kind === "initialization-failed"
     ? pendingNewSessionControl.sessionId
     : null;
+  const initialScrollPositionRef = useRef(searchTarget ? null : initialScrollPosition ?? null);
+  const [pendingScrollRestore, setPendingScrollRestore] = useState<Extract<ChatReadingPosition, { atBottom: false }> | null>(() => {
+    const position = initialScrollPositionRef.current;
+    return position && !position.atBottom ? position : null;
+  });
+  const [restoreAnchorReady, setRestoreAnchorReady] = useState(false);
 
 
   const {
-    loading, error, messages, entryIds, streamState, hasEarlierMessages, loadingEarlierMessages,
+    loading, error, activeLeafId, messages, entryIds, historyCursor, streamState, hasEarlierMessages, loadingEarlierMessages,
     agentRunning, bashRunning, pendingBash, modelState, modelActions, toolPreset,
     retryInfo, contextUsage, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,
@@ -306,6 +315,7 @@ export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSe
     lastUserMsgRef,
     pauseFollowing,
     scrollContainerRef,
+    scrollToElement,
     scrollToLatest,
   } = useChatScrollFollow({
     agentRunning,
@@ -313,6 +323,7 @@ export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSe
     loading,
     messageCount: messages.length,
     positionRequest: scrollPositionRequest,
+    deferInitialScroll: Boolean(pendingScrollRestore),
   });
   useEffect(() => {
     const scopeKey = session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : null);
@@ -356,9 +367,92 @@ export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSe
   // key 不匹配时当前 render 立即回落到 50，避免 effect 执行前先挂载上一会话的数百节点。
   const visibleCount = renderWindow.key === renderWindowKey ? renderWindow.count : VISIBLE_PAGE_SIZE;
   const sentinelRef = useRef<HTMLDivElement>(null);
+  const messageContentRef = useRef<HTMLDivElement | null>(null);
   const prevScrollDistanceRef = useRef<number | null>(null);
   const searchLoadRef = useRef(false);
+  const restoreLoadRef = useRef(false);
+  const pendingScrollRestoreRef = useRef(pendingScrollRestore);
+  const historyCursorRef = useRef(historyCursor);
+  pendingScrollRestoreRef.current = pendingScrollRestore;
+  historyCursorRef.current = historyCursor;
   const [pendingSearchScroll, setPendingSearchScroll] = useState<Props["searchTarget"]>(null);
+
+  useLayoutEffect(() => () => {
+    const sessionId = session?.id;
+    const container = scrollContainerRef.current;
+    const content = messageContentRef.current;
+    if (!sessionId || !onScrollPositionChange || !container || !content || pendingScrollRestoreRef.current) return;
+    if (container.scrollTop + container.clientHeight >= container.scrollHeight - 8) {
+      onScrollPositionChange(sessionId, { atBottom: true });
+      return;
+    }
+    const viewportTop = container.getBoundingClientRect().top;
+    const candidates = Array.from(content.children).flatMap((element) => {
+      if (!(element instanceof HTMLElement) || !element.dataset.entryId || element.offsetHeight === 0) return [];
+        const rect = element.getBoundingClientRect();
+      return [{ entryId: element.dataset.entryId, top: rect.top, bottom: rect.bottom }];
+    });
+    const anchor = findChatScrollAnchor(candidates, viewportTop);
+    if (!anchor) return;
+    onScrollPositionChange(sessionId, {
+      atBottom: false,
+      ...anchor,
+      oldestEntryId: historyCursorRef.current,
+    });
+  }, []);
+
+  useEffect(() => {
+    if (searchTarget) setPendingScrollRestore(null);
+  }, [searchTarget]);
+
+  const initialLeafIdRef = useRef(activeLeafId);
+  useEffect(() => {
+    if (initialLeafIdRef.current === activeLeafId) return;
+    initialLeafIdRef.current = activeLeafId;
+    setPendingScrollRestore(null);
+  }, [activeLeafId]);
+
+  useEffect(() => {
+    const position = pendingScrollRestore;
+    if (!position || loading || searchTarget || loadingEarlierMessages || restoreLoadRef.current) return;
+    if (entryIds.includes(position.anchorEntryId)) {
+      setRenderWindow({ key: renderWindowKey, count: Math.max(VISIBLE_PAGE_SIZE, messages.length * 2) });
+      setRestoreAnchorReady(true);
+      return;
+    }
+    if (!hasEarlierMessages) {
+      scrollToLatest("instant");
+      setPendingScrollRestore(null);
+      return;
+    }
+    restoreLoadRef.current = true;
+    void loadEarlierMessages().then((loaded) => {
+      if (!loaded) {
+        scrollToLatest("instant");
+        setPendingScrollRestore(null);
+      }
+    }).finally(() => {
+      restoreLoadRef.current = false;
+    });
+  }, [entryIds, hasEarlierMessages, loadEarlierMessages, loading, loadingEarlierMessages, messages.length, pendingScrollRestore, renderWindowKey, scrollToLatest, searchTarget]);
+
+  useLayoutEffect(() => {
+    const position = pendingScrollRestore;
+    const content = messageContentRef.current;
+    if (!position || !content || searchTarget) return;
+    const element = Array.from(content.children).find((candidate) => (
+      candidate instanceof HTMLElement && candidate.dataset.entryId === position.anchorEntryId
+    ));
+    if (element) {
+      scrollToElement(element, position.anchorOffset);
+      setPendingScrollRestore(null);
+      return;
+    }
+    if (restoreAnchorReady) {
+      scrollToLatest("instant");
+      setPendingScrollRestore(null);
+    }
+  }, [entryIds, pendingScrollRestore, restoreAnchorReady, scrollToElement, scrollToLatest, searchTarget, visibleCount]);
 
   useEffect(() => {
     if (!searchTarget || loading || searchLoadRef.current) return;
@@ -402,7 +496,7 @@ export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSe
   useEffect(() => {
     const sentinel = sentinelRef.current;
     const container = scrollContainerRef.current;
-    if (!sentinel || !container) return;
+    if (!sentinel || !container || pendingScrollRestore) return;
     const observer = new IntersectionObserver(
       (entries) => {
         if (entries[0]?.isIntersecting) {
@@ -422,7 +516,7 @@ export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSe
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [hasEarlierMessages, loadEarlierMessages, loadingEarlierMessages, messages.length, renderWindowKey, scrollContainerRef, visibleCount]);
+  }, [hasEarlierMessages, loadEarlierMessages, loadingEarlierMessages, messages.length, pendingScrollRestore, renderWindowKey, scrollContainerRef, visibleCount]);
 
   // After visibleCount increases (more messages prepended), restore the
   // scroll position so the viewport doesn't jump.
@@ -800,9 +894,13 @@ export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSe
             floating
           />
         </div>
-        <div ref={scrollContainerRef} className={`flex-1 overflow-x-hidden overflow-y-auto pt-4 [scrollbar-width:none]${askDialogElement ? " chat-scroll-ask-reserve" : ""}`}>
+        <div
+          ref={scrollContainerRef}
+          className={`flex-1 overflow-x-hidden overflow-y-auto pt-4 [scrollbar-width:none]${askDialogElement ? " chat-scroll-ask-reserve" : ""}`}
+          style={{ visibility: pendingScrollRestore ? "hidden" : undefined }}
+        >
           <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
-            <div style={{ maxWidth: "var(--chat-content-max-width, 820px)", margin: "0 auto" }}>
+            <div ref={messageContentRef} style={{ maxWidth: "var(--chat-content-max-width, 820px)", margin: "0 auto" }}>
             {(() => {
               const { toolResults, visibleRefIndexByMessage, assistantTimestampIndices, writtenFilesByFinalAssistant } = messageRenderIndex;
               // Anchor for live-tail detection and scroll positioning: the last
@@ -1074,14 +1172,14 @@ export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSe
             </div>
           </div>
         </div>
-        {!isFollowingLatest && !isNearBottomLatest && (
+        {!pendingScrollRestore && !isFollowingLatest && !isNearBottomLatest && (
           <ChatScrollFollowButton
             isMobile={isMobile}
             label={t("chat.jumpToLatest")}
             onClick={() => scrollToLatest("smooth")}
           />
         )}
-        {isMobile ? null : (
+        {isMobile || pendingScrollRestore ? null : (
           <ChatMinimap
             messages={messages}
             streamingMessage={streamState.streamingMessage}

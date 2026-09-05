@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { SessionSidebar } from "./SessionSidebar";
 import { ChatWindow } from "./ChatWindow";
+import type { ChatReadingPosition } from "@/lib/chat-scroll-position";
 import { FileViewer } from "./FileViewer";
 import { TabBar, type Tab } from "./TabBar";
 import { SettingsPanel, SettingsSectionIcon } from "./SettingsPanel";
@@ -68,6 +69,10 @@ export function AppShell() {
   const [settingsSection, setSettingsSection] = useState<SettingsSection | null>(null);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
   const [sessionCatalog, setSessionCatalog] = useState<SessionInfo[]>([]);
+  const sessionScrollPositionsRef = useRef(new Map<string, ChatReadingPosition>());
+  const handleSessionScrollPositionChange = useCallback((sessionId: string, position: ChatReadingPosition) => {
+    sessionScrollPositionsRef.current.set(sessionId, position);
+  }, []);
   const [searchTarget, setSearchTarget] = useState<{ sessionId: string; entryId: string; blockIndex?: number } | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([]);
@@ -890,6 +895,8 @@ export function AppShell() {
               session={selectedSession}
               searchTarget={searchTarget?.sessionId === selectedSession?.id ? searchTarget : null}
               onSearchTargetHandled={handleSearchTargetHandled}
+              initialScrollPosition={selectedSession ? sessionScrollPositionsRef.current.get(selectedSession.id) ?? null : null}
+              onScrollPositionChange={handleSessionScrollPositionChange}
               newSessionCwd={effectiveNewSessionCwd}
               newSessionWorktrees={effectiveNewSessionCwd && worktreeState?.worktrees.some((worktree) => worktree.path === effectiveNewSessionCwd)
                 ? worktreeState.worktrees
