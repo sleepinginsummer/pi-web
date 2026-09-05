@@ -402,7 +402,7 @@ export function AppShell() {
     leaveWorkspace(cwd);
     clearFilePanel();
     restoreWorkspaceContext(newProject);
-    router.replace("/", { scroll: false });
+    router.replace(typeof window !== "undefined" ? window.location.pathname : "/", { scroll: false });
   }, [clearFilePanel, consumeCwdSyncSuppression, leaveWorkspace, restoreWorkspaceContext, router, selectedSession, syncWorkspaceKey]);
 
 
