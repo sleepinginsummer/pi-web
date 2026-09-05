@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const appShellSource = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
+const chatWindowSource = await readFile(new URL("./ChatWindow.tsx", import.meta.url), "utf8");
 const navigationSource = await readFile(new URL("../hooks/useSessionNavigation.ts", import.meta.url), "utf8");
 const sidebarSource = await readFile(new URL("./SessionSidebar.tsx", import.meta.url), "utf8");
 
@@ -49,4 +50,16 @@ test("restoration runs only after a cross-workspace context reset", () => {
 test("sidebar forwards the server project identity with cwd changes", () => {
   assert.match(sidebarSource, /const projectKeyFor = useCallback/);
   assert.match(sidebarSource, /onCwdChange\?\.\(selectedCwd, projectRootFor\(selectedCwd\), projectKeyFor\(selectedCwd\)\)/);
+});
+
+test("fresh-session drafts remain keyed by cwd across session and workspace navigation", () => {
+  assert.match(
+    chatWindowSource,
+    /draftKey=\{session\?\.id \?\? \(newSessionCwd \? `new:\$\{newSessionCwd\}` : undefined\)\}/,
+  );
+
+  const newSessionStart = navigationSource.indexOf("const newSession = useCallback");
+  const newSessionEnd = navigationSource.indexOf("\n  const sessionCreated", newSessionStart);
+  const newSessionCallback = navigationSource.slice(newSessionStart, newSessionEnd);
+  assert.doesNotMatch(newSessionCallback, /clearDraft\(/);
 });
