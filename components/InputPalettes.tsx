@@ -18,6 +18,7 @@ interface HistoryPaletteProps {
 export const HistoryPalette = memo(function HistoryPalette({
   open, items, activeIndex, onActiveIndexChange, onSelect, containerRef,
 }: HistoryPaletteProps) {
+  const { t } = useI18n();
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   useEffect(() => {
@@ -30,7 +31,7 @@ export const HistoryPalette = memo(function HistoryPalette({
   if (!open || items.length === 0) return null;
   return (
     <div ref={containerRef} style={{ position: "absolute", left: 0, right: 0, bottom: "calc(100% + 8px)", zIndex: 120, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, boxShadow: "0 -6px 20px rgba(0,0,0,0.12)", overflow: "hidden", maxHeight: "min(44vh, 360px)" }}>
-      <div title="Input history" style={{ height: 30, padding: "0 10px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", color: "var(--text-dim)" }}>
+      <div title={t("chat.inputHistory")} style={{ height: 30, padding: "0 10px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", color: "var(--text-dim)" }}>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7" /><path d="M3 4v5h5" /><path d="M12 7v5l3 2" /></svg>
       </div>
       <div style={{ maxHeight: "calc(min(44vh, 360px) - 31px)", overflowY: "auto", padding: 4 }}>
