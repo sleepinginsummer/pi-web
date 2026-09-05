@@ -65,12 +65,24 @@ try {
   ]);
   const toolResult = message("result", "call", "toolResult", [{ type: "text", text: "E2E tool output" }]);
   Object.assign(toolResult.message, { toolCallId: "t1", toolName: "bash", isError: false });
-  writeSession(RICH, [
+  const richEntries = [
     message("user", null, "user", "Render **E2E markdown**"),
-    message("call", "user", "assistant", [{ type: "toolCall", id: "t1", name: "bash", arguments: { command: "echo E2E tool output" } }]),
+    message("call", "user", "assistant", [
+      { type: "thinking", thinking: "" },
+      { type: "thinking", thinking: "E2E intermediate reasoning\nIntermediate thinking details." },
+      { type: "toolCall", id: "t1", name: "bash", arguments: { command: "echo E2E tool output" } },
+    ]),
     toolResult,
-    message("answer", "result", "assistant", [{ type: "text", text: "E2E final answer\n```js\nconsole.log('E2E code');\n```" }]),
-  ]);
+    message("answer", "result", "assistant", [
+      { type: "thinking", thinking: "" },
+      { type: "thinking", thinking: "E2E follow-up reasoning\nFollow-up thinking details." },
+      { type: "text", text: "E2E process note" },
+      { type: "thinking", thinking: "E2E final reasoning\nFinal thinking details." },
+      { type: "text", text: "E2E final answer\n```js\nconsole.log('E2E code');\n```" },
+    ]),
+  ];
+  Object.assign(richEntries.at(-1).message, { provider: "test", model: "E2E Model" });
+  writeSession(RICH, richEntries);
   // The default 50-entry page starts at compaction, with its user prompt outside it.
   const compactedEntries = [
     message("user", null, "user", "E2E prompt outside the compacted page"),
@@ -213,11 +225,38 @@ try {
     await page.goto(`${base}/?session=${BRANCH}`, { waitUntil: "domcontentloaded" });
     await page.getByText("Active branch answer", { exact: true }).waitFor();
     assert.equal(await page.getByText("Inactive branch answer", { exact: true }).count(), 0);
+    const thinkingRequests = [];
+    page.on("request", (request) => {
+      if (new URL(request.url()).pathname.endsWith("/thinking")) thinkingRequests.push(request.url());
+    });
     await page.goto(`${base}/?session=${RICH}`, { waitUntil: "domcontentloaded" });
     await page.locator("strong").filter({ hasText: "E2E markdown" }).waitFor();
     await page.locator("pre").filter({ hasText: "console.log('E2E code');" }).waitFor();
     await page.getByText("E2E final answer", { exact: true }).waitFor();
-    await page.getByRole("button", { name: /process/i }).click();
+    const processDetails = page.getByRole("button", { name: /^Process details/ });
+    const thinking = page.getByRole("button", { name: /^Thinking/ });
+    assert.equal(await processDetails.count(), 1);
+    assert.equal(await thinking.count(), 0, "All thinking stays inside process details");
+    const finalMessage = page.locator("[data-entry-id='answer']");
+    assert.equal(await finalMessage.getByRole("button", { name: /^Thinking/ }).count(), 0);
+    assert.equal(await finalMessage.getByText("E2E Model", { exact: true }).count(), 1);
+    assert.equal(thinkingRequests.length, 0);
+    await processDetails.click();
+    assert.equal(await thinking.count(), 3);
+    assert.equal(await thinking.last().innerText(), "E2E final reasoning");
+    assert.equal(thinkingRequests.length, 0);
+    for (const [index, text] of ["Intermediate thinking details.", "Follow-up thinking details.", "Final thinking details."].entries()) {
+      await thinking.nth(index).click();
+      await page.getByText(text, { exact: false }).waitFor();
+    }
+    assert.equal(thinkingRequests.length, 3);
+    const processText = await processDetails.locator("..").innerText();
+    assert.ok(processText.indexOf("E2E intermediate reasoning") < processText.indexOf("echo E2E tool output"));
+    assert.ok(processText.indexOf("echo E2E tool output") < processText.indexOf("E2E follow-up reasoning"));
+    assert.ok(processText.indexOf("E2E follow-up reasoning") < processText.indexOf("E2E process note"));
+    assert.ok(processText.indexOf("E2E process note") < processText.indexOf("E2E final reasoning"));
+    assert.equal(processText.split("E2E final reasoning").length - 1, 1);
+    assert.ok(!(await finalMessage.last().innerText()).includes("E2E final reasoning"));
     await page.getByText("echo E2E tool output", { exact: true }).waitFor();
     await page.getByRole("button", { name: /bash.*echo E2E tool output/ }).click();
     await page.getByText("E2E tool output", { exact: true }).waitFor();

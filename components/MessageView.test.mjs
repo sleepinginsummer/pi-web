@@ -23,7 +23,13 @@ function renderMessage(message, props = {}) {
   );
 }
 
-test("renders standalone thinking with the saved default and accessible disclosure state", () => {
+test("updates a reused message when its written files change", () => {
+  const props = { message: { role: "assistant", content: [] } };
+  assert.equal(MessageView.compare(props, props), true);
+  assert.equal(MessageView.compare(props, { ...props, writtenFiles: [{ path: "/tmp/result.txt" }] }), false);
+});
+
+test("previews the first thinking line and reveals the full text with the saved default", () => {
   const previousWindow = globalThis.window;
   try {
     for (const expanded of [false, true]) {
@@ -32,19 +38,29 @@ test("renders standalone thinking with the saved default and accessible disclosu
         I18nProvider,
         null,
         React.createElement(ThinkingBlock, {
-          block: { type: "thinking", thinking: "Independent reasoning" },
+          block: { type: "thinking", thinking: "**Independent reasoning**\n\nDetailed second line." },
           blockIndex: 2,
           duration: 3,
         }),
       ));
       assert.match(html, new RegExp(`aria-expanded="${expanded}"`));
-      assert.equal(html.includes("Independent reasoning"), expanded);
+      assert.equal((html.match(/>[^<]*Independent reasoning[^<]*</g) ?? []).length, 1);
+      assert.equal(html.includes("Detailed second line."), expanded);
+      assert.match(html, /aria-label="Thinking: /);
       assert.match(html, /3s/);
     }
   } finally {
     if (previousWindow === undefined) delete globalThis.window;
     else globalThis.window = previousWindow;
   }
+});
+test("shows deferred thinking previews without loading the full content", () => {
+  const html = renderMessage({
+    role: "assistant",
+    content: [{ type: "thinking", thinking: "Historical first line", deferred: true }],
+  });
+  assert.match(html, />Historical first line<\/span>/);
+  assert.match(html, /aria-expanded="false"/);
 });
 test("renders a provider error when the assistant message has no content", () => {
   const html = renderMessage({

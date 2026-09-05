@@ -4,8 +4,8 @@ import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, CustomMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage, WorktreeInfo } from "@/lib/types";
 import { normalizeCustomPanelLines, parseAnsiLine } from "@/lib/ansi";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
-import { countToolCallBlocks, getAssistantErrorMessage, getDisplayableAssistantBlocks, isMessageGroupAnchor, splitFinalAssistantBlocks, splitThinkingBlocks } from "@/lib/message-display";
-import { MessageView, ThinkingBlock } from "./MessageView";
+import { countToolCallBlocks, getAssistantErrorMessage, getDisplayableAssistantBlocks, isMessageGroupAnchor, splitFinalAssistantBlocks } from "@/lib/message-display";
+import { MessageView } from "./MessageView";
 import { AskInputFlyout } from "./AskInputFlyout";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
@@ -965,18 +965,50 @@ export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSe
                 const finalAnswerMessage = finalSplit.answerBlocks.length > 0 || getAssistantErrorMessage(finalAssistant)
                   ? withAssistantBlocks(finalAssistant, finalSplit.answerBlocks)
                   : null;
-                let processViews: ReactNode[] = [];
+                const finalProcessEnd = finalAssistant.content.indexOf(finalSplit.answerBlocks[0]);
+                // 保留原始前缀，确保延迟思考内容仍使用持久化的 block 索引。
+                const finalProcessBlocks = finalAssistant.content.slice(0, finalProcessEnd < 0 ? undefined : finalProcessEnd);
+
+                const processViews: ReactNode[] = [];
                 let processToolCount = 0;
                 let processRefIdx: number | undefined;
-                let processKey = "";
                 let revealProcess = false;
-                const flushProcess = () => {
-                  if (processViews.length === 0) return;
-                  const refIndex = processRefIdx;
+                for (let processIdx = start + 1; processIdx <= finalAssistantIdx; processIdx++) {
+                  const processMessage = messages[processIdx];
+                  if (processMessage.role === "custom") {
+                    revealProcess ||= Boolean(pendingSearchScroll && pendingSearchScroll.entryId === entryIds[processIdx]);
+                    processViews.push(renderMessage(processIdx, { attachRef: false, keyPrefix: "process" }));
+                    continue;
+                  }
+                  if (processMessage.role !== "assistant") continue;
+                  const message = processIdx === finalAssistantIdx
+                    ? withAssistantBlocks(processMessage, finalProcessBlocks, { omitUsage: Boolean(finalAnswerMessage) })
+                    : processMessage;
+                  const blocks = getDisplayableAssistantBlocks(message);
+                  if (blocks.length === 0) continue;
+                  processRefIdx ??= visibleRefIndexByMessage.get(processIdx);
+                  processToolCount += countToolCallBlocks(blocks);
+                  revealProcess ||= Boolean(
+                    pendingSearchScroll
+                    && entryIds[processIdx] === pendingSearchScroll.entryId
+                    && (
+                      pendingSearchScroll.blockIndex === undefined
+                      || blocks.some((block) => processMessage.content.indexOf(block) === pendingSearchScroll.blockIndex)
+                    )
+                  );
+                  processViews.push(renderMessage(processIdx, {
+                    attachRef: false,
+                    keyPrefix: "process",
+                    messageOverride: message,
+                    showTimestamp: false,
+                  }));
+                }
+
+                if (processViews.length > 0) {
                   nodes.push(
                     <div
-                      key={`process-group-${processKey}`}
-                      ref={refIndex === undefined ? undefined : (el) => { messageRefs.current[refIndex] = el; }}
+                      key={`process-group-${entryIds[start] ?? start}`}
+                      ref={processRefIdx === undefined ? undefined : (el) => { messageRefs.current[processRefIdx] = el; }}
                     >
                       <ProcessDetailsGroup
                         messageCount={processViews.length}
@@ -988,66 +1020,7 @@ export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSe
                       />
                     </div>,
                   );
-                  processViews = [];
-                  processToolCount = 0;
-                  processRefIdx = undefined;
-                  revealProcess = false;
-                };
-
-                // Flush each process segment before its next thinking block so
-                // reasoning stays outside the fold without reordering the turn.
-                for (let processIdx = start + 1; processIdx <= finalAssistantIdx; processIdx++) {
-                  const processMessage = messages[processIdx];
-                  const messageKey = entryIds[processIdx] ?? processIdx;
-                  if (processMessage.role === "custom") {
-                    if (processViews.length === 0) processKey = String(messageKey);
-                    revealProcess ||= Boolean(pendingSearchScroll && pendingSearchScroll.entryId === entryIds[processIdx]);
-                    processViews.push(renderMessage(processIdx, { attachRef: false, keyPrefix: "process" }));
-                    continue;
-                  }
-                  if (processMessage.role !== "assistant") continue;
-                  const blocks = processIdx === finalAssistantIdx ? finalSplit.processBlocks : getDisplayableAssistantBlocks(processMessage);
-                  const groups = splitThinkingBlocks(blocks);
-                  const lastProcessGroup = groups.findLast((group) => !group.thinking);
-                  for (const group of groups) {
-                    const blockIndex = processMessage.content.indexOf(group.blocks[0]);
-                    const key = `${messageKey}-${blockIndex}`;
-                    if (group.thinking) {
-                      flushProcess();
-                      const previousTimestamp = messages[processIdx - 1]?.timestamp;
-                      const duration = processMessage.timestamp && previousTimestamp
-                        ? Math.round((processMessage.timestamp - previousTimestamp) / 1000)
-                        : 0;
-                      const refIndex = visibleRefIndexByMessage.get(processIdx);
-                      nodes.push(
-                        <div data-entry-id={entryIds[processIdx]} key={`thinking-${key}`} style={{ marginBottom: 16, display: "flex", flexDirection: "column", gap: 8 }} ref={refIndex === undefined ? undefined : (el) => { messageRefs.current[refIndex] = el; }}>
-                          {group.blocks.map((block) => block.type === "thinking" && (
-                            <ThinkingBlock key={processMessage.content.indexOf(block)} block={block} blockIndex={processMessage.content.indexOf(block)} entryId={entryIds[processIdx]} sessionId={session?.id ?? sessionIdRef.current ?? undefined} duration={duration > 0 ? duration : undefined} />
-                          ))}
-                        </div>,
-                      );
-                    } else {
-                      if (processViews.length === 0) processKey = key;
-                      processRefIdx ??= visibleRefIndexByMessage.get(processIdx);
-                      processToolCount += countToolCallBlocks(group.blocks);
-                      revealProcess ||= Boolean(
-                        pendingSearchScroll
-                        && entryIds[processIdx] === pendingSearchScroll.entryId
-                        && (
-                          pendingSearchScroll.blockIndex === undefined
-                          || group.blocks.some((block) => processMessage.content.indexOf(block) === pendingSearchScroll.blockIndex)
-                        )
-                      );
-                      processViews.push(renderMessage(processIdx, {
-                        attachRef: false,
-                        keyPrefix: `process-${blockIndex}`,
-                        messageOverride: withAssistantBlocks(processMessage, group.blocks, { omitUsage: processIdx === finalAssistantIdx || group !== lastProcessGroup }),
-                        showTimestamp: false,
-                      }));
-                    }
-                  }
                 }
-                flushProcess();
                 const writtenFiles = writtenFilesByFinalAssistant.get(finalAssistantIdx);
                 if (finalAnswerMessage) nodes.push(renderMessage(finalAssistantIdx, { messageOverride: finalAnswerMessage, writtenFiles }));
                 for (let index = finalAssistantIdx + 1; index < end; index++) nodes.push(renderMessage(index));

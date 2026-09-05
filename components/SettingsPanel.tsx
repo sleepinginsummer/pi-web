@@ -17,6 +17,7 @@ import { ModelsConfig } from "./ModelsConfig";
 import { SkillsConfig } from "./SkillsConfig";
 import { PluginsConfig } from "./PluginsConfig";
 import { ConfigSwitch } from "./SettingsUi";
+import { ThinkingIcon } from "./ThinkingIcon";
 
 interface Props {
   cwd: string | null;
@@ -116,20 +117,22 @@ function GeneralSettings({ sessionId, onSessionReloaded }: Pick<Props, "sessionI
     <div className="settings-general">
       <h2 className="settings-general-title">{t("settings.general")}</h2>
 
-      <section className="settings-general-section">
-        <h3 className="settings-general-heading">{t("settings.thinkingDisplay")}</h3>
-        <p className="settings-general-description">{t("settings.thinkingDisplayDescription")}</p>
-        <div className="settings-toggle-option">
-          <span>{t("settings.thinkingExpandedDefault")}</span>
-          <ConfigSwitch
-            checked={thinkingExpanded}
-            label={t("settings.thinkingExpandedDefault")}
-            onChange={(enabled) => {
-              setThinkingExpandedByDefault(enabled);
-              setThinkingExpanded(enabled);
-            }}
-          />
-        </div>
+      <section className="settings-general-section settings-thinking-option">
+        <h3 className="settings-general-heading">{t("settings.thinkingExpandedDefault")}</h3>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={thinkingExpanded}
+          aria-label={t("settings.thinkingExpandedDefault")}
+          title={t("settings.thinkingExpandedDefault")}
+          className="settings-thinking-toggle"
+          onClick={() => {
+            setThinkingExpandedByDefault(!thinkingExpanded);
+            setThinkingExpanded(!thinkingExpanded);
+          }}
+        >
+          <ThinkingIcon active={thinkingExpanded} size={20} />
+        </button>
       </section>
 
       <section className="settings-general-section">
