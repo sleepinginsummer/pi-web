@@ -21,14 +21,13 @@ test("opens one settings panel from direct sidebar shortcuts", () => {
   assert.doesNotMatch(shellSource, /setModelsConfigOpen|setSkillsConfigOpen|setAgentsConfigOpen|setPluginsConfigOpen/);
 });
 
-test("keeps enabled configuration surfaces inside the settings panel", () => {
-  for (const section of ["general", "models", "skills", "plugins"]) {
+test("keeps every requested configuration surface inside the settings panel", () => {
+  for (const section of ["general", "models", "skills", "agents", "plugins"]) {
     assert.match(panelSource, new RegExp(`id: "${section}"`));
   }
-  for (const component of ["ModelsConfig", "SkillsConfig", "PluginsConfig"]) {
+  for (const component of ["ModelsConfig", "SkillsConfig", "AgentsConfig", "PluginsConfig"]) {
     assert.match(panelSource, new RegExp(`<${component} embedded`));
   }
-  assert.doesNotMatch(panelSource, /id: "agents"|<AgentsConfig embedded/);
 });
 
 test("restores the settings section and each list detail selection", async () => {
