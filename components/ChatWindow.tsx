@@ -815,6 +815,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
                 const isVisible = msg.role === "user" || msg.role === "assistant";
                 const currentRefIdx = visibleRefIndexByMessage.get(idx);
                 const keyPrefix = options.keyPrefix ?? "message";
+                const messageKey = entryIds[idx] ?? idx;
                 let showTimestamp = msg.role === "assistant" && assistantTimestampIndices.has(idx);
                 // Hide on the currently-streaming tail (the streaming bubble owns the live timestamp).
                 if (showTimestamp && streamState.isStreaming && idx === messages.length - 1) {
@@ -823,7 +824,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
                 if (options.showTimestamp !== undefined) showTimestamp = options.showTimestamp;
                 const view = (
                   <MessageView
-                    key={`${keyPrefix}-view-${idx}`}
+                    key={`${keyPrefix}-view-${messageKey}`}
                     message={msg}
                     toolResults={toolResults}
                     modelNames={modelState.names}
@@ -841,7 +842,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
                 );
                 if (idx === lastAnchorIdx && (!isVisible || currentRefIdx === undefined)) {
                   return (
-                    <div key={`${keyPrefix}-${idx}`} ref={(el) => {
+                    <div key={`${keyPrefix}-${messageKey}`} ref={(el) => {
                       (lastUserMsgRef as { current: HTMLDivElement | null }).current = el;
                       if (idx === lastRenderedMessageIdx) lastRenderedMessageRef.current = el;
                     }}>
@@ -851,7 +852,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
                 }
                 if (!isVisible || options.attachRef === false || currentRefIdx === undefined) return view;
                 return (
-                  <div key={`${keyPrefix}-${idx}`} ref={(el) => {
+                  <div key={`${keyPrefix}-${messageKey}`} ref={(el) => {
                     attachVisibleRef(idx, currentRefIdx)(el);
                     if (idx === lastRenderedMessageIdx) lastRenderedMessageRef.current = el;
                   }}>
@@ -967,7 +968,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
                     ?? (finalAnswerMessage ? undefined : visibleRefIndexByMessage.get(finalAssistantIdx));
                   nodes.push(
                     <div
-                      key={`process-group-${start}-${finalAssistantIdx}`}
+                      key={`process-group-${entryIds[start] ?? start}-${entryIds[finalAssistantIdx] ?? finalAssistantIdx}`}
                       ref={processRefIdx === undefined ? undefined : (element) => { messageRefs.current[processRefIdx] = element; }}
                     >
                       <ProcessDetailsGroup
