@@ -713,7 +713,16 @@ export function ThinkingBlock({ block, duration, sessionId, entryId, blockIndex 
   }, [expanded, block.deferred, content, sessionId, entryId, blockIndex]);
 
   return (
-    <div style={{ display: "flex", alignItems: "flex-start", gap: 6, minWidth: 0 }}>
+    <div style={{
+      display: "flex", alignItems: "flex-start", gap: 6, minWidth: 0,
+      border: "1px solid var(--border)",
+      borderRadius: 7,
+      padding: "6px 10px",
+      background: "var(--bg)",
+      fontFamily: "var(--font-mono)",
+      fontSize: 11,
+      lineHeight: 1.5,
+    }}>
       <button
         type="button"
         aria-expanded={expanded}
@@ -727,13 +736,13 @@ export function ThinkingBlock({ block, duration, sessionId, entryId, blockIndex 
           width: expanded ? 14 : "100%",
           flexShrink: expanded ? 0 : 1,
           minWidth: 0,
-          minHeight: 24,
-          padding: "2px 0",
+          minHeight: "1.5em",
+          padding: 0,
           background: "transparent",
           border: "none",
           color: "var(--text-muted)",
           cursor: "pointer",
-          fontSize: 12,
+          font: "inherit",
           textAlign: "left",
         }}
       >
@@ -749,10 +758,7 @@ export function ThinkingBlock({ block, duration, sessionId, entryId, blockIndex 
           style={{
             flex: 1,
             minWidth: 0,
-            padding: "2px 0",
             color: error ? "#f87171" : "var(--text-muted)",
-            fontSize: 12,
-            lineHeight: 1.6,
             whiteSpace: "pre-wrap",
             overflowWrap: "anywhere",
           }}
@@ -761,7 +767,7 @@ export function ThinkingBlock({ block, duration, sessionId, entryId, blockIndex 
         </div>
       )}
       {duration !== undefined && (
-        <span style={{ flexShrink: 0, paddingTop: 4, fontSize: 11, color: "var(--text-dim)", fontVariantNumeric: "tabular-nums" }}>{duration}s</span>
+        <span style={{ flexShrink: 0, color: "var(--text-dim)", fontVariantNumeric: "tabular-nums" }}>{duration}s</span>
       )}
     </div>
   );
