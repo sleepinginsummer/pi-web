@@ -9,9 +9,10 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { ChatInput, ModelDataDiagnosticBanner, ModelErrorBanner, ModelScopeWarningBanner } = await jiti.import("./ChatInput.tsx");
+const { ChatInput, ModelDataDiagnosticBanner, ModelErrorBanner, ModelScopeWarningBanner, modelSupportsImageInput } = await jiti.import("./ChatInput.tsx");
 const { filterModelOptions } = await jiti.import("./ModelPicker.tsx");
 const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+const { clearDraft, setDraft } = await jiti.import("../lib/draft-store.ts");
 
 
 const emptyModelState = {
@@ -275,4 +276,67 @@ test("运行中消息仅在服务端确认后清空，失败保留输入", async
   assert.match(queuedSource, /valueRef\.current\.trim\(\) === msg/);
   assert.match(source, /readOnly=\{queuedSubmitPending\}/);
   assert.ok(queuedSource.indexOf("clearInput()") < queuedSource.indexOf("finally"));
+});
+
+test("modelSupportsImageInput warns only when modality info is known and lacks image", () => {
+  const modelList = [
+    { id: "text-only", name: "Text Only", provider: "ollama", input: ["text"] },
+    { id: "vision", name: "Vision", provider: "anthropic", input: ["text", "image"] },
+    { id: "unknown", name: "Unknown", provider: "custom", input: undefined },
+  ];
+
+  assert.equal(modelSupportsImageInput({ provider: "ollama", modelId: "text-only" }, modelList), false);
+  assert.equal(modelSupportsImageInput({ provider: "anthropic", modelId: "vision" }, modelList), true);
+  // Unknown modality info never blocks the user.
+  assert.equal(modelSupportsImageInput({ provider: "custom", modelId: "unknown" }, modelList), true);
+  // Model missing from the list is treated as unknown.
+  assert.equal(modelSupportsImageInput({ provider: "x", modelId: "missing" }, modelList), true);
+  assert.equal(modelSupportsImageInput(null, modelList), true);
+  assert.equal(modelSupportsImageInput({ provider: "ollama", modelId: "text-only" }, undefined), true);
+});
+
+test("renders image warnings for known text-only defaults without an explicit model selection", () => {
+  const draftKey = "new:/tmp/image-warning-default";
+  const modelList = [
+    { id: "text-only", name: "Text Only", provider: "custom", input: ["text"] },
+    { id: "vision", name: "Vision", provider: "custom", input: ["text", "image"] },
+    { id: "unknown", name: "Unknown", provider: "custom" },
+  ];
+  setDraft(draftKey, {
+    value: "Describe this image",
+    images: [{ data: "aW1hZ2U=", mimeType: "image/png" }],
+  });
+
+  try {
+    for (const [modelId, warningExpected] of [["text-only", true], ["vision", false], ["unknown", false], [null, false]]) {
+      const html = renderToStaticMarkup(
+        React.createElement(
+          I18nProvider,
+          null,
+          React.createElement(ChatInput, {
+            onSend() {},
+            onAbort() {},
+            isStreaming: false,
+            modelState: {
+              ...emptyModelState,
+              model: modelId ? { provider: "custom", modelId } : null,
+              isAutoModelSelection: true,
+              list: modelList.map((entry) => ({ ...entry, fastAvailable: false })),
+            },
+            modelActions: emptyModelActions,
+            draftKey,
+          }),
+        ),
+      );
+
+      assert.match(html, /<img/);
+      assert.equal(html.includes("Images may not be sent"), warningExpected, `default model: ${modelId}`);
+      if (warningExpected) {
+        assert.match(html, /The selected model \(Text Only\) does not support image input/);
+        assert.ok(html.indexOf('role="alert"') < html.indexOf("<textarea"));
+      }
+    }
+  } finally {
+    clearDraft(draftKey);
+  }
 });

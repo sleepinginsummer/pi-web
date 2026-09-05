@@ -66,6 +66,7 @@ async function loadModels(
     name: m.name,
     provider: m.provider,
     fastAvailable: isFastModeAvailable(m, fastModels),
+    input: m.input,
   })).sort(compareModelEntries);
   for (const m of visible) {
     const key = `${m.provider}:${m.id}`;
