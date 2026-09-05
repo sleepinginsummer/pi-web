@@ -985,15 +985,13 @@
 .settings-chat-options {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 12px;
   width: 100%;
   max-width: 420px;
 }
 
 .settings-chat-option {
   width: 100%;
-  border-radius: 5px;
-  background: var(--bg-panel);
   color: var(--text);
   font-size: 12px;
 }
@@ -1003,12 +1001,11 @@
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  min-height: 44px;
-  padding: 0 10px;
+  min-height: 28px;
 }
 
 .settings-chat-range-option {
-  padding: 8px 10px 10px;
+  padding: 0;
 }
 
 .settings-chat-range-header {
@@ -1033,7 +1030,7 @@
 .settings-chat-range-option input {
   display: block;
   width: 100%;
-  margin-top: 4px;
+  margin-top: 2px;
   accent-color: var(--accent);
 }
 

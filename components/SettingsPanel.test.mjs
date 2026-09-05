@@ -58,7 +58,7 @@ test("offers direct light, dark, and system theme selection", () => {
   assert.match(themeSource, /const setThemePreference = useCallback/);
 });
 
-test("groups chat display controls together with shared control styles", () => {
+test("groups chat display controls together without row backgrounds", () => {
   const appearanceSection = panelSource.slice(
     panelSource.indexOf('{t("settings.appearance")}'),
     panelSource.indexOf('{t("settings.chat")}'),
@@ -76,7 +76,9 @@ test("groups chat display controls together with shared control styles", () => {
     assert.match(chatSection, new RegExp(`t\\("settings\\.${key}"\\)`));
   }
   assert.doesNotMatch(panelSource, /ThinkingIcon|settings-thinking-/);
-  assert.match(cssSource, /\.settings-chat-option \{[\s\S]*?background: var\(--bg-panel\)[\s\S]*?font-size: 12px/);
+  const chatOptionStyles = cssSource.match(/\.settings-chat-option \{[\s\S]*?\}/)?.[0] ?? "";
+  assert.match(chatOptionStyles, /font-size: 12px/);
+  assert.doesNotMatch(chatOptionStyles, /background/);
 });
 
 test("keeps General free of divider rows", () => {
