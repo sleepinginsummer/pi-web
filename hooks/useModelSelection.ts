@@ -14,6 +14,48 @@ interface ModelsLoadedPayload {
   pinnedThinkingLevel?: ThinkingLevel;
 }
 
+export const MODEL_LOAD_RETRY_DELAYS_MS = [2_000, 5_000, 10_000] as const;
+
+/** 读取模型接口，并尽量保留服务端返回的具体错误。 */
+export async function fetchModelsData(cwd: string, signal?: AbortSignal): Promise<unknown> {
+  const url = cwd ? `/api/models?cwd=${encodeURIComponent(cwd)}` : "/api/models";
+  const response = await fetch(url, signal ? { signal } : undefined);
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const body: unknown = await response.json();
+      if (body && typeof body === "object" && "error" in body && typeof body.error === "string") {
+        detail = body.error;
+      }
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") throw error;
+    }
+    throw new Error(detail || `Failed to load models (HTTP ${response.status})`);
+  }
+  const data: unknown = await response.json();
+  signal?.throwIfAborted();
+  return data;
+}
+
+/** 对临时模型列表故障进行有限重试，取消后立即停止。 */
+export async function retryModelLoad(
+  load: (signal: AbortSignal) => Promise<unknown>,
+  signal: AbortSignal,
+  wait: (milliseconds: number) => Promise<void>,
+): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await load(signal);
+      return;
+    } catch (error) {
+      if (signal.aborted || (error instanceof DOMException && error.name === "AbortError")) return;
+      if (attempt >= MODEL_LOAD_RETRY_DELAYS_MS.length) return;
+      await wait(MODEL_LOAD_RETRY_DELAYS_MS[attempt]);
+      if (signal.aborted) return;
+    }
+  }
+}
+
 export type ModelSelectionAction =
   | { type: "modelsLoaded"; payload: ModelsLoadedPayload; applyNewSessionDefaults: boolean; applyPinnedThinking: boolean }
   | { type: "applyPreferredThinking"; level: ThinkingLevel }
@@ -92,11 +134,7 @@ export function useModelSelection() {
     const modelsGeneration = loadGateRef.current.begin("models");
     const defaultGeneration = loadGateRef.current.begin("thinking-default");
     try {
-      const url = cwd ? `/api/models?cwd=${encodeURIComponent(cwd)}` : "/api/models";
-      const response = await fetch(url, signal ? { signal } : undefined);
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
-      const parsed = parseModelsData(await response.json());
+      const parsed = parseModelsData(await fetchModelsData(cwd, signal));
       const data = parsed.data;
       const list = data.modelList ?? [];
       const match = data.defaultModel
@@ -136,7 +174,7 @@ export function useModelSelection() {
       if (!loadGateRef.current.isLatest("models", modelsGeneration)) return undefined;
       const message = error instanceof Error ? error.message : String(error);
       dispatch({ type: "modelsLoadFailed", error: message });
-      return undefined;
+      throw error;
     } finally {
       loadGateRef.current.finish("models");
       loadGateRef.current.finish("thinking-default");

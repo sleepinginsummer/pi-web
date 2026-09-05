@@ -18,7 +18,7 @@ import { isThinkingLevel, type ThinkingLevelOption } from "@/lib/thinking-levels
 import { recordThinkingLevelPreference } from "@/lib/thinking-level-preference-client";
 import { materializeNewSession, releaseNewSessionMaterialization, type NewSessionMaterializationResult } from "@/lib/new-session-materialization-client";
 import { selectPendingNewSession, type PendingNewSessionControl, type PendingNewSessionEvent } from "@/lib/pending-new-session";
-import { useModelSelection } from "@/hooks/useModelSelection";
+import { retryModelLoad, useModelSelection } from "@/hooks/useModelSelection";
 import { useFrameBatchedStreamDispatch } from "@/hooks/useFrameBatchedStreamDispatch";
 import { useRunCompletion } from "@/hooks/useRunCompletion";
 import {
@@ -2511,10 +2511,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     onBranchDataChange(details?.tree ?? [], activeLeafId, handleLeafChange);
   }, [details?.tree, activeLeafId, handleLeafChange, onBranchDataChange]);
 
-  // Load model list
+  // Load the model list with bounded retries; loadModels exposes each failure.
   useEffect(() => {
     const controller = new AbortController();
-    void loadModels(controller.signal);
+    void retryModelLoad(loadModels, controller.signal, delay);
     return () => controller.abort();
   }, [loadModels, modelsRefreshKey]);
 
