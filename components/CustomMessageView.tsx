@@ -190,7 +190,7 @@ function CustomMessageDetails({ visible, text }: { visible: boolean; text: strin
       borderTop: "1px solid var(--border)",
       background: "var(--bg)",
       color: "var(--text-muted)",
-      fontSize: 12,
+      fontSize: "calc(12px + var(--chat-font-size-offset, 0px))",
       lineHeight: 1.5,
       whiteSpace: "pre-wrap",
       wordBreak: "break-word",

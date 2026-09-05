@@ -24,6 +24,7 @@ import { useI18n } from "@/hooks/useI18n";
 import { useOptimisticInputSubmission, type OptimisticInputSnapshot } from "@/hooks/useOptimisticInputSubmission";
 import { ModelPicker, type ModelPickerOption } from "./ModelPicker";
 import { InputControls } from "./InputControls";
+import { useChatAppearance } from "@/hooks/useChatAppearance";
 import type { ToolPreset } from "@/lib/tool-presets";
 
 export interface AttachedImage {
@@ -295,6 +296,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     dataDiagnostics: modelDataDiagnostics,
   } = modelState;
   const { changeModel: onModelChange, changeThinkingLevel: onThinkingLevelChange } = modelActions;
+  const { fontSize } = useChatAppearance();
   const isMobile = useIsMobile();
   const modelPickerOptions = useMemo<ModelPickerOption[]>(() => {
     if (modelState.list?.length) {
@@ -628,7 +630,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   useEffect(() => {
     resizeTextarea(true);
-  }, [draftKey, resizeTextarea]);
+  }, [draftKey, fontSize, resizeTextarea]);
 
   useEffect(() => {
     return () => {
@@ -1208,7 +1210,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           e.target.value = "";
         }}
       />
-      <div style={{ maxWidth: 820, margin: "0 auto" }}>
+      <div style={{ maxWidth: "var(--chat-content-max-width, 820px)", margin: "0 auto" }}>
         <ModelErrorBanner error={modelError} />
         <ModelScopeWarningBanner warnings={modelScopeWarnings} />
         <ModelDataDiagnosticBanner diagnostics={modelDataDiagnostics} />
@@ -1490,6 +1492,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           >
           <textarea
             ref={textareaRef}
+            className="chat-input-textarea"
             value={value}
             readOnly={queuedSubmitPending}
             onChange={(e) => {
@@ -1533,7 +1536,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               outline: "none",
               resize: "none",
               color: "var(--text)",
-              fontSize: 14,
+              fontSize: "var(--chat-content-font-size, 14px)",
               lineHeight: 1.6,
               fontFamily: "inherit",
               minHeight: 24,

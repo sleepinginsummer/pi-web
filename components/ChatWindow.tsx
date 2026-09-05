@@ -655,7 +655,7 @@ export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSe
 
   return (
     <div
-      className="chat-window relative flex h-full flex-col overflow-hidden"
+      className="chat-window chat-content relative flex h-full min-w-0 flex-col overflow-hidden"
       onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
@@ -726,7 +726,7 @@ export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSe
 
       {isEmptyNew ? (
         <div className="flex flex-1 flex-col items-center justify-center overflow-y-auto px-4 py-8">
-          <div className="w-full max-w-[820px]">
+          <div className="w-full" style={{ maxWidth: "var(--chat-content-max-width, 820px)" }}>
             <div
               className="mb-3"
               style={{
@@ -802,7 +802,7 @@ export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSe
         </div>
         <div ref={scrollContainerRef} className={`flex-1 overflow-x-hidden overflow-y-auto pt-4 [scrollbar-width:none]${askDialogElement ? " chat-scroll-ask-reserve" : ""}`}>
           <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
-            <div style={{ maxWidth: 820, margin: "0 auto" }}>
+            <div style={{ maxWidth: "var(--chat-content-max-width, 820px)", margin: "0 auto" }}>
             {(() => {
               const { toolResults, visibleRefIndexByMessage, assistantTimestampIndices, writtenFilesByFinalAssistant } = messageRenderIndex;
               // Anchor for live-tail detection and scroll positioning: the last
@@ -1100,7 +1100,7 @@ export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSe
             paddingRight: isMobile ? CHAT_COLUMN_PADDING : CHAT_INPUT_RIGHT_PADDING,
           }}
         >
-          <div style={{ maxWidth: 820, margin: "0 auto" }}>
+          <div style={{ maxWidth: "var(--chat-content-max-width, 820px)", margin: "0 auto" }}>
             {detachedSubagentStatuses.length > 0 && (
               <DetachedSubagentStatusPanel statuses={detachedSubagentStatuses} t={t} />
             )}
