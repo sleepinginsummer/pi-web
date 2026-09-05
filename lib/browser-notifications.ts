@@ -75,7 +75,7 @@ export async function showBrowserNotification(
 ): Promise<NotificationDelivery> {
   const notificationOptions: NotificationOptions = {
     body: options.body,
-    ...(options.tag ? { tag: options.tag } : {}),
+    ...(options.tag ? { tag: options.tag, renotify: true } : {}),
   };
   if (environment.getServiceWorkerRegistration) {
     try {
