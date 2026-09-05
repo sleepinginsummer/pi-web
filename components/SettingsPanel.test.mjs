@@ -58,6 +58,27 @@ test("offers direct light, dark, and system theme selection", () => {
   assert.match(themeSource, /const setThemePreference = useCallback/);
 });
 
+test("groups chat display controls together with shared control styles", () => {
+  const appearanceSection = panelSource.slice(
+    panelSource.indexOf('{t("settings.appearance")}'),
+    panelSource.indexOf('{t("settings.chat")}'),
+  );
+  const chatSection = panelSource.slice(
+    panelSource.indexOf('{t("settings.chat")}'),
+    panelSource.indexOf("{shellSettings?.isWindows"),
+  );
+
+  assert.doesNotMatch(appearanceSection, /settings-chat-content/);
+  assert.match(chatSection, /className="settings-chat-options"/);
+  assert.equal((chatSection.match(/className="settings-chat-option(?: |")/g) ?? []).length, 4);
+  assert.equal((chatSection.match(/<ConfigSwitch/g) ?? []).length, 2);
+  for (const key of ["thinkingExpandedDefault", "chatContentWidth", "chatContentFontSize", "quoteSelection"]) {
+    assert.match(chatSection, new RegExp(`t\\("settings\\.${key}"\\)`));
+  }
+  assert.doesNotMatch(panelSource, /ThinkingIcon|settings-thinking-/);
+  assert.match(cssSource, /\.settings-chat-option \{[\s\S]*?background: var\(--bg-panel\)[\s\S]*?font-size: 12px/);
+});
+
 test("keeps General free of divider rows", () => {
   assert.match(panelSource, /className="settings-dialog-header"/);
   assert.match(cssSource, /\.settings-dialog-header \{[\s\S]*?display: flex[\s\S]*?align-items: center[\s\S]*?min-height: 50px/);

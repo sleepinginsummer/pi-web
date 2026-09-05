@@ -21,7 +21,7 @@ test("chat content keeps the existing 820px default behind one shared variable",
   assert.doesNotMatch(chatInput, /maxWidth: 820/);
 });
 
-test("General appearance settings own the chat width preference", () => {
+test("General chat settings own the chat width preference", () => {
   assert.match(chatInput, /useChatAppearance\(\)/);
   assert.match(settingsPanel, /useChatAppearance\(\)/);
   assert.match(settingsPanel, /type="range"/);
