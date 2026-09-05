@@ -137,7 +137,6 @@ function GeneralSettings({ sessionId, onSessionReloaded }: Pick<Props, "sessionI
 
       <section className="settings-general-section">
         <h3 className="settings-general-heading">{t("settings.appearance")}</h3>
-        <p className="settings-general-description">{t("settings.appearanceDescription")}</p>
         <div role="radiogroup" aria-label={t("settings.appearance")} className="settings-theme-options">
           {themeOptions.map((option) => {
             const selected = preference === option.id;
@@ -177,7 +176,6 @@ function GeneralSettings({ sessionId, onSessionReloaded }: Pick<Props, "sessionI
 
       <section className="settings-general-section">
         <h3 className="settings-general-heading">{t("common.language")}</h3>
-        <p className="settings-general-description">{t("settings.languageDescription")}</p>
         <div role="radiogroup" aria-label={t("common.language")} className="settings-language-options">
           {supportedLocales.map((plugin) => {
             const selected = locale === plugin.id;
