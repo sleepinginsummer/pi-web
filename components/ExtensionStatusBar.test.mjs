@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -44,6 +45,20 @@ test("removes only a separator that appears at the start of the full status line
     formatExtensionStatusLine([{ key: "active-goal", text: "goal" }, cacheStatus]),
     "goal · OpenAI cache 0/0·0M/0M 0.0%",
   );
+});
+
+test("preserves explicit status lines without wrapping and scrolls long or tall output", async () => {
+  const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
+  const statusLineRule = css.match(/\.extension-status-line\s*\{([^}]*)\}/)?.[1] ?? "";
+  const statusTextRule = css.match(/\.extension-status-text\s*\{([^}]*)\}/)?.[1] ?? "";
+
+  assert.match(statusLineRule, /max-height:/);
+  assert.match(statusLineRule, /align-items:\s*flex-start/);
+  assert.match(statusLineRule, /overflow:\s*auto/);
+  assert.match(statusTextRule, /white-space:\s*pre\s*;/);
+  assert.doesNotMatch(statusTextRule, /overflow[^:]*:\s*hidden/);
+  assert.doesNotMatch(statusTextRule, /overflow-wrap:\s*anywhere/);
+  assert.doesNotMatch(statusTextRule, /text-overflow:\s*ellipsis/);
 });
 
 test("renders a single status line without identifier keys", () => {

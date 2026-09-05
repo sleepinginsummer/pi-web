@@ -336,9 +336,10 @@ button.extension-widget-trigger:focus-visible {
   min-height: 35px;
   max-height: min(144px, 18dvh);
   padding: 8px 12px;
-  overflow-y: auto;
+  overflow: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
+  scrollbar-width: thin;
 }
 
 .extension-status-text {
@@ -348,8 +349,7 @@ button.extension-widget-trigger:focus-visible {
   font-family: var(--font-mono);
   font-size: 11px;
   line-height: 1.45;
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
+  white-space: pre;
 }
 ::-webkit-scrollbar-thumb:hover {
   background: var(--text-dim);
