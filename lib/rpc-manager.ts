@@ -148,6 +148,21 @@ const IDLE_RESET_EVENT_TYPES = new Set([
   "compaction_end",
 ]);
 
+const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+
+/** 解析会话空闲超时；0 表示禁用，非法值回退到 10 分钟。 */
+export function resolveSessionIdleTimeoutMs(
+  rawValue: string | undefined = process.env.PI_WEB_IDLE_TIMEOUT_MS,
+): number {
+  if (rawValue !== undefined && rawValue.trim() !== "") {
+    const parsed = Number(rawValue);
+    if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 2_147_483_647) return parsed;
+    console.warn(`[pi-web] invalid PI_WEB_IDLE_TIMEOUT_MS "${rawValue}", falling back to 10 minutes`);
+  }
+  return DEFAULT_SESSION_IDLE_TIMEOUT_MS;
+}
+
+const SESSION_IDLE_TIMEOUT_MS = resolveSessionIdleTimeoutMs();
 export interface RpcSessionStartOptions {
   toolNames?: string[];
   initialModel?: { provider: string; modelId: string };
@@ -662,6 +677,8 @@ export class AgentSessionWrapper {
 
   private resetIdleTimer(): void {
     if (this.idleTimer) clearTimeout(this.idleTimer);
+    if (!this._alive) return;
+    if (SESSION_IDLE_TIMEOUT_MS === 0) return;
     this.idleTimer = setTimeout(() => {
       if (this.isRunning()) {
         this.resetIdleTimer();
@@ -670,7 +687,7 @@ export class AgentSessionWrapper {
       void this.shutdown().catch((error) => {
         console.error("[pi-web] failed to shut down idle session:", error instanceof Error ? error.message : error);
       });
-    }, 10 * 60 * 1000);
+    }, SESSION_IDLE_TIMEOUT_MS);
   }
 
   private persistPendingSession(): void {
