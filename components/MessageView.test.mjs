@@ -9,7 +9,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { MessageView } = await jiti.import("./MessageView.tsx");
+const { MessageView, ThinkingBlock } = await jiti.import("./MessageView.tsx");
 const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
 const source = await readFile(new URL("./MessageView.tsx", import.meta.url), "utf8");
 
@@ -23,6 +23,29 @@ function renderMessage(message, props = {}) {
   );
 }
 
+test("renders standalone thinking with the saved default and accessible disclosure state", () => {
+  const previousWindow = globalThis.window;
+  try {
+    for (const expanded of [false, true]) {
+      globalThis.window = { localStorage: { getItem: () => String(expanded) } };
+      const html = renderToStaticMarkup(React.createElement(
+        I18nProvider,
+        null,
+        React.createElement(ThinkingBlock, {
+          block: { type: "thinking", thinking: "Independent reasoning" },
+          blockIndex: 2,
+          duration: 3,
+        }),
+      ));
+      assert.match(html, new RegExp(`aria-expanded="${expanded}"`));
+      assert.equal(html.includes("Independent reasoning"), expanded);
+      assert.match(html, /3s/);
+    }
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});
 test("renders a provider error when the assistant message has no content", () => {
   const html = renderMessage({
     role: "assistant",
