@@ -869,6 +869,27 @@ export class AgentSessionWrapper {
         return { cancelled: false, newSessionId };
       }
 
+      case "fork_branch": {
+        if (this.isRunning()) {
+          throw new Error("Cannot fork while the session is running");
+        }
+        const entryId = command.entryId as string;
+        const sessionManager = this.inner.sessionManager;
+        const currentSessionFile = this.inner.sessionFile;
+        if (!sessionManager.isPersisted()) return { cancelled: true };
+        if (!currentSessionFile) throw new Error("Persisted session is missing a session file");
+        const selectedEntry = sessionManager.getEntry(entryId);
+        if (selectedEntry?.type !== "message" || selectedEntry.message.role !== "assistant") {
+          throw new Error("Only assistant messages can start a quoted branch");
+        }
+
+        // 使用隔离暂存目录创建文件级分支，不能让 SDK 替换当前会话实例或源文件。
+        const { newSessionId, newSessionFile } = createForkedSession(currentSessionFile, entryId);
+        cacheSessionPath(newSessionId, newSessionFile);
+        invalidateSessionListCache();
+        return { cancelled: false, newSessionId };
+      }
+
       case "clone": {
         if (this.isRunning()) throw new Error("Cannot clone while the session is running");
         const sessionManager = this.inner.sessionManager;

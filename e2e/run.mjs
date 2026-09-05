@@ -294,7 +294,7 @@ try {
 
       const selectSession = async (title, entryId) => {
         await page.locator(`[title="${title}"]`).click();
-        await page.locator(`[data-entry-id="${entryId}"]`).waitFor({ state: "visible" });
+        await page.locator(`[data-entry-id="${entryId}"]:not([data-message-role])`).waitFor({ state: "visible" });
       };
       const readingOffset = (target) => target.evaluate((element) => (
         element.getBoundingClientRect().top - element.closest(".overflow-y-auto").getBoundingClientRect().top
@@ -340,7 +340,7 @@ try {
         await pendingHistory;
         await page.getByRole("button", { name: "Branches", exact: true }).click();
         await page.getByText("E2E alternate history branch", { exact: true }).click();
-        await page.locator("[data-entry-id='alternate']").waitFor({ state: "visible" });
+        await page.locator("[data-entry-id='alternate']:not([data-message-role])").waitFor({ state: "visible" });
         await page.screenshot({ path: join(artifacts, "scroll-restore-branch.png") });
       } finally {
         releaseHistory();

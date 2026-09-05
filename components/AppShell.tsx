@@ -32,6 +32,7 @@ import { useSessionListRefreshCoordinator } from "@/hooks/useSessionListRefreshC
 import { FloatingSessionNotifications } from "./FloatingSessionNotifications";
 import { useGlobalAttentionNotifications } from "@/hooks/useGlobalAttentionNotifications";
 import { openNotificationTarget } from "@/lib/notification-navigation";
+import { sendAgentCommand } from "@/lib/agent-client";
 import { getFileName } from "@/lib/file-paths";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
 import { getInitialNavigation } from "@/lib/initial-navigation";
@@ -69,6 +70,8 @@ export function AppShell() {
   const [settingsSection, setSettingsSection] = useState<SettingsSection | null>(null);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
   const [sessionCatalog, setSessionCatalog] = useState<SessionInfo[]>([]);
+  const [quoteSelectionEnabled, setQuoteSelectionEnabled] = useState(false);
+  const [pendingQuotePrompt, setPendingQuotePrompt] = useState<{ sessionId: string; text: string } | null>(null);
   const sessionScrollPositionsRef = useRef(new Map<string, ChatReadingPosition>());
   const handleSessionScrollPositionChange = useCallback((sessionId: string, position: ChatReadingPosition) => {
     sessionScrollPositionsRef.current.set(sessionId, position);
@@ -79,6 +82,23 @@ export function AppShell() {
   const [activeTerminalTabId, setActiveTerminalTabId] = useState<string | null>(null);
   const [terminalsRestored, setTerminalsRestored] = useState(false);
   const closeMobileSidebar = useCallback(() => setSidebarOpen(false), []);
+
+  useEffect(() => {
+    try {
+      setQuoteSelectionEnabled(localStorage.getItem("pi-quote-selection-enabled") === "true");
+    } catch {
+      // 浏览器存储不可用时保留当前页面状态。
+    }
+  }, []);
+
+  const handleQuoteSelectionChange = useCallback((enabled: boolean) => {
+    setQuoteSelectionEnabled(enabled);
+    try {
+      localStorage.setItem("pi-quote-selection-enabled", String(enabled));
+    } catch {
+      // 浏览器存储不可用时保留当前页面状态。
+    }
+  }, []);
   const {
     activateTab: activatePanelTab,
     activeTabId: activeFileTabId,
@@ -330,6 +350,19 @@ export function AppShell() {
     onRefresh: refreshSessions,
     resetSessionViews,
   });
+  const handleAskInNewChat = useCallback(async (
+    prompt: string,
+    sourceSessionId: string,
+    sourceEntryId: string,
+  ) => {
+    const result = await sendAgentCommand<{ newSessionId?: string }>(sourceSessionId, {
+      type: "fork_branch",
+      entryId: sourceEntryId,
+    });
+    if (!result?.newSessionId) throw new Error(translate("chat.quoteForkFailed"));
+    setPendingQuotePrompt({ sessionId: result.newSessionId, text: prompt });
+    handleSessionForked(result.newSessionId);
+  }, [handleSessionForked, translate]);
   const sessionsWithSelection = useMemo(() => selectedSession
     ? [...sessionCatalog.filter((session) => session.id !== selectedSession.id), selectedSession]
     : sessionCatalog, [selectedSession, sessionCatalog]);
@@ -920,6 +953,10 @@ export function AppShell() {
               onSessionStatsPanelOpen={openSessionStatsPanel}
               onContextUsageChange={handleContextUsageChange}
               onOpenFile={handleOpenLinkedFile}
+              onAskInNewChat={handleAskInNewChat}
+              quoteSelectionEnabled={quoteSelectionEnabled}
+              initialPrompt={pendingQuotePrompt && pendingQuotePrompt.sessionId === selectedSession?.id ? pendingQuotePrompt.text : undefined}
+              onInitialPromptConsumed={() => setPendingQuotePrompt(null)}
             />
           ) : initialCwdStatus === "validating" ? (
             <div
@@ -1062,6 +1099,8 @@ export function AppShell() {
         cwd={projectTrustCwd}
         sessionId={selectedSession?.id ?? null}
         initialSection={settingsSection}
+        quoteSelectionEnabled={quoteSelectionEnabled}
+        onQuoteSelectionChange={handleQuoteSelectionChange}
         onClose={() => {
           setSettingsSection(null);
           setModelsRefreshKey((key) => key + 1);

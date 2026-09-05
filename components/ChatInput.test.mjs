@@ -173,6 +173,28 @@ test("keeps the model selector visible when a model error leaves no options", ()
   assert.match(html, /title="No available models"/);
 });
 
+test("renders the compact composer with the standard Send button and no session controls", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(
+      I18nProvider,
+      null,
+      React.createElement(ChatInput, {
+        onSend() {},
+        onAbort() {},
+        isStreaming: false,
+        compact: true,
+        modelState: emptyModelState,
+        modelActions: emptyModelActions,
+      }),
+    ),
+  );
+
+  assert.match(html, /<textarea/);
+  assert.match(html, />Send<\/button>/);
+  assert.equal((html.match(/<button\b/g) ?? []).length, 1);
+  assert.doesNotMatch(html, /type="file"|Attach image|Change tool preset/);
+});
+
 test("filters model options by name and id", () => {
   const options = [
     { provider: "ollama", modelId: "qwen3:latest", name: "Qwen 3" },

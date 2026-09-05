@@ -39,6 +39,8 @@ interface Props {
   onAbort: () => void;
   onQueuedSubmit?: (message: string, mode: "steer" | "followUp") => Promise<boolean>;
   isStreaming: boolean;
+  /** 仅包含文本输入和发送按钮，不显示会话级控件与外边距。 */
+  compact?: boolean;
   creationSettingsLocked?: boolean;
   modelState: ModelSelectionViewState;
   modelActions: ModelSelectionViewActions;
@@ -288,6 +290,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   newSessionWorktrees,
   newSessionCwd,
   onNewSessionCwdChange,
+  compact = false,
 }: Props, ref) {
   const { t } = useI18n();
   const {
@@ -442,6 +445,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   }));
 
   const processImageFiles = useCallback(async (files: File[]) => {
+    if (compact) return;
     if (isStreaming) {
       setImageAttachmentError(t("chat.imageAttachmentStreaming"));
       return;
@@ -495,7 +499,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     } finally {
       pendingImageCountRef.current -= acceptedImageFiles.length;
     }
-  }, [isStreaming, t]);
+  }, [compact, isStreaming, t]);
 
   const removeImage = useCallback((index: number) => {
     setAttachedImages((prev) => {
@@ -663,7 +667,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   const slashInputEnd = Math.min(slashCursor ?? value.length, value.length);
   const slashInputPrefix = value.slice(0, slashInputEnd);
-  const slash = findSlashQuery(slashInputPrefix);
+  const slash = compact ? null : findSlashQuery(slashInputPrefix);
   const slashQuery = slash?.query ?? null;
 
   const filteredSlashCommands = useMemo(() => {
@@ -1080,6 +1084,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   }, [resizeTextarea]);
 
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
+    if (compact) return;
     const items = Array.from(e.clipboardData?.items ?? []);
     const imageItems = items.filter((item) => item.type.startsWith("image/"));
     if (imageItems.length) {
@@ -1095,7 +1100,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     setValue("");
     setAtQuery(null);
     setSlashMenuOpen(false);
-  }, [processImageFiles]);
+  }, [compact, processImageFiles]);
 
   useEffect(() => {
     if (slashQuery === null) {
@@ -1183,12 +1188,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       style={{
         flexShrink: 0,
         background: "transparent",
-        padding: "0 16px 8px",
-        paddingRight: isMobile ? 16 : 52, // desktop: 16px base + 36px for ChatMinimap alignment
+        padding: compact ? 0 : "0 16px 8px",
+        paddingRight: compact ? 0 : isMobile ? 16 : 52, // desktop: 16px base + 36px for ChatMinimap alignment
       }}
     >
       {/* Hidden file input — 视觉隐藏而非 display:none：安卓 WebView/部分浏览器对 display:none 的 file input 用 JS click() 不会弹出选择器 */}
-      <input
+      {!compact && <input
         id="chat-attach-input"
         ref={fileInputRef}
         type="file"
@@ -1209,11 +1214,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           processImageFiles(files);
           e.target.value = "";
         }}
-      />
+      />}
       <div style={{ maxWidth: "var(--chat-content-max-width, 820px)", margin: "0 auto" }}>
-        <ModelErrorBanner error={modelError} />
-        <ModelScopeWarningBanner warnings={modelScopeWarnings} />
-        <ModelDataDiagnosticBanner diagnostics={modelDataDiagnostics} />
+        {!compact && <ModelErrorBanner error={modelError} />}
+        {!compact && <ModelScopeWarningBanner warnings={modelScopeWarnings} />}
+        {!compact && <ModelDataDiagnosticBanner diagnostics={modelDataDiagnostics} />}
         {showImageUnsupportedWarning && (() => {
           const entry = modelState.list.find((item) => (
             item.provider === modelState.model?.provider && item.id === modelState.model?.modelId
@@ -1478,21 +1483,23 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             style={{
               minWidth: 0,
               display: "flex",
+              flexDirection: compact ? "column" : "row",
               gap: 8,
-              alignItems: "center",
+              alignItems: compact ? "stretch" : "center",
               background: "var(--bg)",
-              border: `1px solid ${bashMode ? "var(--tool-bg)" : isStreaming && onQueuedSubmit
+              border: compact ? "none" : `1px solid ${bashMode ? "var(--tool-bg)" : isStreaming && onQueuedSubmit
                 ? "rgba(234,179,8,0.4)"
                 : "color-mix(in srgb, var(--border) 70%, transparent)"}`,
-              borderRadius: 14,
-              padding: "10px 10px 10px 14px",
-              boxShadow: "0 1px 2px rgba(15,23,42,0.04), 0 8px 24px -12px rgba(15,23,42,0.10)",
+              borderRadius: compact ? 0 : 14,
+              padding: compact ? 0 : "10px 10px 10px 14px",
+              boxShadow: compact ? "none" : "0 1px 2px rgba(15,23,42,0.04), 0 8px 24px -12px rgba(15,23,42,0.10)",
               transition: "border-color 0.15s, background 0.15s, box-shadow 0.15s",
             } as React.CSSProperties}
           >
           <textarea
             ref={textareaRef}
             className="chat-input-textarea"
+            aria-label={compact ? t("chat.quoteQuestion") : undefined}
             value={value}
             readOnly={queuedSubmitPending}
             onChange={(e) => {
@@ -1528,7 +1535,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             }
             rows={1}
             style={{
-              flex: 1,
+              flex: compact ? "none" : 1,
               minWidth: 0,
               width: "100%",
               background: "none",
@@ -1539,7 +1546,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               fontSize: "var(--chat-content-font-size, 14px)",
               lineHeight: 1.6,
               fontFamily: "inherit",
-              minHeight: 24,
+              minHeight: compact ? 96 : 24,
               maxHeight: 200,
               overflow: "auto",
             }}
@@ -1637,7 +1644,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         )}
 
         {/* Bottom bar: left | center (context) | right */}
-        <div style={{
+        {!compact && <div style={{
           marginTop: 8,
           display: isMobile ? "grid" : "flex",
           gridTemplateColumns: isMobile ? "minmax(0, 1fr) auto" : undefined,
@@ -1712,7 +1719,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             onNotificationToggle={onNotificationToggle}
           />
 
-        </div>
+        </div>}
       </div>
       {textPreviewOpen && textAttachment && (
         <div role="dialog" aria-modal="true" aria-label="文本附件预览" onMouseDown={(event) => { if (event.target === event.currentTarget) setTextPreviewOpen(false); }} style={{ position: "fixed", inset: 0, zIndex: 1200, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, background: "rgba(0,0,0,0.42)" }}>
