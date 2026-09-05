@@ -8,5 +8,7 @@ test("流式滚动由尺寸监听统一限频且跳过无位移写入", () => {
   assert.match(source, /const STREAMING_SCROLL_INTERVAL_MS = 50/);
   assert.match(source, /new ResizeObserver\(scheduleSync\)/);
   assert.match(source, /Math\.abs\(container\.scrollTop - targetTop\) < 1/);
+  assert.match(source, /container\.scrollTo\(\{\s*top: targetTop,/);
+  assert.doesNotMatch(source, /scrollIntoView/);
   assert.doesNotMatch(source, /\[agentRunning,[\s\S]*?streamingContent/);
 });
