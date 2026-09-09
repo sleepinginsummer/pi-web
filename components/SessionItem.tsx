@@ -93,7 +93,7 @@ function SessionActionButton({ mobile, open, label, pressed, tone, onClick, chil
       aria-label={label}
       aria-pressed={tone === "pin" ? pressed : undefined}
       onClick={onClick}
-      style={{ width: mobile ? 44 : 32, height: mobile ? ITEM_HEIGHT : 32, display: "flex", alignItems: "center", justifyContent: "center", padding: 0, flexShrink: 0, border: mobile ? "none" : `1px solid ${pressed ? "rgba(217,119,6,0.42)" : "var(--border)"}`, borderLeft: mobile ? "1px solid var(--border)" : undefined, borderRadius: mobile ? 0 : 7, background, color, cursor: "pointer", touchAction: "manipulation", transition: "background 0.12s, color 0.12s, border-color 0.12s" }}
+      style={{ width: mobile ? 44 : 32, height: mobile ? ITEM_HEIGHT : 32, display: "flex", alignItems: "center", justifyContent: "center", padding: 0, flexShrink: 0, border: mobile ? "none" : `1px solid ${pressed ? "rgba(217,119,6,0.42)" : "var(--border)"}`, borderRadius: mobile ? 0 : 7, boxShadow: mobile ? "inset 1px 0 var(--border)" : undefined, background, color, cursor: "pointer", touchAction: "manipulation", transition: "background 0.12s, color 0.12s, border-color 0.12s" }}
     >
       {children}
     </button>

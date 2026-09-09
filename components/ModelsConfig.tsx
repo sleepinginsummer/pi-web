@@ -1826,12 +1826,21 @@ function AddProviderPicker({
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export function ModelsConfig({ onClose, embedded = false }: { onClose: () => void; embedded?: boolean }) {
+export function ModelsConfig({
+  onClose,
+  onModelsChanged,
+  embedded = false,
+}: {
+  onClose: () => void;
+  onModelsChanged: () => void;
+  embedded?: boolean;
+}) {
   const { t } = useI18n();
   const [config, setConfig] = useState<ModelsJson>({ providers: {} });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [saveWarning, setSaveWarning] = useState<string | null>(null);
   const [savedOk, setSavedOk] = useState(false);
   const [selection, setSelection] = useState<Selection | null>(readRememberedSelection);
   const [oauthProviders, setOauthProviders] = useState<OAuthProvider[]>([]);
@@ -1960,6 +1969,7 @@ export function ModelsConfig({ onClose, embedded = false }: { onClose: () => voi
   const handleSave = useCallback(async () => {
     setSaving(true);
     setSaveError(null);
+    setSaveWarning(null);
     setSavedOk(false);
     try {
       const res = await fetch("/api/models-config", {
@@ -1967,15 +1977,20 @@ export function ModelsConfig({ onClose, embedded = false }: { onClose: () => voi
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(config),
       });
-      const d = await res.json() as { success?: boolean; error?: string };
+      const d = await res.json() as { success?: boolean; catalogRefreshed?: boolean; error?: string };
       if (!res.ok || d.error) setSaveError(d.error ?? `HTTP ${res.status}`);
-      else { setSavedOk(true); setTimeout(() => setSavedOk(false), 2000); }
+      else {
+        if (d.catalogRefreshed === false) setSaveWarning(t("models.catalogRefreshFailed"));
+        onModelsChanged();
+        setSavedOk(true);
+        setTimeout(() => setSavedOk(false), 2000);
+      }
     } catch (e) {
       setSaveError(String(e));
     } finally {
       setSaving(false);
     }
-  }, [config]);
+  }, [config, onModelsChanged, t]);
 
   const providers = Object.entries(config.providers ?? {});
   const activeOAuth = oauthProviders.filter((p) => p.loggedIn);
@@ -2141,7 +2156,11 @@ export function ModelsConfig({ onClose, embedded = false }: { onClose: () => voi
         </ConfigSplitView>
 
         {/* Footer */}
-        <ConfigFooter status={saveError && <span style={{ color: "#f87171" }}>{saveError}</span>}>
+        <ConfigFooter status={saveError
+          ? <span style={{ color: "#f87171" }}>{saveError}</span>
+          : saveWarning
+            ? <span style={{ color: "#d97706" }}>{saveWarning}</span>
+            : null}>
           {!embedded && <ConfigButton onClick={onClose}>{t("i18n.cancel")}</ConfigButton>}
           <ConfigButton
             variant="primary"

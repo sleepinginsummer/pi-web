@@ -12,7 +12,7 @@ import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ChatScrollFollowButton } from "./ChatScrollFollowButton";
 import { ExtensionStatusBar } from "./ExtensionStatusBar";
 import { useI18n } from "@/hooks/useI18n";
-import { useAgentSession, type AgentPhase, type NoticeItem } from "@/hooks/useAgentSession";
+import { useAgentSession, type AgentPhase } from "@/hooks/useAgentSession";
 import { useChatScrollFollow } from "@/hooks/useChatScrollFollow";
 import { DetachedSubagentStatusPanel } from "./DetachedSubagentStatusPanel";
 import { useAudio } from "@/hooks/useAudio";
@@ -38,7 +38,7 @@ import { withTodoWidget } from "@/lib/todo-widget";
 import type { ToolEntry } from "@/lib/tool-presets";
 import { extractTurnWrittenFiles, type WrittenFile } from "@/lib/turn-written-files";
 import { getFileName } from "@/lib/file-paths";
-import { copyText } from "@/lib/clipboard";
+import { NoticeShelf } from "./NoticeShelf";
 
 interface Props {
   session: SessionInfo | null;
@@ -765,7 +765,12 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
                 </span>
               </div>
             </div>
-            <NoticeShelf notices={notices} onDismiss={dismissNotice} />
+            <NoticeShelf
+              notices={notices}
+              closeLabel={t("i18n.close")}
+              copiedLabel={t("session.copied")}
+              onDismiss={dismissNotice}
+            />
             <div className="relative">
               {askDialogElement}
               {chatInputElement}
@@ -776,7 +781,13 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
       <>
       <div className="relative flex flex-1 overflow-hidden">
         <div className="notice-shelf-overlay">
-          <NoticeShelf notices={notices} onDismiss={dismissNotice} floating />
+          <NoticeShelf
+            notices={notices}
+            closeLabel={t("i18n.close")}
+            copiedLabel={t("session.copied")}
+            onDismiss={dismissNotice}
+            floating
+          />
         </div>
         <div ref={scrollContainerRef} className={`flex-1 overflow-x-hidden overflow-y-auto pt-4 [scrollbar-width:none]${askDialogElement ? " chat-scroll-ask-reserve" : ""}`}>
           <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
@@ -1069,86 +1080,6 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, new
     </div>
   );
 });
-function NoticeShelf({ notices, onDismiss, floating = false }: { notices: NoticeItem[]; onDismiss: (id: string) => void; floating?: boolean }) {
-  const { t } = useI18n();
-  const [copiedNoticeId, setCopiedNoticeId] = useState<string | null>(null);
-  const pressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const longPressedRef = useRef(false);
-
-  const clearPressTimer = useCallback(() => {
-    if (pressTimerRef.current) clearTimeout(pressTimerRef.current);
-    pressTimerRef.current = null;
-  }, []);
-
-  useEffect(() => () => {
-    clearPressTimer();
-    if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
-  }, [clearPressTimer]);
-
-  const startLongPress = (notice: NoticeItem) => {
-    clearPressTimer();
-    longPressedRef.current = false;
-    pressTimerRef.current = setTimeout(() => {
-      longPressedRef.current = true;
-      void copyText(notice.message).then(() => {
-        setCopiedNoticeId(notice.id);
-        if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
-        copiedTimerRef.current = setTimeout(() => setCopiedNoticeId(null), 1_500);
-      }).catch(() => undefined);
-    }, 500);
-  };
-
-  if (notices.length === 0) return null;
-  return (
-    <div className="notice-shelf" style={{ marginBottom: floating ? 0 : 10 }}>
-      {notices.map((notice, index) => {
-        const color = notice.type === "error"
-          ? "#ef4444"
-          : notice.type === "warning"
-            ? "#d97706"
-            : notice.type === "success"
-              ? "#10b981"
-              : "var(--accent)";
-        return (
-          <button
-            key={notice.id}
-            type="button"
-            onPointerDown={(event) => {
-              if (event.button === 0) startLongPress(notice);
-            }}
-            onPointerUp={clearPressTimer}
-            onPointerCancel={clearPressTimer}
-            onPointerLeave={clearPressTimer}
-            onContextMenu={(event) => event.preventDefault()}
-            onClick={(event) => {
-              if (longPressedRef.current) {
-                longPressedRef.current = false;
-                event.preventDefault();
-                return;
-              }
-              onDismiss(notice.id);
-            }}
-            aria-label={`${notice.message}，${t("i18n.close")}`}
-            className="notice-shelf-item"
-            style={{
-              marginBottom: index === notices.length - 1 ? 0 : 6,
-              animation: notice.exiting
-                ? "notice-shelf-out 0.18s ease-in forwards"
-                : "notice-shelf-in 0.18s ease-out both",
-            }}
-          >
-            <span className="notice-shelf-dot" style={{ background: color }} />
-            <span className="notice-shelf-message">
-              {copiedNoticeId === notice.id ? t("session.copied") : notice.message}
-            </span>
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
 
 type ExtensionDialogRequest = Extract<ExtensionUiRequest, { method: "confirm" | "input" | "editor" }>;
 

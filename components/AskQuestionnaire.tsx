@@ -19,8 +19,9 @@ export function AskQuestionnaire({
   const [answers, setAnswers] = useState<Array<AskQuestionnaireAnswer | null>>(
     () => questionnaire.questions.map(() => null),
   );
+  const isSingleQuestion = questionnaire.questions.length === 1;
   const question = questionnaire.questions[page];
-  const isReview = page === questionnaire.questions.length;
+  const isReview = !isSingleQuestion && page === questionnaire.questions.length;
 
   useEffect(() => {
     setPage(0);
@@ -44,22 +45,24 @@ export function AskQuestionnaire({
       role="dialog"
       aria-label={isReview ? t("chat.askReview") : question.question}
     >
-        <div className="ask-questionnaire-tabs">
-          {questionnaire.questions.map((item, index) => (
-            <button
-              key={`${item.header}-${index}`}
-              type="button"
-              className={page === index ? "is-active" : undefined}
-              onClick={() => setPage(index)}
-              disabled={questionnaire.submitting}
-            >
-              {index + 1}. {item.header}
+        {!isSingleQuestion && (
+          <div className="ask-questionnaire-tabs">
+            {questionnaire.questions.map((item, index) => (
+              <button
+                key={`${item.header}-${index}`}
+                type="button"
+                className={page === index ? "is-active" : undefined}
+                onClick={() => setPage(index)}
+                disabled={questionnaire.submitting}
+              >
+                {index + 1}. {item.header}
+              </button>
+            ))}
+            <button type="button" className={isReview ? "is-active" : undefined} onClick={() => setPage(questionnaire.questions.length)} disabled={questionnaire.submitting}>
+              {t("chat.askReview")}
             </button>
-          ))}
-          <button type="button" className={isReview ? "is-active" : undefined} onClick={() => setPage(questionnaire.questions.length)} disabled={questionnaire.submitting}>
-            {t("chat.askReview")}
-          </button>
-        </div>
+          </div>
+        )}
 
         <div className="ask-questionnaire-body">
           {isReview ? (
@@ -102,7 +105,12 @@ export function AskQuestionnaire({
                       className={selected ? "is-selected" : undefined}
                       onClick={() => {
                         if (!question.multiSelect) {
-                          setAnswer({ kind: "options", optionIndexes: [optionIndex] });
+                          const answer: AskQuestionnaireAnswer = { kind: "options", optionIndexes: [optionIndex] };
+                          if (isSingleQuestion) {
+                            onSubmit([answer]);
+                          } else {
+                            setAnswer(answer);
+                          }
                           return;
                         }
                         const indexes = currentAnswer?.kind === "options" ? currentAnswer.optionIndexes : [];
@@ -144,6 +152,15 @@ export function AskQuestionnaire({
                 className="is-primary"
                 disabled={questionnaire.submitting || answers.some((answer, index) => !isAnswerComplete(answer, index))}
                 onClick={() => onSubmit(answers as AskQuestionnaireAnswer[])}
+              >
+                {questionnaire.submitting ? t("chat.askSubmitting") : t("chat.askSubmit")}
+              </button>
+            ) : isSingleQuestion ? (
+              <button
+                type="button"
+                className="is-primary"
+                disabled={questionnaire.submitting || !canContinue}
+                onClick={() => currentAnswer && onSubmit([currentAnswer])}
               >
                 {questionnaire.submitting ? t("chat.askSubmitting") : t("chat.askSubmit")}
               </button>

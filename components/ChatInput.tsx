@@ -278,6 +278,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
     draftKey ? draftImagesToAttachedImages(getDraft(draftKey)?.images) : []
   ));
+  const [imageAttachmentError, setImageAttachmentError] = useState<string | null>(null);
   const [textAttachment, setTextAttachment] = useState(() => (
     draftKey ? getDraft(draftKey)?.textAttachment ?? null : null
   ));
@@ -405,19 +406,34 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   }));
 
   const processImageFiles = useCallback(async (files: File[]) => {
-    if (isStreaming) return;
+    if (isStreaming) {
+      setImageAttachmentError(t("chat.imageAttachmentStreaming"));
+      return;
+    }
     const remaining = Math.max(
       0,
       MAX_ATTACHED_IMAGES - attachedImagesRef.current.length - pendingImageCountRef.current,
     );
-    const imageFiles = files
-      .filter((f) => f.type.startsWith("image/") && f.size <= MAX_ATTACHED_IMAGE_BYTES)
+    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
+    const oversizedImage = imageFiles.find((file) => file.size > MAX_ATTACHED_IMAGE_BYTES);
+    if (oversizedImage) {
+      setImageAttachmentError(t("chat.imageAttachmentTooLarge", {
+        size: (oversizedImage.size / (1024 * 1024)).toFixed(1),
+        max: MAX_ATTACHED_IMAGE_BYTES / (1024 * 1024),
+      }));
+    } else if (imageFiles.length > remaining) {
+      setImageAttachmentError(t("chat.imageAttachmentLimit", { max: MAX_ATTACHED_IMAGES }));
+    } else {
+      setImageAttachmentError(null);
+    }
+    const acceptedImageFiles = imageFiles
+      .filter((file) => file.size <= MAX_ATTACHED_IMAGE_BYTES)
       .slice(0, remaining);
-    if (!imageFiles.length) return;
-    pendingImageCountRef.current += imageFiles.length;
+    if (!acceptedImageFiles.length) return;
+    pendingImageCountRef.current += acceptedImageFiles.length;
     try {
       const newImages = await Promise.all(
-        imageFiles.map(
+        acceptedImageFiles.map(
           (file) =>
             new Promise<AttachedImage>((resolve, reject) => {
               const reader = new FileReader();
@@ -437,10 +453,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         newImages.slice(accepted.length).forEach(revokeImagePreview);
         return [...prev, ...accepted];
       });
+    } catch (error) {
+      console.error("读取图片附件失败", error);
+      setImageAttachmentError(t("chat.imageAttachmentReadFailed"));
     } finally {
-      pendingImageCountRef.current -= imageFiles.length;
+      pendingImageCountRef.current -= acceptedImageFiles.length;
     }
-  }, [isStreaming]);
+  }, [isStreaming, t]);
 
   const removeImage = useCallback((index: number) => {
     setAttachedImages((prev) => {
@@ -464,6 +483,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     setAtQuery(null);
     setHistoryMenuOpen(false);
     setTextPreviewOpen(false);
+    setImageAttachmentError(null);
     if (draftKey) clearDraft(draftKey);
     if (draftKeyRef.current && draftKeyRef.current !== draftKey) clearDraft(draftKeyRef.current);
     attachedImagesRef.current = [];
@@ -563,6 +583,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     draftKeyRef.current = draftKey;
     setValue(draft?.value ?? "");
     setTextAttachment(draft?.textAttachment ?? null);
+    setImageAttachmentError(null);
     setAtQuery(null);
     setHistoryMenuOpen(false);
     setAttachedImages((prev) => {
@@ -1148,6 +1169,35 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         <ModelErrorBanner error={modelError} />
         <ModelScopeWarningBanner warnings={modelScopeWarnings} />
         <ModelDataDiagnosticBanner diagnostics={modelDataDiagnostics} />
+        {imageAttachmentError && (
+          <div
+            role="alert"
+            style={{
+              marginBottom: 8,
+              padding: "7px 10px",
+              background: "rgba(239,68,68,0.07)",
+              border: "1px solid rgba(239,68,68,0.3)",
+              borderRadius: 6,
+              color: "#ef4444",
+              fontSize: 12,
+              lineHeight: 1.5,
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+            }}
+          >
+            <span style={{ flex: 1 }}>{imageAttachmentError}</span>
+            <button
+              type="button"
+              onClick={() => setImageAttachmentError(null)}
+              aria-label={t("chat.dismissImageAttachmentError")}
+              title={t("chat.dismissImageAttachmentError")}
+              style={{ border: 0, padding: 0, background: "transparent", color: "inherit", cursor: "pointer", fontSize: 16, lineHeight: 1 }}
+            >
+              ×
+            </button>
+          </div>
+        )}
         {newSessionWorktrees && newSessionWorktrees.length > 0 && (
           <label style={{ display: "flex", alignItems: "center", gap: 7, margin: "0 0 6px 4px", color: "var(--text-muted)", fontSize: 11 }}>
             <span aria-hidden="true">⌘</span>

@@ -24,6 +24,11 @@ test("keeps the pinned marker visible when a session is selected", () => {
   assert.match(source, /aria-pressed=\{tone === "pin" \? pressed : undefined\}/);
 });
 
+test("置顶按钮切换桌面布局后仍保留左边框", () => {
+  assert.doesNotMatch(source, /borderLeft: mobile/);
+  assert.match(source, /boxShadow: mobile \? "inset 1px 0 var\(--border\)" : undefined/);
+});
+
 test("prefills rename with the displayed title and exposes the desktop context menu", () => {
   assert.match(source, /const displayFirstMessage = parseSkillMessage\(session\.firstMessage\)\?\.displayText/);
   assert.match(mutationSource, /setRenameValue\(title\)/);

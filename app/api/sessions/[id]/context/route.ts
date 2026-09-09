@@ -13,9 +13,8 @@ export async function GET(
   const leafId = url.searchParams.get("leafId") ?? undefined;
   const deferThinking = url.searchParams.has("deferThinking");
   const deferToolResultImages = url.searchParams.has("deferMedia");
-  // `tail` caps the ancestor chain returned (default 50); `before` rewinds the
-  // walk start to an older entry so the client can page upward without
-  // re-fetching the whole active branch.
+  // `tail` sets the minimum page size (default 50); the reader may extend to a
+  // turn anchor. `before` rewinds the walk so the client can page upward.
   const rawTail = Number(url.searchParams.get("tail"));
   const tail = Number.isFinite(rawTail) && rawTail > 0 ? Math.min(rawTail, 1000) : 50;
   const before = url.searchParams.get("before") ?? undefined;

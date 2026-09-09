@@ -22,6 +22,7 @@ export function CustomMessageView({ message, cwd, onOpenFile }: Props) {
   const [copied, setCopied] = useState(false);
   const rawText = getMessageText(message.content);
   const shadowEvent = message.customType === "shadow-mind" ? readShadowMindEvent(message.details) : null;
+  const title = shadowEvent ? formatShadowMindTitle(shadowEvent) : (message.customType || "extension");
   const text = shadowEvent ? formatShadowMindEvent(shadowEvent, t) : rawText;
   const images = getMessageImages(message.content);
   const hasDetails = message.details !== undefined;
@@ -59,7 +60,7 @@ export function CustomMessageView({ message, cwd, onOpenFile }: Props) {
         opacity: isHiddenDisplay && !contentExpanded ? 0.82 : 1,
       }}>
         <CustomMessageHeader
-          title={message.customType || "extension"}
+          title={title}
           time={formatMessageTime(message.timestamp)}
           hidden={isHiddenDisplay}
         />
@@ -87,11 +88,11 @@ function CustomMessageHeader({ title, time, hidden }: { title: string; time: str
       color: "var(--text-muted)",
       fontSize: 12,
     }}>
-      <span style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 650 }}>
+      <span style={{ minWidth: 0, overflowWrap: "anywhere", color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 650 }}>
         {title}
       </span>
       {hidden && <span style={{ color: "var(--text-dim)", fontSize: 11 }}>{t("i18n.hiddenExtensionMessage")}</span>}
-      {time && <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 10 }}>{time}</span>}
+      {time && <span style={{ marginLeft: "auto", flexShrink: 0, color: "var(--text-dim)", fontSize: 10 }}>{time}</span>}
     </div>
   );
 }
@@ -203,23 +204,40 @@ function CustomMessageDetails({ visible, text }: { visible: boolean; text: strin
 }
 
 type ShadowMindEvent =
-  | { event: "run-start"; shadowId: string; model: string | null }
-  | { event: "run-end"; shadowId: string; reason: string | null; durationMs: number | null }
+  | { event: "run-start"; shadowId: string; model: string | null; thinkingLevel: string | null }
+  | { event: "run-end"; shadowId: string; model: string | null; thinkingLevel: string | null; reason: string | null; durationMs: number | null }
   | { event: "runs-aborted"; count: number; reason: string | null };
 
 function readShadowMindEvent(details: unknown): ShadowMindEvent | null {
   if (!details || typeof details !== "object") return null;
   const value = details as Record<string, unknown>;
   if (value.event === "run-start" && typeof value.shadowId === "string") {
-    return { event: "run-start", shadowId: value.shadowId, model: typeof value.model === "string" ? value.model : null };
+    return {
+      event: "run-start",
+      shadowId: value.shadowId,
+      model: typeof value.model === "string" ? value.model : null,
+      thinkingLevel: typeof value.thinkingLevel === "string" ? value.thinkingLevel : null,
+    };
   }
   if (value.event === "run-end" && typeof value.shadowId === "string") {
-    return { event: "run-end", shadowId: value.shadowId, reason: typeof value.reason === "string" ? value.reason : null, durationMs: typeof value.durationMs === "number" ? value.durationMs : null };
+    return {
+      event: "run-end",
+      shadowId: value.shadowId,
+      model: typeof value.model === "string" ? value.model : null,
+      thinkingLevel: typeof value.thinkingLevel === "string" ? value.thinkingLevel : null,
+      reason: typeof value.reason === "string" ? value.reason : null,
+      durationMs: typeof value.durationMs === "number" ? value.durationMs : null,
+    };
   }
   if (value.event === "runs-aborted" && typeof value.count === "number") {
     return { event: "runs-aborted", count: value.count, reason: typeof value.reason === "string" ? value.reason : null };
   }
   return null;
+}
+
+function formatShadowMindTitle(event: ShadowMindEvent): string {
+  if (!("model" in event) || !event.model) return "shadow-mind";
+  return `shadow-mind ${event.model}${event.thinkingLevel ? `+${event.thinkingLevel}` : ""}`;
 }
 
 function formatShadowMindEvent(event: ShadowMindEvent, t: (key: string, values?: Record<string, string | number>) => string): string {

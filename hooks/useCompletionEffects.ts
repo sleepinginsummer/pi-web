@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 import type { RunCompletion } from "@/hooks/useRunCompletion";
 import type { SessionNotificationOptions } from "@/lib/session-notifications";
+import { isManualStopNotificationSuppressed } from "@/lib/manual-stop-notification";
 
 interface CompletionEffectsOptions {
   completion: RunCompletion | null;
@@ -33,7 +34,12 @@ export function useCompletionEffects({
     handledRunIdRef.current = completion.runId;
 
     if (soundEnabled) playDoneSound();
-    void notifySession(title, body, completion.sessionId, { folderName, showWhenActive: true });
+    const notificationSuppressed = completion.sessionId
+      ? isManualStopNotificationSuppressed(completion.sessionId)
+      : false;
+    if (!notificationSuppressed) {
+      void notifySession(title, body, completion.sessionId, { folderName, showWhenActive: true });
+    }
     onComplete?.();
   }, [body, completion, folderName, notifySession, onComplete, playDoneSound, soundEnabled, title]);
 }

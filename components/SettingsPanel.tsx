@@ -19,6 +19,7 @@ interface Props {
   sessionId: string | null;
   initialSection: SettingsSection;
   onClose: () => void;
+  onModelsChanged: () => void;
   onSessionReloaded: () => void;
 }
 
@@ -175,7 +176,7 @@ function GeneralSettings({ sessionId, onSessionReloaded }: Pick<Props, "sessionI
   );
 }
 
-export function SettingsPanel({ cwd, sessionId, initialSection, onClose, onSessionReloaded }: Props) {
+export function SettingsPanel({ cwd, sessionId, initialSection, onClose, onModelsChanged, onSessionReloaded }: Props) {
   const { t } = useI18n();
   const [section, setSection] = useState<SettingsSection>(initialSection);
   const [mountedSections, setMountedSections] = useState<ReadonlySet<SettingsSection>>(
@@ -271,7 +272,7 @@ export function SettingsPanel({ cwd, sessionId, initialSection, onClose, onSessi
 
         <main className="settings-dialog-main">
           {sectionHost("general", <GeneralSettings sessionId={sessionId} onSessionReloaded={onSessionReloaded} />)}
-          {sectionHost("models", <ModelsConfig embedded onClose={onClose} />)}
+          {sectionHost("models", <ModelsConfig embedded onClose={onClose} onModelsChanged={onModelsChanged} />)}
           {cwd && sectionHost("skills", <SkillsConfig embedded key={cwd} cwd={cwd} onClose={onClose} />)}
           {cwd && sectionHost("plugins", <PluginsConfig embedded key={cwd} cwd={cwd} sessionId={sessionId} onClose={onClose} onReloaded={onSessionReloaded} />)}
         </main>

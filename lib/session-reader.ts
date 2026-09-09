@@ -470,6 +470,29 @@ export interface BuildSessionContextOptions {
   sessionId?: string;
 }
 
+type ShadowRunMetadata = {
+  model?: string;
+  thinkingLevel?: string;
+};
+
+/** 汇总一次 Shadow 运行分散在 start/end 事件中的实际模型与思考强度。 */
+function collectShadowRunMetadata(entries: SessionEntry[]): ReadonlyMap<string, ShadowRunMetadata> {
+  const metadata = new Map<string, ShadowRunMetadata>();
+  for (const entry of entries) {
+    if (entry.type !== "custom" || entry.customType !== "shadow-mind-event") continue;
+    const event = entry.data as { kind?: unknown; data?: Record<string, unknown> } | undefined;
+    const kind = event?.kind;
+    const data = event?.data;
+    const runId = data?.runId;
+    if (!data || typeof runId !== "string") continue;
+    const current = metadata.get(runId) ?? {};
+    if (kind === "run-start" && typeof data.model === "string") current.model = data.model;
+    if (kind === "run-end" && typeof data.thinkingLevel === "string") current.thinkingLevel = data.thinkingLevel;
+    metadata.set(runId, current);
+  }
+  return metadata;
+}
+
 export function buildSessionContext(
   entries: SessionEntry[],
   leafId?: string | null,
@@ -511,9 +534,10 @@ export function buildSessionContext(
   // fork/navigation targets aligned while preserving pi's compaction ordering.
   const messages: AgentMessage[] = [];
   const entryIds: string[] = [];
+  const shadowRunMetadata = collectShadowRunMetadata(sliced);
   for (const entry of mergedContextEntries) {
     const localEntry = entry as unknown as SessionEntry;
-    const m = entryToUiMessage(localEntry, options);
+    const m = entryToUiMessage(localEntry, options, shadowRunMetadata);
     if (m) {
       messages.push(m);
       entryIds.push(localEntry.id);
@@ -537,11 +561,10 @@ export function buildSessionContext(
 }
 
 /**
- * Extract the ancestor chain from `leafId` back toward the root, capped at
- * `tail` entries (most-recent first after the final reverse). Iterative: a
- * linear session's chain length equals its entry count, so a recursive walk
- * would overflow the stack. The result is still a valid prefix of the active
- * branch — older history is loaded on demand via pagination.
+ * Extract the ancestor chain from `leafId` back toward the root. `tail` is the
+ * minimum page size; the slice may extend to the current turn anchor so the UI
+ * can group and collapse the turn. The iterative walk avoids stack overflow on
+ * deep linear sessions. Older complete turns are loaded on demand.
  */
 export function sliceActiveBranch(
   entries: SessionEntry[],
@@ -564,8 +587,22 @@ export function sliceActiveBranch(
     chain.push(current);
     current = current.parentId ? byId.get(current.parentId) : undefined;
   }
+
+  // 固定条数可能从一轮工具调用的中间截断，导致前端拿不到 user/compaction
+  // 锚点，进而无法把思考和工具调用归入折叠组。达到最小页大小后继续回溯，
+  // 直到当前轮次完整；超长单轮允许超过 tail，避免用展示正确性换固定响应条数。
+  while (current && !isConversationTurnAnchor(chain.at(-1))) {
+    chain.push(current);
+    current = current.parentId ? byId.get(current.parentId) : undefined;
+  }
   chain.reverse();
   return chain;
+}
+
+function isConversationTurnAnchor(entry: SessionEntry | undefined): boolean {
+  if (!entry) return false;
+  if (entry.type === "compaction") return true;
+  return entry.type === "message" && entry.message.role === "user";
 }
 function parseEntryTimestamp(timestamp: string): number | undefined {
   const parsed = Date.parse(timestamp);
@@ -646,6 +683,7 @@ function deferToolResultBase64Images(
 function entryToUiMessage(
   entry: SessionEntry,
   options: BuildSessionContextOptions,
+  shadowRunMetadata: ReadonlyMap<string, ShadowRunMetadata>,
 ): AgentMessage | null {
   // Supported message roles: user, assistant, toolResult, bashExecution.
   // bashExecution messages enter the case "message" branch (entry.type === "message").
@@ -705,14 +743,17 @@ function entryToUiMessage(
       const event = entry.data as {
         kind?: unknown;
         data?: {
+          runId?: unknown;
           shadowId?: unknown;
           model?: unknown;
+          thinkingLevel?: unknown;
           reason?: unknown;
           durationMs?: unknown;
           count?: unknown;
         };
       } | undefined;
       const data = event?.data;
+      const runMetadata = typeof data?.runId === "string" ? shadowRunMetadata.get(data.runId) : undefined;
       if (event?.kind === "run-start" && typeof data?.shadowId === "string") {
         return {
           role: "custom",
@@ -723,6 +764,7 @@ function entryToUiMessage(
             event: "run-start",
             shadowId: data.shadowId,
             model: typeof data.model === "string" ? data.model : null,
+            ...(runMetadata?.thinkingLevel ? { thinkingLevel: runMetadata.thinkingLevel } : {}),
           },
           timestamp: parseEntryTimestamp(entry.timestamp),
         };
@@ -736,6 +778,8 @@ function entryToUiMessage(
           details: {
             event: "run-end",
             shadowId: data.shadowId,
+            ...(runMetadata?.model ? { model: runMetadata.model } : {}),
+            ...(typeof data.thinkingLevel === "string" ? { thinkingLevel: data.thinkingLevel } : {}),
             reason: typeof data.reason === "string" ? data.reason : null,
             durationMs: typeof data.durationMs === "number" ? data.durationMs : null,
           },

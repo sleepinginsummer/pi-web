@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const source = await readFile(new URL("./ChatWindow.tsx", import.meta.url), "utf8");
+const noticeShelfSource = await readFile(new URL("./NoticeShelf.tsx", import.meta.url), "utf8");
 const appShellSource = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
 const globalAttentionHookSource = await readFile(new URL("../hooks/useGlobalAttentionNotifications.ts", import.meta.url), "utf8");
 
@@ -17,7 +18,7 @@ test("tips use the compact left-side shelf and reveal full text on hover", async
   const styles = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
 
   assert.match(source, /className="notice-shelf-overlay"/);
-  assert.match(source, /className="notice-shelf-message"/);
+  assert.match(noticeShelfSource, /className="notice-shelf-message"/);
   assert.match(styles, /\.notice-shelf-item\s*\{[\s\S]*?width: min\(240px, 100%\);[\s\S]*?min-height: 34px/);
   assert.match(styles, /\.notice-shelf-item:hover \.notice-shelf-message[\s\S]*?white-space: normal/);
 });

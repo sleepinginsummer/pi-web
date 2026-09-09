@@ -5,7 +5,11 @@ import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import type { ModelEntry, ModelsData, SelectedModel, ThinkingLevelMap } from "@/lib/model-types";
 import { loadModelsWithCache, withModelRuntimeError, withSafeModelLoadFailure } from "@/lib/models-cache";
 import type { ThinkingLevel } from "@/lib/thinking-levels";
-import { resolveVisibleModels, selectInitialModelScope } from "@/lib/model-scope";
+import {
+  resolveVisibleModels,
+  restrictVisibleModelsToConfiguredCatalog,
+  selectInitialModelScope,
+} from "@/lib/model-scope";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { projectTrustReloadOptions } from "@/lib/project-trust";
 import { isFastModeAvailable } from "@/lib/fast-mode";
@@ -24,7 +28,11 @@ function compareModelEntries(
     || modelNameCollator.compare(a.id, b.id);
 }
 
-async function loadModels(cwd: string, fastModels: ReadonlySet<string>): Promise<ModelsData> {
+async function loadModels(
+  cwd: string,
+  modelsConfig: Record<string, unknown>,
+  fastModels: ReadonlySet<string>,
+): Promise<ModelsData> {
   const nameMap = new Map<string, string>();
   let modelList: ModelEntry[] = [];
   let defaultModel: SelectedModel | null = null;
@@ -45,9 +53,12 @@ async function loadModels(cwd: string, fastModels: ReadonlySet<string>): Promise
   const settings: SettingsManager = services.settingsManager;
   // `enabledModels` supports globs and fuzzy patterns, so resolve it the same
   // way the CLI does instead of comparing pattern strings literally (#307).
-  const scope = await resolveVisibleModels(
-    services.modelRuntime,
-    settings.getEnabledModels(),
+  const scope = restrictVisibleModelsToConfiguredCatalog(
+    await resolveVisibleModels(
+      services.modelRuntime,
+      settings.getEnabledModels(),
+    ),
+    modelsConfig,
   );
   const { visible, thinkingLevelPins, warnings } = scope;
   modelList = visible.map((m) => ({
@@ -90,7 +101,7 @@ async function loadModels(cwd: string, fastModels: ReadonlySet<string>): Promise
 
 async function loadModelsConsistently(cwd: string): Promise<ModelsData> {
   const before = await readModelsConfigSnapshot();
-  const result = await loadModels(cwd, before.fastModels);
+  const result = await loadModels(cwd, before.modelsConfig, before.fastModels);
   const after = await readModelsConfigSnapshot();
   if (before.generation === after.generation) return result;
   throw new Error("模型配置在目录加载期间发生变化，请重试");

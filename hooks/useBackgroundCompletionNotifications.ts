@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 import type { RunningSessionTransitionEvent } from "@/hooks/useRunningSessionTransitions";
 import type { SessionNotificationOptions } from "@/lib/session-notifications";
+import { consumeManualStopNotificationSuppression } from "@/lib/manual-stop-notification";
 
 type NotifySession = (
   title: string,
@@ -25,6 +26,7 @@ export function useBackgroundCompletionNotifications(
     if (transition.revision <= consumedRevisionRef.current) return;
     consumedRevisionRef.current = transition.revision;
     for (const sessionId of transition.completedInBackground) {
+      if (consumeManualStopNotificationSuppression(sessionId)) continue;
       void notifySession(title, body, sessionId, { folderName: getFolderName(sessionId) });
     }
   }, [body, getFolderName, notifySession, title, transition]);

@@ -21,6 +21,10 @@ import { selectPendingNewSession, type PendingNewSessionControl, type PendingNew
 import { useModelSelection } from "@/hooks/useModelSelection";
 import { useFrameBatchedStreamDispatch } from "@/hooks/useFrameBatchedStreamDispatch";
 import { useRunCompletion } from "@/hooks/useRunCompletion";
+import {
+  clearManualStopNotificationSuppression,
+  markManualStopNotificationSuppressed,
+} from "@/lib/manual-stop-notification";
 export type { ThinkingLevelOption } from "@/lib/thinking-levels";
 import { normalizeAssistantMessage } from "@/lib/normalize";
 import { getPreferredToolPreset, setPreferredToolPreset } from "@/lib/tool-preset-preference";
@@ -1518,6 +1522,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     backfillRequestRef.current.controller?.abort();
     backfillRequestRef.current.generation += 1;
     if (!agentRunningRef.current) {
+      const sid = sessionIdRef.current;
+      if (sid) clearManualStopNotificationSuppression(sid);
       resetStreamDeltas();
       const runId = promptRunIdRef.current + 1;
       promptRunIdRef.current = runId;
@@ -2056,9 +2062,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setExtensionDialog(null);
     extensionDialogRef.current = null;
     clearAskQuestionnaire();
+    markManualStopNotificationSuppressed(sid);
     try {
       await sendAgentCommand(sid, { type: "abort" });
     } catch (e) {
+      clearManualStopNotificationSuppression(sid);
       console.error("Failed to abort:", e);
     }
   }, [clearAskQuestionnaire]);

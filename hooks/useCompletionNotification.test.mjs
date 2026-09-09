@@ -81,6 +81,7 @@ test("exposes a session notification sender for completion and input requests", 
 });
 
 test("completion notifications explicitly allow the active session", () => {
+  assert.match(completionEffectsSource, /if \(!notificationSuppressed\)/);
   assert.match(completionEffectsSource, /notifySession\(title, body, completion\.sessionId, \{ folderName, showWhenActive: true \}\)/);
   assert.match(hookSource, /showWhenActive: policy\.showWhenActive/);
 });
@@ -97,6 +98,7 @@ test("AppShell only orchestrates the shared system and in-app notification contr
   assert.match(appShellSource, /notificationController=\{notificationController\}/);
   assert.match(appShellSource, /useBackgroundCompletionNotifications\(/);
   assert.match(backgroundCompletionSource, /for \(const sessionId of transition\.completedInBackground\)/);
+  assert.match(backgroundCompletionSource, /consumeManualStopNotificationSuppression\(sessionId\)/);
   assert.match(backgroundCompletionSource, /notifySession\(title, body, sessionId, \{ folderName: getFolderName\(sessionId\) \}\)/);
   assert.match(appShellSource, /<FloatingSessionNotifications/);
   assert.doesNotMatch(appShellSource, /useCompletionNotification\(/);

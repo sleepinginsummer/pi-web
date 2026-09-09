@@ -50,6 +50,47 @@ export interface InitialModelScopeResult {
   scopedModels: ScopedModel[];
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * models.json 对某个 provider 显式声明 models 时，以该列表作为 Web 选择器边界。
+ * Pi 运行时会把内置/远程目录与本地配置合并；这里仅收窄 UI 投影，避免重新显示用户未配置的目录模型。
+ */
+export function restrictVisibleModelsToConfiguredCatalog(
+  scope: ModelScopeResult,
+  modelsConfig: Record<string, unknown>,
+): ModelScopeResult {
+  if (!isRecord(modelsConfig.providers)) return scope;
+
+  const configuredIds = new Map<string, ReadonlySet<string>>();
+  for (const [providerId, rawProvider] of Object.entries(modelsConfig.providers)) {
+    if (!isRecord(rawProvider) || !Array.isArray(rawProvider.models)) continue;
+    configuredIds.set(providerId, new Set(rawProvider.models.flatMap((rawModel) => (
+      isRecord(rawModel) && typeof rawModel.id === "string" && rawModel.id.trim()
+        ? [rawModel.id]
+        : []
+    ))));
+  }
+  if (configuredIds.size === 0) return scope;
+
+  const isVisible = (model: { provider: string; id: string }): boolean => {
+    const ids = configuredIds.get(model.provider);
+    return !ids || ids.has(model.id);
+  };
+  const visible = scope.visible.filter(isVisible);
+  const visibleKeys = new Set(visible.map((model) => `${model.provider}/${model.id}`));
+  return {
+    ...scope,
+    visible,
+    scopedModels: scope.scopedModels.filter(({ model }) => isVisible(model)),
+    thinkingLevelPins: Object.fromEntries(
+      Object.entries(scope.thinkingLevelPins).filter(([key]) => visibleKeys.has(key)),
+    ),
+  };
+}
+
 function matchesModel(
   model: { provider: string; id: string },
   ref: { provider: string; modelId: string },

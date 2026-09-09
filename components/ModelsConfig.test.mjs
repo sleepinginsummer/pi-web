@@ -26,6 +26,12 @@ test("ignores malformed auth provider responses", () => {
   );
 });
 
+test("保存模型配置后立即刷新当前模型选择列表", () => {
+  assert.match(source, /catalogRefreshed\?: boolean/);
+  assert.match(source, /if \(d\.catalogRefreshed === false\) setSaveWarning\(t\("models\.catalogRefreshFailed"\)\)/);
+  assert.match(source, /onModelsChanged\(\);\s*setSavedOk\(true\)/);
+});
+
 test("custom model config exposes provider-level request headers", () => {
   const providerDetail = source.slice(
     source.indexOf("function ProviderDetail"),

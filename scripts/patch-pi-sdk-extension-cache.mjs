@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { patchPiSdkExtensionCache } from "../lib/pi-sdk-extension-cache-patch.mjs";
 
-const EXPECTED_SDK_VERSION = "0.84.3";
+const EXPECTED_SDK_VERSION = "0.84.4";
 const sdkEntryPath = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
 const sdkRoot = dirname(dirname(sdkEntryPath));
 const packageJsonPath = join(sdkRoot, "package.json");

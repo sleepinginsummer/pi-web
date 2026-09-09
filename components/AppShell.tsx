@@ -941,6 +941,7 @@ export function AppShell() {
           setSettingsSection(null);
           setModelsRefreshKey((key) => key + 1);
         }}
+        onModelsChanged={() => setModelsRefreshKey((key) => key + 1)}
         onSessionReloaded={bumpSessionKey}
       />
     )}

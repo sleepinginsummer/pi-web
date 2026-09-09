@@ -121,6 +121,20 @@ test("renders compact errors above the input as a wrapping alert", () => {
   assert.ok(html.indexOf('role="alert"') < html.indexOf("<textarea"));
 });
 
+test("图片附件被拒绝时展示明确提示", async () => {
+  const source = await readFile(new URL("./ChatInput.tsx", import.meta.url), "utf8");
+  const processImageSource = source.slice(
+    source.indexOf("const processImageFiles = useCallback"),
+    source.indexOf("const removeImage = useCallback"),
+  );
+
+  assert.match(processImageSource, /chat\.imageAttachmentStreaming/);
+  assert.match(processImageSource, /file\.size > MAX_ATTACHED_IMAGE_BYTES/);
+  assert.match(processImageSource, /chat\.imageAttachmentTooLarge/);
+  assert.match(processImageSource, /chat\.imageAttachmentLimit/);
+  assert.match(source, /role="alert"[\s\S]*?imageAttachmentError/);
+});
+
 test("offers the built-in clone command", async () => {
   const source = await readFile(new URL("./ChatInput.tsx", import.meta.url), "utf8");
   assert.match(source, /name: "clone", description: "chat\.commandClone"/);
