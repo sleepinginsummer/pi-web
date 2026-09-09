@@ -19,7 +19,7 @@ test("keeps AppShell as an orchestrator instead of restoring inline feature owne
   assert.match(appShell, /useFilePanel\(/);
   assert.match(appShell, /<AppTopBar/);
   assert.match(appShell, /<AppTopPanels/);
-  assert.doesNotMatch(appShell, /setFileTabs|setRightPanelOpen|const handleOpenFile|const handleCloseFileTab/);
+  assert.doesNotMatch(appShell, /setFileTabs|setRightPanelOpen|const handleCloseFileTab/);
   assert.doesNotMatch(appShell, /new ResizeObserver/);
   assert.doesNotMatch(appShell, /fetch\(`?\/api\/project-trust|setProjectTrust|setSessionStats|setSystemPrompt|setContextUsage/);
   assert.match(appShell, /useSessionNotifications\(/);

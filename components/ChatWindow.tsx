@@ -953,21 +953,6 @@ export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSe
         </div>
       )}
 
-
-      {extensionDialog && extensionDialog.method !== "select" && !askQuestionnaire && (
-        <ExtensionDialog
-          request={extensionDialog}
-          onRespond={respondToExtensionUi}
-        />
-      )}
-
-      {extensionCustomUi && (
-        <ExtensionCustomPanel
-          request={extensionCustomUi}
-          onInput={sendExtensionCustomInput}
-        />
-      )}
-
       {isEmptyNew ? (
         <div className="flex flex-1 flex-col items-center justify-center overflow-y-auto px-4 py-8">
           <div className="w-full" style={{ maxWidth: "var(--chat-content-max-width, 820px)" }}>
@@ -1034,7 +1019,13 @@ export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSe
         </div>
       ) : (
       <>
-      <div className="relative flex flex-1 overflow-hidden">
+      <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
+        {extensionDialog && extensionDialog.method !== "select" && !askQuestionnaire && (
+          <ExtensionDialog key={extensionDialog.id} request={extensionDialog} onRespond={respondToExtensionUi} />
+        )}
+        {extensionCustomUi && (
+          <ExtensionCustomPanel key={extensionCustomUi.id} request={extensionCustomUi} onInput={sendExtensionCustomInput} />
+        )}
         <div className="notice-shelf-overlay">
           <NoticeShelf
             notices={notices}
@@ -1422,7 +1413,7 @@ export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSe
         document.body,
       )}
 
-      <div className="relative">
+      <div className="relative shrink-0">
         <div
           style={{
             padding: `0 ${CHAT_COLUMN_PADDING}px`,
@@ -1508,10 +1499,10 @@ function ExtensionDialog({
         inset: 0,
         zIndex: 90,
         display: "flex",
-        alignItems: "center",
+        alignItems: collapsed ? "flex-start" : "center",
         justifyContent: "center",
         padding: 20,
-        background: "rgba(0,0,0,0.18)",
+        pointerEvents: "none",
       }}
     >
       {collapsed ? (
@@ -1555,10 +1546,13 @@ function ExtensionDialog({
       ) : (
       <div
         role="dialog"
-        aria-modal="true"
         aria-label={request.title}
         style={{
+          pointerEvents: "auto",
           width: "min(560px, 100%)",
+          maxHeight: "min(760px, 100%)",
+          display: "flex",
+          flexDirection: "column",
           border: "1px solid var(--border)",
           borderRadius: 8,
           background: "var(--bg)",
@@ -1599,7 +1593,7 @@ function ExtensionDialog({
           </button>
         </div>
 
-        <div style={{ padding: 14 }}>
+        <div style={{ padding: 14, flex: "1 1 auto", minHeight: 0, overflowY: "auto" }}>
           {request.method === "confirm" && (
             <div style={{ color: "var(--text-muted)", fontSize: 13, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{request.message}</div>
           )}
@@ -1721,11 +1715,13 @@ function ExtensionCustomPanel({
   const { t } = useI18n();
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const composingRef = useRef(false);
+  const [collapsed, setCollapsed] = useState(false);
   const displayLines = normalizeCustomPanelLines(request.lines);
+  const summary = displayLines.find((line) => line.trim())?.trim();
 
   useEffect(() => {
-    inputRef.current?.focus();
-  }, [request.id]);
+    if (!collapsed) inputRef.current?.focus();
+  }, [collapsed]);
 
   return (
     <div
@@ -1734,22 +1730,62 @@ function ExtensionCustomPanel({
         inset: 0,
         zIndex: 95,
         display: "flex",
-        alignItems: "center",
+        alignItems: collapsed ? "flex-start" : "center",
         justifyContent: "center",
         padding: 20,
-        background: "rgba(0,0,0,0.18)",
+        pointerEvents: "none",
       }}
     >
+      {collapsed ? (
+        <button
+          type="button"
+          onClick={() => setCollapsed(false)}
+          aria-expanded={false}
+          style={{
+            pointerEvents: "auto",
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            maxWidth: "min(920px, 100%)",
+            width: "100%",
+            padding: "10px 12px",
+            border: "1px solid var(--border)",
+            borderRadius: 8,
+            background: "var(--bg)",
+            boxShadow: "0 12px 32px rgba(0,0,0,0.18)",
+            color: "var(--text)",
+            cursor: "pointer",
+            textAlign: "left",
+          }}
+        >
+          <span style={{ fontSize: 11, fontWeight: 650, color: "var(--accent)", flexShrink: 0 }}>
+            {t("chat.extensionPending")}
+          </span>
+          <span style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
+            {t("chat.extensionPanel")}
+          </span>
+          {summary && (
+            <span style={{ fontSize: 12, color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "34%", flexShrink: 1 }}>
+              {summary}
+            </span>
+          )}
+          <span style={{ fontSize: 12, color: "var(--text-muted)", flexShrink: 0 }}>
+            {t("chat.extensionExpand")}
+          </span>
+        </button>
+      ) : (
       <div
         role="dialog"
-        aria-modal="true"
         onClick={(event) => {
           if (!(event.target as HTMLElement).closest("button")) inputRef.current?.focus();
         }}
         style={{
+          pointerEvents: "auto",
           position: "relative",
           width: "min(920px, 100%)",
-          maxHeight: "min(760px, calc(100vh - 40px))",
+          maxHeight: "min(760px, 100%)",
+          display: "flex",
+          flexDirection: "column",
           border: "1px solid var(--border)",
           borderRadius: 8,
           background: "var(--bg)",
@@ -1806,28 +1842,53 @@ function ExtensionCustomPanel({
             pointerEvents: "none",
           }}
         />
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "10px 12px", borderBottom: "1px solid var(--border)" }}>
+        <div style={{ flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "10px 12px", borderBottom: "1px solid var(--border)" }}>
            <div style={{ color: "var(--text)", fontSize: 13, fontWeight: 650 }}>{t("chat.extensionPanel")}</div>
-          <button
-            onClick={() => onInput(request, "\x03")}
-            style={{
-              padding: "5px 9px",
-              borderRadius: 6,
-              border: "1px solid var(--border)",
-              background: "var(--bg-panel)",
-              color: "var(--text-muted)",
-              cursor: "pointer",
-              fontSize: 12,
-            }}
-          >
-             {t("chat.close")}
-          </button>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <button
+              type="button"
+              onClick={() => setCollapsed(true)}
+              aria-expanded={true}
+              title={t("chat.extensionCollapse")}
+              aria-label={t("chat.extensionCollapse")}
+              style={{
+                display: "grid",
+                placeItems: "center",
+                width: 28,
+                height: 28,
+                borderRadius: 6,
+                border: "1px solid var(--border)",
+                background: "var(--bg-panel)",
+                color: "var(--text-muted)",
+                cursor: "pointer",
+                flexShrink: 0,
+              }}
+            >
+              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <polyline points="2 3.5 5 6.5 8 3.5" />
+              </svg>
+            </button>
+            <button
+              onClick={() => onInput(request, "\x03")}
+              style={{
+                padding: "5px 9px",
+                borderRadius: 6,
+                border: "1px solid var(--border)",
+                background: "var(--bg-panel)",
+                color: "var(--text-muted)",
+                cursor: "pointer",
+                fontSize: 12,
+              }}
+            >
+               {t("chat.close")}
+            </button>
+          </div>
         </div>
         <pre
           style={{
             margin: 0,
             padding: 14,
-            maxHeight: "calc(min(760px, 100vh - 40px) - 48px)",
+            minHeight: 0,
             overflow: "auto",
             background: "var(--bg-panel)",
             color: "var(--text)",
@@ -1845,6 +1906,7 @@ function ExtensionCustomPanel({
           ))}
         </pre>
       </div>
+      )}
     </div>
   );
 }

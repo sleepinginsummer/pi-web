@@ -190,7 +190,7 @@ const THINKING_LEVEL_NAMES = new Set<ThinkingLevel>(["off", "minimal", "low", "m
 class PlainTextTheme extends Theme {
   constructor() {
     super(
-      { thinkingXhigh: "", searchMatchText: "" } as unknown as ConstructorParameters<typeof Theme>[0],
+      { muted: "", text: "", thinkingXhigh: "", searchMatchText: "" } as unknown as ConstructorParameters<typeof Theme>[0],
       { selectedBg: "" } as ConstructorParameters<typeof Theme>[1],
       "truecolor",
     );
@@ -295,10 +295,9 @@ export class AgentSessionWrapper {
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private onDestroyCallback: (() => void) | null = null;
   private shutdownPromise: Promise<void> | null = null;
+  private extensionUiAbortController = new AbortController();
   // abort 期间扩展可能在取消当前问题后继续请求下一题，必须拒绝新 UI 才能真正收口。
   private aborting = false;
-  // 异步 custom UI 工厂可能晚于 abort 返回；代次变化后禁止其重新挂载。
-  private uiCancellationGeneration = 0;
   private _alive = true;
   // 工具中断自动恢复状态：最近一次 agent_end 的消息（供 agent_settled 检测）、
   private lastAgentEndMessages: unknown[] | null = null;
@@ -602,24 +601,6 @@ export class AgentSessionWrapper {
     }
   }
 
-  /**
-   * 中止会话时同步释放扩展 UI Promise。仅中止 Agent 不足以让等待用户输入的
-   * 工具退出，AgentSession.abort() 会继续等待 idle，导致 stop 请求长期不返回。
-   */
-  private cancelPendingExtensionUis(): void {
-    this.uiCancellationGeneration += 1;
-    const dialogIds = Array.from(this.pendingUiResponses.keys());
-    for (const id of dialogIds) {
-      this.pendingUiResponses.get(id)?.cancel();
-      this.emit({ type: "extension_ui_closed", id });
-    }
-    for (const id of Array.from(this.activeCustomUis.keys())) {
-      this.closeCustomUi(id, undefined);
-    }
-    this.pendingUiRequests.clear();
-    this.activeAskToolStarts.clear();
-  }
-
   private async restoreShadowSessionSetting(): Promise<void> {
     const result = await restoreShadowSessionSettingSafely(this.shadowSessionSetting);
     if (!result.ok) {
@@ -747,6 +728,9 @@ export class AgentSessionWrapper {
 
     switch (type) {
       case "prompt": {
+        if (this.extensionUiAbortController.signal.aborted) {
+          this.extensionUiAbortController = new AbortController();
+        }
         const shadowToggle = typeof command.message === "string"
           ? parseShadowMindToggleCommand(command.message)
           : null;
@@ -795,8 +779,9 @@ export class AgentSessionWrapper {
         this.aborting = true;
         clearAttentionSession(this.sessionId);
         try {
-          // 标记已在上方同步生效；取消 Promise 后的扩展续步只能拿到默认值，不能再挂起新 UI。
-          this.cancelPendingExtensionUis();
+          // Stop 必须先打断等待用户输入的扩展命令，否则 SDK 会一直等待 idle。
+          this.extensionUiAbortController.abort(new DOMException("Extension UI cancelled by Stop", "AbortError"));
+          this.activeAskToolStarts.clear();
           await this.withFinalRunningNotification(() => this.inner.abort());
         } finally {
           this.aborting = false;
@@ -1036,6 +1021,9 @@ export class AgentSessionWrapper {
       }
 
       case "reload": {
+        if (this.extensionUiAbortController.signal.aborted) {
+          this.extensionUiAbortController = new AbortController();
+        }
         await this.waitForExtensionsBound();
         this.extensionStatuses.clear();
         this.resetExtensionWidgetsForReload();
@@ -1432,12 +1420,14 @@ export class AgentSessionWrapper {
     factory: unknown,
     options?: unknown,
   ): Promise<T> {
-    if (typeof factory !== "function" || this.aborting) return Promise.resolve(undefined as T);
-    const generation = this.uiCancellationGeneration;
+    if (typeof factory !== "function") return Promise.resolve(undefined as T);
+    const stopSignal = this.extensionUiAbortController.signal;
+    if (stopSignal.aborted) return Promise.reject(stopSignal.reason);
+
     const id = randomUUID();
     const width = this.getCustomUiWidth(options);
 
-    return new Promise<T>((resolve) => {
+    return new Promise<T>((resolve, reject) => {
       let completed = false;
       const tui = createHeadlessCustomUiTui(
         () => {
@@ -1449,7 +1439,9 @@ export class AgentSessionWrapper {
       const finish = (value: T) => {
         if (completed) return;
         completed = true;
-        resolve(value);
+        stopSignal.removeEventListener("abort", onStop);
+        if (stopSignal.aborted) reject(stopSignal.reason);
+        else resolve(value);
       };
       const done = (value: T) => {
         if (this.activeCustomUis.has(id)) {
@@ -1458,17 +1450,18 @@ export class AgentSessionWrapper {
           finish(value);
         }
       };
+      const onStop = () => done(undefined as T);
+      stopSignal.addEventListener("abort", onStop, { once: true });
 
       Promise.resolve()
-        .then(() => factory(tui, PLAIN_TEXT_THEME, CUSTOM_UI_KEYBINDINGS, done))
+        .then(() => completed ? undefined : factory(tui, PLAIN_TEXT_THEME, CUSTOM_UI_KEYBINDINGS, done))
         .then((component) => {
-          if (completed || generation !== this.uiCancellationGeneration || this.aborting) {
+          if (completed) {
             try {
               (component as CustomUiComponent | undefined)?.dispose?.();
             } catch {
               // Ignore dispose errors from a component completed before mounting.
             }
-            finish(undefined as T);
             return;
           }
           if (!component || typeof component !== "object" || typeof (component as CustomUiComponent).render !== "function") {
@@ -1506,6 +1499,7 @@ export class AgentSessionWrapper {
     const required = options.required === true;
     const timeout = options.timeout;
     const signal = options.signal;
+    const stopSignal = this.extensionUiAbortController.signal;
     const abortForUiFailure = (reason: string, reject: (error: Error) => void): void => {
       reject(new Error(`Required user interaction failed: ${reason}`));
       if (required && !this.aborting) {
@@ -1514,10 +1508,12 @@ export class AgentSessionWrapper {
         });
       }
     };
-    if (signal?.aborted || this.aborting) {
+    if (stopSignal.aborted) return Promise.reject(stopSignal.reason);
+    if (signal?.aborted) {
       if (required) return Promise.reject(new Error("Required user interaction was aborted"));
       return Promise.resolve(defaultValue);
     }
+    const abortSignal = signal ? AbortSignal.any([signal, stopSignal]) : stopSignal;
 
     const id = randomUUID();
     const fullRequest = {
@@ -1528,26 +1524,41 @@ export class AgentSessionWrapper {
     };
 
     return new Promise((resolve, reject) => {
+      let settled = false;
       let timeoutId: ReturnType<typeof setTimeout> | undefined;
       const cleanup = () => {
         if (timeoutId) clearTimeout(timeoutId);
-        signal?.removeEventListener("abort", onAbort);
+        abortSignal.removeEventListener("abort", onAbort);
         this.pendingUiRequests.delete(id);
         this.pendingUiResponses.delete(id);
+        this.emit({ type: "extension_ui_closed", id });
       };
       const fail = (reason: string) => {
+        if (settled) return;
+        settled = true;
         cleanup();
         if (required) abortForUiFailure(reason, reject);
         else resolve(defaultValue);
       };
       const settle = (value: T) => {
+        if (settled) return;
+        settled = true;
         cleanup();
         resolve(value);
       };
-      const onAbort = () => fail("abort or cancellation");
+      const onAbort = () => {
+        if (!stopSignal.aborted) {
+          fail("abort or cancellation");
+          return;
+        }
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(stopSignal.reason);
+      };
 
       if (timeout) timeoutId = setTimeout(() => fail("timeout"), timeout);
-      signal?.addEventListener("abort", onAbort, { once: true });
+      abortSignal.addEventListener("abort", onAbort, { once: true });
 
       this.pendingUiRequests.set(id, fullRequest as AgentEvent);
       this.pendingUiResponses.set(id, {
@@ -1558,7 +1569,7 @@ export class AgentSessionWrapper {
           }
           settle(parseResponse(response));
         },
-        cancel: () => fail("wrapper shutdown"),
+        cancel: () => stopSignal.aborted ? onAbort() : fail("wrapper shutdown"),
       });
       this.emit(fullRequest as AgentEvent);
     });

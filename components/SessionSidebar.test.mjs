@@ -23,7 +23,7 @@ test("仅在服务端列表缺失时合并已转正的当前会话", () => {
 });
 
 test("does not reselect the active session", () => {
-  assert.match(source, /if \(s\.id === selectedSessionId\) return/);
+  assert.match(source, /if \(s\.id === selectedSessionId && !entryId\) return/);
 });
 
 test("polls running sessions only while the tab is visible", () => {
