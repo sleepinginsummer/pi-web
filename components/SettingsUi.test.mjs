@@ -131,6 +131,8 @@ test("detail header actions keep buttons and switches aligned to the right", () 
     assert.match(sources[name], /<ConfigDetailActions>/);
   }
   assert.match(sources.PluginsConfig, /<ConfigDetailActions>[\s\S]*?<ConfigSwitch[\s\S]*?<\/ConfigDetailActions>/);
+  assert.match(sources.PluginsConfig, /const busy = updatingAll \|\| \(busyKey\?\.endsWith\(key\) \?\? false\)/);
+  assert.match(sources.PluginsConfig, /updatingAll=\{updatingAll\}/);
 });
 
 test("keeps shared static presentation in the stylesheet", () => {

@@ -72,6 +72,11 @@ export function AppShell() {
   const [sessionCatalog, setSessionCatalog] = useState<SessionInfo[]>([]);
   const [quoteSelectionEnabled, setQuoteSelectionEnabled] = useState(false);
   const [pendingQuotePrompt, setPendingQuotePrompt] = useState<{ sessionId: string; text: string } | null>(null);
+  const handleInitialQuotePromptConsumed = useCallback((sessionId: string, prompt: string) => {
+    setPendingQuotePrompt((current) => (
+      current?.sessionId === sessionId && current.text === prompt ? null : current
+    ));
+  }, []);
   const sessionScrollPositionsRef = useRef(new Map<string, ChatReadingPosition>());
   const handleSessionScrollPositionChange = useCallback((sessionId: string, position: ChatReadingPosition) => {
     sessionScrollPositionsRef.current.set(sessionId, position);
@@ -330,6 +335,7 @@ export function AppShell() {
     dispatchPending: dispatchPendingNewSession,
     initialSessionRestored,
     isActiveSession,
+    isNavigationActive,
     leaveWorkspace,
     newSession: handleNewSession,
     newSessionCwd,
@@ -489,17 +495,17 @@ export function AppShell() {
       ?? (selectedSession ? (selectedSession.projectRoot ?? selectedSession.cwd) : null);
     activeProjectRootRef.current = newProject;
 
+    // Keep the project identity in sync during the initial URL restore without
+    // remounting the just-created or restored chat.
+    if (consumeCwdSyncSuppression()) return;
     // Selecting an existing session updates the sidebar cwd in a separate
     // effect. That notification can arrive after selectedSession has changed;
     // never interpret the session's own cwd synchronization as a request to
     // close the session and open a blank new-session view.
-    if (selectedSession?.cwd === cwd) {
-      return;
-    }
-
-    // Keep the project identity in sync during the initial URL restore without
-    // remounting the just-created or restored chat.
-    if (consumeCwdSyncSuppression()) return;
+    if (selectedSession?.cwd === cwd) return;
+    // 点击“新增会话”后，侧栏会继续同步目标 cwd；此时必须保留显式创建意图，
+    // 不能把该同步误判为普通工作区切换并恢复上次打开的旧会话。
+    if (!selectedSession && newSessionCwd === cwd) return;
     // Worktrees of one repo share a project root. Moving the effective cwd
     // within the same project (e.g. switching worktree, or clicking a session
     // that lives in another worktree) must not close the open session.
@@ -512,7 +518,7 @@ export function AppShell() {
     clearFilePanel();
     restoreWorkspaceContext(newProject);
     router.replace(typeof window !== "undefined" ? window.location.pathname : "/", { scroll: false });
-  }, [clearFilePanel, consumeCwdSyncSuppression, leaveWorkspace, restoreWorkspaceContext, router, selectedSession, syncWorkspaceKey]);
+  }, [clearFilePanel, consumeCwdSyncSuppression, leaveWorkspace, newSessionCwd, restoreWorkspaceContext, router, selectedSession, syncWorkspaceKey]);
 
   // Global keyboard shortcuts (handles Esc, Ctrl+Alt+N etc.)
   useGlobalKeyboardShortcuts({
@@ -579,6 +585,13 @@ export function AppShell() {
       activatePanelTab(nextTerminalId);
     }
   }, [activatePanelTab, activeFileTabId, activeTerminalTabId, closeFileTab, fileTabs, terminalTabs]);
+
+  const handleCloseAllFileTabs = useCallback(() => {
+    const nextTerminalId = activeTerminalTabId ?? terminalTabs.at(-1)?.id ?? null;
+    clearFileTabs();
+    setActiveTerminalTabId(nextTerminalId);
+    if (nextTerminalId) activatePanelTab(nextTerminalId);
+  }, [activatePanelTab, activeTerminalTabId, clearFileTabs, terminalTabs]);
 
   const handleViewFullHistory = useCallback(() => {
     if (!selectedSession) return;
@@ -925,6 +938,8 @@ export function AppShell() {
           {showChat ? (
       <ChatWindow
               key={sessionKey}
+              navigationKey={sessionKey}
+              isNavigationActive={isNavigationActive}
               session={selectedSession}
               searchTarget={searchTarget?.sessionId === selectedSession?.id ? searchTarget : null}
               onSearchTargetHandled={handleSearchTargetHandled}
@@ -956,7 +971,7 @@ export function AppShell() {
               onAskInNewChat={handleAskInNewChat}
               quoteSelectionEnabled={quoteSelectionEnabled}
               initialPrompt={pendingQuotePrompt && pendingQuotePrompt.sessionId === selectedSession?.id ? pendingQuotePrompt.text : undefined}
-              onInitialPromptConsumed={() => setPendingQuotePrompt(null)}
+              onInitialPromptConsumed={handleInitialQuotePromptConsumed}
             />
           ) : initialCwdStatus === "validating" ? (
             <div
@@ -1040,7 +1055,24 @@ export function AppShell() {
               onCloseTab={handleClosePanelTab}
             />
           </div>
-
+          {fileTabs.length > 0 && (
+            <button
+              type="button"
+              className="file-viewer-icon-button"
+              onClick={handleCloseAllFileTabs}
+              title={translate("files.closeAllTabs")}
+              aria-label={translate("files.closeAllTabs")}
+              style={{ margin: "0 6px", border: "none" }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M4 15V5a2 2 0 0 1 2-2h10" />
+                <path d="M8 19H6a2 2 0 0 1-2-2" />
+                <path d="M8 7h8a2 2 0 0 1 2 2v2" />
+                <path d="m13 14 7 7" />
+                <path d="m20 14-7 7" />
+              </svg>
+            </button>
+          )}
         </div>
 
         {/* Only the active viewer is mounted. Lightweight per-tab state is restored on activation. */}

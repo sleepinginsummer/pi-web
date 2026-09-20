@@ -417,6 +417,7 @@ function PackageDetail({
   updateStatus,
   checkingUpdate,
   updateError,
+  updatingAll,
   onAction,
   onCheckUpdate,
   onReloadSession,
@@ -430,13 +431,14 @@ function PackageDetail({
   updateStatus?: PluginUpdateResult;
   checkingUpdate: boolean;
   updateError: string | null;
+  updatingAll: boolean;
   onAction: (action: PluginAction, pkg: PluginPackageInfo) => void;
   onCheckUpdate: () => void;
   onReloadSession: () => void;
 }) {
   const { t } = useI18n();
   const key = packageKey(pkg);
-  const busy = busyKey?.endsWith(key) ?? false;
+  const busy = updatingAll || (busyKey?.endsWith(key) ?? false);
   const reloadBusy = busyKey === "reload";
   const enabled = !pkg.disabled;
   const canCheckForUpdates = pkg.canCheckForUpdates;
@@ -643,6 +645,7 @@ export function PluginsConfig({
   const [checkingAll, setCheckingAll] = useState(false);
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [updatingAll, setUpdatingAll] = useState(false);
+  const updatingAllRef = useRef(false);
 
   const packages = useMemo(() => data?.packages ?? [], [data?.packages]);
   const selectedPackage = packages.find((pkg) => packageKey(pkg) === selected) ?? null;
@@ -685,6 +688,7 @@ export function PluginsConfig({
   }, [cwd, selected]);
 
   const checkForUpdates = useCallback(async (pkg?: PluginPackageInfo) => {
+    if (updatingAllRef.current) return;
     const targets = pkg ? [pkg] : packages.filter((item) => item.canCheckForUpdates);
     const keys = targets.map(packageKey);
     if (keys.length === 0) return;
@@ -727,6 +731,8 @@ export function PluginsConfig({
   }, [cwd, packages]);
 
   const updateAllPluginsAction = useCallback(async () => {
+    if (updatingAllRef.current) return;
+    updatingAllRef.current = true;
     setUpdatingAll(true);
     setActionError(null);
     setActionMessage(null);
@@ -748,11 +754,13 @@ export function PluginsConfig({
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));
     } finally {
+      updatingAllRef.current = false;
       setUpdatingAll(false);
     }
   }, [cwd, sessionId, t]);
 
   const runAction = useCallback(async (action: PluginAction, pkg: PluginPackageInfo) => {
+    if (updatingAllRef.current) return;
     const key = packageKey(pkg);
     setBusyKey(`${action}:${key}`);
     setActionError(null);
@@ -799,6 +807,7 @@ export function PluginsConfig({
   }, [cwd]);
 
   const installPlugin = useCallback(async () => {
+    if (updatingAllRef.current) return;
     const source = normalizePluginSourceInput(installSource).trim();
     if (!source) return;
     setInstallSource(source);
@@ -828,7 +837,7 @@ export function PluginsConfig({
   }, [cwd, installScope, installSource]);
 
   const reloadSession = useCallback(async () => {
-    if (!sessionId) return;
+    if (!sessionId || updatingAllRef.current) return;
     setBusyKey("reload");
     setActionError(null);
     setActionMessage(null);
@@ -931,7 +940,7 @@ export function PluginsConfig({
                 source={installSource}
                 scope={installScope}
                 projectResourcesLoaded={projectResourcesLoaded}
-                busy={addBusy}
+                busy={addBusy || updatingAll}
                 actionError={actionError}
                 onSourceChange={setInstallSource}
                 onScopeChange={setInstallScope}
@@ -949,6 +958,7 @@ export function PluginsConfig({
                 updateStatus={updateStatuses[packageKey(selectedPackage)]}
                 checkingUpdate={checkingUpdates.has(packageKey(selectedPackage))}
                 updateError={updateError}
+                updatingAll={updatingAll}
                 onAction={runAction}
                 onCheckUpdate={() => void checkForUpdates(selectedPackage)}
                 onReloadSession={reloadSession}

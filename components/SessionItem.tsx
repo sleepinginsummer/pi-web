@@ -206,21 +206,23 @@ function SessionRowContent({ session, view, actions }: {
       )}
       <div style={{ flex: 1, minWidth: 0 }}>
         <div title={title} style={{ display: "flex", alignItems: "center", gap: 5, minWidth: 0, color: "var(--text)", fontSize: 12, fontWeight: isSelected ? 500 : 400, lineHeight: 1.4 }}><span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{title}</span></div>
-        <div style={{ marginTop: 2, display: "flex", alignItems: "center", gap: 8, color: "var(--text-dim)", fontSize: 11, minWidth: 0 }}>
-          {isRunning ? <RunningSessionIndicator /> : isUnread ? <UnreadSessionIndicator /> : <span title={session.modified}>{formatRelativeTime(session.modified)}</span>}
-          <span>{t("sidebar.messagesCount", { count: session.messageCount })}</span>
-          {session.currentBranch && (
-            <span title={`${session.isWorktree ? "Worktree" : "当前分支"}: ${session.currentBranch}\n${session.cwd}`} style={{ display: "flex", alignItems: "center", gap: 3, color: "var(--accent)", minWidth: 0, overflow: "hidden" }}>
-              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-hidden="true"><line x1="6" y1="3" x2="6" y2="15" /><circle cx="18" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M18 9a9 9 0 0 1-9 9" /></svg>
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{session.currentBranch}</span>
-            </span>
-          )}
+        <div style={{ marginTop: 2, display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+          <div style={{ display: "flex", flex: 1, alignItems: "center", gap: 8, minWidth: 0, overflow: "hidden", color: "var(--text-dim)", fontSize: 11, whiteSpace: "nowrap" }}>
+            {isRunning ? <RunningSessionIndicator /> : isUnread ? <UnreadSessionIndicator /> : <span title={session.modified}>{formatRelativeTime(session.modified)}</span>}
+            <span>{t("sidebar.messagesCount", { count: session.messageCount })}</span>
+            {session.currentBranch && (
+              <span title={`${session.isWorktree ? "Worktree" : "当前分支"}: ${session.currentBranch}\n${session.cwd}`} style={{ display: "flex", alignItems: "center", gap: 3, color: "var(--accent)", minWidth: 0, overflow: "hidden" }}>
+                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-hidden="true"><line x1="6" y1="3" x2="6" y2="15" /><circle cx="18" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M18 9a9 9 0 0 1-9 9" /></svg>
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{session.currentBranch}</span>
+              </span>
+            )}
+          </div>
+          {!isMobile && (hovered || isSelected) && <SessionActions mobile={false} open isPinned={isPinned} onTogglePinned={onTogglePinned} onRename={onRename} onDelete={onDelete} />}
         </div>
       </div>
       {hasChildren && (
         <button type="button" onClick={(event) => { event.stopPropagation(); onToggleCollapse?.(); }} title={collapsed ? "Expand forks" : "Collapse forks"} style={{ width: 20, height: 20, display: "flex", alignItems: "center", justifyContent: "center", padding: 0, flexShrink: 0, background: "none", border: "none", color: "var(--text-dim)", transform: collapsed ? "rotate(-90deg)" : "none", transition: "transform 0.15s" }}><svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="2 3.5 5 6.5 8 3.5" /></svg></button>
       )}
-      {!isMobile && (hovered || isSelected) && <SessionActions mobile={false} open isPinned={isPinned} onTogglePinned={onTogglePinned} onRename={onRename} onDelete={onDelete} />}
     </>
   );
 }

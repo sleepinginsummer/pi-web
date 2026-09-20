@@ -20,6 +20,6 @@ test("custom cwd selection installs validated identity before changing cwd", () 
 
 test("custom cwd selection remembers the validated path", () => {
   assert.match(source, /setCustomPathValue\(loadLastCustomCwd\(\)\)/);
-  assert.match(customPathSource, /const cwd = data\.cwd \?\? validated\.cwd;[\s\S]*?saveLastCustomCwd\(cwd\)/);
+  assert.match(customPathSource, /const cwd = data\.cwd;[\s\S]*?saveLastCustomCwd\(cwd\)/);
   assert.match(source, /initialPath=\{customPathValue \|\| undefined\}/);
 });

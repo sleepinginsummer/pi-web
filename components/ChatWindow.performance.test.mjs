@@ -27,8 +27,10 @@ test("长会话渲染索引通过一次线性 memo 复用", () => {
 });
 
 test("本地渲染窗口耗尽后继续请求服务端历史页", () => {
-  assert.match(source, /visibleCount < messages\.length/);
+  assert.match(source, /MAX_MOUNTED_HISTORY_GROUPS/);
+  assert.match(source, /groupWindow\.start > 0/);
   assert.match(source, /hasEarlierMessages && !loadingEarlierMessages/);
   assert.match(source, /void loadEarlierMessages\(\)/);
-  assert.match(source, /const hasMore = startIndex > 0 \|\| hasEarlierMessages/);
+  assert.match(source, /const hasMore = boundedStartIndex > 0 \|\| hasEarlierMessages/);
+  assert.match(source, /groups\.slice\(boundedStartIndex, endIndex\)/);
 });

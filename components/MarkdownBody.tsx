@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, type MouseEvent } from "react";
+import { Children, cloneElement, isValidElement, useMemo, type MouseEvent, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import { resolveLocalFileHref, shouldOpenLocalFileInApp } from "@/lib/file-links";
 import { encodeFilePathForApi } from "@/lib/file-paths";
@@ -13,6 +13,28 @@ interface MarkdownBodyProps {
   isStreaming?: boolean;
   cwd?: string;
   onOpenFile?: (filePath: string) => void;
+}
+
+interface MarkdownListItemProps {
+  children?: ReactNode;
+  className?: string;
+}
+
+function renderListItems(children: ReactNode, ordered: boolean, start = 1) {
+  let itemIndex = 0;
+  return Children.map(children, (child) => {
+    if (!isValidElement<MarkdownListItemProps>(child)) return child;
+
+    const isTaskItem = child.props.className?.split(" ").includes("task-list-item") ?? false;
+    const marker = isTaskItem ? null : ordered ? `${start + itemIndex}. ` : "• ";
+    itemIndex += 1;
+    return cloneElement(
+      child,
+      child.props,
+      marker ? <span className="markdown-list-marker" aria-hidden="true">{marker}</span> : null,
+      child.props.children,
+    );
+  });
 }
 
 export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile }: MarkdownBodyProps) {
@@ -46,6 +68,15 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
     },
     pre({ children }) {
       return <>{children}</>;
+    },
+    ol({ children, start, ...props }) {
+      delete props.node;
+      const firstNumber = typeof start === "number" ? start : 1;
+      return <ol start={start} {...props}>{renderListItems(children, true, firstNumber)}</ol>;
+    },
+    ul({ children, ...props }) {
+      delete props.node;
+      return <ul {...props}>{renderListItems(children, false)}</ul>;
     },
     a({ href, children, ...props }) {
       // `node` is react-markdown metadata, not a DOM attribute.

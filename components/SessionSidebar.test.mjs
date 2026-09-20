@@ -3,13 +3,21 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const source = await readFile(new URL("./SessionSidebar.tsx", import.meta.url), "utf8");
+const projectSectionSource = await readFile(new URL("./ProjectSection.tsx", import.meta.url), "utf8");
 const appShellSource = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
 const runningSessionsHookSource = await readFile(new URL("../hooks/useRunningSessions.ts", import.meta.url), "utf8");
 const sessionListHookSource = await readFile(new URL("../hooks/useSessionList.ts", import.meta.url), "utf8");
+const projectDirectoriesHookSource = await readFile(new URL("../hooks/useProjectDirectories.ts", import.meta.url), "utf8");
+const sidebarNavigationHookSource = await readFile(new URL("../hooks/useSidebarNavigation.ts", import.meta.url), "utf8");
 
 test("restores and persists the file explorer state", () => {
   assert.match(source, /setExplorerOpen\(loadExplorerOpen\(\)\)/);
   assert.match(source, /saveExplorerOpen\(nextOpen\)/);
+});
+
+test("restores collapsed projects before persisting further changes", () => {
+  assert.match(source, /setCollapsedProjects\(loadCollapsedProjects\(\)\)/);
+  assert.match(source, /if \(!collapsedProjectsReady\) return;\s*saveCollapsedProjects\(collapsedProjects\)/);
 });
 
 test("仅在服务端列表缺失时合并已转正的当前会话", () => {
@@ -75,20 +83,42 @@ test("会话列表加载后不抢占首屏资源预取全部历史上下文", ()
 test("renders projects as persistent directory rows with per-project session actions", () => {
   assert.match(source, /visibleProjects\.map\(\(project\) =>/);
   assert.match(source, /projectName\(project\)/);
-  assert.match(source, /onClick=\{\(\) => handleNewSession\(project\)\}/);
-  assert.match(source, /buildSessionTree\(projectSessions, sessionOrder\)/);
-  assert.match(source, /projectName\(left\)\.localeCompare\(projectName\(right\)/);
+  assert.match(source, /const visibleProjects = getProjectOrder\(/);
+  assert.match(source, /<ProjectSection/);
+  assert.match(source, /project=\{\{/);
+  assert.match(source, /labels=\{\{/);
+  assert.match(source, /actions=\{\{/);
+  assert.match(source, /onNewSession: \(\) => handleNewSession\(project\)/);
+  assert.match(source, /onMove: \(source, target\) => moveProject\(source, target, visibleProjects\)/);
+  assert.match(source, /onTogglePinned: \(\) => toggleProjectPinned\(project\)/);
+  assert.match(projectSectionSource, /const PROJECT_DRAG_TYPE = "application\/x-pi-project"/);
+  assert.match(projectSectionSource, /function ProjectHeader/);
+  assert.match(projectSectionSource, /function WorktreeSelector/);
+  assert.match(projectSectionSource, /function VirtualizedSessionTree/);
+  assert.match(projectSectionSource, /buildSessionTree\(project\.sessions, project\.sessionOrder\)/);
+  assert.match(projectSectionSource, /aria-pressed=\{project\.pinned\}/);
+  assert.doesNotMatch(source, /function SessionTreeItem|function VirtualizedSessionTree|application\/x-pi-project/);
+  assert.doesNotMatch(projectSectionSource, /function SessionTreeItem/);
   assert.match(source, /setProjectPendingRemoval\(project\)/);
   assert.match(source, /sidebar\.removeProjectDescription/);
   assert.match(source, /const showWorktreeSwitcher = false/);
-  assert.match(source, /useState<string\[]>\(\[\]\)/);
-  assert.match(source, /fetch\("\/api\/project-directories", \{ cache: "no-store" \}\)/);
-  assert.match(source, /setKnownProjects\(projects\)/);
+  assert.match(source, /useSidebarNavigation\(allSessions, !loading && !error\)/);
+  assert.match(sidebarNavigationHookSource, /useProjectDirectories\(preferences\.removeProjects\)/);
+  assert.match(source, /projects: knownProjects,[\s\S]*?addProject,[\s\S]*?removeProject,/);
+  assert.doesNotMatch(source, /fetch\("\/api\/project-directories"/);
+  assert.match(projectDirectoriesHookSource, /const addProject = useCallback/);
+  assert.match(projectDirectoriesHookSource, /const removeProject = useCallback/);
+  assert.match(projectDirectoriesHookSource, /operationChainRef\.current\.then\(operation, operation\)/);
+  assert.match(projectDirectoriesHookSource, /fetch\("\/api\/project-directories", \{ cache: "no-store" \}\)/);
+  assert.match(projectDirectoriesHookSource, /window\.addEventListener\("focus", refreshWhenVisible\)/);
+  assert.match(projectDirectoriesHookSource, /document\.addEventListener\("visibilitychange", refreshWhenVisible\)/);
+  assert.match(projectDirectoriesHookSource, /const removed = \[\.\.\.previous\]\.filter/);
+  assert.match(projectDirectoriesHookSource, /onProjectsRemovedRef\.current\?\.\(removed\)/);
 });
 
 test("reopens the custom directory picker at the last successful path", () => {
   assert.match(source, /const handleCustomPathClick = useCallback\(\(\) => \{\s*setCustomPathValue\(loadLastCustomCwd\(\)\);/);
-  assert.match(source, /const cwd = data\.cwd \?\? validated\.cwd;[\s\S]*?saveLastCustomCwd\(cwd\);[\s\S]*?setCustomPathValue\(cwd\)/);
+  assert.match(source, /const data = await addProject\(validated\.cwd\);[\s\S]*?const cwd = data\.cwd;[\s\S]*?saveLastCustomCwd\(cwd\)/);
   assert.match(source, /<DirectoryPicker[\s\S]*?initialPath=\{customPathValue \|\| undefined\}/);
   assert.doesNotMatch(source, /setCustomPathValue\(""\)/);
 });

@@ -19,6 +19,9 @@ export interface SessionEntryBase {
 export interface TextContent {
   type: "text";
   text: string;
+  /** 历史大文本仅返回预览，完整内容由用户展开时读取。 */
+  deferredUrl?: string;
+  originalBytes?: number;
 }
 
 export interface ImageContent {
@@ -45,6 +48,9 @@ export interface ToolCallContent {
   input: Record<string, unknown>;
   /** Client-only buffer for streamed tool input. Never persisted to session files. */
   rawInput?: string;
+  /** 历史大参数仅返回预览，展开工具调用时读取完整 JSON。 */
+  deferredUrl?: string;
+  originalBytes?: number;
 }
 
 export type AssistantContentBlock = TextContent | ImageContent | ThinkingContent | ToolCallContent;
@@ -108,6 +114,8 @@ export interface BashExecutionMessage {
   cancelled?: boolean;
   truncated?: boolean;
   fullOutputPath?: string;
+  deferredOutputUrl?: string;
+  originalOutputBytes?: number;
   excludeFromContext?: boolean;
   timestamp?: number;
 }

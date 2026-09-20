@@ -38,6 +38,14 @@ test("keeps chat scroll positions in page memory by session id", () => {
   assert.doesNotMatch(appShellSource, /localStorage[^\n]*sessionScroll/i);
 });
 
+test("keeps a pending scroll restore through initial leaf hydration", () => {
+  assert.match(chatWindowSource, /const previousLeafIdRef = useRef<string \| null \| undefined>\(undefined\)/);
+  assert.match(
+    chatWindowSource,
+    /if \(loading\) return;\s+\/\/[^\n]+\s+if \(previousLeafIdRef\.current === undefined\) \{\s+previousLeafIdRef\.current = activeLeafId;\s+return;/,
+  );
+});
+
 test("restores only a live session that still belongs to the workspace", () => {
   assert.match(navigationSource, /const restoreWorkspaceContext = useCallback/);
   assert.match(navigationSource, /token !== workspaceRestoreTokenRef\.current/);
@@ -53,6 +61,18 @@ test("restoration runs only after a cross-workspace context reset", () => {
   assert.match(callback, /const newProject = projectKey \?\? projectRoot \?\? cwd/);
   assert.match(callback, /if \(currentProject === newProject\) \{[\s\S]*?return;[\s\S]*?\}/);
   assert.match(callback, /leaveWorkspace\(cwd\);[\s\S]*?restoreWorkspaceContext\(newProject\);/);
+});
+
+test("explicit new-session navigation cannot restore the workspace's old session", () => {
+  const start = appShellSource.indexOf("const handleCwdChange = useCallback");
+  const end = appShellSource.indexOf("\n\n\n  // Global keyboard shortcuts", start);
+  const callback = appShellSource.slice(start, end);
+  const guardIndex = callback.indexOf("if (!selectedSession && newSessionCwd === cwd)");
+  const restoreIndex = callback.indexOf("restoreWorkspaceContext(newProject)");
+
+  assert.ok(guardIndex >= 0, "缺少新增会话 cwd 同步保护");
+  assert.ok(guardIndex < restoreIndex, "新增会话保护必须先于旧会话恢复");
+  assert.match(callback, /newSessionCwd[\s\S]*?restoreWorkspaceContext/);
 });
 
 test("sidebar forwards the server project identity with cwd changes", () => {

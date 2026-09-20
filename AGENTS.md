@@ -71,6 +71,7 @@ app/api/
   models-config/test/route.ts     POST test a configured model/provider
   plugins/route.ts                GET/POST package plugin management
   project-directories/route.ts    GET/POST/DELETE persisted sidebar directories
+  sidebar-preferences/route.ts    GET/PATCH synchronized sidebar order and Pin state
   skills/route.ts                 GET/PATCH loaded skills and disable-model-invocation
   skills/install/route.ts         POST install skills through npx skills add
   skills/search/route.ts          GET/POST skills.sh search
@@ -86,6 +87,9 @@ lib/
   npx.ts               npx runner used by skill install
   pi-types.ts          local structural types for pi SDK objects
   project-directories.ts persisted directory list in ~/.pi/agent/pi-web-projects.json
+  sidebar-preference-state.ts shared pure order/Pin action reducer
+  sidebar-preferences.ts versioned, locked server persistence for sidebar preferences
+  sidebar-preferences-client.ts browser migration and HTTP adapter
   rpc-manager.ts      AgentSessionWrapper + registry + startRpcSession
   session-reader.ts   SessionManager wrappers + path cache + buildSessionContext adapter
   subagent-settings.ts  read/write ~/.pi/agent/agents/settings.json
@@ -97,7 +101,8 @@ lib/
 
 components/
   AppShell.tsx        layout + URL state + tab management
-  SessionSidebar.tsx  session tree + FileExplorer
+  SessionSidebar.tsx  sidebar orchestration + FileExplorer
+  ProjectSection.tsx  project row controls + virtualized session tree
   ChatWindow.tsx      chat composition + completion sound wrapper
   ChatInput.tsx       input bar + model/thinking/tools/compact controls
   MessageView.tsx     renders one message (user/assistant/toolCall/toolResult)
@@ -200,6 +205,11 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 - **Automatic first-round naming**: `AgentSessionWrapper.maybeAutoTitleSession()` (triggered once per wrapper at `agent_settled`, guarded by `autoTitleTriggered`) fires `generateTitleForSessionFile` on the session file. Because that path uses its own services/transport, it is safe to run right after the main run settles; success broadcasts `session_title_generated` over SSE, which `useAgentSession` turns into a sidebar list refresh. Sessions that already have a name are skipped, so existing sessions are untouched.
 - Deleting a session (`DELETE /api/sessions/[id]`) fire-and-forgets `queueTrashSessionTitle(trashedName)`; the trash list reads the generated name from a tail scan of the file (`readTrashedSessionName` in `lib/trash.ts`, fallback first user message) so restored sessions keep their title.
 - Bulk backfill lives in `lib/bulk-title.ts` (`POST/GET/DELETE /api/titles/bulk`, no UI button — it was requested as a one-off backfill and the button was later removed, but the API remains for curl-triggered runs). It snapshots trash + all active sessions and processes its list sequentially. All callers share the global title-task registry; delete/restore path changes migrate the task target while the stable session id remains the scheduling key.
+
+### Sidebar order and Pin synchronization
+- `lib/sidebar-preference-state.ts` is the shared pure reducer for project/session order and Pin actions. The server and optimistic client path must use the same reducer.
+- `lib/sidebar-preferences.ts` persists versioned state in `~/.pi/agent/pi-web-sidebar-preferences.json`; PATCH actions use `withPrivateFileLock()` plus revision conflict detection. `lib/project-directories.ts` uses the same lock helper for atomic multi-browser membership changes. Clients rebase and retry once after a `409`.
+- `hooks/useSidebarNavigation.ts` composes the two client synchronization boundaries: `useSidebarPreferences` owns versioned order/Pin state, while `useProjectDirectories` owns serialized directory membership GET/POST/DELETE and focus refresh. Remote membership removals flow into explicit, idempotent preference-removal actions. Do not expose raw directory setters or reintroduce localStorage order/Pin hooks.
 
 ### Worktrees and project grouping
 - `lib/worktree.ts` resolves linked worktree top-levels back to the main repo `projectRoot`; `listAllSessions()` attaches that to each `SessionInfo` so all worktrees for one repo are grouped together in the sidebar.

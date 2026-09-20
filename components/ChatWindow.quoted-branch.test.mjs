@@ -13,6 +13,8 @@ test("offers compact quoting controls and sends branch questions through the mai
   assert.match(shellSource, /type: "fork_branch"/);
   assert.match(shellSource, /initialPrompt=\{pendingQuotePrompt && pendingQuotePrompt\.sessionId === selectedSession\?\.id/);
   assert.equal((shellSource.match(/<ChatWindow\b/g) ?? []).length, 1);
-  assert.match(chatSource, /onInitialPromptConsumed\?\.\(\);\s*void handleSend\(initialPrompt\)/);
+  assert.match(chatSource, /sent = await handleSend\(initialPrompt\)/);
+  assert.match(chatSource, /if \(!sent\) \{[\s\S]*?input\.prependText\(initialPrompt\);[\s\S]*?\}\s*onInitialPromptConsumed\?\.\(targetSessionId, initialPrompt\)/);
+  assert.doesNotMatch(chatSource, /onInitialPromptConsumed\?\.\([^)]*\);\s*void handleSend\(initialPrompt\)/);
   assert.match(chatSource, /role=\{quoteInputOpen \? "dialog" : "toolbar"\}/);
 });

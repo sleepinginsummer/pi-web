@@ -24,6 +24,19 @@ test("keeps the pinned marker visible when a session is selected", () => {
   assert.match(source, /aria-pressed=\{tone === "pin" \? pressed : undefined\}/);
 });
 
+test("桌面操作区只占用统计行，标题保持优先宽度", () => {
+  const titleIndex = source.indexOf("title={title}");
+  const metadataIndex = source.indexOf("flex: 1, alignItems", titleIndex);
+  const desktopActionsIndex = source.indexOf("<SessionActions mobile={false}", titleIndex);
+  const contentCloseIndex = source.indexOf("</div>\n      </div>", metadataIndex);
+
+  assert.ok(titleIndex >= 0);
+  assert.ok(metadataIndex > titleIndex);
+  assert.ok(desktopActionsIndex > metadataIndex);
+  assert.ok(desktopActionsIndex < contentCloseIndex);
+  assert.match(source.slice(metadataIndex, desktopActionsIndex), /overflow: "hidden"/);
+});
+
 test("置顶按钮切换桌面布局后仍保留左边框", () => {
   assert.doesNotMatch(source, /borderLeft: mobile/);
   assert.match(source, /boxShadow: mobile \? "inset 1px 0 var\(--border\)" : undefined/);

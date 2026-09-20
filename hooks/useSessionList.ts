@@ -22,6 +22,7 @@ interface UseSessionListResult {
 export function useSessionList({ refreshKey, onSessionsChange }: UseSessionListOptions): UseSessionListResult {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const sessionsRef = useRef<SessionInfo[]>([]);
+  const directoryVersionRef = useRef<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshDone, setRefreshDone] = useState(false);
@@ -52,12 +53,26 @@ export function useSessionList({ refreshKey, onSessionsChange }: UseSessionListO
     if (showInitialLoading) setLoading(true);
 
     try {
-      const response = await fetch("/api/sessions", { cache: "no-store" });
+      const params = new URLSearchParams();
+      if (directoryVersionRef.current !== null) params.set("since", String(directoryVersionRef.current));
+      const response = await fetch(`/api/sessions${params.size > 0 ? `?${params}` : ""}`, { cache: "no-store" });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const data = await response.json() as { sessions: SessionInfo[] };
+      const data = await response.json() as {
+        sessions?: SessionInfo[];
+        upserts?: SessionInfo[];
+        removed?: string[];
+        sessionDirectoryVersion?: number;
+      };
       if (!requestGate.isLatest(requestKey, generation)) return;
 
-      commitSessions(data.sessions);
+      const nextSessions = data.sessions ?? (() => {
+        const removed = new Set(data.removed ?? []);
+        const byId = new Map(sessionsRef.current.filter((session) => !removed.has(session.id)).map((session) => [session.id, session]));
+        for (const session of data.upserts ?? []) byId.set(session.id, session);
+        return [...byId.values()].sort((left, right) => Date.parse(right.modified) - Date.parse(left.modified));
+      })();
+      if (typeof data.sessionDirectoryVersion === "number") directoryVersionRef.current = data.sessionDirectoryVersion;
+      commitSessions(nextSessions);
       setError(null);
       if (!showInitialLoading) {
         setRefreshDone(true);

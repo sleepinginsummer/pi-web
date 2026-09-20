@@ -29,7 +29,7 @@ export type { ThinkingLevelOption } from "@/lib/thinking-levels";
 import { normalizeAssistantMessage } from "@/lib/normalize";
 import { getPreferredToolPreset, setPreferredToolPreset } from "@/lib/tool-preset-preference";
 import type { ToolPreset } from "@/lib/tool-presets";
-import { sendAgentCommand } from "@/lib/agent-client";
+import { isPromptRejectedError, sendAgentCommand } from "@/lib/agent-client";
 import { setDraft, type ChatDraft } from "@/lib/draft-store";
 import { getToolNamesForPreset, type ToolEntry } from "@/lib/tool-presets";
 import type { SessionStatsInfo } from "@/lib/pi-types";
@@ -327,6 +327,8 @@ export type BuiltinSlashCommandResult =
   | { handled: true; message?: string; error?: string; action?: "openSessionStats" };
 
 export interface UseAgentSessionOptions {
+  navigationKey: number;
+  isNavigationActive: (key: number) => boolean;
   session: SessionInfo | null;
   newSessionCwd: string | null;
   pendingNewSessionControl: PendingNewSessionControl;
@@ -530,7 +532,7 @@ type SlashCommandsResponse = {
 
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
-    session, newSessionCwd, pendingNewSessionControl, onPendingNewSessionEvent, onSessionCreated, onSessionListRefresh, onSessionForked,
+    navigationKey, isNavigationActive, session, newSessionCwd, pendingNewSessionControl, onPendingNewSessionEvent, onSessionCreated, onSessionListRefresh, onSessionForked,
     modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onSessionStatsPanelOpen,
   } = opts;
 
@@ -543,6 +545,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const { completion, beginRun, settleRun } = useRunCompletion();
 
   const [contextModel, setContextModel] = useState<SessionContextSnapshot["model"]>(null);
+  const [contextVersion, setContextVersion] = useState<string | null>(null);
   const [detailsState, setDetailsState] = useState<{ sid: string; value: SessionDetails } | null>(null);
   const [loading, setLoading] = useState(!isNew);
   const [error, setError] = useState<string | null>(null);
@@ -602,6 +605,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [agentPhase, setAgentPhase] = useState<AgentPhase>(null);
   const [slashCommands, setSlashCommands] = useState<SlashCommandInfo[]>([]);
   const [slashCommandsLoading, setSlashCommandsLoading] = useState(false);
+  const slashCommandsRequestIdRef = useRef(0);
   const [noticeState, dispatchNotice] = useReducer(noticeReducer, { visible: [], pending: [] });
   const [sessionStatsOverride, setSessionStatsOverride] = useState<SessionStatsInfo | null>(null);
   const [sessionTotalActiveMs, setSessionTotalActiveMs] = useState(0);
@@ -633,6 +637,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // detached 子代理可能跨越多个父轮，必须按 agentId 保持到对应 completion 到达。
   const pendingDetachedSubagentIdsRef = useRef(new Set<string>());
   const sessionIdRef = useRef<string | null>(session?.id ?? materializedNewSessionId);
+  const contextVersionRef = useRef<string | null>(null);
   const modelSwitchPendingRef = useRef(false);
   useEffect(() => {
     if (!newSessionCwd) return;
@@ -644,7 +649,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       releaseNewSessionMaterialization(newSessionCwd);
     }
   }, [newSessionCwd, pendingControlKind]);
-  const details = session && detailsState?.sid === session.id ? detailsState.value : null;
+  const details = session
+    && detailsState?.sid === session.id
+    && detailsState.value.version === contextVersion
+    ? detailsState.value
+    : null;
   const agentRunningRef = useRef(false);
   const bashRunningRef = useRef(false);
   const bashRecoveryIdRef = useRef(0);
@@ -829,6 +838,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       controller: null,
     };
     setContextModel(snapshot.model);
+    contextVersionRef.current = snapshot.version;
+    setContextVersion(snapshot.version);
     setSessionTotalActiveMs(snapshot.totalActiveMs ?? 0);
     setActiveLeafId(leafId);
     pendingDetachedSubagentIdsRef.current = pendingDetachedSubagentIds(snapshot.messages);
@@ -919,7 +930,35 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
     }
   }, [historyPage]);
+  const loadSessionDetails = useCallback((sid: string): void => {
+    detailsRequestRef.current.controller?.abort();
+    const controller = new AbortController();
+    const generation = detailsRequestRef.current.generation + 1;
+    detailsRequestRef.current = { generation, controller };
+    void fetchSessionDetails(sid, controller.signal)
+      .then((sessionDetails) => {
+        if (
+          detailsRequestRef.current.generation === generation
+          && sessionIdRef.current === sid
+          && contextVersionRef.current === sessionDetails.version
+        ) setDetailsState({ sid, value: sessionDetails });
+      })
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        console.error("Failed to load session details:", error);
+      });
+  }, []);
+
   const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false) => {
+    const performancePrefix = `pi-session:${sid}`;
+    if (showLoading) {
+      performance.clearMarks(`${performancePrefix}:request`);
+      performance.mark(`${performancePrefix}:request`);
+      if (performance.getEntriesByName(`${performancePrefix}:click`, "mark").length > 0) {
+        performance.clearMeasures("pi-session-click-to-request");
+        performance.measure("pi-session-click-to-request", `${performancePrefix}:click`, `${performancePrefix}:request`);
+      }
+    }
     backfillRequestRef.current.controller?.abort();
     backfillRequestRef.current = { sid, generation: backfillRequestRef.current.generation + 1, controller: null };
     const earlyRuntimeController = includeState ? new AbortController() : null;
@@ -945,6 +984,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (loaded.kind === "missing") {
             if (showLoading) {
               setContextModel(null);
+              contextVersionRef.current = null;
+              setContextVersion(null);
               setDetailsState(null);
               setActiveLeafId(null);
               setMessages([]);
@@ -957,25 +998,39 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             setLoading(false);
             return false;
           }
-          return commitContextSnapshot(sid, loaded.snapshot, loaded.leafId);
+          return commitContextSnapshot(sid, loaded.snapshot, loaded.leafId) ? loaded : null;
       });
       if (!contextResult.committed || !contextResult.value) return { loaded: false, agentState: null };
+      if (showLoading) {
+        performance.clearMarks(`${performancePrefix}:data`);
+        performance.mark(`${performancePrefix}:data`);
+        performance.clearMeasures("pi-session-request-to-data");
+        performance.measure("pi-session-request-to-data", `${performancePrefix}:request`, `${performancePrefix}:data`);
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          performance.clearMarks(`${performancePrefix}:paint`);
+          performance.mark(`${performancePrefix}:paint`);
+          performance.clearMeasures("pi-session-data-to-paint");
+          performance.measure("pi-session-data-to-paint", `${performancePrefix}:data`, `${performancePrefix}:paint`);
+        }));
+      }
 
-      detailsRequestRef.current.controller?.abort();
-      const controller = new AbortController();
-      const generation = detailsRequestRef.current.generation + 1;
-      detailsRequestRef.current = { generation, controller };
-      void fetchSessionDetails(sid, controller.signal)
-        .then((sessionDetails) => {
-          if (
-            detailsRequestRef.current.generation === generation
-            && sessionIdRef.current === sid
-          ) setDetailsState({ sid, value: sessionDetails });
-        })
-        .catch((error: unknown) => {
-          if (error instanceof DOMException && error.name === "AbortError") return;
-          console.error("Failed to load session details:", error);
+      loadSessionDetails(sid);
+      if (contextResult.value.cached) {
+        void contextLoaderRef.current.run(
+          sid,
+          (signal) => fetchSessionContext(sid, signal, { skipCache: true }),
+          (loaded) => {
+            if (loaded.kind !== "loaded" || loaded.snapshot.version === contextVersionRef.current) return false;
+            const committed = commitContextSnapshot(sid, loaded.snapshot, loaded.leafId, { preserveScroll: true });
+            if (committed) loadSessionDetails(sid);
+            return committed;
+          },
+        ).catch((error: unknown) => {
+          if (!(error instanceof DOMException && error.name === "AbortError")) {
+            console.error("Failed to revalidate cached session context:", error);
+          }
         });
+      }
 
       if (!includeState) return { loaded: true, agentState: null };
       runtimeStateRequestRef.current?.abort();
@@ -1008,7 +1063,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       return { loaded: false, agentState: null };
     }
-  }, [applyRuntimeState, commitContextSnapshot]);
+  }, [applyRuntimeState, commitContextSnapshot, loadSessionDetails]);
 
   /** Shadow lifecycle entry 使用单次 context-only 刷新，避免触发 details/backfill 或改变滚动位置。 */
   const scheduleContextRefresh = useCallback((sid: string) => {
@@ -1180,23 +1235,28 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [ensureNewSession]);
 
   const loadSlashCommands = useCallback(async () => {
-    const sid = await ensureNewSession();
-    if (!sid) {
-      setSlashCommands([]);
-      return [] as SlashCommandInfo[];
-    }
+    const requestId = ++slashCommandsRequestIdRef.current;
     setSlashCommandsLoading(true);
     try {
+      const sid = await ensureNewSession();
+      if (!sid) {
+        if (requestId === slashCommandsRequestIdRef.current) setSlashCommands([]);
+        return [] as SlashCommandInfo[];
+      }
       const data = await sendAgentCommand<SlashCommandsResponse>(sid, { type: "get_commands" });
       const commands = data?.commands ?? [];
+      // 会话切换或后发请求已经接管时，旧响应不得覆盖当前命令列表。
+      if (requestId !== slashCommandsRequestIdRef.current || sessionIdRef.current !== sid) return commands;
       setSlashCommands(commands);
       return commands;
     } catch (e) {
       console.error("Failed to load slash commands:", e);
+      if (requestId !== slashCommandsRequestIdRef.current) return [] as SlashCommandInfo[];
       setSlashCommands([]);
-      return [] as SlashCommandInfo[];
+      // 交给输入框恢复请求标记，用户继续输入或重新打开菜单时可以重试。
+      throw e;
     } finally {
-      setSlashCommandsLoading(false);
+      if (requestId === slashCommandsRequestIdRef.current) setSlashCommandsLoading(false);
     }
   }, [ensureNewSession]);
 
@@ -1221,6 +1281,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const timeout = setTimeout(() => settle("timeout"), EVENT_STREAM_CONNECT_TIMEOUT_MS);
 
       es.onmessage = (e) => {
+        // close() 不能保证已经进入浏览器任务队列的消息不再触发；旧连接或旧会话事件必须丢弃。
+        if (eventSourceRef.current !== es || sessionIdRef.current !== sid) return;
         try {
           const event = JSON.parse(e.data) as AgentEvent;
           if (event.type === "connected") settle("connected");
@@ -1886,7 +1948,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const id = event.id as string;
         setExtensionDialog((current) => current?.id === id ? null : current);
         if (extensionDialogRef.current?.id === id) extensionDialogRef.current = null;
-        if (askQuestionnaireRequestIdsRef.current.has(id)) clearAskQuestionnaire();
+        const wasAskRequest = askQuestionnaireRequestIdsRef.current.delete(id);
+        // 提交问卷时，每道题完成都会关闭各自的底层 UI 请求；此时问卷仍需继续承接下一题。
+        if (wasAskRequest && !askQuestionnaireRef.current?.submitting) clearAskQuestionnaire();
         break;
       }
     }
@@ -1894,6 +1958,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
+    if (!isNavigationActive(navigationKey)) return false;
     backfillRequestRef.current.controller?.abort();
     backfillRequestRef.current.generation += 1;
     const requestSessionId = sessionIdRef.current ?? session?.id ?? null;
@@ -1949,6 +2014,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const sid = await ensureNewSession();
 
         if (sid) {
+          if (!isNavigationActive(navigationKey)) throw new Error("会话已切换，消息未发送");
           sentSessionId = sid;
           if (selectedModel) {
             setPendingModel(selectedModel);
@@ -1957,6 +2023,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             }
           }
           await ensureEventsConnected(sid);
+          if (!isNavigationActive(navigationKey)) throw new Error("会话已切换，消息未发送");
           promptRequestStarted = true;
           await sendAgentCommand(sid, {
             type: "prompt",
@@ -1974,10 +2041,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           promoteNewSession(1, message);
         }
       } else if (session) {
-        sentSessionId = session.id;
-        await ensureEventsConnected(session.id);
+        const sid = requestSessionId;
+        if (!sid || sid !== session.id) throw new Error("会话已切换，消息未发送");
+        if (!isNavigationActive(navigationKey)) throw new Error("会话已切换，消息未发送");
+        sentSessionId = sid;
+        await ensureEventsConnected(sid);
+        if (sessionIdRef.current !== sid || !isNavigationActive(navigationKey)) {
+          throw new Error("会话已切换，消息未发送");
+        }
         promptRequestStarted = true;
-        await sendAgentCommand(session.id, {
+        await sendAgentCommand(sid, {
           type: "prompt",
           message,
           ...(piImages?.length ? { images: piImages } : {}),
@@ -1991,25 +2064,24 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // A failed prompt POST is ambiguous: the server may have accepted it
       // before the response connection was lost. Keep SSE alive until the
       // server confirms idle so a real run cannot continue unseen.
-      if (promptRequestStarted && sentSessionId) {
+      if (promptRequestStarted && sentSessionId && !isPromptRejectedError(e)) {
         void reconcileAgentState(sentSessionId, promptRunId);
         // 请求已发出但响应失败时，服务端可能已受理；保留原有的乐观提交行为。
         return true;
       }
       agentRunningRef.current = false;
       closeEvents();
-      if (e instanceof EventStreamConnectionError) {
-        const optimisticKey = optimisticUserMessageKeyRef.current;
-        if (optimisticKey) {
-          setMessages((prev) => {
-            const last = prev[prev.length - 1];
-            return last?.role === "user" && userMessageKey(last) === optimisticKey
-              ? prev.slice(0, -1)
-              : prev;
-          });
-        }
-        addNotice({ type: "error", message: e.message });
+      const optimisticKey = optimisticUserMessageKeyRef.current;
+      if (optimisticKey) {
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          return last?.role === "user" && userMessageKey(last) === optimisticKey
+            ? prev.slice(0, -1)
+            : prev;
+        });
       }
+      const detail = e instanceof Error ? e.message : String(e);
+      addNotice({ type: "error", message: `消息发送失败，输入已保留：${detail}` });
       optimisticUserMessageKeyRef.current = null;
       setAgentRunning(false);
       setAgentPhase(null);
@@ -2017,7 +2089,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       dispatch({ type: "end" });
       return false;
     }
-  }, [addNotice, closeEvents, ensureEventsConnected, ensureNewSession, enterMainRun, isNew, newSessionCwd, newSessionModel, pendingControlKind, promoteNewSession, reconcileAgentState, requestScrollPosition, resetStreamDeltas, session]);
+  }, [addNotice, closeEvents, ensureEventsConnected, ensureNewSession, enterMainRun, isNavigationActive, isNew, navigationKey, newSessionCwd, newSessionModel, pendingControlKind, promoteNewSession, reconcileAgentState, requestScrollPosition, resetStreamDeltas, session]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
     if (agentRunningRef.current || bashRunningRef.current) return;
@@ -2317,6 +2389,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     message: string,
     mode: "steer" | "followUp",
   ): Promise<boolean> => {
+    if (!isNavigationActive(navigationKey)) return false;
     const sid = sessionIdRef.current;
     if (!sid) {
       addNotice({ type: "error", message: "当前会话尚未就绪，消息未发送" });
@@ -2331,6 +2404,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       ? { type: "prompt", message, streamingBehavior: mode }
       : { type: mode === "steer" ? "steer" : "follow_up", message };
     try {
+      if (!isNavigationActive(navigationKey)) return false;
       const acknowledgement = await sendAgentCommand<AgentSubmitAcknowledgement>(sid, command);
       if (!acknowledgement?.accepted) throw new Error("服务端未确认接收消息");
       return true;
@@ -2339,7 +2413,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       addNotice({ type: "error", message: `消息发送失败，输入已保留：${detail}` });
       return false;
     }
-  }, [addNotice, runShadowSlashCommand]);
+  }, [addNotice, isNavigationActive, navigationKey, runShadowSlashCommand]);
 
   const handleAbortCompaction = useCallback(async () => {
     const sid = sessionIdRef.current;

@@ -60,6 +60,16 @@ test("keeps single-tilde CJK numeric ranges literal instead of striking them", (
   assert.match(html, /100~200倍/);
 });
 
+test("renders list markers as selectable text so copied lists keep their formatting", () => {
+  const html = renderMarkdown("3. first\n4. second\n   - nested");
+
+  assert.match(html, /<ol start="3">/);
+  assert.match(html, /<span class="markdown-list-marker" aria-hidden="true">3\. <\/span>/);
+  assert.match(html, /<span class="markdown-list-marker" aria-hidden="true">4\. <\/span>/);
+  assert.match(html, /<span class="markdown-list-marker" aria-hidden="true">• <\/span>/);
+  assert.doesNotMatch(html, /markdown-list-marker[^>]*>1\. /);
+});
+
 test("still renders double-tilde strikethrough", () => {
   const html = renderMarkdown("~~gone~~");
 

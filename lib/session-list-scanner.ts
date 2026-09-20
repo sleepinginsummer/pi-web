@@ -2,7 +2,7 @@
 // New and changed files still require a full scan; unchanged files only need stat.
 // ponytail: size/mtime fingerprints miss same-size edits with restored mtime;
 // use content hashes if detecting those edits becomes necessary.
-import { createReadStream, existsSync, readFileSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync, watch, type FSWatcher } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import type { Dirent } from "node:fs";
 import { join } from "node:path";
@@ -44,6 +44,37 @@ declare global {
 	var __piWebScanIndex: Map<string, IndexEntry> | undefined;
 	var __piWebScanIndexLoaded: boolean | undefined;
 	var __piWebScanIndexSaveQueued: boolean | undefined;
+	var __piWebSessionDirectorySnapshot: { files: string[]; checkedAt: number; dirty: boolean; changedFiles: Set<string> } | undefined;
+	var __piWebSessionDirectoryWatcher: FSWatcher | null | undefined;
+}
+
+const DIRECTORY_RECONCILE_MS = 5 * 60_000;
+
+function ensureDirectoryWatcher(sessionsDir: string): void {
+	if (globalThis.__piWebSessionDirectoryWatcher !== undefined) return;
+	try {
+		globalThis.__piWebSessionDirectoryWatcher = watch(
+			sessionsDir,
+			{ recursive: true, persistent: false },
+			(_event, filename) => {
+				const snapshot = globalThis.__piWebSessionDirectorySnapshot;
+				if (!snapshot) return;
+				const relativeName = filename?.toString();
+				if (!relativeName || !relativeName.endsWith(".jsonl")) {
+					snapshot.dirty = true;
+					return;
+				}
+				snapshot.changedFiles.add(join(sessionsDir, relativeName));
+			},
+		);
+		globalThis.__piWebSessionDirectoryWatcher.on("error", () => {
+			globalThis.__piWebSessionDirectoryWatcher?.close();
+			globalThis.__piWebSessionDirectoryWatcher = null;
+			if (globalThis.__piWebSessionDirectorySnapshot) globalThis.__piWebSessionDirectorySnapshot.dirty = true;
+		});
+	} catch {
+		globalThis.__piWebSessionDirectoryWatcher = null;
+	}
 }
 
 function parseLine(line: string): RawEntry | null {
@@ -295,11 +326,20 @@ function queueIndexPersist(): void {
  * (size, mtimeMs) changed since the last pass. Output ordering matches the SDK
  * catalogue (modified descending).
  */
-export async function listSessionsIncremental(): Promise<ScannedSessionInfo[]> {
+export async function listSessionsIncremental(options: { trustWatcher?: boolean } = {}): Promise<ScannedSessionInfo[]> {
 	loadPersistedIndex();
 
 	const sessionsDir = join(getAgentDir(), "sessions");
-	const files = await enumerateSessionFiles(sessionsDir);
+	ensureDirectoryWatcher(sessionsDir);
+	let directory = globalThis.__piWebSessionDirectorySnapshot;
+	const needsReconcile = !options.trustWatcher || !directory || directory.dirty || Date.now() - directory.checkedAt >= DIRECTORY_RECONCILE_MS;
+	if (needsReconcile) {
+		const files = await enumerateSessionFiles(sessionsDir);
+		directory = { files, checkedAt: Date.now(), dirty: false, changedFiles: new Set(files) };
+		globalThis.__piWebSessionDirectorySnapshot = directory;
+	}
+	if (!directory) throw new Error("会话目录快照初始化失败");
+	const files = directory.files;
 
 	const index = getIndex();
 	const present = new Set(files);
@@ -309,8 +349,10 @@ export async function listSessionsIncremental(): Promise<ScannedSessionInfo[]> {
 	}
 	for (const pathKey of stale) index.delete(pathKey);
 
+	const filesToStat = needsReconcile ? files : [...directory.changedFiles];
+	directory.changedFiles.clear();
 	const fingerprints = await Promise.all(
-		files.map(async (filePath) => {
+		filesToStat.map(async (filePath) => {
 			try {
 				const s = await stat(filePath);
 				return {
@@ -324,11 +366,20 @@ export async function listSessionsIncremental(): Promise<ScannedSessionInfo[]> {
 	);
 
 	const changed: Array<{ filePath: string; fp: Fingerprint; resultIndex: number }> = [];
-	const results: (ScannedSessionInfo | null)[] = new Array(files.length).fill(null);
-	for (const [resultIndex, { filePath, fp }] of fingerprints.entries()) {
+	const results = new Map<string, ScannedSessionInfo>();
+	for (const [filePath, cached] of index) {
+		if (present.has(filePath)) results.set(filePath, cached.info);
+	}
+	for (const { filePath, fp } of fingerprints) {
 		if (!fp) {
 			index.delete(filePath);
+			results.delete(filePath);
+			directory.files = directory.files.filter((candidate) => candidate !== filePath);
 			continue;
+		}
+		if (!present.has(filePath)) {
+			directory.files.push(filePath);
+			present.add(filePath);
 		}
 		const cached = index.get(filePath);
 		if (
@@ -336,19 +387,20 @@ export async function listSessionsIncremental(): Promise<ScannedSessionInfo[]> {
 			cached.fp.size === fp.size &&
 			cached.fp.mtimeMs === fp.mtimeMs
 		) {
-			results[resultIndex] = cached.info;
+			results.set(filePath, cached.info);
 			continue;
 		}
-		changed.push({ filePath, fp, resultIndex });
+		changed.push({ filePath, fp, resultIndex: 0 });
 	}
 
-	await runPool(changed, async ({ filePath, fp, resultIndex }) => {
+	await runPool(changed, async ({ filePath, fp }) => {
 		const info = await scanSessionFileInfo(filePath);
 		if (info) {
 			index.set(filePath, { fp, info });
-			results[resultIndex] = info;
+			results.set(filePath, info);
 		} else {
 			index.delete(filePath);
+			results.delete(filePath);
 		}
 	});
 
@@ -356,8 +408,15 @@ export async function listSessionsIncremental(): Promise<ScannedSessionInfo[]> {
 
 	// Preserve catalogue order for timestamp ties, independently of cache hits
 	// and the order in which concurrent file reads complete.
-	return results.filter((info) => info !== null)
+	return directory.files
+		.map((filePath) => results.get(filePath) ?? null)
+		.filter((info): info is ScannedSessionInfo => info !== null)
 		.sort((a, b) => b.modified.getTime() - a.modified.getTime());
+}
+
+/** 应用内文件变更无法依赖 watcher 的调度时序，显式要求下一次读取校对目录。 */
+export function invalidateSessionDirectorySnapshot(): void {
+	if (globalThis.__piWebSessionDirectorySnapshot) globalThis.__piWebSessionDirectorySnapshot.dirty = true;
 }
 
 /** Test seam: drop all in-memory index state. */
@@ -365,4 +424,7 @@ export function resetSessionScanIndexForTests(): void {
 	globalThis.__piWebScanIndex = undefined;
 	globalThis.__piWebScanIndexLoaded = undefined;
 	globalThis.__piWebScanIndexSaveQueued = undefined;
+	globalThis.__piWebSessionDirectoryWatcher?.close();
+	globalThis.__piWebSessionDirectoryWatcher = undefined;
+	globalThis.__piWebSessionDirectorySnapshot = undefined;
 }

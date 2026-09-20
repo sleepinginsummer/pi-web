@@ -8,6 +8,7 @@ import { createJiti } from "jiti";
 const listRoute = await readFile(new URL("./route.ts", import.meta.url), "utf8");
 const detailRoute = await readFile(new URL("./[id]/route.ts", import.meta.url), "utf8");
 const contextRoute = await readFile(new URL("./[id]/context/route.ts", import.meta.url), "utf8");
+const browseSnapshot = await readFile(new URL("../../../lib/session-browse-snapshot.ts", import.meta.url), "utf8");
 const stateRoute = await readFile(new URL("./[id]/state/route.ts", import.meta.url), "utf8");
 const jiti = createJiti(import.meta.url, {
   alias: { "@": process.cwd() },
@@ -84,13 +85,12 @@ test("session listing merges live registry snapshots and honors force refresh", 
 });
 
 test("session reads use the live SessionManager before requiring a JSONL path", () => {
-  for (const source of [detailRoute, contextRoute]) {
-    const liveLookup = source.indexOf("getRpcSession(id)");
-    const pathLookup = source.indexOf("resolveSessionPath(id)");
-    assert.ok(liveLookup >= 0);
-    assert.ok(pathLookup > liveLookup);
-    assert.match(source, /liveRpc\?\.inner\.sessionManager \?\? SessionManager\.open/);
-  }
+  const liveLookup = browseSnapshot.indexOf("getRpcSession(sessionId)");
+  const pathLookup = browseSnapshot.indexOf("resolveSessionPath(sessionId)");
+  assert.ok(liveLookup >= 0);
+  assert.ok(pathLookup > liveLookup);
+  assert.match(detailRoute, /getRpcSession\(id\)/);
+  assert.match(contextRoute, /readSessionBrowseSnapshot\(id\)/);
 });
 
 test("live agent state is available before the session file is persisted", () => {

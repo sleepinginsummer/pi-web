@@ -34,12 +34,28 @@ import type {
 
 const MAX_THINKING_CACHE_ENTRIES = 100;
 const thinkingContentCache = new Map<string, Promise<string>>();
+const deferredContentCache = new Map<string, Promise<unknown>>();
 const MAX_MARKDOWN_CHARS = 100_000;
 const CJK_PATTERN = /[\u3000-\u30ff\u3400-\u9fff\uf900-\ufaff\u{20000}-\u{2fa1f}\uac00-\ud7af]/u;
 
 interface TokenEstimateCacheEntry {
   text: string;
   tokens: number;
+}
+
+async function loadDeferredContent(url: string): Promise<unknown> {
+  let pending = deferredContentCache.get(url);
+  if (!pending) {
+    pending = fetch(url).then(async (response) => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return (await response.json() as { value: unknown }).value;
+    }).catch((error) => {
+      deferredContentCache.delete(url);
+      throw error;
+    });
+    deferredContentCache.set(url, pending);
+  }
+  return pending;
 }
 
 function estimateTokens(text: string): number {
@@ -226,6 +242,11 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking }:
   const [hovered, setHovered] = useState(false);
   const [copied, setCopied] = useState(false);
   const [longMessageExpanded, setLongMessageExpanded] = useState(false);
+  const [deferredContent, setDeferredContent] = useState<string | null>(null);
+  const [deferredError, setDeferredError] = useState<string | null>(null);
+  const deferredUrl = typeof message.content === "string"
+    ? undefined
+    : message.content.find((block): block is TextContent => block.type === "text" && Boolean(block.deferredUrl))?.deferredUrl;
 
   const content =
     typeof message.content === "string"
@@ -235,7 +256,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking }:
           .map((b) => b.text)
           .join("\n");
   const skillMessage = parseSkillMessage(content);
-  const displayContent = skillMessage?.displayText ?? content;
+  const displayContent = deferredContent ?? skillMessage?.displayText ?? content;
   const skillCommand = skillMessage
     ? skillMessage.displayText
     : null;
@@ -252,6 +273,14 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking }:
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     });
+  };
+  const loadDeferred = () => {
+    if (!deferredUrl) return;
+    setDeferredError(null);
+    void loadDeferredContent(deferredUrl).then((value) => {
+      if (typeof value === "string") setDeferredContent(value);
+      else throw new Error("Invalid deferred content");
+    }).catch((error) => setDeferredError(String(error)));
   };
   const actions: MessageAction[] = [
     {
@@ -341,6 +370,12 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking }:
           ) : displayContent ? (
             <MarkdownBody className="markdown-user-message" cwd={cwd} onOpenFile={onOpenFile}>{displayContent}</MarkdownBody>
           ) : null}
+          {deferredUrl && deferredContent === null && (
+            <button type="button" onClick={loadDeferred} style={{ marginTop: 7, padding: 0, border: 0, background: "none", color: "var(--accent)", cursor: "pointer", fontSize: 11 }}>
+              {t("chat.viewLongMessage")}
+            </button>
+          )}
+          {deferredError && <div style={{ marginTop: 6, color: "#ef4444", fontSize: 11 }}>{deferredError}</div>}
         </div>
 
       </div>
@@ -654,7 +689,27 @@ function BlockView({ block, searchTarget, toolResults, isStreaming, streamingDur
 }
 
 function TextBlock({ block, isStreaming, cwd, onOpenFile }: { block: TextContent; isStreaming?: boolean; cwd?: string; onOpenFile?: (filePath: string) => void }) {
-  return <SafeMarkdownBody isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile}>{block.text}</SafeMarkdownBody>;
+  const [text, setText] = useState(block.text);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const load = () => {
+    if (!block.deferredUrl) return;
+    setLoading(true);
+    setError(null);
+    void loadDeferredContent(block.deferredUrl).then((value) => {
+      if (typeof value !== "string") throw new Error("Invalid deferred content");
+      setText(value);
+    }).catch((cause) => setError(String(cause))).finally(() => setLoading(false));
+  };
+  return <>
+    <SafeMarkdownBody isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile}>{text}</SafeMarkdownBody>
+    {block.deferredUrl && text === block.text && (
+      <button type="button" onClick={load} disabled={loading} style={{ padding: 0, border: 0, background: "none", color: "var(--accent)", cursor: loading ? "default" : "pointer", fontSize: 11 }}>
+        {loading ? "loading..." : "view full content"}
+      </button>
+    )}
+    {error && <div style={{ color: "#ef4444", fontSize: 11 }}>{error}</div>}
+  </>;
 }
 
 function ImageBlock({ block }: { block: ImageContent }) {
@@ -779,7 +834,9 @@ export function ThinkingBlock({ block, duration, sessionId, entryId, blockIndex 
 function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number }) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
-  const inputStr = block.rawInput ?? JSON.stringify(block.input, null, 2);
+  const [deferredInput, setDeferredInput] = useState<unknown>(null);
+  const [deferredError, setDeferredError] = useState<string | null>(null);
+  const inputStr = block.rawInput ?? JSON.stringify(deferredInput ?? block.input, null, 2);
   const isStreamingInput = block.rawInput !== undefined;
   const isEditTool = isEditToolName(block.toolName);
   const resultDiff = result && !result.isError ? getResultDiff(result) : null;
@@ -791,6 +848,17 @@ function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; re
   const resultImages = getMessageImages(result?.content ?? []);
   const resultIsEmpty = resultText === null ? false : (resultText.trim() === "(no output)" || resultText.trim() === "");
   const isError = result?.isError ?? false;
+
+  useEffect(() => {
+    if (!expanded || !block.deferredUrl || deferredInput !== null) return;
+    let cancelled = false;
+    void loadDeferredContent(block.deferredUrl).then((value) => {
+      if (!cancelled) setDeferredInput(value);
+    }).catch((error) => {
+      if (!cancelled) setDeferredError(String(error));
+    });
+    return () => { cancelled = true; };
+  }, [block.deferredUrl, deferredInput, expanded]);
 
   return (
     <div
@@ -851,6 +919,7 @@ function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; re
           }}
         >
           {inputStr}
+          {deferredError ? `\n${deferredError}` : ""}
         </pre>
       )}
 
@@ -863,6 +932,7 @@ function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; re
         ) : (
           <PairedResult
             text={resultText ?? ""}
+            textBlocks={result.content.filter((item): item is TextContent => item.type === "text")}
             images={resultImages}
             isEmpty={resultIsEmpty}
             isError={isError}
@@ -1119,8 +1189,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function PairedResult({ text, images, isEmpty, isError }: {
+function PairedResult({ text, textBlocks, images, isEmpty, isError }: {
   text: string;
+  textBlocks: TextContent[];
   images: ImageContent[];
   isEmpty: boolean;
   isError: boolean;
@@ -1139,7 +1210,11 @@ function PairedResult({ text, images, isEmpty, isError }: {
           {images.map((image, index) => <MessageImage key={index} image={image} variant="assistant" />)}
         </div>
       )}
-      {showText && <pre
+      {showText && (textBlocks.some((block) => block.deferredUrl) ? (
+        <div style={{ padding: "8px 10px", background: "var(--bg)" }}>
+          {textBlocks.map((block, index) => <TextBlock key={index} block={block} />)}
+        </div>
+      ) : <pre
         style={{
           margin: 0,
           padding: "8px 10px",
@@ -1156,7 +1231,7 @@ function PairedResult({ text, images, isEmpty, isError }: {
         }}
       >
          {isEmpty ? t("i18n.noOutput") : text}
-      </pre>}
+      </pre>)}
     </div>
   );
 }
@@ -1324,7 +1399,12 @@ function BashExecutionView({ message, sessionId }: { message: BashExecutionMessa
         role: "toolResult",
         toolCallId: block.toolCallId,
         toolName,
-        content: displayOutput ? [{ type: "text", text: displayOutput }] : [],
+        content: displayOutput ? [{
+          type: "text",
+          text: displayOutput,
+          deferredUrl: fullOutput === null ? message.deferredOutputUrl : undefined,
+          originalBytes: message.originalOutputBytes,
+        }] : [],
         isError,
         timestamp: message.timestamp,
       };

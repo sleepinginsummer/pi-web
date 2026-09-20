@@ -101,6 +101,34 @@ test("本地发送、外部启动和挂载恢复统一采用主运行入口", ()
   assert.doesNotMatch(mountSource, /agentState\.busy[\s\S]*?agentRunningRef\.current = true/);
 });
 
+test("明确拒绝 prompt 时恢复输入并显示错误", () => {
+  const sendSource = source.slice(
+    source.indexOf("const handleSend = useCallback"),
+    source.indexOf("const executeBash = useCallback"),
+  );
+
+  assert.match(sendSource, /promptRequestStarted && sentSessionId && !isPromptRejectedError\(e\)/);
+  assert.match(sendSource, /setMessages\(\(prev\) => \{/);
+  assert.match(sendSource, /消息发送失败，输入已保留/);
+  assert.match(sendSource, /return false;/);
+});
+
+test("会话切换后旧组件不能提交普通消息或排队消息", () => {
+  const sendSource = source.slice(
+    source.indexOf("const handleSend = useCallback"),
+    source.indexOf("const executeBash = useCallback"),
+  );
+  const queuedSource = source.slice(
+    source.indexOf("const handleQueuedSubmit"),
+    source.indexOf("const handleAbortCompaction"),
+  );
+
+  assert.match(sendSource, /if \(!isNavigationActive\(navigationKey\)\) return false/);
+  assert.ok((sendSource.match(/isNavigationActive\(navigationKey\)/g) ?? []).length >= 4);
+  assert.match(queuedSource, /if \(!isNavigationActive\(navigationKey\)\) return false/);
+  assert.ok((queuedSource.match(/isNavigationActive\(navigationKey\)/g) ?? []).length >= 2);
+});
+
 test("settles main-agent UI only from the authoritative busy snapshot", () => {
   const applySource = source.slice(
     source.indexOf("const applyAgentSnapshot"),
@@ -174,8 +202,9 @@ test("context loads atomically through the shared latest loader", () => {
     source.indexOf("const handleModelChange"),
   );
 
-  assert.equal((loadSource.match(/contextLoaderRef\.current\.run\(/g) ?? []).length, 3);
-  assert.equal((loadSource.match(/commitContextSnapshot\(sid, loaded\.snapshot, loaded\.leafId/g) ?? []).length, 3);
+  assert.equal((loadSource.match(/contextLoaderRef\.current\.run\(/g) ?? []).length, 4);
+  assert.equal((loadSource.match(/commitContextSnapshot\(sid, loaded\.snapshot, loaded\.leafId/g) ?? []).length, 4);
+  assert.match(loadSource, /contextResult\.value\.cached[\s\S]*?skipCache: true/);
   assert.match(loadSource, /skipCache: true[\s\S]*?preserveScroll: true/);
   assert.match(navigationSource, /navigationChainRef\.current\.get\(sid\)/);
   assert.match(navigationSource, /navigationChainRef\.current\.delete\(sid\)/);
@@ -207,6 +236,31 @@ test("refuses a normal send while the hook knows an asynchronous run is active",
 
   assert.match(sendSource, /if \(agentRunningRef\.current \|\| bashRunningRef\.current\) return false;/);
   assert.match(sendSource, /return Boolean\(sentSessionId\);/);
+});
+
+test("旧 SSE 连接和旧会话事件不能写入当前会话", () => {
+  const connectionSource = source.slice(
+    source.indexOf("const connectEvents = useCallback"),
+    source.indexOf("const ensureEventsConnected = useCallback"),
+  );
+
+  assert.match(connectionSource, /eventSourceRef\.current !== es \|\| sessionIdRef\.current !== sid/);
+  assert.ok(
+    connectionSource.indexOf("eventSourceRef.current !== es") < connectionSource.indexOf("JSON.parse(e.data)"),
+    "必须在解析和分发事件前拒绝旧连接",
+  );
+});
+
+test("发送期间会话变化时拒绝提交并保留原输入", () => {
+  const sendSource = source.slice(
+    source.indexOf("  const handleSend = useCallback"),
+    source.indexOf("  const executeBash = useCallback"),
+  );
+
+  assert.match(sendSource, /const requestSessionId = sessionIdRef\.current \?\? session\?\.id \?\? null/);
+  assert.match(sendSource, /if \(!sid \|\| sid !== session\.id\) throw new Error\("会话已切换，消息未发送"\)/);
+  assert.match(sendSource, /await ensureEventsConnected\(sid\);[\s\S]*?sessionIdRef\.current !== sid/);
+  assert.match(sendSource, /await sendAgentCommand\(sid, \{[\s\S]*?type: "prompt"/);
 });
 
 test("发送消息时异步刷新当前工作目录的 Git 分支", () => {
@@ -273,6 +327,19 @@ test("待创建 Shadow 预设在首轮前应用并持久化 materialized session
   assert.doesNotMatch(ensureSource, /if \(sessionIdRef\.current\) return/);
 });
 
+test("Slash 命令加载拒绝过期响应，并在失败后允许输入框重试", () => {
+  const loadSource = source.slice(
+    source.indexOf("const loadSlashCommands = useCallback"),
+    source.indexOf("const closeEvents = useCallback"),
+  );
+
+  assert.match(loadSource, /const requestId = \+\+slashCommandsRequestIdRef\.current/);
+  assert.match(loadSource, /requestId !== slashCommandsRequestIdRef\.current \|\| sessionIdRef\.current !== sid/);
+  assert.match(loadSource, /if \(requestId !== slashCommandsRequestIdRef\.current\) return \[\]/);
+  assert.match(loadSource, /throw e;/);
+  assert.match(loadSource, /requestId === slashCommandsRequestIdRef\.current\) setSlashCommandsLoading\(false\)/);
+});
+
 test("surfaces auto-continue events from the RPC wrapper as notices", () => {
   const eventSource = source.slice(
     source.lastIndexOf("const handleAgentEvent = useCallback"),
@@ -308,7 +375,7 @@ test("buffers multi-question ask answers until final submission", () => {
   assert.match(questionnaireSource, /clearAskQuestionnaire\(\)/);
 });
 
-test("server-side UI cancellation closes both ordinary dialogs and buffered ask questionnaires", () => {
+test("completed ask requests do not close a questionnaire while it is submitting", () => {
   const eventSource = source.slice(
     source.lastIndexOf("const handleAgentEvent = useCallback"),
     source.indexOf("handleAgentEventRef.current = handleAgentEvent"),
@@ -316,7 +383,8 @@ test("server-side UI cancellation closes both ordinary dialogs and buffered ask 
 
   assert.match(eventSource, /case "extension_ui_closed"/);
   assert.match(eventSource, /setExtensionDialog\(\(current\) => current\?\.id === id \? null : current\)/);
-  assert.match(eventSource, /askQuestionnaireRequestIdsRef\.current\.has\(id\)[\s\S]*?clearAskQuestionnaire\(\)/);
+  assert.match(eventSource, /askQuestionnaireRequestIdsRef\.current\.delete\(id\)/);
+  assert.match(eventSource, /wasAskRequest && !askQuestionnaireRef\.current\?\.submitting[\s\S]*?clearAskQuestionnaire\(\)/);
 });
 
 test("new-session model side effects run only for the latest committed selection", () => {

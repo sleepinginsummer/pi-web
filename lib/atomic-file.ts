@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
-import { linkSync, renameSync, unlinkSync, writeFileSync } from "fs";
+import { linkSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "fs";
 import { basename, dirname, join } from "path";
+import lockfile from "proper-lockfile";
 
 type AtomicPublish = (tempPath: string, destinationPath: string) => void;
 
@@ -63,4 +64,19 @@ export function writePrivateFileCreateAtomicSync(path: string, contents: string)
     // link 成功即完成 create-only 发布；临时硬链接清理失败不能把成功伪装成失败。
     ignoreCleanupFailureAfterPublish: true,
   });
+}
+
+/** 在私有配置文件上统一执行跨进程锁协议。 */
+export async function withPrivateFileLock<T>(path: string, operation: () => T | Promise<T>): Promise<T> {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const release = await lockfile.lock(path, {
+    realpath: false,
+    retries: { retries: 60, factor: 1, minTimeout: 10, maxTimeout: 50 },
+    stale: 30_000,
+  });
+  try {
+    return await operation();
+  } finally {
+    await release();
+  }
 }

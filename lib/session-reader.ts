@@ -15,7 +15,7 @@ import { sessionPathKey } from "./session-path";
 import { MAX_TOOL_RESULT_IMAGE_BYTES, TOOL_RESULT_IMAGE_MIMES } from "./tool-result-images";
 import { resolveProject, type ProjectInfo } from "./worktree";
 import { readSubagentRun, SUBAGENT_META_TYPE } from "./subagents";
-import { listSessionsIncremental } from "./session-list-scanner";
+import { invalidateSessionDirectorySnapshot, listSessionsIncremental } from "./session-list-scanner";
 
 export { getAgentDir };
 
@@ -143,7 +143,7 @@ export function mergeSessionLists(
 }
 
 async function loadAllSessions(): Promise<SessionInfo[]> {
-  const scanned = await listSessionsIncremental();
+  const scanned = await listSessionsIncremental({ trustWatcher: true });
   const pathToId = new Map<string, string>();
   for (const s of scanned) pathToId.set(sessionPathKey(s.path), s.id);
 
@@ -318,6 +318,7 @@ function findSessionIdByPath(filePath: string): string | undefined {
 export function invalidateSessionListCache(): void {
   globalThis.__piSessionListGeneration = (globalThis.__piSessionListGeneration ?? 0) + 1;
   globalThis.__piSessionListCache = undefined;
+  invalidateSessionDirectorySnapshot();
 }
 
 export function getSessionListVersion(): number {
@@ -474,6 +475,8 @@ export interface BuildSessionContextOptions {
   excludeLeaf?: boolean;
   /** Session id used to build lazy URLs for historical tool-result images. */
   sessionId?: string;
+  /** 持久化索引沿完整祖先链解析出的有效设置，避免分页时读取无关消息正文。 */
+  effectiveSettings?: Pick<SessionContext, "thinkingLevel" | "model">;
 }
 
 type ShadowRunMetadata = {
@@ -562,15 +565,13 @@ export function buildSessionContext(
     entryIds,
     oldestEntryId: oldestCursorEntry?.id ?? null,
     hasMore,
-    ...getSessionSettings(entries, leafId),
+    ...(options.effectiveSettings ?? getSessionSettings(entries, leafId)),
   };
 }
 
 /**
- * Extract the ancestor chain from `leafId` back toward the root. `tail` is the
- * minimum page size; the slice may extend to the current turn anchor so the UI
- * can group and collapse the turn. The iterative walk avoids stack overflow on
- * deep linear sessions. Older complete turns are loaded on demand.
+ * 固定返回不超过 tail 条祖先记录。工具调用与结果使用稳定 ID，跨页加载后仍可配对；
+ * 不能为了补齐单轮而突破响应预算。迭代遍历避免深分支导致栈溢出。
  */
 export function sliceActiveBranch(
   entries: SessionEntry[],
@@ -594,21 +595,8 @@ export function sliceActiveBranch(
     current = current.parentId ? byId.get(current.parentId) : undefined;
   }
 
-  // 固定条数可能从一轮工具调用的中间截断，导致前端拿不到 user/compaction
-  // 锚点，进而无法把思考和工具调用归入折叠组。达到最小页大小后继续回溯，
-  // 直到当前轮次完整；超长单轮允许超过 tail，避免用展示正确性换固定响应条数。
-  while (current && !isConversationTurnAnchor(chain.at(-1))) {
-    chain.push(current);
-    current = current.parentId ? byId.get(current.parentId) : undefined;
-  }
   chain.reverse();
   return chain;
-}
-
-function isConversationTurnAnchor(entry: SessionEntry | undefined): boolean {
-  if (!entry) return false;
-  if (entry.type === "compaction") return true;
-  return entry.type === "message" && entry.message.role === "user";
 }
 function parseEntryTimestamp(timestamp: string): number | undefined {
   const parsed = Date.parse(timestamp);
@@ -637,12 +625,12 @@ function base64ImageInfo(block: unknown): { bytes: number; mime?: string } | nul
   return { bytes: Math.max(0, Math.floor(data.length * 3 / 4) - padding), mime };
 }
 
-function deferToolResultBase64Images(
+function deferHistoricalBase64Images(
   message: AgentMessage,
   sessionId: string | undefined,
   entryId: string,
 ): AgentMessage {
-  if (message.role !== "toolResult") return message;
+  if (!("content" in message) || !Array.isArray(message.content)) return message;
 
   let omitted = 0;
   let bytes = 0;
@@ -674,14 +662,95 @@ function deferToolResultBase64Images(
     if (image.mime) mimes.add(image.mime);
     return [];
   });
-  if (omitted === 0) return { ...message, content };
+  if (omitted === 0) return { ...message, content } as AgentMessage;
 
   const mimeText = mimes.size > 0 ? `: ${[...mimes].join(", ")}` : "";
   content.push({
     type: "text",
     text: `[${omitted} tool result image${omitted === 1 ? "" : "s"} omitted from initial history payload${mimeText}, ~${bytes} bytes]`,
   });
-  return { ...message, content };
+  return { ...message, content } as AgentMessage;
+}
+
+const HISTORICAL_TEXT_PREVIEW_BYTES = 8 * 1024;
+const HISTORICAL_TEXT_INLINE_BYTES = 64 * 1024;
+
+function textPreview(text: string): string {
+  if (Buffer.byteLength(text) <= HISTORICAL_TEXT_PREVIEW_BYTES) return text;
+  let end = Math.min(text.length, HISTORICAL_TEXT_PREVIEW_BYTES);
+  while (end > 0 && Buffer.byteLength(text.slice(0, end)) > HISTORICAL_TEXT_PREVIEW_BYTES) end -= 1;
+  return `${text.slice(0, end)}\n\n[内容过长，展开后加载完整内容]`;
+}
+
+function deferredContentUrl(sessionId: string, entryId: string, resource: string, blockIndex?: number): string {
+  const query = new URLSearchParams({ resource });
+  if (blockIndex !== undefined) query.set("blockIndex", String(blockIndex));
+  return `/api/sessions/${encodeURIComponent(sessionId)}/entries/${encodeURIComponent(entryId)}/content?${query}`;
+}
+
+/** 将历史大字段替换为可定位的预览，保证分页条数固定时响应字节数仍有上限。 */
+function deferHistoricalLargeContent(message: AgentMessage, sessionId: string | undefined, entryId: string): AgentMessage {
+  if (!sessionId) return message;
+  if (message.role === "bashExecution") {
+    const bytes = Buffer.byteLength(message.output);
+    return bytes > HISTORICAL_TEXT_INLINE_BYTES
+      ? {
+          ...message,
+          output: textPreview(message.output),
+          deferredOutputUrl: deferredContentUrl(sessionId, entryId, "bash-output"),
+          originalOutputBytes: bytes,
+        }
+      : message;
+  }
+  if (!("content" in message)) return message;
+  if (typeof message.content === "string") {
+    const bytes = Buffer.byteLength(message.content);
+    if (bytes <= HISTORICAL_TEXT_INLINE_BYTES) return message;
+    return {
+      ...message,
+      content: [{
+        type: "text",
+        text: textPreview(message.content),
+        deferredUrl: deferredContentUrl(sessionId, entryId, "text", 0),
+        originalBytes: bytes,
+      }],
+    } as AgentMessage;
+  }
+  const content = message.content.map((block, blockIndex) => {
+    if (block.type === "text") {
+      const bytes = Buffer.byteLength(block.text);
+      return bytes > HISTORICAL_TEXT_INLINE_BYTES
+        ? {
+            ...block,
+            text: textPreview(block.text),
+            deferredUrl: deferredContentUrl(sessionId, entryId, "text", blockIndex),
+            originalBytes: bytes,
+          }
+        : block;
+    }
+    if (block.type === "toolCall") {
+      const serialized = JSON.stringify(block.input);
+      const bytes = Buffer.byteLength(serialized);
+      return bytes > HISTORICAL_TEXT_INLINE_BYTES
+        ? {
+            ...block,
+            input: { preview: textPreview(serialized) },
+            deferredUrl: deferredContentUrl(sessionId, entryId, "tool-input", blockIndex),
+            originalBytes: bytes,
+          }
+        : block;
+    }
+    return block;
+  });
+  const details = "details" in message ? message.details : undefined;
+  const boundedDetails = details !== undefined && Buffer.byteLength(JSON.stringify(details)) > HISTORICAL_TEXT_INLINE_BYTES
+    ? undefined
+    : details;
+  return {
+    ...message,
+    content,
+    ...(details !== undefined ? { details: boundedDetails } : {}),
+  } as AgentMessage;
 }
 
 // Convert a session entry on the active branch into a UI message.
@@ -699,8 +768,9 @@ function entryToUiMessage(
   switch (entry.type) {
     case "message": {
       let message = options.deferToolResultImages
-        ? deferToolResultBase64Images(normalizeToolCalls(entry.message), options.sessionId, entry.id)
+        ? deferHistoricalBase64Images(normalizeToolCalls(entry.message), options.sessionId, entry.id)
         : normalizeToolCalls(entry.message);
+      if (options.deferToolResultImages) message = deferHistoricalLargeContent(message, options.sessionId, entry.id);
       const legacyContent = message.role === "assistant" ? (message as { content: unknown }).content : undefined;
       if (typeof legacyContent === "string") {
         message = { ...message, content: [{ type: "text", text: legacyContent }] } as AgentMessage;

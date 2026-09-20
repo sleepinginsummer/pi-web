@@ -43,7 +43,11 @@ import { getFileName } from "@/lib/file-paths";
 import { NoticeShelf } from "./NoticeShelf";
 import { buildQuotedSelection } from "@/lib/quoted-selection";
 
+const MAX_MOUNTED_HISTORY_GROUPS = 160;
+
 interface Props {
+  navigationKey: number;
+  isNavigationActive: (key: number) => boolean;
   session: SessionInfo | null;
   searchTarget?: { sessionId: string; entryId: string; blockIndex?: number } | null;
   onSearchTargetHandled?: (target: { sessionId: string; entryId: string }) => void;
@@ -73,7 +77,7 @@ interface Props {
   onAskInNewChat?: (prompt: string, sourceSessionId: string, sourceEntryId: string) => Promise<void>;
   quoteSelectionEnabled?: boolean;
   initialPrompt?: string;
-  onInitialPromptConsumed?: () => void;
+  onInitialPromptConsumed?: (sessionId: string, prompt: string) => void;
 }
 
 function phaseLabel(phase: AgentPhase, t: (key: string, params?: Record<string, string | number>) => string): string {
@@ -271,7 +275,7 @@ function LiveProcessDetailsGroup({ hiddenCount, renderAll, renderRecent, t }: { 
   );
 }
 
-export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, newSessionCwd, newSessionWorktrees, pendingNewSessionControl, onPendingNewSessionEvent, notificationController, onAgentEnd, onSessionCreated, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onShadowMindControlChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onNewSessionCwdChange, onAskInNewChat, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed }: Props) {
+export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigationActive, session, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, newSessionCwd, newSessionWorktrees, pendingNewSessionControl, onPendingNewSessionEvent, notificationController, onAgentEnd, onSessionCreated, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onShadowMindControlChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onNewSessionCwdChange, onAskInNewChat, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed }: Props) {
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
   const {
@@ -307,7 +311,7 @@ export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSe
     handleBuiltinSlashCommand,
     handleShadowMindToggle, handleToolPresetChange, loadSlashCommands,
   } = useAgentSession({
-    session, newSessionCwd, pendingNewSessionControl, onPendingNewSessionEvent, onSessionCreated, onSessionListRefresh, onSessionForked,
+    navigationKey, isNavigationActive, session, newSessionCwd, pendingNewSessionControl, onPendingNewSessionEvent, onSessionCreated, onSessionListRefresh, onSessionForked,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onSessionStatsPanelOpen,
   });
   const displayExtensionWidgets = useMemo(
@@ -496,13 +500,36 @@ export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSe
     }
   }, [closeQuotedSelection, onAskInNewChat, quoteSubmitting, quotedSelection, session?.id, sessionIdRef, unlockAudio]);
 
-  const initialPromptSentRef = useRef(false);
+  const initialPromptAttemptRef = useRef<string | null>(null);
+  const mountedRef = useRef(true);
   useEffect(() => {
-    if (loading || error || !initialPrompt || initialPromptSentRef.current) return;
-    initialPromptSentRef.current = true;
-    onInitialPromptConsumed?.();
-    void handleSend(initialPrompt);
-  }, [error, handleSend, initialPrompt, loading, onInitialPromptConsumed]);
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    const targetSessionId = session?.id;
+    if (loading || error || !initialPrompt || !targetSessionId || initialPromptAttemptRef.current === initialPrompt) return;
+    initialPromptAttemptRef.current = initialPrompt;
+    void (async () => {
+      let sent = false;
+      try {
+        sent = await handleSend(initialPrompt);
+      } catch (sendError) {
+        console.error("发送引用分支的首条问题失败", sendError);
+      }
+      if (!mountedRef.current) return;
+      // 发送前失败时把问题交还输入框，避免引用内容随自动发送状态一起丢失。
+      if (!sent) {
+        const input = chatInputRef?.current;
+        if (!input) return;
+        input.prependText(initialPrompt);
+      }
+      onInitialPromptConsumed?.(targetSessionId, initialPrompt);
+    })();
+  }, [chatInputRef, error, handleSend, initialPrompt, loading, onInitialPromptConsumed, session?.id]);
 
   // Register the abort handler for the global Esc shortcut
   useEffect(() => {
@@ -513,10 +540,12 @@ export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSe
   // Only render the last N messages initially. When the user scrolls to the
   // top, load another page while keeping the scroll position stable.
   const renderWindowKey = session?.id ?? `new:${newSessionCwd ?? "none"}`;
-  const [renderWindow, setRenderWindow] = useState({ key: renderWindowKey, count: VISIBLE_PAGE_SIZE });
+  const [renderWindow, setRenderWindow] = useState({ key: renderWindowKey, count: VISIBLE_PAGE_SIZE, offset: 0 });
   // key 不匹配时当前 render 立即回落到 50，避免 effect 执行前先挂载上一会话的数百节点。
   const visibleCount = renderWindow.key === renderWindowKey ? renderWindow.count : VISIBLE_PAGE_SIZE;
   const sentinelRef = useRef<HTMLDivElement>(null);
+  const endSentinelRef = useRef<HTMLDivElement>(null);
+  const historyGroupWindowRef = useRef({ start: 0, end: 0, total: 0, entryGroups: new Map<string, number>() });
   const messageContentRef = useRef<HTMLDivElement | null>(null);
   const prevScrollDistanceRef = useRef<number | null>(null);
   const searchLoadRef = useRef(false);
@@ -555,18 +584,24 @@ export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSe
     if (searchTarget) setPendingScrollRestore(null);
   }, [searchTarget]);
 
-  const initialLeafIdRef = useRef(activeLeafId);
+  const previousLeafIdRef = useRef<string | null | undefined>(undefined);
   useEffect(() => {
-    if (initialLeafIdRef.current === activeLeafId) return;
-    initialLeafIdRef.current = activeLeafId;
+    if (loading) return;
+    // 首次 context hydration 只建立基线；只有后续分支切换才取消旧分支的阅读位置恢复。
+    if (previousLeafIdRef.current === undefined) {
+      previousLeafIdRef.current = activeLeafId;
+      return;
+    }
+    if (previousLeafIdRef.current === activeLeafId) return;
+    previousLeafIdRef.current = activeLeafId;
     setPendingScrollRestore(null);
-  }, [activeLeafId]);
+  }, [activeLeafId, loading]);
 
   useEffect(() => {
     const position = pendingScrollRestore;
     if (!position || loading || searchTarget || loadingEarlierMessages || restoreLoadRef.current) return;
     if (entryIds.includes(position.anchorEntryId)) {
-      setRenderWindow({ key: renderWindowKey, count: Math.max(VISIBLE_PAGE_SIZE, messages.length * 2) });
+      setRenderWindow({ key: renderWindowKey, count: MAX_MOUNTED_HISTORY_GROUPS, offset: 0 });
       setRestoreAnchorReady(true);
       return;
     }
@@ -607,7 +642,7 @@ export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSe
   useEffect(() => {
     if (!searchTarget || loading || searchLoadRef.current) return;
     if (entryIds.includes(searchTarget.entryId)) {
-      setRenderWindow({ key: renderWindowKey, count: Math.max(VISIBLE_PAGE_SIZE, messages.length * 2) });
+      setRenderWindow({ key: renderWindowKey, count: MAX_MOUNTED_HISTORY_GROUPS, offset: 0 });
       setPendingSearchScroll(searchTarget);
       return;
     }
@@ -652,10 +687,19 @@ export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSe
         if (entries[0]?.isIntersecting) {
           // Save distance from top before prepending to restore scroll later
           prevScrollDistanceRef.current = captureScrollDistance(container.scrollHeight, container.scrollTop);
-          if (visibleCount < messages.length) {
+          const groupWindow = historyGroupWindowRef.current;
+          if (visibleCount < Math.min(messages.length, MAX_MOUNTED_HISTORY_GROUPS) && renderWindow.offset === 0) {
             setRenderWindow((current) => ({
               key: renderWindowKey,
-              count: getNextVisibleCount(current.key === renderWindowKey ? current.count : VISIBLE_PAGE_SIZE),
+              count: Math.min(MAX_MOUNTED_HISTORY_GROUPS, getNextVisibleCount(current.key === renderWindowKey ? current.count : VISIBLE_PAGE_SIZE)),
+              offset: current.key === renderWindowKey ? current.offset : 0,
+            }));
+          } else if (groupWindow.start > 0) {
+            prevScrollDistanceRef.current = captureScrollDistance(container.scrollHeight, container.scrollTop);
+            setRenderWindow((current) => ({
+              key: renderWindowKey,
+              count: Math.min(MAX_MOUNTED_HISTORY_GROUPS, Math.max(current.count, VISIBLE_PAGE_SIZE)),
+              offset: Math.min(groupWindow.total, (current.key === renderWindowKey ? current.offset : 0) + VISIBLE_PAGE_SIZE),
             }));
           } else if (hasEarlierMessages && !loadingEarlierMessages) {
             void loadEarlierMessages();
@@ -666,7 +710,23 @@ export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSe
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [hasEarlierMessages, loadEarlierMessages, loadingEarlierMessages, messages.length, pendingScrollRestore, renderWindowKey, scrollContainerRef, visibleCount]);
+  }, [hasEarlierMessages, loadEarlierMessages, loadingEarlierMessages, messages.length, pendingScrollRestore, renderWindow.offset, renderWindowKey, scrollContainerRef, visibleCount]);
+
+  useEffect(() => {
+    const sentinel = endSentinelRef.current;
+    const container = scrollContainerRef.current;
+    if (!sentinel || !container || renderWindow.offset <= 0) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (!entries[0]?.isIntersecting) return;
+      setRenderWindow((current) => ({
+        key: renderWindowKey,
+        count: Math.min(MAX_MOUNTED_HISTORY_GROUPS, Math.max(current.count, VISIBLE_PAGE_SIZE)),
+        offset: Math.max(0, current.offset - VISIBLE_PAGE_SIZE),
+      }));
+    }, { root: container, threshold: 0 });
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [renderWindow.offset, renderWindowKey, scrollContainerRef]);
 
   // After visibleCount increases (more messages prepended), restore the
   // scroll position so the viewport doesn't jump.
@@ -803,8 +863,8 @@ export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSe
   }, [messages]);
   const messageRefs = useMessageRefs(messageRenderIndex.visibleCount);
   const revealHistoryForMinimap = useCallback(() => {
-    setRenderWindow({ key: renderWindowKey, count: Math.max(VISIBLE_PAGE_SIZE, messages.length * 2) });
-  }, [messages.length, renderWindowKey]);
+    setRenderWindow({ key: renderWindowKey, count: MAX_MOUNTED_HISTORY_GROUPS, offset: 0 });
+  }, [renderWindowKey]);
 
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
   // 新会话引导区：π Pi Web 正下方显示当前文件夹名
@@ -1081,7 +1141,9 @@ export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSe
                     cwd={messageCwd}
                     onOpenFile={onOpenFile}
                     entryId={entryIds[idx]}
-                    searchBlockIndex={entryIds[idx] === pendingSearchScroll?.entryId ? pendingSearchScroll.blockIndex : undefined}
+                    searchBlockIndex={pendingSearchScroll && entryIds[idx] === pendingSearchScroll.entryId
+                      ? pendingSearchScroll.blockIndex
+                      : undefined}
                     onFork={isNew || !entryIds[idx] || bashRunning ? undefined : handleFork}
                     forking={forkingEntryId === entryIds[idx]}
                     showTimestamp={showTimestamp}
@@ -1266,22 +1328,35 @@ export const ChatWindow = memo(function ChatWindow({ session, searchTarget, onSe
                 return <Fragment key={`group-${start}`}>{nodes}</Fragment>;
               };
 
-              const window = getVisibleRenderWindow(groups.length, visibleCount);
+              const boundedVisibleCount = Math.min(visibleCount, MAX_MOUNTED_HISTORY_GROUPS);
+              const offset = renderWindow.key === renderWindowKey ? renderWindow.offset : 0;
+              const endIndex = Math.max(0, groups.length - Math.min(offset, groups.length));
+              const window = getVisibleRenderWindow(endIndex, boundedVisibleCount);
               // 运行中的单轮会话可能包含超过一页的工具消息。必须连同该轮锚点一起渲染，
               // 否则定位引用会被分页裁掉，恢复会话时只能滚进底部预留的空白区域。
               const startIndex = liveTailStartIndex === null
                 ? window.startIndex
                 : Math.min(window.startIndex, liveTailStartIndex);
-              const hasMore = startIndex > 0 || hasEarlierMessages;
+              const boundedStartIndex = Math.max(0, endIndex - MAX_MOUNTED_HISTORY_GROUPS, startIndex);
+              const entryGroups = new Map<string, number>();
+              groups.forEach((group, groupIndex) => {
+                for (let index = group.start; index < group.end; index++) {
+                  const entryId = entryIds[index];
+                  if (entryId) entryGroups.set(entryId, groupIndex);
+                }
+              });
+              historyGroupWindowRef.current = { start: boundedStartIndex, end: endIndex, total: groups.length, entryGroups };
+              const hasMore = boundedStartIndex > 0 || hasEarlierMessages;
               return (
                 <>
                   {hasMore && (
                      <div ref={sentinelRef} className="py-3 text-center text-xs text-text-muted">
-                       {loadingEarlierMessages ? t("i18n.loading") : t("chat.loadEarlier", { count: startIndex })}
+                       {loadingEarlierMessages ? t("i18n.loading") : t("chat.loadEarlier", { count: boundedStartIndex })}
                     </div>
                   )}
-                  {groups.slice(startIndex).map(renderGroup)}
-                  {liveTailStartIndex === null && renderStreamingMessage()}
+                  {groups.slice(boundedStartIndex, endIndex).map(renderGroup)}
+                  {endIndex < groups.length && <div ref={endSentinelRef} className="py-3 text-center text-xs text-text-muted">{t("chat.jumpToLatest")}</div>}
+                  {liveTailStartIndex === null && endIndex === groups.length && renderStreamingMessage()}
                 </>
               );
             })()}

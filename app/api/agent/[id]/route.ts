@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
 import { invalidateSessionListCache, resolveSessionPath } from "@/lib/session-reader";
 import {
@@ -30,15 +31,54 @@ function getSubmitMode(commandType: string): SubmitMode | null {
   if (commandType === "follow_up") return "followUp";
   return null;
 }
+
+function submitFingerprint(body: Record<string, unknown>): { messageHash: string; messageLength: number } {
+  const message = typeof body.message === "string" ? body.message : "";
+  return {
+    messageHash: createHash("sha256").update(message).digest("hex").slice(0, 16),
+    messageLength: message.length,
+  };
+}
+
+function submitIdentityError(
+  routeSessionId: string,
+  body: Record<string, unknown>,
+  runtimeSessionId?: string,
+): Response | null {
+  const clientSessionId = typeof body.clientSessionId === "string" ? body.clientSessionId : null;
+  const requestId = typeof body.requestId === "string" ? body.requestId : undefined;
+  if (clientSessionId === routeSessionId && (!runtimeSessionId || runtimeSessionId === routeSessionId)) return null;
+
+  console.error("[pi-web] 拒绝会话身份不一致的消息提交", {
+    requestId,
+    clientSessionId,
+    routeSessionId,
+    runtimeSessionId,
+    ...submitFingerprint(body),
+  });
+  return NextResponse.json({
+    error: "会话已切换，消息未发送",
+    code: "session_identity_mismatch",
+    accepted: false,
+  }, { status: 409 });
+}
 // POST /api/agent/[id] - Send a command to an existing session
 export async function POST(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  let commandType: string | undefined;
 
   try {
     const body = await req.json() as { type: string; [key: string]: unknown };
+    commandType = body.type;
+
+    const identityMode = getSubmitMode(body.type);
+    if (identityMode) {
+      const identityError = submitIdentityError(id, body);
+      if (identityError) return identityError;
+    }
 
     if (body.type === "set_tools") {
       const existing = getRpcSession(id);
@@ -62,6 +102,11 @@ export async function POST(
       ({ session } = await startRpcSession(id, filePath, undefined));
     }
 
+    if (identityMode) {
+      const identityError = submitIdentityError(id, body, session.sessionId);
+      if (identityError) return identityError;
+    }
+
     const result = await session.send(body);
     if (shouldInvalidateSessionList(body.type)) invalidateSessionListCache();
     if (isShadowSettingCommandResult(result)) {
@@ -69,12 +114,25 @@ export async function POST(
     }
     const mode = getSubmitMode(body.type);
     if (mode) {
+      console.info("[pi-web] 会话消息提交已接受", {
+        requestId: typeof body.requestId === "string" ? body.requestId : undefined,
+        clientSessionId: body.clientSessionId,
+        routeSessionId: id,
+        runtimeSessionId: session.sessionId,
+        mode,
+        ...submitFingerprint(body),
+      });
       return NextResponse.json({ success: true, data: { accepted: true, mode } });
     }
 
     return NextResponse.json({ success: true, data: result });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({
+      error: String(error),
+      ...(commandType === "prompt"
+        ? { code: "prompt_rejected", accepted: false }
+        : {}),
+    }, { status: 500 });
   }
 }
 

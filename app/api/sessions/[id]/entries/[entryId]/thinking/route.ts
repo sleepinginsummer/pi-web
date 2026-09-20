@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { getSessionEntries, resolveSessionPath } from "@/lib/session-reader";
+import { resolveSessionPath } from "@/lib/session-reader";
+import { readIndexedSessionEntry } from "@/lib/session-content-index";
 
 export async function GET(
   req: Request,
@@ -16,8 +17,7 @@ export async function GET(
     const filePath = await resolveSessionPath(id);
     if (!filePath) return NextResponse.json({ error: "Session not found" }, { status: 404 });
 
-    // SessionManager-backed parsing preserves the SDK's malformed-line tolerance.
-    const entry = getSessionEntries(filePath).find((candidate) => candidate.id === entryId);
+    const entry = await readIndexedSessionEntry(filePath, entryId);
     if (!entry || entry.type !== "message" || entry.message.role !== "assistant") {
       return NextResponse.json({ error: "Assistant message not found" }, { status: 404 });
     }

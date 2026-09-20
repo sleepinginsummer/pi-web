@@ -13,6 +13,9 @@ try {
 
 const nextConfig: NextConfig = {
   devIndicators: false,
+  experimental: {
+    proxyClientMaxBodySize: "20mb",
+  },
   outputFileTracingRoot: configDir,
   serverExternalPackages: [
     "node-pty",

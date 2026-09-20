@@ -13,6 +13,7 @@ import {
 } from "@/lib/session-reader";
 import { sessionPathKey } from "@/lib/session-path";
 import { getRpcSession } from "@/lib/rpc-manager";
+import { removeSidebarPreferenceIds } from "@/lib/sidebar-preferences";
 import { projectTreeForResponse } from "@/lib/project-tree";
 import { computeSessionTotalActiveMs } from "@/lib/session-timing";
 import { computeSessionStats } from "@/lib/session-stats";
@@ -212,6 +213,11 @@ export async function DELETE(
 
     await getRpcSession(id)?.shutdown();
     const trashedName = trashSessionFile(filePath);
+    try {
+      await removeSidebarPreferenceIds({ sessionIds: [id] });
+    } catch (error) {
+      console.error("清理已删除会话的侧边栏偏好失败", error);
+    }
     invalidateSessionPathCache(id);
     invalidateSessionListCache();
     queueTrashSessionTitle(trashedName);

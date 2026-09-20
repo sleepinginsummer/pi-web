@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { allowFileRoot } from "@/lib/file-access";
+import { removeSidebarPreferenceIds } from "@/lib/sidebar-preferences";
 import {
   addProjectDirectory,
   normalizeProjectDirectory,
@@ -20,7 +21,7 @@ export async function POST(request: Request) {
     const body = await request.json() as { cwd?: unknown };
     const cwd = normalizeProjectDirectory(body.cwd);
     allowFileRoot(cwd);
-    return NextResponse.json({ projects: addProjectDirectory(cwd), cwd });
+    return NextResponse.json({ projects: await addProjectDirectory(cwd), cwd });
   } catch (error) {
     console.error("保存 Pi Web 项目目录失败", error);
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 400 });
@@ -33,7 +34,14 @@ export async function DELETE(request: Request) {
     if (typeof body.cwd !== "string" || !body.cwd.trim()) {
       return NextResponse.json({ error: "cwd required" }, { status: 400 });
     }
-    return NextResponse.json({ projects: removeProjectDirectory(body.cwd.trim()) });
+    const cwd = body.cwd.trim();
+    const projects = await removeProjectDirectory(cwd);
+    try {
+      await removeSidebarPreferenceIds({ projectPaths: [cwd] });
+    } catch (error) {
+      console.error("清理已删除项目的侧边栏偏好失败", error);
+    }
+    return NextResponse.json({ projects });
   } catch (error) {
     console.error("移除 Pi Web 项目目录失败", error);
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });

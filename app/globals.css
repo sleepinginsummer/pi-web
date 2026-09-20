@@ -503,14 +503,20 @@ pre, code {
   margin: 5px 0 8px;
   list-style-position: outside;
 }
-.markdown-body li { margin: 3px 0; padding-left: 2px; }
-.markdown-body ul > li { list-style-type: disc; }
-.markdown-body ol > li { list-style-type: decimal; }
-.markdown-body li > p { margin: 0; }
-.markdown-body li::marker {
+.markdown-body li {
+  position: relative;
+  margin: 3px 0;
+  padding-left: 2px;
+  list-style: none;
+}
+.markdown-body .markdown-list-marker {
+  position: absolute;
+  right: calc(100% + 4px);
   color: color-mix(in srgb, var(--accent) 72%, var(--text-muted));
   font-weight: 600;
+  white-space: pre;
 }
+.markdown-body li > p { margin: 0; }
 .markdown-body strong {
   color: color-mix(in srgb, var(--text) 88%, var(--accent));
   font-weight: 700;
@@ -549,7 +555,6 @@ pre, code {
   position: relative;
   padding-left: 25px;
 }
-.markdown-body .task-list-item::marker { content: ""; }
 .markdown-body .task-list-item > input[type="checkbox"],
 .markdown-body .task-list-item > p:first-child > input[type="checkbox"]:first-child {
   appearance: none;
@@ -1429,8 +1434,13 @@ span.token.table {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  padding-right: 42px;
   color: var(--text-muted);
   font-size: 12px;
+}
+
+.ask-questionnaire-heading small {
+  flex-shrink: 0;
 }
 
 .ask-questionnaire-heading span {

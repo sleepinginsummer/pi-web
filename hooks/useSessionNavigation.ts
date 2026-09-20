@@ -29,12 +29,21 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
   const [newSessionCwd, setNewSessionCwd] = useState<string | null>(null);
   const [pendingNewSessions, setPendingNewSessions] = useState<Map<string, PendingNewSessionControl>>(() => new Map());
   const [sessionKey, setSessionKey] = useState(0);
+  const activeSessionKeyRef = useRef(0);
   const [initialSessionRestored, setInitialSessionRestored] = useState(() => !initialSessionId);
   const activeSessionIdRef = useRef<string | null>(null);
   const activeWorkspaceKeyRef = useRef<string | null>(null);
   const workspaceRestoreTokenRef = useRef(0);
   const suppressCwdBumpRef = useRef(false);
-  activeSessionIdRef.current = selectedSession?.id ?? null;
+
+  // 导航事件先同步推进代次，再等待 React 提交新界面。旧 ChatWindow 即使仍处于事件队列中，
+  // 也会在真正提交消息前发现自己已经失效。
+  const bumpSessionKey = useCallback(() => {
+    const nextKey = activeSessionKeyRef.current + 1;
+    activeSessionKeyRef.current = nextKey;
+    setSessionKey(nextKey);
+  }, []);
+  const isNavigationActive = useCallback((key: number) => activeSessionKeyRef.current === key, []);
 
   const invalidateWorkspaceRestore = useCallback(() => {
     workspaceRestoreTokenRef.current += 1;
@@ -64,15 +73,20 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
 
   const applySessionSelection = useCallback((session: SessionInfo, isRestore = false) => {
     if (!isRestore && activeSessionIdRef.current === session.id) return;
+    if (!isRestore) {
+      performance.clearMarks(`pi-session:${session.id}:click`);
+      performance.mark(`pi-session:${session.id}:click`);
+    }
+    activeSessionIdRef.current = session.id;
     setNewSessionCwd(null);
     setSelectedSession(session);
-    setSessionKey((key) => key + 1);
+    bumpSessionKey();
     resetSessionViews();
     setInitialSessionRestored(true);
     if (isMobile && !isRestore) onMobileSelect();
     if (isRestore) suppressCwdBumpRef.current = true;
     else replaceSessionUrl(session.id);
-  }, [isMobile, onMobileSelect, resetSessionViews]);
+  }, [bumpSessionKey, isMobile, onMobileSelect, resetSessionViews]);
 
   const isActiveSession = useCallback((sessionId: string) => activeSessionIdRef.current === sessionId, []);
   const invalidateNotificationNavigation = useNotificationSessionNavigation({
@@ -87,20 +101,22 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
   const newSession = useCallback((_sessionId: string, cwd: string) => {
     invalidateWorkspaceRestore();
     invalidateNotificationNavigation();
+    activeSessionIdRef.current = null;
     setSelectedSession(null);
     if (!pendingNewSessions.has(cwd)) {
       setPendingNewSessions((current) => new Map(current).set(cwd, DEFAULT_PENDING_NEW_SESSION_CONTROL));
     }
     setNewSessionCwd(cwd);
-    setSessionKey((key) => key + 1);
+    bumpSessionKey();
     resetSessionViews();
     if (isMobile) onMobileSelect();
     replaceSessionUrl(null);
-  }, [invalidateNotificationNavigation, invalidateWorkspaceRestore, isMobile, onMobileSelect, pendingNewSessions, resetSessionViews]);
+  }, [bumpSessionKey, invalidateNotificationNavigation, invalidateWorkspaceRestore, isMobile, onMobileSelect, pendingNewSessions, resetSessionViews]);
 
   const sessionCreated = useCallback((session: SessionInfo) => {
     invalidateWorkspaceRestore();
     invalidateNotificationNavigation();
+    activeSessionIdRef.current = session.id;
     clearDraft(`new:${session.cwd}`);
     releaseNewSessionMaterialization(session.cwd);
     setNewSessionCwd(null);
@@ -119,8 +135,9 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
   const sessionForked = useCallback((newSessionId: string) => {
     invalidateWorkspaceRestore();
     invalidateNotificationNavigation();
+    activeSessionIdRef.current = newSessionId;
     onRefresh();
-    setSessionKey((key) => key + 1);
+    bumpSessionKey();
     setNewSessionCwd(null);
     setSelectedSession((current) => ({
       ...(current ?? { path: "", cwd: "", created: "", modified: "", messageCount: 0, firstMessage: "" }),
@@ -128,19 +145,20 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
     }));
     hydrateSelectedSession(newSessionId);
     router.replace(`?session=${encodeURIComponent(newSessionId)}`, { scroll: false });
-  }, [hydrateSelectedSession, invalidateNotificationNavigation, invalidateWorkspaceRestore, onRefresh, router]);
+  }, [bumpSessionKey, hydrateSelectedSession, invalidateNotificationNavigation, invalidateWorkspaceRestore, onRefresh, router]);
 
   const sessionDeleted = useCallback((sessionId: string) => {
     invalidateWorkspaceRestore();
     invalidateNotificationNavigation();
     onRefresh();
     if (selectedSession?.id !== sessionId) return;
+    activeSessionIdRef.current = null;
     setSelectedSession(null);
     setNewSessionCwd(selectedSession.cwd ?? null);
-    setSessionKey((key) => key + 1);
+    bumpSessionKey();
     resetSessionViews();
     router.replace("/", { scroll: false });
-  }, [invalidateNotificationNavigation, invalidateWorkspaceRestore, onRefresh, resetSessionViews, router, selectedSession]);
+  }, [bumpSessionKey, invalidateNotificationNavigation, invalidateWorkspaceRestore, onRefresh, resetSessionViews, router, selectedSession]);
 
   const dispatchPending = useCallback((cwd: string, event: PendingNewSessionEvent) => {
     setPendingNewSessions((current) => {
@@ -167,11 +185,12 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
   const leaveWorkspace = useCallback((cwd: string) => {
     invalidateWorkspaceRestore();
     invalidateNotificationNavigation();
+    activeSessionIdRef.current = null;
     setSelectedSession(null);
     setNewSessionCwd((current) => current && current !== cwd ? null : current);
-    setSessionKey((key) => key + 1);
+    bumpSessionKey();
     resetSessionViews();
-  }, [invalidateNotificationNavigation, invalidateWorkspaceRestore, resetSessionViews]);
+  }, [bumpSessionKey, invalidateNotificationNavigation, invalidateWorkspaceRestore, resetSessionViews]);
   const updateDraftCwd = useCallback((cwd: string | null) => {
     invalidateWorkspaceRestore();
     invalidateNotificationNavigation();
@@ -209,8 +228,6 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
     setSelectedSession((current) => current?.id === sessionId ? { ...current, name: title } : current);
     return true;
   }, []);
-  const bumpSessionKey = useCallback(() => setSessionKey((key) => key + 1), []);
-
   return {
     applyGeneratedTitle,
     beginInitialCwd,
@@ -220,6 +237,7 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
     dispatchPending,
     initialSessionRestored,
     isActiveSession,
+    isNavigationActive,
     leaveWorkspace,
     newSession,
     newSessionCwd,

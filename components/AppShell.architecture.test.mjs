@@ -48,6 +48,13 @@ test("keeps file panel state independent from presentation components", () => {
   assert.doesNotMatch(filePanelHook, /@\/components\/TabBar/);
 });
 
+test("closes every file tab while preserving an open terminal", () => {
+  assert.match(appShell, /const handleCloseAllFileTabs = useCallback/);
+  assert.match(appShell, /const nextTerminalId = activeTerminalTabId \?\? terminalTabs\.at\(-1\)\?\.id \?\? null/);
+  assert.match(appShell, /clearFileTabs\(\);[\s\S]*?if \(nextTerminalId\) activatePanelTab\(nextTerminalId\)/);
+  assert.match(appShell, /fileTabs\.length > 0[\s\S]*?onClick=\{handleCloseAllFileTabs\}[\s\S]*?files\.closeAllTabs/);
+});
+
 test("does not duplicate branch dropdown measurement in the generic top panel hook", () => {
   assert.match(topPanelHook, /activePanel === "branches"/);
   assert.match(topPanelHook, /setPosition\(null\)/);
@@ -60,6 +67,16 @@ test("exposes semantic session navigation commands instead of mutable internals"
   assert.match(publicApi, /updateDraftCwd/);
   assert.doesNotMatch(publicApi, /setSelectedSession|setNewSessionCwd|setInitialSessionRestored/);
   assert.doesNotMatch(publicApi, /activeSessionIdRef|suppressCwdBumpRef/);
+});
+
+test("invalidates the previous chat synchronously before a session switch is rendered", () => {
+  assert.match(sessionNavigationHook, /const activeSessionKeyRef = useRef\(0\)/);
+  assert.match(sessionNavigationHook, /activeSessionKeyRef\.current = nextKey;\s+setSessionKey\(nextKey\)/);
+  assert.match(sessionNavigationHook, /activeSessionIdRef\.current = session\.id;\s+setNewSessionCwd\(null\)/);
+  assert.doesNotMatch(sessionNavigationHook, /activeSessionIdRef\.current = selectedSession\?\.id/);
+  assert.match(sessionNavigationHook, /isNavigationActive/);
+  assert.match(appShell, /navigationKey=\{sessionKey\}/);
+  assert.match(appShell, /isNavigationActive=\{isNavigationActive\}/);
 });
 
 test("routes session-list completion refreshes through one coordinator", () => {

@@ -45,3 +45,8 @@ test("ask flyout supports collapse and preserves transcript scrolling", () => {
   assert.doesNotMatch(askDialogStyles, /max-height: min\(/);
   assert.doesNotMatch(globalStyles, /\.ask-questionnaire-backdrop/);
 });
+
+test("ask question progress reserves space for the collapse button", () => {
+  assert.match(globalStyles, /\.ask-questionnaire-heading\s*\{[\s\S]*?padding-right: 42px/);
+  assert.match(globalStyles, /\.ask-questionnaire-heading small\s*\{[\s\S]*?flex-shrink: 0/);
+});

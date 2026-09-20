@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync, readFileSync, statSync } from "fs";
-import { dirname, resolve } from "path";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { resolve } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { writePrivateFileAtomicSync } from "./atomic-file";
+import { withPrivateFileLock, writePrivateFileAtomicSync } from "./atomic-file";
 
 interface ProjectDirectoriesFile {
   projects: string[];
@@ -30,20 +30,24 @@ export function normalizeProjectDirectory(value: unknown): string {
   return cwd;
 }
 
-function writeProjectDirectories(projects: string[], path = getProjectDirectoriesPath()): void {
-  mkdirSync(dirname(path), { recursive: true });
-  writePrivateFileAtomicSync(path, `${JSON.stringify({ projects }, null, 2)}\n`);
+async function mutateProjectDirectories(
+  path: string,
+  mutation: (projects: string[]) => string[],
+): Promise<string[]> {
+  return withPrivateFileLock(path, () => {
+    const projects = readProjectDirectories(path);
+    const next = mutation(projects);
+    if (next.length !== projects.length || next.some((project, index) => project !== projects[index])) {
+      writePrivateFileAtomicSync(path, `${JSON.stringify({ projects: next }, null, 2)}\n`);
+    }
+    return next;
+  });
 }
 
-export function addProjectDirectory(cwd: string, path = getProjectDirectoriesPath()): string[] {
-  const projects = readProjectDirectories(path);
-  const next = [cwd, ...projects.filter((project) => project !== cwd)];
-  writeProjectDirectories(next, path);
-  return next;
+export function addProjectDirectory(cwd: string, path = getProjectDirectoriesPath()): Promise<string[]> {
+  return mutateProjectDirectories(path, (projects) => [cwd, ...projects.filter((project) => project !== cwd)]);
 }
 
-export function removeProjectDirectory(cwd: string, path = getProjectDirectoriesPath()): string[] {
-  const next = readProjectDirectories(path).filter((project) => project !== cwd);
-  writeProjectDirectories(next, path);
-  return next;
+export function removeProjectDirectory(cwd: string, path = getProjectDirectoriesPath()): Promise<string[]> {
+  return mutateProjectDirectories(path, (projects) => projects.filter((project) => project !== cwd));
 }

@@ -5,7 +5,7 @@ import lockfile from "proper-lockfile";
 import { writePrivateFileAtomicSync } from "./atomic-file";
 import { isThinkingLevel, type ThinkingLevel } from "./thinking-levels";
 
-const HISTORY_LIMIT = 50;
+const HISTORY_LIMIT = 10;
 const FILE_NAME = "pi-web-thinking-level-preferences.json";
 
 export interface ThinkingLevelUsage {

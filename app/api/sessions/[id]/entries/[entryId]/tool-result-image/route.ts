@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { getSessionEntries, resolveSessionPath } from "@/lib/session-reader";
+import { resolveSessionPath } from "@/lib/session-reader";
+import { readIndexedSessionEntry } from "@/lib/session-content-index";
 import { MAX_TOOL_RESULT_IMAGE_BYTES, TOOL_RESULT_IMAGE_MIMES } from "@/lib/tool-result-images";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -56,13 +57,14 @@ export async function GET(
     const filePath = await resolveSessionPath(id);
     if (!filePath) return NextResponse.json({ error: "Session not found" }, { status: 404 });
 
-    const entry = getSessionEntries(filePath).find((candidate) => candidate.id === entryId);
-    if (!entry || entry.type !== "message" || entry.message.role !== "toolResult") {
-      return NextResponse.json({ error: "Tool result not found" }, { status: 404 });
+    const entry = await readIndexedSessionEntry(filePath, entryId);
+    const message = entry?.type === "message" ? entry.message as { content?: unknown } : null;
+    if (!message || !Array.isArray(message.content)) {
+      return NextResponse.json({ error: "Message not found" }, { status: 404 });
     }
 
-    const image = readBase64Image(entry.message.content[blockIndex]);
-    if (!image) return NextResponse.json({ error: "Tool result image not found" }, { status: 404 });
+    const image = readBase64Image(message.content[blockIndex]);
+    if (!image) return NextResponse.json({ error: "Message image not found" }, { status: 404 });
     if (!TOOL_RESULT_IMAGE_MIMES.has(image.mime)) {
       return NextResponse.json({ error: "Unsupported image type" }, { status: 415 });
     }

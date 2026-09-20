@@ -16,6 +16,24 @@ test("消息提交成功后直接确认，不被后续状态读取推翻", () =>
   assert.doesNotMatch(postSource, /getRpcSessionSnapshot/);
 });
 
+test("prompt 在服务端接受前失败时返回明确拒绝", () => {
+  const postSource = source.slice(source.indexOf("export async function POST"), source.indexOf("// GET /api/agent/[id]"));
+  assert.match(postSource, /commandType === "prompt"/);
+  assert.match(postSource, /code: "prompt_rejected", accepted: false/);
+});
+
+test("消息提交同时校验客户端、路由和运行时会话身份", () => {
+  const postSource = source.slice(source.indexOf("export async function POST"), source.indexOf("// GET /api/agent/[id]"));
+  assert.match(source, /function submitIdentityError/);
+  assert.equal((postSource.match(/submitIdentityError\(id, body/g) ?? []).length, 2);
+  assert.match(postSource, /submitIdentityError\(id, body, session\.sessionId\)/);
+  assert.match(source, /code: "session_identity_mismatch"/);
+  assert.match(postSource, /会话消息提交已接受/);
+  assert.match(source, /createHash\("sha256"\)/);
+  assert.match(postSource, /clientSessionId: body\.clientSessionId/);
+  assert.match(postSource, /runtimeSessionId: session\.sessionId/);
+});
+
 test("Shadow prompt interception returns setting state instead of submit acknowledgement", () => {
   const postSource = source.slice(source.indexOf("export async function POST"), source.indexOf("// GET /api/agent/[id]"));
   assert.match(postSource, /isShadowSettingCommandResult\(result\)/);
