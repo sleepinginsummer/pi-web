@@ -118,7 +118,6 @@ test("renders projects as persistent directory rows with per-project session act
 
 test("reopens the custom directory picker at the last successful path", () => {
   assert.match(source, /const handleCustomPathClick = useCallback\(\(\) => \{\s*setCustomPathValue\(loadLastCustomCwd\(\)\);/);
-  assert.match(source, /const data = await addProject\(validated\.cwd\);[\s\S]*?const cwd = data\.cwd;[\s\S]*?saveLastCustomCwd\(cwd\)/);
   assert.match(source, /<DirectoryPicker[\s\S]*?initialPath=\{customPathValue \|\| undefined\}/);
   assert.doesNotMatch(source, /setCustomPathValue\(""\)/);
 });

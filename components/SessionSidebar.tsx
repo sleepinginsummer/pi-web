@@ -10,6 +10,7 @@ import type { RunningSessionTransitionEvent } from "@/hooks/useRunningSessionTra
 import { loadExplorerOpen, saveExplorerOpen } from "@/lib/file-explorer-state";
 import { loadCollapsedProjects, saveCollapsedProjects } from "@/lib/project-collapse-state";
 import { WorktreeMutationError } from "@/lib/worktree-client";
+import { commitCustomProjectSelection } from "@/lib/custom-project-selection";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import { ProjectSection, type SessionTreeSharedProps } from "./ProjectSection";
@@ -597,32 +598,37 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
     setCustomPathValidating(true);
     setCustomPathError(null);
     try {
-      const validateResponse = await fetch("/api/cwd/validate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd: path }),
+      await commitCustomProjectSelection(path, {
+        validateProject: async (candidate) => {
+          const validateResponse = await fetch("/api/cwd/validate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ cwd: candidate }),
+          });
+          const validated = await validateResponse.json().catch(() => ({})) as {
+            cwd?: string;
+            projectRoot?: string;
+            projectKey?: string;
+            error?: string;
+          };
+          if (!validateResponse.ok || !validated.cwd) {
+            throw new Error(validated.error ?? `HTTP ${validateResponse.status}`);
+          }
+          return {
+            cwd: validated.cwd,
+            projectRoot: validated.projectRoot,
+            projectKey: validated.projectKey,
+          };
+        },
+        installValidatedProject: setValidatedProject,
+        addProject,
+        selectCwd: setSelectedCwd,
+        commitSelection: (cwd) => {
+          saveLastCustomCwd(cwd);
+          setCustomPathValue(cwd);
+          setCustomPathOpen(false);
+        },
       });
-      const validated = await validateResponse.json().catch(() => ({})) as {
-        cwd?: string;
-        projectRoot?: string;
-        projectKey?: string;
-        error?: string;
-      };
-      if (!validateResponse.ok || !validated.cwd) {
-        setCustomPathError(validated.error ?? `HTTP ${validateResponse.status}`);
-        return;
-      }
-      setValidatedProject({
-        cwd: validated.cwd,
-        projectRoot: validated.projectRoot,
-        projectKey: validated.projectKey,
-      });
-      const data = await addProject(validated.cwd);
-      setSelectedCwd(data.cwd);
-      const cwd = data.cwd;
-      saveLastCustomCwd(cwd);
-      setCustomPathValue(cwd);
-      setCustomPathOpen(false);
     } catch (e) {
       setCustomPathError(e instanceof Error ? e.message : String(e));
     } finally {

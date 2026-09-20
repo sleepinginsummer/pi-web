@@ -1,25 +1,26 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { commitCustomProjectSelection } from "../lib/custom-project-selection.ts";
 
-const source = await readFile(new URL("./SessionSidebar.tsx", import.meta.url), "utf8");
-const customPathStart = source.indexOf("const commitCustomPath = useCallback");
-const customPathEnd = source.indexOf("const handleCustomPathClick", customPathStart);
-const customPathSource = source.slice(customPathStart, customPathEnd);
+test("目录校验失败时不安装身份、不写入项目且不切换 cwd", async () => {
+  const calls = [];
 
-test("custom cwd selection installs validated identity before changing cwd", () => {
-  assert.notEqual(customPathStart, -1);
-  assert.notEqual(customPathEnd, -1);
-  assert.match(customPathSource, /projectRoot\?: string;[\s\S]*?projectKey\?: string;/);
+  await assert.rejects(
+    commitCustomProjectSelection("/missing", {
+      validateProject: async () => {
+        calls.push("validate");
+        throw new Error("directory not found");
+      },
+      installValidatedProject: () => calls.push("identity"),
+      addProject: async () => {
+        calls.push("add");
+        return { cwd: "/missing" };
+      },
+      selectCwd: () => calls.push("select"),
+      commitSelection: () => calls.push("commit"),
+    }),
+    /directory not found/,
+  );
 
-  const identityUpdate = customPathSource.indexOf("setValidatedProject(");
-  const cwdUpdate = customPathSource.indexOf("setSelectedCwd(");
-  assert.ok(identityUpdate >= 0, "validated project identity is retained");
-  assert.ok(cwdUpdate > identityUpdate, "identity is retained before cwd changes");
-});
-
-test("custom cwd selection remembers the validated path", () => {
-  assert.match(source, /setCustomPathValue\(loadLastCustomCwd\(\)\)/);
-  assert.match(customPathSource, /const cwd = data\.cwd;[\s\S]*?saveLastCustomCwd\(cwd\)/);
-  assert.match(source, /initialPath=\{customPathValue \|\| undefined\}/);
+  assert.deepEqual(calls, ["validate"]);
 });
