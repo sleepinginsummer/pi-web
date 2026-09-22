@@ -195,7 +195,7 @@ try {
     await page.getByText(text(4999), { exact: true }).waitFor();
     const latestUser = await page.getByText(text(4998), { exact: true }).elementHandle();
     assert.ok(latestUser, "Latest user message must be mounted before pagination");
-    const sentinel = page.getByText("Scroll up to load earlier messages", { exact: true });
+    const sentinel = page.getByText(/^Scroll up to load earlier messages \(\d+ hidden\)$/);
     await sentinel.waitFor({ state: "attached" });
     assert.equal(await page.getByText(text(4949), { exact: true }).count(), 0);
 
@@ -308,7 +308,7 @@ try {
       };
       await selectSession(text(0), "e4999");
       const olderPage = page.waitForResponse((response) => response.url().includes(`/api/sessions/${LONG}/context?`));
-      await page.getByText("Scroll up to load earlier messages", { exact: true }).evaluate((element) => element.scrollIntoView({ block: "start", behavior: "instant" }));
+      await sentinel.evaluate((element) => element.scrollIntoView({ block: "start", behavior: "instant" }));
       await olderPage;
       const olderMessage = page.locator("[data-entry-id='e4920']");
       const olderOffset = await positionForReading(olderMessage);
