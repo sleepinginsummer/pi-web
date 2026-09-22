@@ -316,23 +316,28 @@ try {
         return targetBox.y - scrollBox.y;
       };
       const captureReadingAnchor = async () => {
-        const anchor = await page.locator("[data-entry-id]:not([data-message-role])").evaluateAll((elements) => {
-          const scroll = document.querySelector("[data-chat-scroll-container]");
-          if (!scroll) return null;
-          const viewportTop = scroll.getBoundingClientRect().top;
-          const candidates = elements.filter((element) => scroll.contains(element) && element instanceof HTMLElement && element.offsetHeight > 0);
-          let candidate = candidates[0];
-          for (const element of candidates) {
-            if (element.getBoundingClientRect().top > viewportTop) break;
-            candidate = element;
-          }
-          return candidate instanceof HTMLElement ? {
-            entryId: candidate.dataset.entryId,
-            offset: candidate.getBoundingClientRect().top - viewportTop,
-          } : null;
-        });
-        assert.ok(anchor?.entryId, "Reading position must have an entry anchor");
-        return anchor;
+        const deadline = Date.now() + 5000;
+        while (Date.now() < deadline) {
+          const anchor = await page.locator("[data-entry-id]:not([data-message-role])").evaluateAll((elements) => {
+            const scroll = document.querySelector("[data-chat-scroll-container]");
+            if (!scroll) return null;
+            const viewportTop = scroll.getBoundingClientRect().top;
+            const candidates = elements.filter((element) => scroll.contains(element) && element instanceof HTMLElement && element.offsetHeight > 0);
+            let candidate = candidates[0];
+            for (const element of candidates) {
+              if (element.getBoundingClientRect().top > viewportTop) break;
+              candidate = element;
+            }
+            return candidate instanceof HTMLElement ? {
+              entryId: candidate.dataset.entryId,
+              offset: candidate.getBoundingClientRect().top - viewportTop,
+            } : null;
+          });
+          if (anchor?.entryId) return anchor;
+          // 虚拟窗口提交期间可能短暂没有已挂载的消息节点。
+          await delay(50);
+        }
+        assert.fail("Reading position must have an entry anchor");
       };
       const positionForReading = async (target) => {
         const offset = await readingOffset(target);
@@ -343,11 +348,8 @@ try {
       const olderPage = page.waitForResponse(isOlderContextResponse);
       await sentinel.evaluate((element) => element.scrollIntoView({ block: "start", behavior: "instant" }));
       await olderPage;
-      const olderMessage = page.locator("[data-entry-id='e4920']");
-      await olderMessage.waitFor();
-      await positionForReading(olderMessage);
-      const olderAnchor = await captureReadingAnchor();
       await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      const olderAnchor = await captureReadingAnchor();
       await selectSession("Render **E2E markdown**", "user");
       const process = page.getByRole("button", { name: /process details/i });
       await process.click();
