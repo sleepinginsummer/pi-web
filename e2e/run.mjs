@@ -240,10 +240,14 @@ try {
       assert.equal(older.hasMore, true);
     }
     assert.equal(typeof oldest, "number");
-    const rendered = await page.getByText(/^E2E message \d{4}$/).allTextContents();
-    // The sidebar also displays the first message as the session title.
-    assert.deepEqual(rendered.filter((value) => value !== text(0)),
-      Array.from({ length: 5000 - oldest }, (_, i) => text(oldest + i)), "Missing, reordered, or duplicate chat messages");
+    const rendered = (await page.getByText(/^E2E message \d{4}$/).allTextContents())
+      // The sidebar also displays the first message as the session title.
+      .filter((value) => value !== text(0));
+    const firstRendered = Number(rendered[0]?.slice("E2E message ".length));
+    assert.ok(Number.isInteger(firstRendered) && firstRendered <= oldest,
+      "Rendered history may include an older contiguous prefix restored from the client cache");
+    assert.deepEqual(rendered,
+      Array.from({ length: 5000 - firstRendered }, (_, i) => text(firstRendered + i)), "Missing, reordered, or duplicate chat messages");
     await page.screenshot({ path: join(artifacts, `history-${viewport.width}.png`) });
 
     await page.goto(`${base}/?session=${BRANCH}`, { waitUntil: "domcontentloaded" });
