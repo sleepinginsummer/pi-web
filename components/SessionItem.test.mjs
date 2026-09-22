@@ -24,6 +24,8 @@ test("置顶装饰标记在桌面选中和悬浮时保持置顶显示", () => {
   assert.match(source, /PinIcon size=\{12\}[^>]*transform: "rotate\(45deg\)"/);
   assert.match(source, /PinIcon size=\{mobile \? 17 : 14\}/);
   assert.match(source, /aria-pressed=\{tone === "pin" \? pressed : undefined\}/);
+  assert.match(source, /paddingRight: !isMobile \? DESKTOP_SESSION_ACTIONS_WIDTH \+ 8 : 0/);
+  assert.match(source, /pointerEvents: hovered \|\| isSelected \? "auto" : "none"/);
 });
 
 

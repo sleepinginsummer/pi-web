@@ -54,16 +54,19 @@ test("桌面操作层垂直居中且悬浮前后几何稳定", () => {
   assert.ok(row.querySelector('button[title="Collapse forks"]'));
   assert.ok(row.querySelector("[data-session-pin-marker]"));
   assert.equal(slot.querySelectorAll("button").length, 0);
+  assert.equal(slot.style.pointerEvents, "none");
 
   fireEvent.mouseEnter(row);
   assert.equal(document.querySelector("[data-session-actions]"), slot);
   assert.equal(`${slot.style.top}|${slot.style.right}|${slot.style.width}|${slot.style.height}|${slot.style.transform}`, stableGeometry);
   assert.equal(slot.querySelectorAll("button").length, 3);
+  assert.equal(slot.style.pointerEvents, "auto");
   assert.ok(row.querySelector("[data-session-pin-marker]"));
 
   fireEvent.mouseLeave(row);
   assert.equal(`${slot.style.top}|${slot.style.right}|${slot.style.width}|${slot.style.height}|${slot.style.transform}`, stableGeometry);
   assert.equal(slot.querySelectorAll("button").length, 0);
+  assert.equal(slot.style.pointerEvents, "none");
   assert.ok(row.querySelector("[data-session-pin-marker]"));
 });
 

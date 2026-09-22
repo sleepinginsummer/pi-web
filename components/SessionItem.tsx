@@ -208,7 +208,7 @@ function SessionRowContent({ session, view, actions }: {
       {depth > 0 && (
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-hidden="true"><rect x="5" y="7" width="14" height="11" rx="2" /><path d="M9 11h.01M15 11h.01M9 15h6M12 7V4M10 4h4" /></svg>
       )}
-      <div style={{ position: "relative", flex: 1, minWidth: 0 }}>
+      <div style={{ position: "relative", flex: 1, minWidth: 0, boxSizing: "border-box", paddingRight: !isMobile ? DESKTOP_SESSION_ACTIONS_WIDTH + 8 : 0 }}>
         <div title={title} style={{ display: "flex", alignItems: "center", gap: 5, minWidth: 0, color: "var(--text)", fontSize: 12, fontWeight: isSelected ? 500 : 400, lineHeight: 1.4 }}><span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{title}</span></div>
         <div style={{ marginTop: 2, display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
           <div style={{ display: "flex", flex: 1, alignItems: "center", gap: 8, minWidth: 0, overflow: "hidden", color: "var(--text-dim)", fontSize: 11, whiteSpace: "nowrap" }}>
@@ -225,7 +225,7 @@ function SessionRowContent({ session, view, actions }: {
         {!isMobile && (
           <div
             data-session-actions
-            style={{ position: "absolute", top: "50%", right: 0, width: DESKTOP_SESSION_ACTIONS_WIDTH, height: 32, transform: "translateY(-50%)", zIndex: 2 }}
+            style={{ position: "absolute", top: "50%", right: 0, width: DESKTOP_SESSION_ACTIONS_WIDTH, height: 32, transform: "translateY(-50%)", pointerEvents: hovered || isSelected ? "auto" : "none", zIndex: 2 }}
           >
             {(hovered || isSelected) && <SessionActions mobile={false} open isPinned={isPinned} onTogglePinned={onTogglePinned} onRename={onRename} onDelete={onDelete} />}
           </div>
