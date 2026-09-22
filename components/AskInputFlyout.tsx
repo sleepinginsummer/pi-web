@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronDown, ChevronUp } from "lucide-react";
+import { ChevronUp } from "lucide-react";
 import { useI18n } from "@/hooks/useI18n";
 import type { AskQuestionnaireAnswer, AskQuestionnaireState } from "@/hooks/useAgentSession";
 import type { ExtensionUiRequest } from "@/lib/types";
@@ -61,23 +61,13 @@ export function AskInputFlyout({ ask, actions, isMobile }: AskInputFlyoutProps) 
         ) : (
           <div className="ask-expanded-content">
             {ask?.kind === "questionnaire" ? (
-              <>
-                <button
-                  type="button"
-                  className="ask-collapse-button"
-                  onClick={() => setCollapsed(true)}
-                  aria-label={t("chat.askCollapse")}
-                  title={t("chat.askCollapse")}
-                >
-                  <ChevronDown size={17} aria-hidden="true" />
-                </button>
-                <AskQuestionnaire
-                  key={ask.value.toolCallId}
-                  questionnaire={ask.value}
-                  onSubmit={actions.submitQuestionnaire}
-                  onCancel={actions.cancelQuestionnaire}
-                />
-              </>
+              <AskQuestionnaire
+                key={ask.value.toolCallId}
+                questionnaire={ask.value}
+                onSubmit={actions.submitQuestionnaire}
+                onCancel={actions.cancelQuestionnaire}
+                onCollapse={() => setCollapsed(true)}
+              />
             ) : ask?.kind === "select" ? (
               <AskDialog
                 request={ask.value}

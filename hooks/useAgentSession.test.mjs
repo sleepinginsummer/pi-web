@@ -297,7 +297,10 @@ test("运行中只在新会话首次落盘与权威 idle 边界刷新完整会�
   assert.match(messageEndSource, /reason: "new-session-persisted"/);
   assert.doesNotMatch(messageEndSource, /setTimeout|SESSION_LIST_REFRESH_THROTTLE_MS/);
   assert.doesNotMatch(agentEndSource, /onSessionListRefresh/);
+  assert.match(agentEndSource, /loadSession\(sessionIdRef\.current, false, false, \{ preserveScroll: true \}\)/);
   assert.ok(settledSource.indexOf("settleRun(runId, sid)") < settledSource.indexOf('reason: "run-settled"'));
+  assert.ok(settledSource.indexOf("invalidateSessionContext(sid)") < settledSource.indexOf("loadSession(sid, false, false"));
+  assert.match(settledSource, /loadSession\(sid, false, false, \{ preserveScroll: true \}\)\.then\([\s\S]*?requestScrollPosition\("running-end"\)/);
   assert.match(eventSource, /reason: "title-generated"/);
 });
 
@@ -410,6 +413,16 @@ test("wires persisted Shadow lifecycle entries to the context refresh path", () 
 
   assert.match(eventSource, /case "entry_appended"[\s\S]*?consumeShadowEntry\(entry\)[\s\S]*?shadowLifecycleRef\.current\.consume\(entry\)[\s\S]*?scheduleContextRefresh\(sid\)/);
   assert.doesNotMatch(eventSource, /setTimeout\([\s\S]{0,300}loadSession/);
+});
+
+test("refreshes Shadow runtime state after a cold SSE connection becomes ready", () => {
+  const connector = source.slice(
+    source.indexOf("const connectEvents = useCallback"),
+    source.indexOf("const ensureEventsConnected"),
+  );
+
+  assert.match(connector, /event\.type === "connected"[\s\S]*?fetchRuntimeState\(sid, controller\.signal\)[\s\S]*?applyRuntimeState\(snapshot\.state\)/);
+  assert.match(connector, /eventSourceRef\.current === es && sessionIdRef\.current === sid/);
 });
 
 test("delegates Shadow runtime, slash, and toggle behavior to the focused hook", () => {

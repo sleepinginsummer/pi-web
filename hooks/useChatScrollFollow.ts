@@ -151,7 +151,6 @@ export function useChatScrollFollow({
   const lastUserMsgRef = useRef<HTMLDivElement | null>(null);
   const initialScrollDoneRef = useRef(deferInitialScroll);
   const handledPositionGenerationRef = useRef(0);
-  const previousAgentRunningRef = useRef(agentRunning);
   const {
     beginProgrammaticScroll,
     isFollowing,
@@ -263,8 +262,6 @@ export function useChatScrollFollow({
   }, [agentRunning, isFollowingRef, isStreaming, messageCount, scrollContainerRef, scrollToLatest, syncScrollPosition]);
 
   useEffect(() => {
-    const wasRunning = previousAgentRunningRef.current;
-    previousAgentRunningRef.current = agentRunning;
     let layoutFrame: number | null = null;
     const frame = requestAnimationFrame(() => {
       layoutFrame = requestAnimationFrame(() => {
@@ -273,17 +270,19 @@ export function useChatScrollFollow({
         if (hasUnhandledPosition) {
           handledPositionGenerationRef.current = positionRequest.generation;
           initialScrollDoneRef.current = true;
-          if (positionRequest.position === "user") scrollUserMessageToTop();
-          else scrollToInitialPosition();
+          if (positionRequest.position === "user") {
+            scrollUserMessageToTop();
+          } else if (positionRequest.position === "running-end") {
+            // 结束定位只能在权威最终上下文提交后执行，避免被后续消息布局覆盖。
+            if (isFollowingRef.current) scrollToLatest("instant");
+          } else {
+            scrollToInitialPosition();
+          }
           return;
         }
         if (!initialScrollDoneRef.current && messageCount > 0) {
           initialScrollDoneRef.current = true;
           scrollToInitialPosition();
-          return;
-        }
-        if (wasRunning && !agentRunning && isFollowingRef.current) {
-          scrollToLatest("smooth");
           return;
         }
         if (agentRunning && isFollowingRef.current) scrollToLatest("instant");

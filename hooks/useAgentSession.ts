@@ -949,7 +949,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       });
   }, []);
 
-  const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false) => {
+  const loadSession = useCallback(async (
+    sid: string,
+    showLoading = false,
+    includeState = false,
+    options: { preserveScroll?: boolean } = {},
+  ) => {
     const performancePrefix = `pi-session:${sid}`;
     if (showLoading) {
       performance.clearMarks(`${performancePrefix}:request`);
@@ -998,7 +1003,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             setLoading(false);
             return false;
           }
-          return commitContextSnapshot(sid, loaded.snapshot, loaded.leafId) ? loaded : null;
+          return commitContextSnapshot(sid, loaded.snapshot, loaded.leafId, options) ? loaded : null;
       });
       if (!contextResult.committed || !contextResult.value) return { loaded: false, agentState: null };
       if (showLoading) {
@@ -1285,7 +1290,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (eventSourceRef.current !== es || sessionIdRef.current !== sid) return;
         try {
           const event = JSON.parse(e.data) as AgentEvent;
-          if (event.type === "connected") settle("connected");
+          if (event.type === "connected") {
+            settle("connected");
+            // SSE 的 connected 只会在冷启动 runtime 完成后发送。挂载时并行的 /state
+            // 可能更早返回 alive=false，因此必须在这里重新读取一次扩展状态。
+            const controller = new AbortController();
+            void fetchRuntimeState(sid, controller.signal)
+              .then((snapshot) => {
+                if (eventSourceRef.current === es && sessionIdRef.current === sid) {
+                  applyRuntimeState(snapshot.state);
+                }
+              })
+              .catch((error: unknown) => {
+                if (!(error instanceof DOMException && error.name === "AbortError")) {
+                  console.error("Failed to refresh runtime state after event stream connected:", error);
+                }
+              });
+          }
           handleAgentEventRef.current?.(event);
         } catch {
           // ignore
@@ -1309,7 +1330,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // connection must be ready before they continue.
       };
     });
-  }, [closeEvents]);
+  }, [applyRuntimeState, closeEvents]);
 
   const ensureEventsConnected = useCallback(async (sid: string) => {
     const result = await connectEvents(sid);
@@ -1614,10 +1635,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (sid) {
       // AppShell coordinator 合并新会话的 settled 与标题刷新。
       onSessionListRefresh?.({ reason: "run-settled", sessionId: sid });
-      // 完成副作用已发布，最终消息同步作为独立刷新执行。
-      void loadSession(sid);
+      // 先提交最终上下文，再发出结束定位，避免初始定位覆盖底部位置。
+      invalidateSessionContext(sid);
+      void loadSession(sid, false, false, { preserveScroll: true }).then(() => {
+        if (sessionIdRef.current === sid) requestScrollPosition("running-end");
+      });
     }
-  }, [flushStreamDeltas, loadSession, onSessionListRefresh, scheduleEventStreamClose, settleRun]);
+  }, [flushStreamDeltas, loadSession, onSessionListRefresh, requestScrollPosition, scheduleEventStreamClose, settleRun]);
 
   const readAgentSnapshot = useCallback(async (sid: string): Promise<AgentRuntimeSnapshot | null> => {
     try {
@@ -1746,9 +1770,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         dispatch({ type: "end" });
         if (sessionIdRef.current) {
           // 结束事件后始终从服务端重新读取最终上下文，不能仅依据本地 messageCount 跳过；
-          // SSE 可能丢失最后一段 message_end，刷新页面才会暴露这个问题。
+          // 该刷新仍处于运行边界，必须保留滚动，最终 settled 再统一定位到底部。
           invalidateSessionContext(sessionIdRef.current);
-          void loadSession(sessionIdRef.current);
+          void loadSession(sessionIdRef.current, false, false, { preserveScroll: true });
           void reconcileAgentState(sessionIdRef.current, promptRunIdRef.current);
         }
         break;

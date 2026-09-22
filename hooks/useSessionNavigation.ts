@@ -29,6 +29,8 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
   const [newSessionCwd, setNewSessionCwd] = useState<string | null>(null);
   const [pendingNewSessions, setPendingNewSessions] = useState<Map<string, PendingNewSessionControl>>(() => new Map());
   const [sessionKey, setSessionKey] = useState(0);
+  const [notificationSessionLocateRequest, setNotificationSessionLocateRequest] = useState<{ sessionId: string; revision: number } | null>(null);
+  const notificationLocateRevisionRef = useRef(0);
   const activeSessionKeyRef = useRef(0);
   const [initialSessionRestored, setInitialSessionRestored] = useState(() => !initialSessionId);
   const activeSessionIdRef = useRef<string | null>(null);
@@ -89,9 +91,15 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
   }, [bumpSessionKey, isMobile, onMobileSelect, resetSessionViews]);
 
   const isActiveSession = useCallback((sessionId: string) => activeSessionIdRef.current === sessionId, []);
+  const requestSidebarLocate = useCallback((sessionId: string) => {
+    const revision = notificationLocateRevisionRef.current + 1;
+    notificationLocateRevisionRef.current = revision;
+    setNotificationSessionLocateRequest({ sessionId, revision });
+  }, []);
   const invalidateNotificationNavigation = useNotificationSessionNavigation({
     isActiveSession,
     selectSession: applySessionSelection,
+    requestSidebarLocate,
   });
   const selectSession = useCallback((session: SessionInfo, isRestore = false) => {
     invalidateWorkspaceRestore();
@@ -241,6 +249,7 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
     leaveWorkspace,
     newSession,
     newSessionCwd,
+    notificationSessionLocateRequest,
     pendingNewSessions,
     restoreWorkspaceContext,
     selectSession,

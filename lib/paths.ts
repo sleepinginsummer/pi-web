@@ -1,4 +1,5 @@
-import { normalize, parse, sep } from "path";
+import { normalize } from "path";
+import { samePortablePath } from "./path-equality";
 
 // ============================================================================
 // Path primitives.
@@ -53,13 +54,6 @@ export function toSlashPath(p: string): string {
   return p.replace(/\\/g, "/");
 }
 
-function normalizeForComparison(p: string): string {
-  const normalized = normalize(toNativePath(p));
-  const rootLength = parse(normalized).root.length;
-  let end = normalized.length;
-  while (end > rootLength && normalized[end - 1] === sep) end--;
-  return normalized.slice(0, end);
-}
 
 /**
  * Whether two paths denote the same location, tolerating separator style and —
@@ -69,12 +63,5 @@ function normalizeForComparison(p: string): string {
  * Compares lexically: callers wanting symlinks resolved should realpath first.
  */
 export function samePath(a: string, b: string): boolean {
-  if (a === b) return true;
-  if (!a || !b) return false;
-  const normalizedA = normalizeForComparison(a);
-  const normalizedB = normalizeForComparison(b);
-  if (process.platform === "win32") {
-    return normalizedA.toLowerCase() === normalizedB.toLowerCase();
-  }
-  return normalizedA === normalizedB;
+  return samePortablePath(a, b, process.platform === "win32");
 }

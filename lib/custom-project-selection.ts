@@ -12,15 +12,14 @@ interface CustomProjectSelectionDependencies {
   commitSelection: (cwd: string) => void;
 }
 
-/** 统一自定义目录确认流程，确保项目身份先于规范化 cwd 生效。 */
+/** 目录持久化成功后，以服务端最终 cwd 安装身份并完成选择。 */
 export async function commitCustomProjectSelection(
   candidate: string,
   dependencies: CustomProjectSelectionDependencies,
 ): Promise<string> {
   const validated = await dependencies.validateProject(candidate);
-  dependencies.installValidatedProject(validated);
-
   const added = await dependencies.addProject(validated.cwd);
+  dependencies.installValidatedProject({ ...validated, cwd: added.cwd });
   dependencies.selectCwd(added.cwd);
   dependencies.commitSelection(added.cwd);
   return added.cwd;

@@ -6,7 +6,7 @@ export interface SessionTreeNode {
 }
 
 /** Build the sidebar hierarchy. Forks remain roots; only subagents nest. */
-export function buildSessionTree(sessions: SessionInfo[]): SessionTreeNode[] {
+export function buildSessionTree(sessions: SessionInfo[], manualOrder: readonly string[] = []): SessionTreeNode[] {
   const byId = new Map<string, SessionTreeNode>();
   for (const session of sessions) {
     byId.set(session.id, { session, children: [] });
@@ -38,11 +38,19 @@ export function buildSessionTree(sessions: SessionInfo[]): SessionTreeNode[] {
     if (ancestor) byId.get(ancestor)!.children.push(node);
     else roots.push(node);
   }
-
+  const orderIndex = new Map(manualOrder.map((id, index) => [id, index]));
+  const compare = (left: SessionTreeNode, right: SessionTreeNode) => {
+    const leftIndex = orderIndex.get(left.session.id);
+    const rightIndex = orderIndex.get(right.session.id);
+    if (leftIndex !== undefined || rightIndex !== undefined) {
+      return (leftIndex ?? Number.MAX_SAFE_INTEGER) - (rightIndex ?? Number.MAX_SAFE_INTEGER);
+    }
+    return right.session.modified.localeCompare(left.session.modified);
+  };
   const pending = [roots];
   while (pending.length > 0) {
     const nodes = pending.pop()!;
-    nodes.sort((a, b) => b.session.modified.localeCompare(a.session.modified));
+    nodes.sort(compare);
     for (const node of nodes) pending.push(node.children);
   }
   return roots;

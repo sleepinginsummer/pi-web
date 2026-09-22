@@ -12,3 +12,8 @@ test("流式滚动由尺寸监听统一限频且跳过无位移写入", () => {
   assert.doesNotMatch(source, /scrollIntoView/);
   assert.doesNotMatch(source, /\[agentRunning,[\s\S]*?streamingContent/);
 });
+
+test("会话结束定位在最终布局后精确滚到底部", () => {
+  assert.match(source, /positionRequest\.position === "running-end"[\s\S]*?isFollowingRef\.current[\s\S]*?scrollToLatest\("instant"\)/);
+  assert.doesNotMatch(source, /previousAgentRunningRef|wasRunning/);
+});

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { ChevronDown } from "lucide-react";
 import { useI18n } from "@/hooks/useI18n";
 import type { AskQuestionnaireAnswer, AskQuestionnaireState } from "@/hooks/useAgentSession";
 import { normalizeAskQuestionnairePreview } from "@/lib/ask-questionnaire-preview";
@@ -9,10 +10,12 @@ export function AskQuestionnaire({
   questionnaire,
   onSubmit,
   onCancel,
+  onCollapse,
 }: {
   questionnaire: AskQuestionnaireState;
   onSubmit: (answers: AskQuestionnaireAnswer[]) => void;
   onCancel: () => void;
+  onCollapse?: () => void;
 }) {
   const { t } = useI18n();
   const [page, setPage] = useState(0);
@@ -45,24 +48,47 @@ export function AskQuestionnaire({
       role="dialog"
       aria-label={isReview ? t("chat.askReview") : question.question}
     >
-        {!isSingleQuestion && (
-          <div className="ask-questionnaire-tabs">
-            {questionnaire.questions.map((item, index) => (
-              <button
-                key={`${item.header}-${index}`}
-                type="button"
-                className={page === index ? "is-active" : undefined}
-                onClick={() => setPage(index)}
-                disabled={questionnaire.submitting}
-              >
-                {index + 1}. {item.header}
+        {!isSingleQuestion ? (
+          <div className="ask-questionnaire-header">
+            <div className="ask-questionnaire-tabs">
+              {questionnaire.questions.map((item, index) => (
+                <button
+                  key={`${item.header}-${index}`}
+                  type="button"
+                  className={page === index ? "is-active" : undefined}
+                  onClick={() => setPage(index)}
+                  disabled={questionnaire.submitting}
+                >
+                  {index + 1}. {item.header}
+                </button>
+              ))}
+              <button type="button" className={isReview ? "is-active" : undefined} onClick={() => setPage(questionnaire.questions.length)} disabled={questionnaire.submitting}>
+                {t("chat.askReview")}
               </button>
-            ))}
-            <button type="button" className={isReview ? "is-active" : undefined} onClick={() => setPage(questionnaire.questions.length)} disabled={questionnaire.submitting}>
-              {t("chat.askReview")}
-            </button>
+            </div>
+            {onCollapse && (
+              <button
+                type="button"
+                className="ask-collapse-button"
+                onClick={onCollapse}
+                aria-label={t("chat.askCollapse")}
+                title={t("chat.askCollapse")}
+              >
+                <ChevronDown size={17} aria-hidden="true" />
+              </button>
+            )}
           </div>
-        )}
+        ) : onCollapse ? (
+          <button
+            type="button"
+            className="ask-collapse-button is-overlay"
+            onClick={onCollapse}
+            aria-label={t("chat.askCollapse")}
+            title={t("chat.askCollapse")}
+          >
+            <ChevronDown size={17} aria-hidden="true" />
+          </button>
+        ) : null}
 
         <div className="ask-questionnaire-body">
           {isReview ? (

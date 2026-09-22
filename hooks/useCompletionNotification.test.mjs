@@ -8,6 +8,7 @@ const registrationSource = await readFile(new URL("../components/PwaRegistration
 const appShellSource = await readFile(new URL("../components/AppShell.tsx", import.meta.url), "utf8");
 const chatWindowSource = await readFile(new URL("../components/ChatWindow.tsx", import.meta.url), "utf8");
 const notificationNavigationSource = await readFile(new URL("./useNotificationSessionNavigation.ts", import.meta.url), "utf8");
+const sessionNavigationSource = await readFile(new URL("./useSessionNavigation.ts", import.meta.url), "utf8");
 const sessionNotificationsSource = await readFile(new URL("./useSessionNotifications.ts", import.meta.url), "utf8");
 const floatingNotificationsSource = await readFile(new URL("./useFloatingSessionNotifications.ts", import.meta.url), "utf8");
 const backgroundCompletionSource = await readFile(new URL("./useBackgroundCompletionNotifications.ts", import.meta.url), "utf8");
@@ -45,6 +46,8 @@ test("notification target switches sessions without reloading the current page",
   assert.match(notificationNavigationSource, /window\.addEventListener\(NOTIFICATION_TARGET_EVENT/);
   assert.match(notificationNavigationSource, /notificationEvent\.preventDefault\(\)/);
   assert.match(notificationNavigationSource, /selectSession\(session\)/);
+  assert.match(notificationNavigationSource, /requestSidebarLocate\(sessionId\)/);
+  assert.match(sessionNavigationSource, /setNotificationSessionLocateRequest\(\{ sessionId, revision \}\)/);
   assert.doesNotMatch(registrationSource, /window\.location\.assign/);
   assert.doesNotMatch(hookSource, /window\.location\.assign/);
 });

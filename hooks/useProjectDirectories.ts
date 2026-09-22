@@ -1,25 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-
-const LEGACY_STORAGE_KEY = "pi-web:project-directories";
-
-type ProjectDirectoriesResponse = { projects?: string[]; cwd?: string; error?: string };
-
-function readLegacyProjects(): string[] {
-  try {
-    const value = JSON.parse(window.localStorage.getItem(LEGACY_STORAGE_KEY) ?? "[]") as unknown;
-    return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
-  } catch {
-    return [];
-  }
-}
-
-async function parseResponse(response: Response): Promise<ProjectDirectoriesResponse> {
-  const data = await response.json().catch(() => ({})) as ProjectDirectoriesResponse;
-  if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
-  return data;
-}
+import {
+  addProjectDirectoryClient,
+  fetchProjectDirectories,
+  migrateLegacyProjectDirectories,
+  readLegacyProjectDirectories,
+  removeProjectDirectoryClient,
+  retainFailedLegacyProjectDirectories,
+} from "@/lib/project-directories-client";
 
 /** 项目目录成员集合及其增删协议的唯一客户端同步边界。 */
 export function useProjectDirectories(onProjectsRemoved?: (ids: string[]) => void) {
@@ -46,20 +35,11 @@ export function useProjectDirectories(onProjectsRemoved?: (ids: string[]) => voi
   }, []);
 
   const load = useCallback(async (migrateLegacy: boolean): Promise<string[]> => {
-    const data = await parseResponse(await fetch("/api/project-directories", { cache: "no-store" }));
-    let next = data.projects ?? [];
+    let next = await fetchProjectDirectories();
     if (migrateLegacy) {
-      for (const cwd of readLegacyProjects()) {
-        const migration = await fetch("/api/project-directories", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ cwd }),
-        });
-        if (!migration.ok) continue;
-        const migrated = await migration.json() as ProjectDirectoriesResponse;
-        next = migrated.projects ?? next;
-      }
-      window.localStorage.removeItem(LEGACY_STORAGE_KEY);
+      const migration = await migrateLegacyProjectDirectories(readLegacyProjectDirectories(), next);
+      next = migration.projects;
+      retainFailedLegacyProjectDirectories(migration.failed);
     }
     commitProjects(next);
     return next;
@@ -68,23 +48,13 @@ export function useProjectDirectories(onProjectsRemoved?: (ids: string[]) => voi
   const refreshProjects = useCallback(() => enqueue(() => load(false)), [enqueue, load]);
 
   const addProject = useCallback((cwd: string) => enqueue(async () => {
-    const data = await parseResponse(await fetch("/api/project-directories", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cwd }),
-    }));
-    const next = data.projects ?? [];
-    commitProjects(next);
-    return { projects: next, cwd: data.cwd ?? cwd };
+    const data = await addProjectDirectoryClient(cwd);
+    commitProjects(data.projects);
+    return data;
   }), [commitProjects, enqueue]);
 
   const removeProject = useCallback((cwd: string) => enqueue(async () => {
-    const data = await parseResponse(await fetch("/api/project-directories", {
-      method: "DELETE",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cwd }),
-    }));
-    const next = data.projects ?? [];
+    const next = await removeProjectDirectoryClient(cwd);
     commitProjects(next);
     return next;
   }), [commitProjects, enqueue]);

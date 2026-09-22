@@ -1324,15 +1324,7 @@ span.token.table {
 }
 
 
-.ask-expanded-content .ask-questionnaire-tabs {
-  padding-right: 54px;
-}
-
-
 .ask-collapse-button {
-  position: absolute;
-  top: 10px;
-  right: 12px;
   z-index: 2;
   display: grid;
   width: 30px;
@@ -1343,6 +1335,13 @@ span.token.table {
   color: var(--text-muted);
   background: var(--bg-panel);
   cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.ask-collapse-button.is-overlay {
+  position: absolute;
+  top: 10px;
+  right: 12px;
 }
 
 .ask-collapse-button:hover,
@@ -1396,17 +1395,33 @@ span.token.table {
   animation: ask-card-in 0.14s ease-out both;
 }
 
-.ask-questionnaire-tabs {
+.ask-questionnaire-header {
   display: flex;
-  gap: 4px;
-  overflow-x: auto;
-  padding: 8px;
+  min-width: 0;
+  align-items: center;
   border-bottom: 1px solid var(--border);
   background: var(--bg-panel);
 }
 
+.ask-questionnaire-header > .ask-collapse-button {
+  margin-right: 12px;
+}
+
+.ask-questionnaire-tabs {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+  padding: 8px;
+}
+
 .ask-questionnaire-tabs button {
+  display: inline-flex;
+  min-height: 32px;
   flex: 0 0 auto;
+  align-items: center;
   padding: 6px 9px;
   border: 1px solid transparent;
   border-radius: 6px;
@@ -1414,6 +1429,8 @@ span.token.table {
   background: transparent;
   cursor: pointer;
   font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
 }
 
 .ask-questionnaire-tabs button.is-active {

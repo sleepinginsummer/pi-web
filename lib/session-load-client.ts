@@ -103,30 +103,33 @@ export function prefetchSessionContext(sid: string): void {
   drainPrefetchQueue();
 }
 
-/** 列表刷新后删除已经不存在的会话，避免缓存长期持有旧 Promise。 */
-export function pruneSessionContextCache(sessionIds: Iterable<string>): void {
-  const valid = new Set(sessionIds);
-  for (const sid of sessionContextCache.keys()) {
-    if (!valid.has(sid)) {
-      activePrefetchControllers.get(sid)?.abort();
-      sessionContextCache.delete(sid);
-      bumpContextGeneration(sid);
-    }
-  }
-  for (let i = prefetchQueue.length - 1; i >= 0; i -= 1) {
-    if (!valid.has(prefetchQueue[i])) prefetchQueue.splice(i, 1);
-  }
-}
-
-/** 会话产生新消息后清除预取快照，并取消尚未完成的预取。 */
-export function invalidateSessionContext(sid: string): void {
+function invalidateContextState(sid: string): void {
   bumpContextGeneration(sid);
   activePrefetchControllers.get(sid)?.abort();
-  activePrefetchControllers.delete(sid);
   sessionContextCache.delete(sid);
+  sessionContextInflight.delete(sid);
   for (let i = prefetchQueue.length - 1; i >= 0; i -= 1) {
     if (prefetchQueue[i] === sid) prefetchQueue.splice(i, 1);
   }
+}
+
+/** 列表刷新后让已不存在会话的缓存与进行中请求同时失效。 */
+export function pruneSessionContextCache(sessionIds: Iterable<string>): void {
+  const valid = new Set(sessionIds);
+  const candidates = new Set([
+    ...sessionContextCache.keys(),
+    ...sessionContextInflight.keys(),
+    ...activePrefetchControllers.keys(),
+    ...prefetchQueue,
+  ]);
+  for (const sid of candidates) {
+    if (!valid.has(sid)) invalidateContextState(sid);
+  }
+}
+
+/** 会话产生新消息后清除上下文状态，并取消尚未完成的预取。 */
+export function invalidateSessionContext(sid: string): void {
+  invalidateContextState(sid);
 }
 
 

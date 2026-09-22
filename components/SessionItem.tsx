@@ -11,6 +11,10 @@ import type { SessionInfo } from "@/lib/types";
 
 const ITEM_HEIGHT = 54;
 const SESSION_SWIPE_ACTION_WIDTH = 132;
+const DESKTOP_ACTION_BUTTON_WIDTH = 32;
+const DESKTOP_ACTION_GAP = 4;
+const DESKTOP_ACTION_COUNT = 3;
+const DESKTOP_SESSION_ACTIONS_WIDTH = DESKTOP_ACTION_BUTTON_WIDTH * DESKTOP_ACTION_COUNT + DESKTOP_ACTION_GAP * (DESKTOP_ACTION_COUNT - 1);
 
 type ActionTone = "pin" | "accent" | "danger";
 
@@ -93,7 +97,7 @@ function SessionActionButton({ mobile, open, label, pressed, tone, onClick, chil
       aria-label={label}
       aria-pressed={tone === "pin" ? pressed : undefined}
       onClick={onClick}
-      style={{ width: mobile ? 44 : 32, height: mobile ? ITEM_HEIGHT : 32, display: "flex", alignItems: "center", justifyContent: "center", padding: 0, flexShrink: 0, border: mobile ? "none" : `1px solid ${pressed ? "rgba(217,119,6,0.42)" : "var(--border)"}`, borderRadius: mobile ? 0 : 7, boxShadow: mobile ? "inset 1px 0 var(--border)" : undefined, background, color, cursor: "pointer", touchAction: "manipulation", transition: "background 0.12s, color 0.12s, border-color 0.12s" }}
+      style={{ width: mobile ? 44 : DESKTOP_ACTION_BUTTON_WIDTH, height: mobile ? ITEM_HEIGHT : 32, display: "flex", alignItems: "center", justifyContent: "center", padding: 0, flexShrink: 0, border: mobile ? "none" : `1px solid ${pressed ? "rgba(217,119,6,0.42)" : "var(--border)"}`, borderRadius: mobile ? 0 : 7, boxShadow: mobile ? "inset 1px 0 var(--border)" : undefined, background, color, cursor: "pointer", touchAction: "manipulation", transition: "background 0.12s, color 0.12s, border-color 0.12s" }}
     >
       {children}
     </button>
@@ -111,7 +115,7 @@ function SessionActions({ mobile, open, isPinned, onTogglePinned, onRename, onDe
   const { t } = useI18n();
   const containerStyle = mobile
     ? { position: "absolute" as const, inset: "0 0 0 auto", width: SESSION_SWIPE_ACTION_WIDTH, height: ITEM_HEIGHT, display: "flex", zIndex: 0 }
-    : { display: "flex", gap: 4, flexShrink: 0 };
+    : { display: "flex", gap: DESKTOP_ACTION_GAP, flexShrink: 0 };
   return (
     <div aria-hidden={mobile && !open} style={containerStyle}>
       <SessionActionButton mobile={mobile} open={open} label={t(isPinned ? "sidebar.unpin" : "sidebar.pin")} pressed={isPinned} tone="pin" onClick={onTogglePinned}>
@@ -204,7 +208,7 @@ function SessionRowContent({ session, view, actions }: {
       {depth > 0 && (
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-hidden="true"><rect x="5" y="7" width="14" height="11" rx="2" /><path d="M9 11h.01M15 11h.01M9 15h6M12 7V4M10 4h4" /></svg>
       )}
-      <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ position: "relative", flex: 1, minWidth: 0 }}>
         <div title={title} style={{ display: "flex", alignItems: "center", gap: 5, minWidth: 0, color: "var(--text)", fontSize: 12, fontWeight: isSelected ? 500 : 400, lineHeight: 1.4 }}><span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{title}</span></div>
         <div style={{ marginTop: 2, display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
           <div style={{ display: "flex", flex: 1, alignItems: "center", gap: 8, minWidth: 0, overflow: "hidden", color: "var(--text-dim)", fontSize: 11, whiteSpace: "nowrap" }}>
@@ -217,8 +221,15 @@ function SessionRowContent({ session, view, actions }: {
               </span>
             )}
           </div>
-          {!isMobile && (hovered || isSelected) && <SessionActions mobile={false} open isPinned={isPinned} onTogglePinned={onTogglePinned} onRename={onRename} onDelete={onDelete} />}
         </div>
+        {!isMobile && (
+          <div
+            data-session-actions
+            style={{ position: "absolute", top: "50%", right: 0, width: DESKTOP_SESSION_ACTIONS_WIDTH, height: 32, transform: "translateY(-50%)", zIndex: 2 }}
+          >
+            {(hovered || isSelected) && <SessionActions mobile={false} open isPinned={isPinned} onTogglePinned={onTogglePinned} onRename={onRename} onDelete={onDelete} />}
+          </div>
+        )}
       </div>
       {hasChildren && (
         <button type="button" onClick={(event) => { event.stopPropagation(); onToggleCollapse?.(); }} title={collapsed ? "Expand forks" : "Collapse forks"} style={{ width: 20, height: 20, display: "flex", alignItems: "center", justifyContent: "center", padding: 0, flexShrink: 0, background: "none", border: "none", color: "var(--text-dim)", transform: collapsed ? "rotate(-90deg)" : "none", transition: "transform 0.15s" }}><svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="2 3.5 5 6.5 8 3.5" /></svg></button>
@@ -268,6 +279,7 @@ export function SessionItem({ session, status, mobile, actions, tree = {} }: Ses
     <div style={{ height: ITEM_HEIGHT, position: "relative", overflow: "hidden" }}>
       {isMobile && !mutations.confirmDelete && !mutations.renaming && <SessionActions mobile open={swipeOpen} isPinned={isPinned} onTogglePinned={stopAndTogglePin} onRename={stopAndRename} onDelete={stopAndDelete} />}
       <div
+        data-session-row
         {...swipe.pointerHandlers}
         onClick={handleRowClick}
         onContextMenu={isMobile || mutations.confirmDelete || mutations.renaming ? undefined : handleContextMenu}
@@ -275,7 +287,7 @@ export function SessionItem({ session, status, mobile, actions, tree = {} }: Ses
         onMouseLeave={() => { if (!isMobile) setHovered(false); }}
         style={{ width: "100%", height: ITEM_HEIGHT, boxSizing: "border-box", display: "flex", position: "relative", zIndex: 1, alignItems: "center", paddingLeft: depth > 0 ? depth * 12 + 14 : 14, paddingRight: isPinned ? 32 : 8, cursor: mutations.confirmDelete || mutations.renaming ? "default" : "pointer", background: mutations.confirmDelete ? "rgba(239,68,68,0.06)" : isSelected ? "var(--bg-selected)" : hovered ? "var(--bg-hover)" : isMobile ? "var(--bg-panel)" : "transparent", borderLeft: mutations.confirmDelete ? "2px solid #ef4444" : isSelected ? "2px solid var(--accent)" : "2px solid transparent", transform: isMobile ? `translateX(${swipe.offset}px)` : "none", transition: swipe.dragging ? "none" : "background 0.1s, transform 0.18s ease-out", touchAction: isMobile ? "pan-y" : "auto", willChange: isMobile ? "transform" : "auto", opacity: mutations.deleting ? 0.5 : 1, gap: 6, overflow: "hidden" }}
       >
-        {isPinned && <span aria-hidden="true" style={{ position: "absolute", top: 0, right: 0, width: 24, height: 16, display: "flex", alignItems: "center", justifyContent: "center", background: "#eab308", borderBottomLeftRadius: 5, color: "#713f12", boxShadow: "0 1px 2px rgba(161,98,7,0.24)", pointerEvents: "none", zIndex: 1 }}><PinIcon size={12} strokeWidth={2.4} aria-hidden="true" style={{ transform: "rotate(45deg)" }} /></span>}
+        {isPinned && <span data-session-pin-marker aria-hidden="true" style={{ position: "absolute", top: 0, right: 0, width: 24, height: 16, display: "flex", alignItems: "center", justifyContent: "center", background: "#eab308", borderBottomLeftRadius: 5, color: "#713f12", boxShadow: "0 1px 2px rgba(161,98,7,0.24)", pointerEvents: "none", zIndex: 3 }}><PinIcon size={12} strokeWidth={2.4} aria-hidden="true" style={{ transform: "rotate(45deg)" }} /></span>}
         {mutations.confirmDelete ? (
           <SessionDeleteConfirm title={title} onConfirm={() => void mutations.performDelete()} onCancel={mutations.cancelDelete} />
         ) : mutations.renaming ? (

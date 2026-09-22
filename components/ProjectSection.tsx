@@ -3,12 +3,8 @@
 import { Pin as PinIcon } from "lucide-react";
 import { useLayoutEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
 import type { SessionInfo } from "@/lib/types";
+import { buildSessionTree, type SessionTreeNode } from "@/lib/session-tree";
 import { SessionItem } from "./SessionItem";
-
-interface WorktreeOption {
-  path: string;
-  label: string;
-}
 
 interface ProjectSectionProps {
   project: {
@@ -36,27 +32,26 @@ interface ProjectSectionProps {
     onNewSession: () => void;
   };
   treeProps: SessionTreeSharedProps;
-  worktree?: {
-    ariaLabel: string;
-    currentPath: string;
-    title?: string;
-    options: WorktreeOption[];
-    onChange: (path: string) => void;
-  };
 }
 
 const PROJECT_DRAG_TYPE = "application/x-pi-project";
 
 /** 单个项目目录的条件编排；数据持久化由父层负责。 */
-export function ProjectSection({ project, labels, actions, treeProps, worktree }: ProjectSectionProps) {
+export function ProjectSection({ project, labels, actions, treeProps }: ProjectSectionProps) {
   const tree = useMemo(() => buildSessionTree(project.sessions, project.sessionOrder), [project.sessionOrder, project.sessions]);
+  const handledLocateRevisionRef = useRef(0);
   return (
     <section style={{ padding: "2px 6px 6px" }}>
       <ProjectHeader project={project} labels={labels} actions={actions} />
-      {project.active && !project.collapsed && worktree && <WorktreeSelector worktree={worktree} />}
       {!project.collapsed && (
         <div style={{ paddingLeft: 24 }}>
-          {tree.length > 0 ? <VirtualizedSessionTree tree={tree} treeProps={treeProps} /> : (
+          {tree.length > 0 ? (
+            <VirtualizedSessionTree
+              tree={tree}
+              treeProps={treeProps}
+              handledLocateRevisionRef={handledLocateRevisionRef}
+            />
+          ) : (
             <div style={{ padding: "5px 10px 7px", color: "var(--text-dim)", fontSize: 11 }}>{labels.empty}</div>
           )}
         </div>
@@ -165,39 +160,14 @@ function ProjectHeader({
   );
 }
 
-function WorktreeSelector({ worktree }: { worktree: NonNullable<ProjectSectionProps["worktree"]> }) {
-  return (
-    <label title={worktree.title} style={{ display: "flex", alignItems: "center", gap: 6, height: 28, margin: "0 6px 2px 30px", color: "var(--text-dim)" }}>
-      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}>
-        <line x1="6" y1="3" x2="6" y2="15" />
-        <circle cx="18" cy="6" r="3" />
-        <circle cx="6" cy="18" r="3" />
-        <path d="M18 9a9 9 0 0 1-9 9" />
-      </svg>
-      <select
-        aria-label={worktree.ariaLabel}
-        value={worktree.currentPath}
-        onChange={(event) => worktree.onChange(event.target.value)}
-        style={{ minWidth: 0, flex: 1, height: 26, padding: "0 24px 0 0", border: 0, outline: 0, background: "transparent", color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 11, cursor: "pointer" }}
-      >
-        {worktree.options.map((option) => (
-          <option key={option.path} value={option.path}>{option.label}</option>
-        ))}
-      </select>
-    </label>
-  );
-}
 
-interface SessionTreeNode {
-  session: SessionInfo;
-  children: SessionTreeNode[];
-}
 
 export interface SessionTreeSharedProps {
   selectedSessionId: string | null;
   runningSessionIds: ReadonlySet<string>;
   unreadSessionIds: Set<string>;
   pinnedSessionIds: Set<string>;
+  locateSessionRequest?: { sessionId: string; revision: number } | null;
   isMobile: boolean;
   openSwipeSessionId: string | null;
   onOpenSwipeSessionChange: (sessionId: string, open: boolean) => void;
@@ -208,38 +178,6 @@ export interface SessionTreeSharedProps {
   onSessionDeleted?: (id: string) => void;
 }
 
-function buildSessionTree(sessions: SessionInfo[], manualOrder: string[]): SessionTreeNode[] {
-  const byId = new Map<string, SessionTreeNode>();
-  for (const session of sessions) byId.set(session.id, { session, children: [] });
-  const parentOf = new Map<string, string>();
-  for (const session of sessions) {
-    if (session.parentSessionId) parentOf.set(session.id, session.parentSessionId);
-  }
-  const resolveAncestor = (id: string): string | null => {
-    let current = parentOf.get(id);
-    const visited = new Set<string>();
-    while (current) {
-      if (visited.has(current)) return null;
-      visited.add(current);
-      if (byId.has(current)) return current;
-      current = parentOf.get(current);
-    }
-    return null;
-  };
-  const roots: SessionTreeNode[] = [];
-  for (const node of byId.values()) {
-    const ancestor = resolveAncestor(node.session.id);
-    if (ancestor) byId.get(ancestor)!.children.push(node);
-    else roots.push(node);
-  }
-  const orderIndex = new Map(manualOrder.map((id, index) => [id, index]));
-  const sort = (nodes: SessionTreeNode[]) => {
-    nodes.sort((left, right) => (orderIndex.get(left.session.id) ?? Number.MAX_SAFE_INTEGER) - (orderIndex.get(right.session.id) ?? Number.MAX_SAFE_INTEGER));
-    nodes.forEach((node) => sort(node.children));
-  };
-  sort(roots);
-  return roots;
-}
 
 const SESSION_TREE_ROW_HEIGHT = 54;
 const SESSION_TREE_OVERSCAN = 6;
@@ -247,6 +185,19 @@ const SESSION_TREE_OVERSCAN = 6;
 interface FlatSessionTreeRow {
   node: SessionTreeNode;
   depth: number;
+}
+
+function findSessionAncestorIds(
+  nodes: SessionTreeNode[],
+  targetSessionId: string,
+  ancestors: string[] = [],
+): string[] | null {
+  for (const node of nodes) {
+    if (node.session.id === targetSessionId) return ancestors;
+    const result = findSessionAncestorIds(node.children, targetSessionId, [...ancestors, node.session.id]);
+    if (result) return result;
+  }
+  return null;
 }
 
 function flattenSessionTree(nodes: SessionTreeNode[], collapsedIds: ReadonlySet<string>, depth = 0): FlatSessionTreeRow[] {
@@ -260,7 +211,15 @@ function flattenSessionTree(nodes: SessionTreeNode[], collapsedIds: ReadonlySet<
   return rows;
 }
 
-function VirtualizedSessionTree({ tree, treeProps }: { tree: SessionTreeNode[]; treeProps: SessionTreeSharedProps }) {
+function VirtualizedSessionTree({
+  tree,
+  treeProps,
+  handledLocateRevisionRef,
+}: {
+  tree: SessionTreeNode[];
+  treeProps: SessionTreeSharedProps;
+  handledLocateRevisionRef: { current: number };
+}) {
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => new Set());
   const rows = useMemo(() => flattenSessionTree(tree, collapsedIds), [collapsedIds, tree]);
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -296,6 +255,35 @@ function VirtualizedSessionTree({ tree, treeProps }: { tree: SessionTreeNode[]; 
     }
     return visible;
   }, [range.end, range.start, rows, treeProps.selectedSessionId]);
+
+  useLayoutEffect(() => {
+    const request = treeProps.locateSessionRequest;
+    if (!request || handledLocateRevisionRef.current === request.revision) return;
+
+    const targetIndex = rows.findIndex((row) => row.node.session.id === request.sessionId);
+    if (targetIndex < 0) {
+      const ancestorIds = findSessionAncestorIds(tree, request.sessionId);
+      if (!ancestorIds) return;
+      setCollapsedIds((current) => {
+        const next = new Set(current);
+        let changed = false;
+        for (const ancestorId of ancestorIds) {
+          if (next.delete(ancestorId)) changed = true;
+        }
+        return changed ? next : current;
+      });
+      return;
+    }
+
+    const wrapper = wrapperRef.current;
+    const scroll = wrapper?.closest<HTMLElement>("[data-session-scroll]");
+    if (!wrapper || !scroll) return;
+    const wrapperTop = scroll.scrollTop + wrapper.getBoundingClientRect().top - scroll.getBoundingClientRect().top;
+    const targetTop = wrapperTop + targetIndex * SESSION_TREE_ROW_HEIGHT;
+    const top = Math.max(0, targetTop - (scroll.clientHeight - SESSION_TREE_ROW_HEIGHT) / 2);
+    scroll.scrollTo({ top, behavior: "auto" });
+    handledLocateRevisionRef.current = request.revision;
+  }, [handledLocateRevisionRef, rows, tree, treeProps.locateSessionRequest]);
 
   return (
     <div ref={wrapperRef} style={{ position: "relative", height: rows.length * SESSION_TREE_ROW_HEIGHT }}>

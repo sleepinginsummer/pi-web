@@ -339,6 +339,7 @@ export function AppShell() {
     leaveWorkspace,
     newSession: handleNewSession,
     newSessionCwd,
+    notificationSessionLocateRequest,
     pendingNewSessions,
     restoreWorkspaceContext,
     selectSession: handleSelectSession,
@@ -479,11 +480,7 @@ export function AppShell() {
     return () => controller.abort();
   }, [beginInitialCwd, initialNavigation]);
   const worktreeCwd = selectedSession?.cwd ?? newSessionCwd ?? activeCwd;
-  const {
-    snapshot: worktreeState,
-    create: handleCreateWorktree,
-    remove: handleRemoveWorktree,
-  } = useWorktreeState(worktreeCwd);
+  const { snapshot: worktreeState } = useWorktreeState(worktreeCwd);
 
   const handleCwdChange = useCallback((cwd: string | null, projectRoot?: string | null, projectKey?: string | null) => {
     setActiveCwd(cwd);
@@ -658,11 +655,10 @@ export function AppShell() {
         onSessionDeleted={handleSessionDeleted}
         runningSessionIds={runningSessionIds}
         runningSessionTransitions={runningSessionTransitions}
+        locateSessionRequest={notificationSessionLocateRequest}
         selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? null}
         onCwdChange={handleCwdChange}
         worktreeState={worktreeState}
-        onCreateWorktree={handleCreateWorktree}
-        onRemoveWorktree={handleRemoveWorktree}
         onOpenFile={handleOpenFile}
         onOpenTerminal={handleOpenTerminal}
         explorerRefreshKey={explorerRefreshKey}

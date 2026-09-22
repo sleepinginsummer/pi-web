@@ -33,7 +33,7 @@ test("ask flyout supports collapse and preserves transcript scrolling", () => {
   assert.match(globalStyles, /\.chat-window\s*\{[\s\S]*?--ask-max-height: min\(620px, calc\(100dvh - 150px\)\);[\s\S]*?--ask-gap: 8px;[\s\S]*?--ask-collapsed-height: 44px/);
   assert.match(globalStyles, /\.ask-input-flyout\s*\{[\s\S]*?bottom: calc\(100% \+ var\(--ask-gap\)\);[\s\S]*?pointer-events: none/);
   assert.match(globalStyles, /\.ask-input-flyout-content\s*\{[\s\S]*?pointer-events: auto/);
-  assert.match(flyoutSource, /className="ask-collapse-button"[\s\S]*?chat\.askCollapse/);
+  assert.match(questionnaireSource, /className="ask-collapse-button"[\s\S]*?chat\.askCollapse/);
   assert.match(flyoutSource, /className="ask-collapsed-bar"[\s\S]*?chat\.askExpand/);
   assert.match(chatWindowSource, /<AskInputFlyout[\s\S]*?className=\{`flex-1[\s\S]*?chat-scroll-ask-reserve/);
   assert.doesNotMatch(chatWindowSource, /askCollapseState|askCollapsed/);
@@ -46,7 +46,9 @@ test("ask flyout supports collapse and preserves transcript scrolling", () => {
   assert.doesNotMatch(globalStyles, /\.ask-questionnaire-backdrop/);
 });
 
-test("ask question progress reserves space for the collapse button", () => {
-  assert.match(globalStyles, /\.ask-questionnaire-heading\s*\{[\s\S]*?padding-right: 42px/);
+test("ask 顶部导航与折叠按钮使用同一布局行", () => {
+  assert.match(questionnaireSource, /className="ask-questionnaire-header"[\s\S]*?className="ask-questionnaire-tabs"[\s\S]*?className="ask-collapse-button"/);
+  assert.match(globalStyles, /\.ask-questionnaire-header\s*\{[\s\S]*?display: flex;[\s\S]*?align-items: center/);
+  assert.match(globalStyles, /\.ask-questionnaire-tabs button\s*\{[\s\S]*?display: inline-flex;[\s\S]*?align-items: center;[\s\S]*?line-height: 18px/);
   assert.match(globalStyles, /\.ask-questionnaire-heading small\s*\{[\s\S]*?flex-shrink: 0/);
 });

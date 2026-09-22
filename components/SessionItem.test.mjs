@@ -15,27 +15,17 @@ test("does not register row-level session deletion shortcuts", () => {
   assert.doesNotMatch(source, /onKeyDown=\{handleKeyDown\}/);
 });
 
-test("keeps the pinned marker visible when a session is selected", () => {
+test("置顶装饰标记在桌面选中和悬浮时保持置顶显示", () => {
   assert.match(source, /paddingRight: isPinned \? 32 : 8/);
   assert.match(source, /background: mutations\.confirmDelete \? "rgba\(239,68,68,0\.06\)" : isSelected/);
+  assert.match(source, /isPinned && <span data-session-pin-marker/);
+  assert.match(source, /data-session-pin-marker[\s\S]*?zIndex: 3/);
   assert.match(source, /background: "#eab308"[\s\S]*?borderBottomLeftRadius: 5/);
   assert.match(source, /PinIcon size=\{12\}[^>]*transform: "rotate\(45deg\)"/);
   assert.match(source, /PinIcon size=\{mobile \? 17 : 14\}/);
   assert.match(source, /aria-pressed=\{tone === "pin" \? pressed : undefined\}/);
 });
 
-test("桌面操作区只占用统计行，标题保持优先宽度", () => {
-  const titleIndex = source.indexOf("title={title}");
-  const metadataIndex = source.indexOf("flex: 1, alignItems", titleIndex);
-  const desktopActionsIndex = source.indexOf("<SessionActions mobile={false}", titleIndex);
-  const contentCloseIndex = source.indexOf("</div>\n      </div>", metadataIndex);
-
-  assert.ok(titleIndex >= 0);
-  assert.ok(metadataIndex > titleIndex);
-  assert.ok(desktopActionsIndex > metadataIndex);
-  assert.ok(desktopActionsIndex < contentCloseIndex);
-  assert.match(source.slice(metadataIndex, desktopActionsIndex), /overflow: "hidden"/);
-});
 
 test("置顶按钮切换桌面布局后仍保留左边框", () => {
   assert.doesNotMatch(source, /borderLeft: mobile/);
