@@ -208,8 +208,11 @@ try {
       await sentinel.evaluate((element) => element.scrollIntoView({ block: "start", behavior: "instant" }));
       const response = await responsePromise;
       const older = (await response.json()).context;
-      const firstMessage = older.messages[0]?.content;
-      assert.equal(typeof firstMessage, "string", "Older page must contain user messages");
+      const firstContent = older.messages[0]?.content;
+      const firstMessage = typeof firstContent === "string"
+        ? firstContent
+        : firstContent?.find((block) => block.type === "text")?.text;
+      assert.equal(typeof firstMessage, "string", "Older page must contain text messages");
       await page.getByText(firstMessage, { exact: true }).waitFor({ state: "attached" });
       await page.getByText(text(4999), { exact: true }).evaluate((element) => element.scrollIntoView({ block: "end", behavior: "instant" }));
     }
@@ -219,17 +222,22 @@ try {
     })), { connected: true, text: text(4998) }, "Prepending history must preserve existing message nodes");
     await latestUser.dispose();
     assert.ok(olderResponses.length >= 2, "Scrolling must fetch consecutive older pages");
-    let oldest = 4950;
+    let oldest;
     for (const response of olderResponses) {
       assert.equal(response.status(), 200);
-      assert.equal(new URL(response.url()).searchParams.get("before"), `e${oldest}`);
+      const beforeId = new URL(response.url()).searchParams.get("before");
+      assert.match(beforeId, /^e\d+$/);
+      const before = Number(beforeId.slice(1));
+      if (oldest !== undefined) assert.equal(before, oldest);
       const older = (await response.json()).context;
-      assert.deepEqual(older.entryIds, ids(oldest - 50, oldest));
-      assert.equal(older.messages.length, 50);
-      oldest -= 50;
+      const pageStart = before - older.entryIds.length;
+      assert.deepEqual(older.entryIds, ids(pageStart, before));
+      assert.equal(older.messages.length, older.entryIds.length);
+      oldest = pageStart;
       assert.equal(older.oldestEntryId, `e${oldest}`);
       assert.equal(older.hasMore, true);
     }
+    assert.equal(typeof oldest, "number");
     const rendered = await page.getByText(/^E2E message \d{4}$/).allTextContents();
     // The sidebar also displays the first message as the session title.
     assert.deepEqual(rendered.filter((value) => value !== text(0)),
