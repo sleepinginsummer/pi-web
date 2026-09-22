@@ -182,12 +182,15 @@ try {
     page.setDefaultTimeout(30_000);
     const errors = [];
     const olderResponses = [];
+    const isOlderContextResponse = (response) => {
+      const url = new URL(response.url());
+      return url.pathname === `/api/sessions/${LONG}/context` && url.searchParams.has("before");
+    };
     page.on("pageerror", (error) => errors.push(error.message));
     page.on("console", (event) => { if (event.type() === "error") errors.push(event.text()); });
     page.on("response", (response) => {
       if (response.url().startsWith(base) && response.status() >= 500) errors.push(`${response.status()} ${response.url()}`);
-      const url = new URL(response.url());
-      if (url.pathname === `/api/sessions/${LONG}/context` && url.searchParams.has("before")) olderResponses.push(response);
+      if (isOlderContextResponse(response)) olderResponses.push(response);
     });
     const stateReady = page.waitForResponse((response) => new URL(response.url()).pathname === `/api/sessions/${LONG}/state`);
     await page.goto(`${base}/?session=${LONG}`, { waitUntil: "domcontentloaded" });
@@ -201,8 +204,7 @@ try {
     // Observer 可能在断言前扩展本地渲染窗口并预取第一页历史；
     // 这里只验证后续两次请求，不假设浏览器仍停留在初始 50 条边界。
     for (let turn = 0; turn < 2; turn++) {
-      const responsePromise = page.waitForResponse((response) =>
-        new URL(response.url()).pathname === `/api/sessions/${LONG}/context`);
+      const responsePromise = page.waitForResponse(isOlderContextResponse);
       await sentinel.evaluate((element) => element.scrollIntoView({ block: "start", behavior: "instant" }));
       const response = await responsePromise;
       const older = (await response.json()).context;
@@ -307,7 +309,7 @@ try {
         return readingOffset(target);
       };
       await selectSession(text(0), "e4999");
-      const olderPage = page.waitForResponse((response) => response.url().includes(`/api/sessions/${LONG}/context?`));
+      const olderPage = page.waitForResponse(isOlderContextResponse);
       await sentinel.evaluate((element) => element.scrollIntoView({ block: "start", behavior: "instant" }));
       await olderPage;
       const olderMessage = page.locator("[data-entry-id='e4920']");
