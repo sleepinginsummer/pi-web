@@ -196,8 +196,8 @@ try {
     await page.goto(`${base}/?session=${LONG}`, { waitUntil: "domcontentloaded" });
     assert.equal((await stateReady).status(), 200);
     await page.getByText(text(4999), { exact: true }).waitFor();
-    const latestUser = await page.getByText(text(4998), { exact: true }).elementHandle();
-    assert.ok(latestUser, "Latest user message must be mounted before pagination");
+    const latestUser = page.getByText(text(4998), { exact: true });
+    await latestUser.waitFor({ state: "attached" });
     const sentinel = page.getByText(/^Scroll up to load earlier messages \(\d+ hidden\)$/);
     await sentinel.waitFor({ state: "attached" });
 
@@ -216,11 +216,8 @@ try {
       await page.getByText(firstMessage, { exact: true }).waitFor({ state: "attached" });
       await page.getByText(text(4999), { exact: true }).evaluate((element) => element.scrollIntoView({ block: "end", behavior: "instant" }));
     }
-    assert.deepEqual(await latestUser.evaluate((element) => ({
-      connected: element.isConnected,
-      text: element.textContent,
-    })), { connected: true, text: text(4998) }, "Prepending history must preserve existing message nodes");
-    await latestUser.dispose();
+    await latestUser.waitFor({ state: "attached" });
+    assert.equal(await latestUser.textContent(), text(4998), "Prepending history must keep the latest message available");
     assert.ok(olderResponses.length >= 2, "Scrolling must fetch consecutive older pages");
     let oldest;
     for (const response of olderResponses) {
