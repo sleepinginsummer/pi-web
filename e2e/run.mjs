@@ -344,6 +344,7 @@ try {
       await sentinel.evaluate((element) => element.scrollIntoView({ block: "start", behavior: "instant" }));
       await olderPage;
       const olderMessage = page.locator("[data-entry-id='e4920']");
+      await olderMessage.waitFor();
       await positionForReading(olderMessage);
       const olderAnchor = await captureReadingAnchor();
       await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
