@@ -42,7 +42,9 @@ export async function checkChatAppearance(page) {
   const fittedHeight = async () => {
     await page.waitForFunction(() => {
       const input = document.querySelector(".chat-input-textarea");
-      return input && (input.scrollHeight <= input.clientHeight + 1 || input.clientHeight >= 199);
+      if (!(input instanceof HTMLTextAreaElement)) return false;
+      const appliedHeight = Number.parseFloat(input.style.height);
+      return Number.isFinite(appliedHeight) && Math.abs(appliedHeight - Math.min(input.scrollHeight, 200)) < 1;
     });
     return textarea.evaluate((el) => el.clientHeight);
   };

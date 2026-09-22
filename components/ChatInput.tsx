@@ -299,7 +299,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     dataDiagnostics: modelDataDiagnostics,
   } = modelState;
   const { changeModel: onModelChange, changeThinkingLevel: onThinkingLevelChange } = modelActions;
-  const { fontSize } = useChatAppearance();
+  const { fontSize, width } = useChatAppearance();
   const isMobile = useIsMobile();
   const modelPickerOptions = useMemo<ModelPickerOption[]>(() => {
     if (modelState.list?.length) {
@@ -630,7 +630,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   useEffect(() => {
     resizeTextarea(true);
-  }, [draftKey, fontSize, resizeTextarea]);
+  }, [draftKey, fontSize, resizeTextarea, value, width]);
 
   useEffect(() => {
     return () => {

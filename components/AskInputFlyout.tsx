@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ChevronUp } from "lucide-react";
 import { useI18n } from "@/hooks/useI18n";
 import type { AskQuestionnaireAnswer, AskQuestionnaireState } from "@/hooks/useAgentSession";
@@ -19,6 +19,7 @@ export interface AskInputFlyoutActions {
   submitQuestionnaire: (answers: AskQuestionnaireAnswer[]) => void;
   cancelQuestionnaire: () => void;
   select: (request: SelectRequest, value: string) => void;
+  cancelSelect: (request: SelectRequest) => void;
   submitCustom: (request: SelectRequest, sentinelText: string, text: string) => void;
   stop: () => void;
 }
@@ -38,6 +39,17 @@ export function AskInputFlyout({ ask, actions, isMobile }: AskInputFlyoutProps) 
     ? ask.value.questions[0]?.question ?? ""
     : ask?.value.title ?? "";
 
+  const expiresAt = ask?.kind === "select" ? ask.value.expiresAt : undefined;
+  const [now, setNow] = useState(() => Date.now());
+  const remainingSeconds = expiresAt === undefined ? null : Math.max(0, Math.ceil((expiresAt - now) / 1000));
+  const countdown = remainingSeconds === null ? null : t("chat.extensionExpiresIn", { seconds: remainingSeconds });
+  const collapsedLabel = countdown ? `${t("chat.extensionPending")} ${title} ${countdown}` : t("chat.askExpand");
+
+  useEffect(() => {
+    if (expiresAt === undefined) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [expiresAt]);
   if (!activeAskId) return null;
 
   const setCollapsed = (nextCollapsed: boolean) => {
@@ -52,10 +64,11 @@ export function AskInputFlyout({ ask, actions, isMobile }: AskInputFlyoutProps) 
             type="button"
             className="ask-collapsed-bar"
             onClick={() => setCollapsed(false)}
-            aria-label={t("chat.askExpand")}
-            title={t("chat.askExpand")}
+            aria-label={collapsedLabel}
+            title={countdown ? `${t("chat.askExpand")}: ${collapsedLabel}` : t("chat.askExpand")}
           >
-            <span>{title}</span>
+            <span>{countdown ? `${t("chat.extensionPending")} ${title}` : title}</span>
+            {countdown && <span>{countdown}</span>}
             <ChevronUp size={17} aria-hidden="true" />
           </button>
         ) : (
@@ -71,7 +84,9 @@ export function AskInputFlyout({ ask, actions, isMobile }: AskInputFlyoutProps) 
             ) : ask?.kind === "select" ? (
               <AskDialog
                 request={ask.value}
+                remainingSeconds={remainingSeconds}
                 onSelect={actions.select}
+                onCancel={actions.cancelSelect}
                 onCustomSubmit={actions.submitCustom}
                 onStop={actions.stop}
                 onCollapse={() => setCollapsed(true)}

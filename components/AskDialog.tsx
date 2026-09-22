@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import type { ExtensionUiRequest } from "@/lib/types";
 import styles from "./AskDialog.module.css";
@@ -24,6 +24,12 @@ function useAskDialogInteraction(
   const [customValue, setCustomValue] = useState("");
   const customOptionIndex = findCustomOptionIndex(request.options);
 
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      optionsRef.current?.querySelector<HTMLButtonElement>("button[data-ask-option]")?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [request.id]);
   const openCustom = () => {
     setCustomValue("");
     setCustomOpen(true);
@@ -41,9 +47,9 @@ function useAskDialogInteraction(
     onCustomSubmit(request, request.options[customOptionIndex], text);
   };
 
-  // 方向键在选项间移动焦点，回车触发当前项；Esc 仍由全局停止快捷键处理。
+  // 选项使用统一的 roving focus，支持方向键、Home/End 和回车选择。
   const handleOptionsKeyDown = (event: ReactKeyboardEvent) => {
-    if (event.key !== "ArrowDown" && event.key !== "ArrowUp" && event.key !== "Enter") return;
+    if (!["ArrowDown", "ArrowUp", "ArrowRight", "ArrowLeft", "Home", "End", "Enter"].includes(event.key)) return;
     const buttons = Array.from(optionsRef.current?.querySelectorAll<HTMLButtonElement>("button[data-ask-option]") ?? []);
     if (buttons.length === 0) return;
     const activeIndex = document.activeElement instanceof HTMLButtonElement
@@ -57,9 +63,13 @@ function useAskDialogInteraction(
       return;
     }
     event.preventDefault();
-    const nextIndex = event.key === "ArrowDown"
-      ? (activeIndex + 1) % buttons.length
-      : (activeIndex - 1 + buttons.length) % buttons.length;
+    let nextIndex: number;
+    if (event.key === "Home") nextIndex = 0;
+    else if (event.key === "End") nextIndex = buttons.length - 1;
+    else {
+      const delta = event.key === "ArrowDown" || event.key === "ArrowRight" ? 1 : -1;
+      nextIndex = (activeIndex + delta + buttons.length) % buttons.length;
+    }
     buttons[nextIndex].focus();
   };
 
@@ -111,8 +121,10 @@ function CustomAnswerOption({
           event.preventDefault();
           onSubmit();
         } else if (event.key === "Escape") {
+          event.preventDefault();
           onClose();
-        } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          event.stopPropagation();
+        } else if (["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
           event.stopPropagation();
         }
       }}
@@ -125,20 +137,32 @@ function CustomAnswerOption({
 }
 
 // RPC fallback 会把 "Type something." sentinel 作为最后一项；该项点击后切换为内联输入。
-export function AskDialog({ request, onSelect, onCustomSubmit, onStop, onCollapse }: {
+export function AskDialog({ request, remainingSeconds, onSelect, onCancel, onCustomSubmit, onStop, onCollapse }: {
   request: AskDialogRequest;
+  remainingSeconds: number | null;
   onSelect: (request: AskDialogRequest, value: string) => void;
+  onCancel: (request: AskDialogRequest) => void;
   onCustomSubmit: (request: AskDialogRequest, sentinelText: string, text: string) => void;
   onStop: () => void;
   onCollapse: () => void;
 }) {
   const { t } = useI18n();
   const interaction = useAskDialogInteraction(request, onSelect, onCustomSubmit);
-
   return (
-    <div role="dialog" aria-label={request.title} onKeyDown={interaction.handleOptionsKeyDown} className={styles.card}>
+    <div role="dialog" aria-label={request.title} onKeyDown={(event) => {
+      if (event.key === "Escape" && !event.nativeEvent.isComposing) {
+        event.preventDefault();
+        event.stopPropagation();
+        onCancel(request);
+        return;
+      }
+      interaction.handleOptionsKeyDown(event);
+    }} className={styles.card}>
       <div className={styles.header}>
         <div className={styles.title}>{request.title}</div>
+        {remainingSeconds !== null && (
+          <span>{t("chat.extensionExpiresIn", { seconds: remainingSeconds })}</span>
+        )}
         <div className={styles.actions}>
           <button type="button" onClick={onCollapse} className={styles.collapse} aria-label={t("chat.askCollapse")} title={t("chat.askCollapse")}>
             <ChevronDown size={17} aria-hidden="true" />

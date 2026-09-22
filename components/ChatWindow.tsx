@@ -31,6 +31,7 @@ import { findChatScrollAnchor, type ChatReadingPosition } from "@/lib/chat-scrol
 import {
   captureScrollDistance,
   getNextVisibleCount,
+  isScrollAtTail,
   getVisibleRenderWindow,
   restoreScrollTop,
   VISIBLE_PAGE_SIZE,
@@ -292,7 +293,7 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
     const position = initialScrollPositionRef.current;
     return position && !position.atBottom ? position : null;
   });
-  const [restoreAnchorReady, setRestoreAnchorReady] = useState(false);
+  const [restoreAnchorReadyFor, setRestoreAnchorReadyFor] = useState<Extract<ChatReadingPosition, { atBottom: false }> | null>(null);
 
 
   const {
@@ -549,7 +550,7 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
   const messageContentRef = useRef<HTMLDivElement | null>(null);
   const prevScrollDistanceRef = useRef<number | null>(null);
   const searchLoadRef = useRef(false);
-  const restoreLoadRef = useRef(false);
+  const restoreLoadPositionRef = useRef<Extract<ChatReadingPosition, { atBottom: false }> | null>(null);
   const pendingScrollRestoreRef = useRef(pendingScrollRestore);
   const historyCursorRef = useRef(historyCursor);
   pendingScrollRestoreRef.current = pendingScrollRestore;
@@ -561,14 +562,16 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
     const container = scrollContainerRef.current;
     const content = messageContentRef.current;
     if (!sessionId || !onScrollPositionChange || !container || !content || pendingScrollRestoreRef.current) return;
-    if (container.scrollTop + container.clientHeight >= container.scrollHeight - 8) {
+    // 旧历史虚拟窗口的 DOM 底部不等于整段会话末尾，不能覆盖阅读锚点。
+    const renderWindowAtTail = historyGroupWindowRef.current.end >= historyGroupWindowRef.current.total;
+    if (renderWindowAtTail && isScrollAtTail(container.scrollTop, container.clientHeight, container.scrollHeight)) {
       onScrollPositionChange(sessionId, { atBottom: true });
       return;
     }
     const viewportTop = container.getBoundingClientRect().top;
     const candidates = Array.from(content.children).flatMap((element) => {
       if (!(element instanceof HTMLElement) || !element.dataset.entryId || element.offsetHeight === 0) return [];
-        const rect = element.getBoundingClientRect();
+      const rect = element.getBoundingClientRect();
       return [{ entryId: element.dataset.entryId, top: rect.top, bottom: rect.bottom }];
     });
     const anchor = findChatScrollAnchor(candidates, viewportTop);
@@ -581,7 +584,11 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
   }, []);
 
   useEffect(() => {
-    if (searchTarget) setPendingScrollRestore(null);
+    if (searchTarget) {
+      setPendingScrollRestore(null);
+      setRestoreAnchorReadyFor(null);
+      restoreLoadPositionRef.current = null;
+    }
   }, [searchTarget]);
 
   const previousLeafIdRef = useRef<string | null | undefined>(undefined);
@@ -595,49 +602,56 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
     if (previousLeafIdRef.current === activeLeafId) return;
     previousLeafIdRef.current = activeLeafId;
     setPendingScrollRestore(null);
+    setRestoreAnchorReadyFor(null);
+    restoreLoadPositionRef.current = null;
   }, [activeLeafId, loading]);
 
   useEffect(() => {
     const position = pendingScrollRestore;
-    if (!position || loading || searchTarget || loadingEarlierMessages || restoreLoadRef.current) return;
+    if (!position || loading || searchTarget || loadingEarlierMessages || restoreLoadPositionRef.current === position) return;
     if (entryIds.includes(position.anchorEntryId)) {
       setRenderWindow({ key: renderWindowKey, count: MAX_MOUNTED_HISTORY_GROUPS, offset: 0 });
-      setRestoreAnchorReady(true);
+      setRestoreAnchorReadyFor(position);
+      restoreLoadPositionRef.current = null;
       return;
     }
     if (!hasEarlierMessages) {
       scrollToLatest("instant");
       setPendingScrollRestore(null);
+      setRestoreAnchorReadyFor(null);
+      restoreLoadPositionRef.current = null;
       return;
     }
-    restoreLoadRef.current = true;
+    restoreLoadPositionRef.current = position;
     void loadEarlierMessages().then((loaded) => {
+      if (restoreLoadPositionRef.current !== position) return;
       if (!loaded) {
         scrollToLatest("instant");
         setPendingScrollRestore(null);
+        setRestoreAnchorReadyFor(null);
       }
     }).finally(() => {
-      restoreLoadRef.current = false;
+      if (restoreLoadPositionRef.current === position) restoreLoadPositionRef.current = null;
     });
   }, [entryIds, hasEarlierMessages, loadEarlierMessages, loading, loadingEarlierMessages, messages.length, pendingScrollRestore, renderWindowKey, scrollToLatest, searchTarget]);
 
   useLayoutEffect(() => {
     const position = pendingScrollRestore;
     const content = messageContentRef.current;
-    if (!position || !content || searchTarget) return;
+    if (!position || !content || searchTarget || restoreAnchorReadyFor !== position) return;
     const element = Array.from(content.children).find((candidate) => (
       candidate instanceof HTMLElement && candidate.dataset.entryId === position.anchorEntryId
     ));
     if (element instanceof HTMLElement) {
       scrollToElement(element, position.anchorOffset);
       setPendingScrollRestore(null);
+      setRestoreAnchorReadyFor(null);
       return;
     }
-    if (restoreAnchorReady) {
-      scrollToLatest("instant");
-      setPendingScrollRestore(null);
-    }
-  }, [entryIds, pendingScrollRestore, restoreAnchorReady, scrollToElement, scrollToLatest, searchTarget, visibleCount]);
+    scrollToLatest("instant");
+    setPendingScrollRestore(null);
+    setRestoreAnchorReadyFor(null);
+  }, [entryIds, pendingScrollRestore, restoreAnchorReadyFor, scrollToElement, scrollToLatest, searchTarget, visibleCount]);
 
   useEffect(() => {
     if (!searchTarget || loading || searchLoadRef.current) return;
@@ -928,6 +942,7 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
         submitQuestionnaire: submitAskQuestionnaire,
         cancelQuestionnaire: cancelAskQuestionnaire,
         select: (request, value) => respondToExtensionUi(request, { value }),
+        cancelSelect: (request) => respondToExtensionUi(request, { cancelled: true }),
         submitCustom: (request, sentinelText, text) => {
           // 先回送 sentinel 原文触发 pi 的 input 分支，同时登记待提交文本，
           // 随后的 input 请求到达时由 useAgentSession 自动应答（不弹窗）。
@@ -1097,6 +1112,7 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
         </div>
         <div
           ref={scrollContainerRef}
+          data-chat-scroll-container
           className={`flex-1 overflow-x-hidden overflow-y-auto pt-4 [scrollbar-width:none]${askDialogElement ? " chat-scroll-ask-reserve" : ""}`}
           style={{ visibility: pendingScrollRestore ? "hidden" : undefined }}
         >

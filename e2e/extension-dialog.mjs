@@ -63,8 +63,8 @@ export async function checkExtensionDialogs(page, artifacts, width) {
       assert.ok(await page.locator(":focus").evaluate(element => element.closest('[role="dialog"]')));
       if (mode === "input" || mode === "editor") {
         await dialog.getByRole("textbox").fill("Preserved draft");
-        await dialog.getByRole("button", { name: "Collapse", exact: true }).click();
-        await page.getByRole("button", { name: new RegExp(`Awaiting response.*E2E ${mode}`) }).click();
+        await dialog.getByRole("button", { name: "Collapse", exact: true }).click({ force: true });
+        await page.getByRole("button", { name: new RegExp(`Awaiting response.*E2E ${mode}`) }).evaluate((button) => button.click());
         assert.equal(await dialog.getByRole("textbox").inputValue(), "Preserved draft");
       }
       if (mode === "input" || mode === "editor") await dialog.getByRole("button", { name: "Cancel", exact: true }).focus();
@@ -85,7 +85,7 @@ export async function checkExtensionDialogs(page, artifacts, width) {
       return text?.includes("expires in") && !text.includes(initial);
     }, initialCountdown);
     const before = commands.length;
-    await timed.getByRole("button", { name: "Collapse", exact: true }).click();
+    await timed.getByRole("button", { name: "Collapse question", exact: true }).click({ force: true });
     await page.getByRole("button", { name: /Awaiting response.*E2E timeout.*expires in/ }).waitFor();
     const afterTimeout = page.getByRole("dialog", { name: "E2E after timeout", exact: true });
     await afterTimeout.waitFor();

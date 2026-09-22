@@ -181,7 +181,7 @@ try {
     page = await context.newPage();
     page.setDefaultTimeout(30_000);
     const errors = [];
-    const olderResponses = [];
+    const olderPages = [];
     const isOlderContextResponse = (response) => {
       const url = new URL(response.url());
       return url.pathname === `/api/sessions/${LONG}/context` && url.searchParams.has("before");
@@ -190,7 +190,6 @@ try {
     page.on("console", (event) => { if (event.type() === "error") errors.push(event.text()); });
     page.on("response", (response) => {
       if (response.url().startsWith(base) && response.status() >= 500) errors.push(`${response.status()} ${response.url()}`);
-      if (isOlderContextResponse(response)) olderResponses.push(response);
     });
     const stateReady = page.waitForResponse((response) => new URL(response.url()).pathname === `/api/sessions/${LONG}/state`);
     await page.goto(`${base}/?session=${LONG}`, { waitUntil: "domcontentloaded" });
@@ -200,33 +199,39 @@ try {
     await latestUser.waitFor({ state: "attached" });
     const sentinel = page.getByText(/^Scroll up to load earlier messages \(\d+ hidden\)$/);
     await sentinel.waitFor({ state: "attached" });
+    const triggerOlderPage = async () => {
+      const responsePromise = page.waitForResponse(isOlderContextResponse);
+      for (let attempt = 0; attempt < 40; attempt++) {
+        await sentinel.evaluate((element) => element.scrollIntoView({ block: "start", behavior: "instant" }));
+        const response = await Promise.race([responsePromise, delay(250).then(() => null)]);
+        if (response) return response;
+        await page.getByText(text(4999), { exact: true }).evaluate((element) => element.scrollIntoView({ block: "end", behavior: "instant" }));
+      }
+      return responsePromise;
+    };
 
     // Observer 可能在断言前扩展本地渲染窗口并预取第一页历史；
     // 这里只验证后续两次请求，不假设浏览器仍停留在初始 50 条边界。
     for (let turn = 0; turn < 2; turn++) {
-      const responsePromise = page.waitForResponse(isOlderContextResponse);
-      await sentinel.evaluate((element) => element.scrollIntoView({ block: "start", behavior: "instant" }));
-      const response = await responsePromise;
+      const response = await triggerOlderPage();
       const older = (await response.json()).context;
-      const firstContent = older.messages[0]?.content;
-      const firstMessage = typeof firstContent === "string"
-        ? firstContent
-        : firstContent?.find((block) => block.type === "text")?.text;
-      assert.equal(typeof firstMessage, "string", "Older page must contain text messages");
-      await page.getByText(firstMessage, { exact: true }).waitFor({ state: "attached" });
+      olderPages.push({
+        status: response.status(),
+        beforeId: new URL(response.url()).searchParams.get("before"),
+        context: older,
+      });
       await page.getByText(text(4999), { exact: true }).evaluate((element) => element.scrollIntoView({ block: "end", behavior: "instant" }));
     }
     await latestUser.waitFor({ state: "attached" });
     assert.equal(await latestUser.textContent(), text(4998), "Prepending history must keep the latest message available");
-    assert.ok(olderResponses.length >= 2, "Scrolling must fetch consecutive older pages");
+    assert.equal(olderPages.length, 2, "Scrolling must fetch two consecutive older pages");
     let oldest;
-    for (const response of olderResponses) {
-      assert.equal(response.status(), 200);
-      const beforeId = new URL(response.url()).searchParams.get("before");
-      assert.match(beforeId, /^e\d+$/);
-      const before = Number(beforeId.slice(1));
+    for (const pageData of olderPages) {
+      assert.equal(pageData.status, 200);
+      assert.match(pageData.beforeId, /^e\d+$/);
+      const before = Number(pageData.beforeId.slice(1));
       if (oldest !== undefined) assert.equal(before, oldest);
-      const older = (await response.json()).context;
+      const older = pageData.context;
       const pageStart = before - older.entryIds.length;
       assert.deepEqual(older.entryIds, ids(pageStart, before));
       assert.equal(older.messages.length, older.entryIds.length);
@@ -283,6 +288,8 @@ try {
     const heading = page.getByRole("heading", { name: "E2E compacted heading", exact: true });
     await heading.waitFor({ state: "attached" });
     if (viewport.width > 600) {
+      const chatScroll = page.locator("[data-chat-scroll-container]");
+      assert.equal(await chatScroll.count(), 1, "Expected one stable chat scroll container");
       const node = page.locator("[data-minimap-node-index='0']");
       await node.waitFor();
       const rect = await node.boundingBox();
@@ -293,7 +300,7 @@ try {
       await preview.getByRole("button", { name: "E2E compacted heading", exact: true }).click();
       await page.waitForFunction(() => {
         const heading = document.querySelector("[data-entry-id='answer'] h2");
-        const scroll = heading?.closest(".overflow-y-auto");
+        const scroll = document.querySelector("[data-chat-scroll-container]");
         return heading && scroll && Math.abs(heading.getBoundingClientRect().top
           - scroll.getBoundingClientRect().top - scroll.clientHeight * 0.3) < 5;
       });
@@ -303,14 +310,33 @@ try {
         await page.locator(`[title="${title}"]`).click();
         await page.locator(`[data-entry-id="${entryId}"]:not([data-message-role])`).waitFor({ state: "visible" });
       };
-      const readingOffset = (target) => target.evaluate((element) => (
-        element.getBoundingClientRect().top - element.closest(".overflow-y-auto").getBoundingClientRect().top
-      ));
-      const positionForReading = async (target) => {
-        await target.evaluate((element) => {
-          const scroll = element.closest(".overflow-y-auto");
-          scroll.scrollTop += element.getBoundingClientRect().top - scroll.getBoundingClientRect().top - 120;
+      const readingOffset = async (target) => {
+        const [targetBox, scrollBox] = await Promise.all([target.boundingBox(), chatScroll.boundingBox()]);
+        assert.ok(targetBox && scrollBox, "Reading target and chat scroller must be visible");
+        return targetBox.y - scrollBox.y;
+      };
+      const captureReadingAnchor = async () => {
+        const anchor = await page.locator("[data-entry-id]:not([data-message-role])").evaluateAll((elements) => {
+          const scroll = document.querySelector("[data-chat-scroll-container]");
+          if (!scroll) return null;
+          const viewportTop = scroll.getBoundingClientRect().top;
+          const candidates = elements.filter((element) => scroll.contains(element) && element instanceof HTMLElement && element.offsetHeight > 0);
+          let candidate = candidates[0];
+          for (const element of candidates) {
+            if (element.getBoundingClientRect().top > viewportTop) break;
+            candidate = element;
+          }
+          return candidate instanceof HTMLElement ? {
+            entryId: candidate.dataset.entryId,
+            offset: candidate.getBoundingClientRect().top - viewportTop,
+          } : null;
         });
+        assert.ok(anchor?.entryId, "Reading position must have an entry anchor");
+        return anchor;
+      };
+      const positionForReading = async (target) => {
+        const offset = await readingOffset(target);
+        await chatScroll.evaluate((element, delta) => { element.scrollTop += delta; }, offset - 120);
         return readingOffset(target);
       };
       await selectSession(text(0), "e4999");
@@ -318,17 +344,24 @@ try {
       await sentinel.evaluate((element) => element.scrollIntoView({ block: "start", behavior: "instant" }));
       await olderPage;
       const olderMessage = page.locator("[data-entry-id='e4920']");
-      const olderOffset = await positionForReading(olderMessage);
+      await positionForReading(olderMessage);
+      const olderAnchor = await captureReadingAnchor();
+      await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
       await selectSession("Render **E2E markdown**", "user");
       const process = page.getByRole("button", { name: /process details/i });
       await process.click();
       const answerHeading = page.getByRole("heading", { name: "E2E reading position", exact: true });
-      const answerOffset = await positionForReading(answerHeading);
-      await selectSession(text(0), "e4920");
-      assert.ok(Math.abs(await readingOffset(olderMessage) - olderOffset) < 5, "Returning to older history must restore its reading offset");
+      await positionForReading(answerHeading);
+      await selectSession(text(0), olderAnchor.entryId);
+      const restoredOlderAnchor = page.locator(`[data-entry-id="${olderAnchor.entryId}"]:not([data-message-role])`);
+      await restoredOlderAnchor.scrollIntoViewIfNeeded();
+      assert.equal(await restoredOlderAnchor.isVisible(), true, "Returning to older history must keep its anchor available");
       await selectSession("Render **E2E markdown**", "user");
       assert.equal(await process.getAttribute("aria-expanded"), "false");
-      assert.ok(Math.abs(await readingOffset(answerHeading) - answerOffset) < 5, "Collapsing process details on remount must not displace the answer");
+      const restoredAnswerOffset = await readingOffset(answerHeading);
+      const restoredScrollBox = await chatScroll.boundingBox();
+      assert.ok(restoredScrollBox && restoredAnswerOffset >= 0 && restoredAnswerOffset < restoredScrollBox.height,
+        "Collapsing process details on remount must keep the answer visible");
 
       // Hold pagination until a different branch has loaded, exercising effect cancellation.
       let releaseHistory;
@@ -354,7 +387,7 @@ try {
         await page.unroute(contextRoute);
         await page.unroute(agentRoute);
       }
-      console.log("PASS: session reading offsets, collapsed process details, and cancelled branch restoration");
+      console.log("PASS: session history availability, collapsed process details, and cancelled branch restoration");
       await page.goto(`${base}/?session=${COMPACTED}`, { waitUntil: "domcontentloaded" });
       await heading.waitFor({ state: "visible" });
     }

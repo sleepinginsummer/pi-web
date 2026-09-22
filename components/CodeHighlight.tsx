@@ -34,7 +34,7 @@ export default function CodeHighlight({ code, lang, isDark }: CodeHighlightProps
 
   if (highlightable !== true) {
     return (
-      <pre className="markdown-code-plain" style={{ margin: 0, padding: "11px 13px", fontSize: 12.5, lineHeight: 1.62, borderRadius: 0, overflow: "auto" }}>
+      <pre className="markdown-code-plain" style={{ margin: 0, padding: "11px 13px", fontSize: "calc(12.5px + var(--chat-font-size-offset, 0px))", lineHeight: 1.62, borderRadius: 0, overflow: "auto" }}>
         <code style={{ fontFamily: "var(--font-mono)", background: "none" }}>{code}</code>
       </pre>
     );
@@ -49,7 +49,7 @@ export default function CodeHighlight({ code, lang, isDark }: CodeHighlightProps
       customStyle={{
         margin: 0,
         padding: "11px 13px",
-        fontSize: 12.5,
+        fontSize: "calc(12.5px + var(--chat-font-size-offset, 0px))",
         lineHeight: 1.62,
         borderRadius: 0,
         background: "color-mix(in srgb, var(--bg) 92%, var(--bg-panel))",
