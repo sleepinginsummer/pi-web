@@ -2412,6 +2412,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleQueuedSubmit = useCallback(async (
     message: string,
     mode: "steer" | "followUp",
+    images?: AttachedImage[],
   ): Promise<boolean> => {
     if (!isNavigationActive(navigationKey)) return false;
     const sid = sessionIdRef.current;
@@ -2419,14 +2420,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       addNotice({ type: "error", message: "当前会话尚未就绪，消息未发送" });
       return false;
     }
-    const shadowResult = await runShadowSlashCommand(message, sid);
-    if (shadowResult.handled) {
-      if (!shadowResult.success) addNotice({ type: "error", message: shadowResult.error });
-      return shadowResult.success;
+    if (!images?.length) {
+      const shadowResult = await runShadowSlashCommand(message, sid);
+      if (shadowResult.handled) {
+        if (!shadowResult.success) addNotice({ type: "error", message: shadowResult.error });
+        return shadowResult.success;
+      }
     }
+    const piImages = images?.map((image) => ({
+      type: "image" as const,
+      data: image.data,
+      mimeType: image.mimeType,
+    }));
     const command = message.startsWith("/")
-      ? { type: "prompt", message, streamingBehavior: mode }
-      : { type: mode === "steer" ? "steer" : "follow_up", message };
+      ? { type: "prompt", message, streamingBehavior: mode, ...(piImages?.length ? { images: piImages } : {}) }
+      : { type: mode === "steer" ? "steer" : "follow_up", message, ...(piImages?.length ? { images: piImages } : {}) };
     try {
       if (!isNavigationActive(navigationKey)) return false;
       const acknowledgement = await sendAgentCommand<AgentSubmitAcknowledgement>(sid, command);

@@ -113,6 +113,18 @@ test("明确拒绝 prompt 时恢复输入并显示错误", () => {
   assert.match(sendSource, /return false;/);
 });
 
+test("运行中排队消息把图片转换为 Pi 图片协议", () => {
+  const queuedSource = source.slice(
+    source.indexOf("const handleQueuedSubmit"),
+    source.indexOf("const handleAbortCompaction"),
+  );
+
+  assert.match(queuedSource, /images\?: AttachedImage\[\]/);
+  assert.match(queuedSource, /const piImages = images\?\.map/);
+  assert.match(queuedSource, /type: "image" as const/);
+  assert.match(queuedSource, /piImages\?\.length \? \{ images: piImages \} : \{\}/);
+});
+
 test("会话切换后旧组件不能提交普通消息或排队消息", () => {
   const sendSource = source.slice(
     source.indexOf("const handleSend = useCallback"),

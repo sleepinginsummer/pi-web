@@ -235,14 +235,19 @@ test("renders compact errors above the input as a wrapping alert", () => {
   assert.ok(html.indexOf('role="alert"') < html.indexOf("<textarea"));
 });
 
-test("图片附件被拒绝时展示明确提示", async () => {
+test("运行期间允许添加图片，仍校验附件大小和数量", async () => {
   const source = await readFile(new URL("./ChatInput.tsx", import.meta.url), "utf8");
   const processImageSource = source.slice(
     source.indexOf("const processImageFiles = useCallback"),
     source.indexOf("const removeImage = useCallback"),
   );
+  const fileInputSource = source.slice(
+    source.indexOf('id="chat-attach-input"'),
+    source.indexOf("onChange=", source.indexOf('id="chat-attach-input"')),
+  );
 
-  assert.match(processImageSource, /chat\.imageAttachmentStreaming/);
+  assert.doesNotMatch(processImageSource, /isStreaming/);
+  assert.doesNotMatch(fileInputSource, /disabled=\{isStreaming\}/);
   assert.match(processImageSource, /file\.size > MAX_ATTACHED_IMAGE_BYTES/);
   assert.match(processImageSource, /chat\.imageAttachmentTooLarge/);
   assert.match(processImageSource, /chat\.imageAttachmentLimit/);
@@ -384,9 +389,12 @@ test("运行中消息仅在服务端确认后清空，失败保留输入", async
 
   assert.match(queuedSource, /queuedSubmitPendingRef\.current\) return/);
   assert.match(queuedSource, /queuedSubmitPendingRef\.current = true/);
+  assert.match(queuedSource, /const submittedImages = \[\.\.\.attachedImages\]/);
   assert.match(queuedSource, /const accepted = await onQueuedSubmit/);
+  assert.match(queuedSource, /submittedImages\.length \? submittedImages : undefined/);
   assert.match(queuedSource, /queuedSubmitTokenRef\.current === token/);
   assert.match(queuedSource, /valueRef\.current\.trim\(\) === msg/);
+  assert.match(queuedSource, /imagesUnchanged/);
   assert.match(source, /readOnly=\{queuedSubmitPending\}/);
   assert.ok(queuedSource.indexOf("clearInput()") < queuedSource.indexOf("finally"));
 });

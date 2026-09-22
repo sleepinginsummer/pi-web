@@ -252,7 +252,6 @@ export const enLocale: LocalePlugin = {
     "chat.quoteQuestion": "My question:",
     "chat.quoteForkFailed": "Unable to create a branch from this message.",
     "chat.attachImage": "Attach image",
-    "chat.imageAttachmentStreaming": "Images cannot be attached while the agent is running. Wait for the current response to finish.",
     "chat.imageAttachmentTooLarge": "This image is {size} MB. The per-image limit is {max} MB.",
     "chat.imageAttachmentLimit": "A message can include at most {max} images.",
     "chat.imageAttachmentReadFailed": "The image could not be read. Please try again.",

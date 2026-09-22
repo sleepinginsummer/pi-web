@@ -37,7 +37,7 @@ interface Props {
   // 返回 false 表示当前状态未接收消息，保留草稿避免用户输入丢失。
   onSend: (message: string, images?: AttachedImage[]) => boolean | void | Promise<boolean | void>;
   onAbort: () => void;
-  onQueuedSubmit?: (message: string, mode: "steer" | "followUp") => Promise<boolean>;
+  onQueuedSubmit?: (message: string, mode: "steer" | "followUp", images?: AttachedImage[]) => Promise<boolean>;
   isStreaming: boolean;
   /** 仅包含文本输入和发送按钮，不显示会话级控件与外边距。 */
   compact?: boolean;
@@ -446,10 +446,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   const processImageFiles = useCallback(async (files: File[]) => {
     if (compact) return;
-    if (isStreaming) {
-      setImageAttachmentError(t("chat.imageAttachmentStreaming"));
-      return;
-    }
     const remaining = Math.max(
       0,
       MAX_ATTACHED_IMAGES - attachedImagesRef.current.length - pendingImageCountRef.current,
@@ -499,7 +495,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     } finally {
       pendingImageCountRef.current -= acceptedImageFiles.length;
     }
-  }, [compact, isStreaming, t]);
+  }, [compact, t]);
 
   const removeImage = useCallback((index: number) => {
     setAttachedImages((prev) => {
@@ -700,7 +696,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     ? t(slashQuery ? "chat.match" : "chat.command")
     : t(slashQuery ? "chat.matches" : "chat.commands", { count: filteredSlashCommands.length });
   const hasInputText = Boolean(value.trim());
-  const canQueueStreamingMessage = hasInputText && attachedImages.length === 0 && !textAttachment && !queuedSubmitPending;
+  const canQueueStreamingMessage = (hasInputText || attachedImages.length > 0) && !textAttachment && !queuedSubmitPending;
   // 模型能力未知时不阻止发送；仅对明确不支持图片的模型提示。
   const showImageUnsupportedWarning = (
     attachedImages.length > 0
@@ -886,16 +882,23 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   const sendQueued = useCallback(async (mode: "steer" | "followup") => {
     const msg = value.trim();
-    if (!msg || attachedImages.length || !onQueuedSubmit || queuedSubmitPendingRef.current) return;
+    const submittedImages = [...attachedImages];
+    if ((!msg && submittedImages.length === 0) || textAttachment || !onQueuedSubmit || queuedSubmitPendingRef.current) return;
     const token = queuedSubmitTokenRef.current + 1;
     queuedSubmitTokenRef.current = token;
     queuedSubmitPendingRef.current = true;
     setQueuedSubmitPending(true);
     onAudioUnlock?.();
     try {
-      const accepted = await onQueuedSubmit(msg, mode === "steer" ? "steer" : "followUp");
-      // 外部草稿恢复等路径仍可能改值；旧 ACK 绝不能清掉较新的输入。
-      if (accepted && queuedSubmitTokenRef.current === token && valueRef.current.trim() === msg) clearInput();
+      const accepted = await onQueuedSubmit(
+        msg,
+        mode === "steer" ? "steer" : "followUp",
+        submittedImages.length ? submittedImages : undefined,
+      );
+      // 外部草稿恢复等路径仍可能改值或附件；旧 ACK 绝不能清掉较新的输入。
+      const imagesUnchanged = attachedImagesRef.current.length === submittedImages.length
+        && attachedImagesRef.current.every((image, index) => image === submittedImages[index]);
+      if (accepted && queuedSubmitTokenRef.current === token && valueRef.current.trim() === msg && imagesUnchanged) clearInput();
     } catch {
       // 提交方负责展示具体错误；这里必须保留输入，避免未处理 rejection 导致静默丢消息。
     } finally {
@@ -904,7 +907,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         setQueuedSubmitPending(false);
       }
     }
-  }, [value, attachedImages.length, onQueuedSubmit, clearInput, onAudioUnlock]);
+  }, [value, attachedImages, textAttachment, onQueuedSubmit, clearInput, onAudioUnlock]);
 
   const getNextSlashIndex = useCallback((direction: "up" | "down" | "left" | "right") => {
     const lastIndex = displayedSlashCommands.length - 1;
@@ -1199,7 +1202,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         type="file"
         accept="image/*"
         multiple
-        disabled={isStreaming}
         style={{
           position: "absolute",
           width: 1,
@@ -1558,7 +1560,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 <button
                   onClick={() => void sendQueued("steer")}
                   disabled={!canQueueStreamingMessage}
-                  title={attachedImages.length ? t("chat.imageAttachmentStreaming") : t("chat.steerHint")}
+                  title={t("chat.steerHint")}
                   style={{
                     display: "flex", alignItems: "center", gap: 5,
                     padding: "7px 12px",
@@ -1581,9 +1583,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 <button
                   onClick={() => void sendQueued("followup")}
                   disabled={!canQueueStreamingMessage}
-                  title={attachedImages.length
-                    ? t("chat.imageAttachmentStreaming")
-                    : `${t("chat.followUpHint")} (${isMobile ? "Ctrl/Cmd+" : ""}Alt/Option+Enter)`}
+                  title={`${t("chat.followUpHint")} (${isMobile ? "Ctrl/Cmd+" : ""}Alt/Option+Enter)`}
                   aria-keyshortcuts={isMobile ? "Control+Alt+Enter Meta+Alt+Enter" : "Alt+Enter"}
                   style={{
                     display: "flex", alignItems: "center", gap: 5,
@@ -1664,13 +1664,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 background: "none", border: "none",
                 borderRadius: 9,
                 color: attachedImages.length ? "var(--accent)" : "var(--text-muted)",
-                cursor: isStreaming ? "not-allowed" : "pointer",
-                opacity: isStreaming ? 0.5 : 1,
-                pointerEvents: isStreaming ? "none" : undefined,
+                cursor: "pointer",
                 transition: "background 0.12s, color 0.12s",
               }}
               onMouseEnter={(e) => {
-                if (isStreaming) return;
                 e.currentTarget.style.background = "var(--bg-hover)";
                 e.currentTarget.style.color = attachedImages.length ? "var(--accent)" : "var(--text)";
               }}

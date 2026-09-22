@@ -252,7 +252,6 @@ export const zhCNLocale: LocalePlugin = {
     "chat.quoteQuestion": "我的问题：",
     "chat.quoteForkFailed": "无法从这条消息创建分支。",
     "chat.attachImage": "附加图片",
-    "chat.imageAttachmentStreaming": "Agent 运行期间不能添加图片，请等待当前回复结束。",
     "chat.imageAttachmentTooLarge": "图片大小为 {size} MB，超过单张 {max} MB 上限。",
     "chat.imageAttachmentLimit": "一条消息最多可附加 {max} 张图片。",
     "chat.imageAttachmentReadFailed": "图片读取失败，请重试。",
