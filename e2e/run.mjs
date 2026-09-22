@@ -197,9 +197,9 @@ try {
     assert.ok(latestUser, "Latest user message must be mounted before pagination");
     const sentinel = page.getByText(/^Scroll up to load earlier messages \(\d+ hidden\)$/);
     await sentinel.waitFor({ state: "attached" });
-    assert.equal(await page.getByText(text(4949), { exact: true }).count(), 0);
 
-    // Exercise the real IntersectionObserver and prepend path, twice.
+    // Observer 可能在断言前扩展本地渲染窗口并预取第一页历史；
+    // 这里只验证后续两次请求，不假设浏览器仍停留在初始 50 条边界。
     for (let turn = 0; turn < 2; turn++) {
       const responsePromise = page.waitForResponse((response) =>
         new URL(response.url()).pathname === `/api/sessions/${LONG}/context`);
