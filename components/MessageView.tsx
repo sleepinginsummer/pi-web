@@ -11,8 +11,10 @@ import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { CustomMessageView } from "./CustomMessageView";
 import { CopyActionIcon, MessageActions, createForkAction, type MessageAction } from "./MessageActions";
 import { formatMessageTime as formatTime, getMessageImages, getMessageText, MessageImage } from "./MessageContentPrimitives";
-import { getAssistantErrorMessage, getThinkingPreview, isDisplayableAssistantBlock } from "@/lib/message-display";
-import { parseUnifiedPatch, type SplitDiffCell } from "@/lib/patch";
+import { getAssistantErrorMessage, getThinkingPreview, isAssistantTruncated, isDisplayableAssistantBlock } from "@/lib/message-display";
+import { parseUnifiedPatch, type SplitDiffCell, type SplitDiffFile } from "@/lib/patch";
+import { isApplyPatchToolName } from "@/lib/tool-names";
+import { parseApplyPatchInput, applyPatchPreviewToFiles, extractApplyPatchPaths, getApplyPatchInputText } from "@/lib/apply-patch";
 import { parseSkillMessage } from "@/lib/skill-block";
 import { getLongUserMessageStats } from "@/lib/long-user-message";
 import { isThinkingExpandedByDefault, THINKING_EXPANDED_EVENT } from "@/lib/thinking-expansion-preference";
@@ -31,6 +33,22 @@ import type {
   ToolCallContent,
   ThinkingContent,
 } from "@/lib/types";
+
+/** 将 provider/id 对应的配置展示名投影到消息元信息，保留响应模型作为回退。 */
+export function getModelDisplayName(provider: string, responseModel: string, modelNames?: Record<string, string>): string {
+  const providerName = provider.toLowerCase();
+  const responseName = responseModel.toLowerCase();
+  const configured = Object.entries(modelNames ?? {}).flatMap(([key, name]) => {
+    const separator = key.indexOf(":");
+    return separator > 0 && key.slice(0, separator).toLowerCase() === providerName
+      ? [{ id: key.slice(separator + 1).toLowerCase(), name }]
+      : [];
+  });
+  return configured.find((model) => model.id === responseName)?.name
+    ?? configured.find((model) => responseName.endsWith(`/${model.id}`))?.name
+    ?? Object.entries(modelNames ?? {}).find(([key]) => key.toLowerCase() === responseName)?.[1]
+    ?? `${provider}/${responseModel}`;
+}
 
 const MAX_THINKING_CACHE_ENTRIES = 100;
 const thinkingContentCache = new Map<string, Promise<string>>();
@@ -233,7 +251,7 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
 function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking }: {
   message: UserMessage;
   cwd?: string;
-  onOpenFile?: (filePath: string) => void;
+  onOpenFile?: (filePath: string, page?: number) => void;
   entryId?: string;
   onFork?: (entryId: string, draft?: ChatDraft) => void;
   forking?: boolean;
@@ -431,6 +449,7 @@ function AssistantMessageView({
   const allBlocks = allBlockItems.map(({ block }) => block);
   const blocks = blockItems.map(({ block }) => block);
   const providerError = getAssistantErrorMessage(message, { isStreaming });
+  const truncated = isAssistantTruncated(message, { isStreaming });
   const [hovered, setHovered] = useState(false);
   const [copied, setCopied] = useState(false);
   const streamStartRef = useRef<number | null>(null);
@@ -591,7 +610,7 @@ function AssistantMessageView({
         }}
       >
         {message.provider && (
-          <span>{modelNames?.[`${message.provider}:${message.model}`] ?? modelNames?.[message.model] ?? message.model}</span>
+          <span>{getModelDisplayName(message.provider, message.model, modelNames)}</span>
         )}
         {isStreaming && (() => {
           const est = Math.round(estimatedTokens);
@@ -645,6 +664,27 @@ function AssistantMessageView({
           }}
         >
           Error: {providerError}
+        </div>
+      )}
+
+      {truncated && (
+        <div
+          role="alert"
+          style={{
+            marginTop: blocks.length > 0 || providerError ? 8 : 0,
+            padding: "7px 10px",
+            border: "1px solid rgba(234,179,8,0.3)",
+            borderRadius: 6,
+            background: "rgba(234,179,8,0.07)",
+            color: "#ca8a04",
+            fontFamily: "var(--font-mono)",
+            fontSize: 12,
+            lineHeight: 1.5,
+            whiteSpace: "pre-wrap",
+            overflowWrap: "anywhere",
+          }}
+        >
+          {t("chat.truncatedByOutputLimit")}
         </div>
       )}
 
@@ -840,6 +880,10 @@ function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; re
   const isStreamingInput = block.rawInput !== undefined;
   const isEditTool = isEditToolName(block.toolName);
   const resultDiff = result && !result.isError ? getResultDiff(result) : null;
+  const patchFiles = getApplyPatchFiles(block, result);
+  const patchLabel = isApplyPatchToolName(block.toolName)
+    ? summarizeApplyPatchInput(block)
+    : null;
 
   // Result display
   const resultText = result
@@ -902,8 +946,8 @@ function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; re
         </svg>
       </button>
 
-      {/* ── Expanded: input args ── */}
-      {expanded && (isStreamingInput || !isEditTool) && (
+      {/* ── Expanded: input args (only when no richer view exists) ── */}
+      {expanded && (isStreamingInput || !isEditTool) && !patchFiles && (
         <pre
           style={{
             margin: 0,
@@ -923,17 +967,36 @@ function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; re
         </pre>
       )}
 
+      {/* ── Result images — always visible, independent of the collapsed details ── */}
+      {resultImages.length > 0 && <div style={{ display: "flex", gap: 8, flexWrap: "wrap", padding: 10 }}>{resultImages.map((image, index) => <MessageImage key={index} image={image} variant="assistant" />)}</div>}
+
+      {/* ── Expanded: applied-patch split diff ── */}
+      {expanded && patchFiles && (
+        <div style={{ borderTop: "1px solid rgba(34,197,94,0.15)", background: "var(--bg)" }}>
+          <SplitFilesView files={patchFiles} />
+        </div>
+      )}
+
       {/* ── Paired result — only shown when expanded ── */}
-      {expanded && result && (
+      {expanded && result && patchFiles && isError && (
+        <PairedResult
+          text={resultText ?? ""}
+          textBlocks={result.content.filter((item): item is TextContent => item.type === "text")}
+          images={[]}
+          isEmpty={resultIsEmpty}
+          isError={isError}
+        />
+      )}
+      {expanded && result && !patchFiles && (
         resultDiff ? (
           <PairedDiffResult
             diff={resultDiff}
           />
-        ) : (
+        ) : (!resultIsEmpty || resultImages.length === 0) && (
           <PairedResult
             text={resultText ?? ""}
             textBlocks={result.content.filter((item): item is TextContent => item.type === "text")}
-            images={resultImages}
+            images={[]}
             isEmpty={resultIsEmpty}
             isError={isError}
           />
@@ -963,9 +1026,13 @@ function PairedDiffResult({ diff }: {
 }
 
 function SplitPatchView({ text }: { text: string }) {
-  const { t } = useI18n();
   const files = useMemo(() => parseUnifiedPatch(text), [text]);
   if (!files) return <PatchTextView text={text} />;
+  return <SplitFilesView files={files} />;
+}
+
+function SplitFilesView({ files }: { files: SplitDiffFile[] }) {
+  const { t } = useI18n();
   const showFileHeaders = files.length > 1;
 
   return (
@@ -1162,6 +1229,37 @@ function PatchTextView({ text }: { text: string }) {
   );
 }
 
+/**
+ * Split diff rows for an apply_patch-style tool call.
+ *
+ * Prefers parsing the V4A patch document from the call input. The extension's
+ * applied result preview contains the complete old/new file with unchanged
+ * lines, so it is only used as a fallback when the call input is unavailable.
+ * A single call may contain several file operations — each becomes its own
+ * file section.
+ */
+function getApplyPatchFiles(block: ToolCallContent, result?: ToolResultMessage): SplitDiffFile[] | null {
+  if (!isApplyPatchToolName(block.toolName)) return null;
+
+  const fromInput = parseApplyPatchInput(getApplyPatchInputText(block.input, block.rawInput));
+  if (fromInput) return fromInput;
+
+  const details = result && !result.isError ? (result as ToolResultMessage & { details?: unknown }).details : undefined;
+  if (isRecord(details)) {
+    const fromPreview = applyPatchPreviewToFiles(details.preview);
+    if (fromPreview) return fromPreview;
+  }
+
+  return null;
+}
+
+/** Header label listing the files targeted by an apply_patch call. */
+function summarizeApplyPatchInput(block: ToolCallContent): string | null {
+  const paths = extractApplyPatchPaths(getApplyPatchInputText(block.input, block.rawInput));
+  if (paths.length === 0) return null;
+  return paths.join(", ").slice(0, 120);
+}
+
 function getResultDiff(result: ToolResultMessage): ResultDiff | null {
   const details = (result as ToolResultMessage & { details?: unknown }).details;
   if (!isRecord(details)) return null;
@@ -1197,7 +1295,6 @@ function PairedResult({ text, textBlocks, images, isEmpty, isError }: {
   isError: boolean;
 }) {
   const { t } = useI18n();
-  const showText = !isEmpty || images.length === 0;
   return (
     <div
       style={{
@@ -1210,7 +1307,7 @@ function PairedResult({ text, textBlocks, images, isEmpty, isError }: {
           {images.map((image, index) => <MessageImage key={index} image={image} variant="assistant" />)}
         </div>
       )}
-      {showText && (textBlocks.some((block) => block.deferredUrl) ? (
+      {(text.trim() !== "" || textBlocks.length > 0) && (textBlocks.some((block) => block.deferredUrl) ? (
         <div style={{ padding: "8px 10px", background: "var(--bg)" }}>
           {textBlocks.map((block, index) => <TextBlock key={index} block={block} />)}
         </div>

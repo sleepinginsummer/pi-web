@@ -101,6 +101,7 @@ export function parseModelsData(value: unknown): ModelsDataParseResult {
       models: parseModels(value.models),
       modelList: parseModelList(value.modelList),
       defaultModel: parseDefaultModel(value.defaultModel),
+      defaultThinkingLevel: isThinkingLevel(value.defaultThinkingLevel) ? value.defaultThinkingLevel : null,
       thinkingLevels: parseThinkingLevels(value.thinkingLevels, diagnostics),
       thinkingLevelMaps: parseThinkingMaps(value.thinkingLevelMaps, diagnostics),
       thinkingLevelPins: parsePins(value.thinkingLevelPins, diagnostics),

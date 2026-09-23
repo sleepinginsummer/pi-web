@@ -13,6 +13,7 @@ export interface ModelSelectionState {
   thinkingLevelPins: Record<string, ThinkingLevel>;
   newSessionModel: SelectedModel | null;
   newSessionDefaultModel: SelectedModel | null;
+  newSessionDefaultThinkingLevel: ThinkingLevel | null;
   thinkingLevel: ThinkingLevelOption;
 }
 
@@ -24,6 +25,7 @@ export interface ModelSelectionViewState {
   scopeWarnings: string[];
   dataDiagnostics: ModelsDataDiagnostic[];
   thinkingLevel: ThinkingLevelOption;
+  isAutoThinkingSelection: boolean;
   model: SelectedModel | null;
   isAutoModelSelection: boolean;
   availableThinkingLevels: readonly ThinkingLevel[] | null;

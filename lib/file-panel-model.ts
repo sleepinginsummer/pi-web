@@ -4,10 +4,12 @@ export interface FileTab {
   filePath: string;
   sourceSessionId?: string | null;
   initialDisplayMode?: "source" | "preview" | "diff";
+  page?: number;
 }
 
 export interface OpenFileOptions {
   modeHint?: "diff";
+  page?: number;
   sourceSessionId?: string | null;
 }
 
@@ -32,6 +34,7 @@ export function openFileTab(
       ...tab,
       ...(options.sourceSessionId ? { sourceSessionId: options.sourceSessionId } : {}),
       ...(options.modeHint ? { initialDisplayMode: options.modeHint } : {}),
+      ...(options.page !== undefined ? { page: options.page } : {}),
     })
     : [...state.tabs, {
       id: tabId,
@@ -39,6 +42,7 @@ export function openFileTab(
       filePath,
       sourceSessionId: options.sourceSessionId,
       initialDisplayMode: options.modeHint,
+      page: options.page,
     }];
   return { tabs, activeTabId: tabId, isOpen: true };
 }

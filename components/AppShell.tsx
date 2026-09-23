@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect, useMemo } from "react";
+import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { SessionSidebar } from "./SessionSidebar";
@@ -35,7 +35,8 @@ import { openNotificationTarget } from "@/lib/notification-navigation";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { getFileName } from "@/lib/file-paths";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
-import { getInitialNavigation } from "@/lib/initial-navigation";
+import { getInitialNavigation, withTabOpen } from "@/lib/initial-navigation";
+import { getTabOpen } from "@/lib/tab-session";
 import {
   getDefaultRightPanelWidth,
   getRightPanelMaxWidth,
@@ -58,7 +59,7 @@ import type { ToolEntry } from "@/lib/tool-presets";
 export function AppShell() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [initialNavigation] = useState(() => getInitialNavigation(searchParams ?? new URLSearchParams()));
+  const [initialNavigation, setInitialNavigation] = useState(() => getInitialNavigation(searchParams ?? new URLSearchParams()));
   const { locale, t: translate } = useI18n();
   const isMobile = useIsMobile();
   const [initialCwdStatus, setInitialCwdStatus] = useState<"idle" | "validating" | "ready" | "error">(
@@ -121,7 +122,7 @@ export function AppShell() {
   const handleOpenFile = useCallback((
     filePath: string,
     fileName: string,
-    options?: { sourceSessionId?: string | null; modeHint?: "diff" },
+    options?: { sourceSessionId?: string | null; modeHint?: "diff"; page?: number },
   ) => {
     setActiveTerminalTabId(null);
     openFileTab(filePath, fileName, options);
@@ -238,6 +239,12 @@ export function AppShell() {
     storageKey: "pi-right-panel-width",
     widthRef: rightPanelWidthRef,
   });
+  const [rightPanelExpanded, setRightPanelExpanded] = useState(false);
+  const rightPanelFullWidth = rightPanelOpen && rightPanelExpanded && !isMobile;
+  useEffect(() => {
+    if (rightPanelFullWidth) closeTopPanel();
+  }, [rightPanelFullWidth, closeTopPanel]);
+  useEffect(() => { if (!rightPanelOpen || isMobile) setRightPanelExpanded(false); }, [rightPanelOpen, isMobile]);
   const reclampSidebarWidth = sidebarResizer.reclampWidth;
   const reclampRightPanelWidth = rightPanelResizer.reclampWidth;
   // On mobile the sidebar is an overlay drawer; hide it by default so the chat
@@ -334,6 +341,7 @@ export function AppShell() {
     consumeCwdSyncSuppression,
     dispatchPending: dispatchPendingNewSession,
     initialSessionRestored,
+    markInitialRestorePending,
     isActiveSession,
     isNavigationActive,
     leaveWorkspace,
@@ -357,6 +365,14 @@ export function AppShell() {
     onRefresh: refreshSessions,
     resetSessionViews,
   });
+  // 会话记忆只在挂载后读取，避免 SSR 和客户端首帧因 sessionStorage 不同而水合失败。
+  useLayoutEffect(() => {
+    const next = withTabOpen(initialNavigation, getTabOpen());
+    if (next === initialNavigation) return;
+    if (next.sessionId) markInitialRestorePending();
+    setInitialNavigation(next);
+  }, [initialNavigation, markInitialRestorePending]);
+
   const handleAskInNewChat = useCallback(async (
     prompt: string,
     sourceSessionId: string,
@@ -470,6 +486,9 @@ export function AppShell() {
         // the just-created empty chat during that initial synchronization.
         beginInitialCwd(data.cwd);
         setInitialCwdStatus("ready");
+        if (!new URLSearchParams(window.location.search).get("cwd")) {
+          router.replace(`?cwd=${encodeURIComponent(data.cwd)}`, { scroll: false });
+        }
       })
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
@@ -543,8 +562,8 @@ export function AppShell() {
 
 
 
-  const handleOpenLinkedFile = useCallback((filePath: string) => {
-    handleOpenFile(filePath, getFileName(filePath), { sourceSessionId: selectedSession?.id ?? null });
+  const handleOpenLinkedFile = useCallback((filePath: string, page?: number) => {
+    handleOpenFile(filePath, getFileName(filePath), { sourceSessionId: selectedSession?.id ?? null, page });
   }, [handleOpenFile, selectedSession?.id]);
 
   const handleOpenTerminal = useCallback((cwd: string) => {
@@ -846,6 +865,7 @@ export function AppShell() {
       <div
         ref={sidebarResizer.panelRef}
         id="session-sidebar"
+        inert={rightPanelFullWidth}
         className={`sidebar-container${sidebarOpen ? " sidebar-open" : " sidebar-closed"}${mobileSidebarReady ? "" : " sidebar-mobile-pending"}${sidebarResizer.isResizing ? " sidebar-resizing" : ""}`}
         style={{
           "--sidebar-width": `${sidebarResizer.width}px`,
@@ -862,6 +882,7 @@ export function AppShell() {
       {sidebarOpen && (
         <div
           {...sidebarResizer.separatorProps}
+          inert={rightPanelFullWidth}
           aria-controls="session-sidebar"
           className={`panel-resize-handle sidebar-resize-handle${sidebarResizer.isResizing ? " is-resizing" : ""}`}
           data-resize-handle="sidebar"
@@ -1021,6 +1042,7 @@ export function AppShell() {
       {rightPanelOpen && (
         <div
           {...rightPanelResizer.separatorProps}
+          inert={rightPanelFullWidth}
           aria-controls="file-panel"
           className={`panel-resize-handle right-panel-resize-handle${rightPanelResizer.isResizing ? " is-resizing" : ""}`}
           data-resize-handle="right-panel"
@@ -1032,7 +1054,7 @@ export function AppShell() {
       <div
         ref={rightPanelResizer.panelRef}
         id="file-panel"
-        className={`right-panel-container${rightPanelOpen ? " right-panel-open" : " right-panel-closed"}${rightPanelResizer.isResizing ? " right-panel-resizing" : ""}`}
+        className={`right-panel-container${rightPanelOpen ? " right-panel-open" : " right-panel-closed"}${rightPanelFullWidth ? " right-panel-full-width" : ""}${rightPanelResizer.isResizing ? " right-panel-resizing" : ""}`}
         style={{
           "--right-panel-width": `${rightPanelResizer.width}px`,
           display: "flex",
@@ -1051,6 +1073,23 @@ export function AppShell() {
               onCloseTab={handleClosePanelTab}
             />
           </div>
+          {rightPanelOpen && isMobile && (
+            <button type="button" className="file-viewer-icon-button"
+              title={translate("files.hidePanel")}
+              aria-label={translate("files.hidePanel")}
+              onClick={closeFilePanel}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><path d="M5 5l14 14M19 5L5 19" /></svg>
+            </button>
+          )}
+          {rightPanelOpen && !isMobile && (
+            <button type="button" className="file-viewer-icon-button"
+              aria-pressed={rightPanelFullWidth}
+              title={translate(rightPanelFullWidth ? "files.restorePanelWidth" : "files.expandPanel")}
+              aria-label={translate(rightPanelFullWidth ? "files.restorePanelWidth" : "files.expandPanel")}
+              onClick={() => setRightPanelExpanded((current) => !current)}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="M8 3H3v5M16 21h5v-5M3 3l7 7M21 21l-7-7" /></svg>
+            </button>
+          )}
           {fileTabs.length > 0 && (
             <button
               type="button"
@@ -1081,6 +1120,7 @@ export function AppShell() {
               sourceSessionId={activeFileTab.sourceSessionId}
               gitRefreshKey={explorerRefreshKey}
               initialDisplayMode={activeFileTab.initialDisplayMode}
+              initialPage={activeFileTab.page}
               initialState={activeFileTab.viewerState}
               onStateChange={(viewerState) => handleFileViewerStateChange(
                 activeFileTab.id,
@@ -1089,10 +1129,10 @@ export function AppShell() {
               )}
               watchEnabled={rightPanelOpen}
               onMentionLines={rightPanelOpen ? handleFileLineMention : undefined}
-              onOpenFile={(filePath) => handleOpenFile(
+              onOpenFile={(filePath, page) => handleOpenFile(
                 filePath,
                 getFileName(filePath),
-                { sourceSessionId: activeFileTab.sourceSessionId },
+                { sourceSessionId: activeFileTab.sourceSessionId, page },
               )}
             />
           ) : !activeTerminalTabId ? (

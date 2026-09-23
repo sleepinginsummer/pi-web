@@ -14,6 +14,7 @@ import styles from "./ChatMinimap.module.css";
 
 interface Props {
   messages: AgentMessage[];
+  entryIds: string[];
   streamingMessage: Partial<AgentMessage> | null;
   scrollContainer: RefObject<HTMLDivElement | null>;
   messageRefs: RefObject<(HTMLDivElement | null)[]>;
@@ -29,6 +30,7 @@ const NAVIGATION_ACTIVE_LOCK_MS = 1600;
 
 interface AssistantPreview {
   markdown: string;
+  entryId?: string;
   element: HTMLDivElement | null;
 }
 
@@ -36,6 +38,8 @@ interface TurnInfo {
   userMessage: UserMessage | CustomMessage;
   assistantPreviews: AssistantPreview[];
   scrollTop: number | null;
+  /** Tool calls issued anywhere in this turn's assistant replies. */
+  toolCount: number;
 }
 
 interface NodeInfo {
@@ -53,6 +57,16 @@ function getUserPreview(message: UserMessage | CustomMessage): string {
     .trim();
 }
 
+/** Tool calls in one assistant message. A reply can both answer and call
+ *  tools, so this counts blocks rather than text-less messages. */
+export function countToolCalls(message: AgentMessage | Partial<AgentMessage>): number {
+  if (message.role !== "assistant" || !Array.isArray(message.content)) return 0;
+  return message.content.reduce(
+    (total, block) => total + (block.type === "toolCall" ? 1 : 0),
+    0,
+  );
+}
+
 function getAssistantAnswerMarkdown(message: AgentMessage | Partial<AgentMessage>): string {
   if (message.role !== "assistant") return "";
   const { answerBlocks } = splitFinalAssistantBlocks(message as AssistantMessage);
@@ -61,6 +75,13 @@ function getAssistantAnswerMarkdown(message: AgentMessage | Partial<AgentMessage
     .map((block) => block.text)
     .join("\n\n")
     .trim();
+}
+
+/** 分组折叠时同一消息可能有“过程”和“最终回答”两个 DOM 节点；标题定位必须选实际含标题的节点。 */
+function findRenderedHeadingRoot(scrollEl: HTMLElement, preview: AssistantPreview | null | undefined): HTMLElement | null {
+  if (!preview?.entryId) return preview?.element ?? null;
+  const roots = scrollEl.querySelectorAll<HTMLElement>(`[data-entry-id="${CSS.escape(preview.entryId)}"]`);
+  return Array.from(roots).find((root) => root.querySelector("h1, h2, h3")) ?? preview.element;
 }
 
 function PreviewHeading({
@@ -230,6 +251,7 @@ function layoutNodes(allNodes: NodeInfo[], minimapHeight: number): NodeLayout {
 
 export function ChatMinimap({
   messages,
+  entryIds,
   streamingMessage,
   scrollContainer,
   messageRefs,
@@ -255,6 +277,7 @@ export function ChatMinimap({
   const previewItemRefs = useRef(new Map<number, HTMLDivElement>());
   const previewHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeNodeLockRef = useRef<{ index: number; until: number } | null>(null);
+  const headingAnchorRef = useRef<{ heading: HTMLElement; until: number } | null>(null);
   const pendingNavigationRef = useRef<{
     nodeIndex: number;
     target: "user" | "assistant" | "heading";
@@ -333,7 +356,7 @@ export function ChatMinimap({
       let refIndex = 0;
       let currentTurn: TurnInfo | null = null;
 
-      for (const message of allMessagesRef.current) {
+      for (const [messageIndex, message] of allMessagesRef.current.entries()) {
         const isAnchor = isMessageGroupAnchor(message);
         if (!isAnchor && message.role !== "assistant") continue;
         const element = refs?.[refIndex];
@@ -348,16 +371,19 @@ export function ChatMinimap({
             scrollTop: elementRect
               ? elementRect.top - containerRect.top + scrollEl.scrollTop
               : null,
+            toolCount: 0,
           };
           turns.push(currentTurn);
           continue;
         }
 
         if (!currentTurn) continue;
+        currentTurn.toolCount += countToolCalls(message);
         const answerMarkdown = getAssistantAnswerMarkdown(message);
         if (answerMarkdown) {
           currentTurn.assistantPreviews.push({
             markdown: answerMarkdown,
+            entryId: entryIds[messageIndex],
             element,
           });
         }
@@ -388,7 +414,7 @@ export function ChatMinimap({
           const heading = (
             pendingNavigation.headingIndex === undefined
               ? null
-              : assistant?.element
+              : findRenderedHeadingRoot(scrollEl, assistant)
                 ?.querySelectorAll<HTMLElement>("h1, h2, h3")
                 .item(pendingNavigation.headingIndex)
           );
@@ -404,7 +430,7 @@ export function ChatMinimap({
         scrollEl.scrollTo({ top: Math.max(0, targetTop - targetOffset), behavior: "smooth" });
       }
     }, 150);
-  }, [lockActiveNode, messageRefs, scrollContainer, syncActiveNode]);
+  }, [entryIds, lockActiveNode, messageRefs, scrollContainer, syncActiveNode]);
 
   useEffect(() => {
     const el = scrollContainer.current;
@@ -502,6 +528,45 @@ export function ChatMinimap({
     return nearestNode;
   }, []);
 
+  useEffect(() => {
+    const scrollEl = scrollContainer.current;
+    if (!scrollEl) return;
+    const alignHeading = () => {
+      const anchor = headingAnchorRef.current;
+      if (!anchor) return;
+      if (Date.now() >= anchor.until || !anchor.heading.isConnected) {
+        headingAnchorRef.current = null;
+        return;
+      }
+      const expected = scrollEl.getBoundingClientRect().top + scrollEl.clientHeight * 0.3;
+      const delta = anchor.heading.getBoundingClientRect().top - expected;
+      if (Math.abs(delta) > 2) scrollEl.scrollTo({ top: scrollEl.scrollTop + delta, behavior: "instant" });
+    };
+    const cancelAnchor = () => { headingAnchorRef.current = null; };
+    const cancelOnScrollKey = (event: KeyboardEvent) => {
+      if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)
+        && !(event.target instanceof Element && event.target.closest("input, textarea, [contenteditable='true']"))) {
+        cancelAnchor();
+      }
+    };
+    const observer = new ResizeObserver(alignHeading);
+    if (scrollEl.firstElementChild) observer.observe(scrollEl.firstElementChild);
+    observer.observe(scrollEl);
+    scrollEl.addEventListener("scrollend", alignHeading);
+    window.addEventListener("keydown", cancelOnScrollKey);
+    scrollEl.addEventListener("wheel", cancelAnchor, { passive: true });
+    scrollEl.addEventListener("touchstart", cancelAnchor, { passive: true });
+    scrollEl.addEventListener("pointerdown", cancelAnchor, { passive: true });
+    return () => {
+      observer.disconnect();
+      scrollEl.removeEventListener("scrollend", alignHeading);
+      window.removeEventListener("keydown", cancelOnScrollKey);
+      scrollEl.removeEventListener("wheel", cancelAnchor);
+      scrollEl.removeEventListener("touchstart", cancelAnchor);
+      scrollEl.removeEventListener("pointerdown", cancelAnchor);
+    };
+  }, [scrollContainer]);
+
   const scrollToHeading = useCallback((
     node: NodeInfo,
     assistantIndex: number,
@@ -509,7 +574,8 @@ export function ChatMinimap({
   ) => {
     const scrollEl = scrollContainer.current;
     if (!scrollEl) return;
-    const answerElement = node.targetTurn.assistantPreviews[assistantIndex]?.element;
+    const preview = node.targetTurn.assistantPreviews[assistantIndex];
+    const answerElement = findRenderedHeadingRoot(scrollEl, preview);
     if (!answerElement) {
       pendingNavigationRef.current = {
         nodeIndex: node.index,
@@ -531,6 +597,8 @@ export function ChatMinimap({
       - scrollEl.clientHeight * 0.3
     );
     lockActiveNode(node.index);
+    // 首次跳转后内容仍可能补页或重新排版；短暂锚定标题，防止异步布局把阅读位置拉偏。
+    headingAnchorRef.current = { heading, until: Date.now() + 2000 };
     scrollEl.scrollTo({ top: Math.max(0, targetTop), behavior: "smooth" });
   }, [lockActiveNode, onRevealHistory, scrollContainer]);
 
@@ -701,8 +769,20 @@ export function ChatMinimap({
                 data-minimap-preview-index={node.index}
                 data-located={isLocated ? "true" : undefined}
               >
-                <span className={styles.number} aria-hidden="true">
-                  {String(node.index + 1).padStart(2, "0")}
+                <span className={styles.number}>
+                  <span aria-hidden="true">
+                    {String(node.index + 1).padStart(2, "0")}
+                  </span>
+                  {node.targetTurn.toolCount > 0 && (
+                    <span
+                      className={styles.toolBadge}
+                      role="img"
+                      title={t("chatMinimap.toolCalls", { count: node.targetTurn.toolCount })}
+                      aria-label={t("chatMinimap.toolCalls", { count: node.targetTurn.toolCount })}
+                    >
+                      {node.targetTurn.toolCount > 99 ? "99+" : node.targetTurn.toolCount}
+                    </span>
+                  )}
                 </span>
                 <div className={styles.content}>
                   <button

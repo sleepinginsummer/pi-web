@@ -11,6 +11,7 @@ import { parseThinkingLevelOption, type ThinkingLevel, type ThinkingLevelOption 
 interface ModelsLoadedPayload {
   state: Pick<ModelSelectionState, "names" | "list" | "error" | "scopeWarnings" | "dataDiagnostics" | "thinkingLevels" | "thinkingLevelMaps" | "thinkingLevelPins">;
   defaultModel?: SelectedModel | null;
+  defaultThinkingLevel?: ThinkingLevel | null;
   pinnedThinkingLevel?: ThinkingLevel;
 }
 
@@ -75,6 +76,7 @@ export const initialModelSelectionState: ModelSelectionState = {
   thinkingLevelPins: {},
   newSessionModel: null,
   newSessionDefaultModel: null,
+  newSessionDefaultThinkingLevel: null,
   thinkingLevel: "auto",
 };
 
@@ -85,7 +87,10 @@ export function modelSelectionReducer(state: ModelSelectionState, action: ModelS
         ...state,
         ...action.payload.state,
         ...(action.applyNewSessionDefaults
-          ? { newSessionDefaultModel: action.payload.defaultModel ?? null }
+          ? {
+              newSessionDefaultModel: action.payload.defaultModel ?? null,
+              newSessionDefaultThinkingLevel: action.payload.defaultThinkingLevel ?? null,
+            }
           : {}),
         ...(action.applyNewSessionDefaults && action.applyPinnedThinking && action.payload.pinnedThinkingLevel
           ? { thinkingLevel: action.payload.pinnedThinkingLevel }
@@ -160,6 +165,7 @@ export function useModelSelection() {
             thinkingLevelPins: data.thinkingLevelPins ?? {},
           },
           defaultModel,
+          defaultThinkingLevel: data.defaultThinkingLevel,
         },
       });
 

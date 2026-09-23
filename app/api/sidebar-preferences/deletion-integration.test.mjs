@@ -13,8 +13,8 @@ test("权威项目删除完成后 best-effort 清理侧边栏偏好", () => {
 });
 
 test("权威会话删除完成后 best-effort 清理侧边栏偏好", () => {
-  const deleteIndex = sessionRoute.indexOf("const trashedName = trashSessionFile(filePath)");
-  const cleanupIndex = sessionRoute.indexOf("await removeSidebarPreferenceIds({ sessionIds: [id] })");
+  const deleteIndex = sessionRoute.indexOf("const name = trashSessionFile(deletedPath)");
+  const cleanupIndex = sessionRoute.indexOf("await removeSidebarPreferenceIds({ sessionIds: [...deletedSessionIds] })");
   assert.ok(deleteIndex >= 0 && cleanupIndex > deleteIndex);
   assert.match(sessionRoute.slice(deleteIndex), /catch \(error\)[\s\S]*?清理已删除会话的侧边栏偏好失败/);
 });

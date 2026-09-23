@@ -587,6 +587,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     newSessionModel,
     newSessionDefaultModel,
     thinkingLevel,
+    newSessionDefaultThinkingLevel,
   } = modelSelectionState;
   const [fastEnabled, setFastEnabled] = useState(false);
   const [runtimeFastAvailable, setRuntimeFastAvailable] = useState<boolean | null>(null);
@@ -1587,6 +1588,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, []);
 
   const scheduleEventStreamClose = useCallback((sid: string) => {
+    if (session?.id === sid) {
+      cancelEventStreamGrace();
+      return;
+    }
     cancelEventStreamGrace();
     const generation = eventStreamGraceGenerationRef.current;
     eventStreamGraceTimerRef.current = setTimeout(() => {
@@ -1598,7 +1603,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         && !shadowLifecycleRef.current.hasActiveRuns
       ) closeEvents();
     }, EVENT_STREAM_IDLE_GRACE_MS);
-  }, [cancelEventStreamGrace, closeEvents]);
+  }, [cancelEventStreamGrace, closeEvents, session?.id]);
 
   /** 本地发送、外部 agent_start 与挂载恢复统一从这里采用主运行。 */
   const enterMainRun = useCallback((phase: AgentPhase): number => {
@@ -2251,7 +2256,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     try {
       await sendAgentCommand(sid, { type: "set_model", provider, modelId });
       modelSwitchPendingRef.current = false;
-      await loadSession(sid);
+      invalidateSessionContext(sid);
+      await loadSession(sid, false, true);
     } catch (e) {
       console.error("Failed to switch model:", e);
       modelSwitchPendingRef.current = false;
@@ -2260,7 +2266,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         type: "error",
         message: `Failed to switch model: ${e instanceof Error ? e.message : String(e)}`,
       });
-      await loadSession(sid);
+      invalidateSessionContext(sid);
+      await loadSession(sid, false, true);
     } finally {
       modelSwitchPendingRef.current = false;
       setModelSwitching(false);
@@ -2332,6 +2339,24 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           setCompactResult(readCompactResult(result, "manual"));
           if (await loadCompactedSession(sid, true)) promoteNewSession();
           return complete({ handled: true, message: "Compacted context" });
+        }
+
+        case "auto-compact": {
+          if (!sid) return complete({ handled: true, error: "No active session" });
+          // Read the live wrapper (this POST starts it if idle) so the toggle
+          // follows settings.json, not the React default of `true`.
+          const liveState = await sendAgentCommand<AgentRuntimeState>(sid, { type: "get_state" });
+          const nextEnabled = !(liveState?.autoCompactionEnabled ?? true);
+          await sendAgentCommand(sid, {
+            type: "set_auto_compaction",
+            enabled: nextEnabled,
+          });
+          return complete({
+            handled: true,
+            message: nextEnabled
+              ? "Auto-compaction enabled"
+              : "Auto-compaction disabled",
+          });
         }
 
         case "reload": {
@@ -2477,17 +2502,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption) => {
     if (creationSettingsLocked) return;
-    modelSelectionActions.setThinkingLevel(level);
     if (isNew && !sessionIdRef.current) {
       thinkingLevelOverrideRef.current = level === "auto" ? null : level;
       if (newSessionCwd) onPendingNewSessionEvent(newSessionCwd, { type: "SET_THINKING_LEVEL", level });
       recommendedThinkingLevelRef.current = null;
     }
-    if (level === "auto") return; // "auto" leaves pi's current setting untouched
+    if (level === "auto") {
+      // 活动会话的 Auto 不写入运行时；新会话显示 settings.json 的解析默认值。
+      if (isNew) modelSelectionActions.setThinkingLevel("auto");
+      return;
+    }
+    modelSelectionActions.setThinkingLevel(level);
     const sid = sessionIdRef.current;
     if (!sid) return;
     try {
       await sendAgentCommand(sid, { type: "set_thinking_level", level });
+      if (sessionIdRef.current === sid) modelSelectionActions.setThinkingLevel(level);
     } catch (e) {
       console.error("Failed to set thinking level:", e);
     }
@@ -2666,7 +2696,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       error: modelError,
       scopeWarnings: modelScopeWarnings,
       dataDiagnostics: modelDataDiagnostics,
-      thinkingLevel,
+      thinkingLevel: isNew && thinkingLevel === "auto"
+        ? newSessionDefaultThinkingLevel ?? "auto"
+        : thinkingLevel,
+      isAutoThinkingSelection: isNew && thinkingLevelOverrideRef.current === null,
       model: displayModel,
       isAutoModelSelection: isNew && newSessionModel === null,
       availableThinkingLevels: modelKey ? (modelThinkingLevels[modelKey] ?? null) : null,
@@ -2678,7 +2711,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     };
   }, [
     displayModel, displayModelFastAvailable, isNew, modelDataDiagnostics, modelError, modelList, modelNames,
-    fastEnabled, fastPending, modelScopeWarnings, modelSwitching, modelThinkingLevelMaps, modelThinkingLevels, newSessionModel, runtimeFastAvailable, thinkingLevel,
+    fastEnabled, fastPending, modelScopeWarnings, modelSwitching, modelThinkingLevelMaps, modelThinkingLevels, newSessionModel, newSessionDefaultThinkingLevel, runtimeFastAvailable, thinkingLevel,
   ]);
 
   const modelViewActions = useMemo<ModelSelectionViewActions>(() => ({

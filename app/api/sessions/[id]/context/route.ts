@@ -14,7 +14,7 @@ export async function GET(
   const leafId = url.searchParams.get("leafId") ?? undefined;
   const deferThinking = url.searchParams.has("deferThinking");
   const deferToolResultImages = url.searchParams.has("deferMedia");
-  // `tail` 是记录数硬上限；`before` 沿父链向前翻页且不重复边界记录。
+  // `tail` 按可见消息计数，同时限制原始记录数；`before` 不重复边界记录。
   const rawTail = Number(url.searchParams.get("tail"));
   const tail = Number.isFinite(rawTail) && rawTail > 0 ? Math.min(rawTail, 1000) : 50;
   const before = url.searchParams.get("before") ?? undefined;

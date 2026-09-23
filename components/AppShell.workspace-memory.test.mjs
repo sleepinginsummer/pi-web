@@ -26,7 +26,7 @@ test("explicit navigation invalidates a pending workspace restore", () => {
 test("persists every selected-session transition through one effect", () => {
   assert.match(
     navigationSource,
-    /useEffect\(\(\) => \{\s+if \(!selectedSession\) return;[\s\S]*?setLastOpenSession\(workspaceKey, selectedSession\.id\);\s+\}, \[selectedSession\]\);/,
+    /useEffect\(\(\) => \{\s+if \(!selectedSession\) return;[\s\S]*?setLastOpenSession\(workspaceKey, selectedSession\.id\);\s+setTabOpenSession\(selectedSession\.id\);\s+\}, \[selectedSession\]\);/,
   );
 });
 

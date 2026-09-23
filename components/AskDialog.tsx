@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent }
 import { useI18n } from "@/hooks/useI18n";
 import type { ExtensionUiRequest } from "@/lib/types";
 import styles from "./AskDialog.module.css";
+import { MarkdownBody } from "./MarkdownBody";
 import { ChevronDown } from "lucide-react";
 
 type AskDialogRequest = Extract<ExtensionUiRequest, { method: "select" }>;
@@ -26,7 +27,7 @@ function useAskDialogInteraction(
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
-      optionsRef.current?.querySelector<HTMLButtonElement>("button[data-ask-option]")?.focus();
+      optionsRef.current?.querySelector<HTMLElement>("[data-ask-option]")?.focus();
     });
     return () => cancelAnimationFrame(frame);
   }, [request.id]);
@@ -49,13 +50,13 @@ function useAskDialogInteraction(
 
   // 选项使用统一的 roving focus，支持方向键、Home/End 和回车选择。
   const handleOptionsKeyDown = (event: ReactKeyboardEvent) => {
-    if (!["ArrowDown", "ArrowUp", "ArrowRight", "ArrowLeft", "Home", "End", "Enter"].includes(event.key)) return;
-    const buttons = Array.from(optionsRef.current?.querySelectorAll<HTMLButtonElement>("button[data-ask-option]") ?? []);
+    if (!["ArrowDown", "ArrowUp", "ArrowRight", "ArrowLeft", "Home", "End", "Enter", " "].includes(event.key)) return;
+    const buttons = Array.from(optionsRef.current?.querySelectorAll<HTMLElement>("[data-ask-option]") ?? []);
     if (buttons.length === 0) return;
-    const activeIndex = document.activeElement instanceof HTMLButtonElement
+    const activeIndex = document.activeElement instanceof HTMLElement
       ? buttons.indexOf(document.activeElement)
       : -1;
-    if (event.key === "Enter") {
+    if (event.key === "Enter" || event.key === " ") {
       if (activeIndex < 0) return;
       event.preventDefault();
       if (activeIndex === customOptionIndex) openCustom();
@@ -183,15 +184,16 @@ export function AskDialog({ request, remainingSeconds, onSelect, onCancel, onCus
             onSubmit={interaction.submitCustom}
           />
         ) : (
-          <button
+          <div
             key={option}
-            type="button"
+            role="button"
+            tabIndex={0}
             data-ask-option={option}
             onClick={() => onSelect(request, option)}
             className={styles.option}
           >
-            {option}
-          </button>
+            <div inert><MarkdownBody>{option}</MarkdownBody></div>
+          </div>
         ))}
       </div>
     </div>

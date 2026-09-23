@@ -49,6 +49,7 @@ const EMPTY_PROFILE: EditableProfile = {
   tools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
   loadSkills: false,
   loadExtensions: false,
+  promptMode: "append",
   inheritContext: false,
   runInBackground: false,
   enabled: true,
@@ -82,6 +83,7 @@ function editableProfile(profile: SubagentProfile): EditableProfile {
     tools: [...profile.tools],
     loadSkills: profile.loadSkills,
     loadExtensions: profile.loadExtensions,
+    promptMode: profile.promptMode,
     ...(profile.model ? { model: profile.model } : {}),
     ...(profile.thinking ? { thinking: profile.thinking } : {}),
     ...(profile.maxTurns ? { maxTurns: profile.maxTurns } : {}),
@@ -106,6 +108,15 @@ function duplicateProfileName(name: string, profiles: readonly SubagentProfile[]
 
 function isWritableScope(scope: SubagentScope): scope is SubagentWritableScope {
   return scope === "global" || scope === "project";
+}
+
+/**
+ * A built-in has no file to edit, so its fields stay read-only, but its switch is
+ * live: the server records the name in `agents/settings.json` instead of writing a
+ * copy of the profile to disk.
+ */
+function isTogglableScope(scope: SubagentScope): boolean {
+  return isWritableScope(scope) || scope === "builtin";
 }
 
 function shortenPath(path: string): string {
@@ -163,6 +174,7 @@ export function AgentsConfig({
   const [toggling, setToggling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [builtInEnabled, setBuiltInEnabled] = useState(false);
+  const [maxConcurrent, setMaxConcurrent] = useState(10);
   const [settingsLoading, setSettingsLoading] = useState(true);
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
@@ -226,6 +238,7 @@ export function AgentsConfig({
           throw new Error(data.error ?? `HTTP ${response.status}`);
         }
         setBuiltInEnabled(data.enabled);
+        if (typeof data.maxConcurrent === "number") setMaxConcurrent(data.maxConcurrent);
       } catch (cause) {
         if (controller.signal.aborted) return;
         setSettingsError(cause instanceof Error ? cause.message : String(cause));
@@ -358,6 +371,9 @@ export function AgentsConfig({
       : { provider: draft.model.slice(0, separator), modelId: draft.model.slice(separator + 1) };
   })();
   const controlStyle = disabled ? { ...inputStyle, ...disabledInputStyle } : inputStyle;
+  const switchDisabled = creating
+    ? disabled
+    : !selected || !isTogglableScope(selected.scope) || saving || toggling;
   const update = <K extends keyof EditableProfile>(key: K, value: EditableProfile[K]) => {
     setDraft((current) => ({ ...current, [key]: value }));
   };
@@ -367,7 +383,7 @@ export function AgentsConfig({
       update("enabled", enabled);
       return;
     }
-    if (!selected || !isWritableScope(selected.scope)) return;
+    if (!selected || !isTogglableScope(selected.scope)) return;
     setToggling(true);
     setError(null);
     try {
@@ -410,6 +426,23 @@ export function AgentsConfig({
     }
   };
 
+  const updateMaxConcurrent = async (value: number) => {
+    setMaxConcurrent(value);
+    setSettingsError(null);
+    try {
+      const response = await fetch("/api/subagents/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ maxConcurrent: value }),
+      });
+      const data = await response.json() as Partial<SubagentSettingsResponse> & { error?: string };
+      if (!response.ok || data.error || typeof data.maxConcurrent !== "number") throw new Error(data.error ?? `HTTP ${response.status}`);
+      setMaxConcurrent(data.maxConcurrent);
+    } catch (cause) {
+      setSettingsError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
   const reloadSession = async () => {
     if (!sessionId) return;
     setReloading(true);
@@ -439,6 +472,19 @@ export function AgentsConfig({
               {reloading ? t("agents.reloading") : t("agents.reloadSession")}
             </ConfigButton>
           )}
+          <label className="agents-concurrency-control" title={t("agents.maxConcurrentDescription")}>
+            <span>{t("agents.maxConcurrent")}</span>
+            <input
+              aria-label={t("agents.maxConcurrent")}
+              type="number"
+              min={1}
+              max={32}
+              value={maxConcurrent}
+              disabled={settingsLoading || settingsSaving}
+              onChange={(event) => setMaxConcurrent(Number(event.target.value))}
+              onBlur={() => void updateMaxConcurrent(maxConcurrent)}
+            />
+          </label>
           <ConfigSwitch
             checked={builtInEnabled}
             disabled={settingsLoading || reloading}
@@ -505,7 +551,7 @@ export function AgentsConfig({
                     <ConfigDetailActions>
                       {selected && (mode === "view" || mode === "edit") && <ConfigButton size="small" onClick={beginDuplicate} disabled={saving || toggling}>{t("agents.duplicate")}</ConfigButton>}
                       {selected && isWritableScope(selected.scope) && mode === "edit" && <ConfigButton variant="danger" size="small" onClick={() => void remove()} disabled={saving || toggling}>{t("agents.delete")}</ConfigButton>}
-                      <ConfigSwitch checked={draft.enabled} disabled={disabled} label={draft.enabled ? t("agents.disable") : t("agents.enable")} onChange={(checked) => void toggleEnabled(checked)} />
+                      <ConfigSwitch checked={draft.enabled} disabled={switchDisabled} label={draft.enabled ? t("agents.disable") : t("agents.enable")} onChange={(checked) => void toggleEnabled(checked)} />
                     </ConfigDetailActions>
                   </ConfigDetailHeader>
 

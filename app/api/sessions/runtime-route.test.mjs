@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -101,7 +101,7 @@ test("live agent state is available before the session file is persisted", () =>
   assert.match(stateRoute, /if \(snapshot\.alive\)/);
 });
 
-test("deleting an intermediate subagent reparents both relation representations", async (t) => {
+test("删除中间子代理时将后代一同移入回收站", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "pi-web-delete-reparent-"));
   const grandparentPath = join(dir, "grandparent.jsonl");
   const parentPath = join(dir, "parent.jsonl");
@@ -136,7 +136,11 @@ test("deleting an intermediate subagent reparents both relation representations"
     "",
   ].join("\n"));
   cacheSessionPath(parentId, parentPath);
+  const oldAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = dir;
   t.after(async () => {
+    if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
     invalidateSessionPathCache(parentId);
     await rm(dir, { recursive: true, force: true });
   });
@@ -148,15 +152,8 @@ test("deleting an intermediate subagent reparents both relation representations"
 
   assert.equal(response.status, 200);
   await assert.rejects(readFile(parentPath), { code: "ENOENT" });
-  const [childHeaderLine, childMetadataLine] = (await readFile(childPath, "utf8")).trim().split("\n");
-  assert.equal(JSON.parse(childHeaderLine).parentSession, grandparentPath);
-  assert.deepEqual(JSON.parse(childMetadataLine).data, {
-    version: 1,
-    parentSessionId: "delete-reparent-grandparent",
-    parentSessionPath: grandparentPath,
-    profile: "Explore",
-    description: "Inspect parser",
-  });
+  await assert.rejects(readFile(childPath), { code: "ENOENT" });
+  assert.ok((await readdir(join(dir, "trash"))).some((name) => name.endsWith("_child.jsonl")));
 });
 
 test("live detail and state routes work without a persisted JSONL file", async (t) => {

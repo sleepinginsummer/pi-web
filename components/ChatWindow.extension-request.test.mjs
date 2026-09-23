@@ -5,6 +5,7 @@ import test from "node:test";
 const source = await readFile(new URL("./ChatWindow.tsx", import.meta.url), "utf8");
 const dialogSource = source.slice(source.indexOf("function ExtensionDialog"));
 const customSource = source.slice(source.indexOf("function ExtensionCustomPanel"));
+const askSource = await readFile(new URL("./AskDialog.tsx", import.meta.url), "utf8");
 
 test("confines extension overlays to the content region above the composer", () => {
   assert.doesNotMatch(source, /function ExtensionRequestSheet/);
@@ -26,6 +27,19 @@ test("adds collapse without replacing cancel", () => {
   assert.match(dialogSource, /chat\.extensionCollapse/);
   assert.match(dialogSource, /chat\.cancel/);
   assert.doesNotMatch(dialogSource, /chat\.extensionSkip/);
+});
+
+test("renders extension confirmation and options as markdown", () => {
+  assert.match(source, /import \{ MarkdownBody \} from "\.\/MarkdownBody"/);
+  assert.match(dialogSource, /<MarkdownBody>\{request\.message\}<\/MarkdownBody>/);
+  assert.match(askSource, /role="button"[\s\S]*?data-ask-option[\s\S]*?<div inert><MarkdownBody>\{option\}<\/MarkdownBody>/);
+  assert.match(askSource, /querySelector<HTMLElement>\("\[data-ask-option\]"\)/);
+});
+
+test("preserves title newlines like pi's TUI and keeps long titles from hiding the body", () => {
+  const header = dialogSource.slice(dialogSource.indexOf('role="dialog"'), dialogSource.indexOf("{request.method === \"confirm\""));
+  assert.match(header, /whiteSpace: "pre-wrap", overflowWrap: "anywhere" \}\}>\{request\.title\}/);
+  assert.match(header, /maxHeight: "50%", overflowY: "auto" \}\}>[\s\S]*?\{request\.title\}/);
 });
 
 test("resets collapse state when a new extension request arrives", () => {

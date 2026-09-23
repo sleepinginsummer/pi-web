@@ -8,7 +8,7 @@ import {
 
 type NewSessionMaterializationConfig = {
   cwd: string;
-  toolNames: string[];
+  toolNames?: string[];
   shadowMindEnabled: boolean;
   model?: NewSessionModel;
   thinkingLevel?: unknown;
@@ -39,7 +39,7 @@ async function requestNewSessionMaterialization(
       operation: request.operation,
       ...(request.operation === "finalize-existing" ? { sessionId: request.sessionId } : {}),
       type: "ensure_session",
-      toolNames: request.toolNames,
+      ...(request.toolNames !== undefined ? { toolNames: request.toolNames } : {}),
       ...(!request.shadowMindEnabled ? { shadowMindEnabled: false } : {}),
       ...(request.model ? { provider: request.model.provider, modelId: request.model.modelId } : {}),
       ...(request.thinkingLevel ? { thinkingLevel: request.thinkingLevel } : {}),

@@ -358,8 +358,15 @@ export async function readIndexedContextPage(
   let current = byId.get(options.before ?? activeLeafId ?? "");
   if (options.before) current = current?.parentId ? byId.get(current.parentId) : undefined;
   const selected: IndexedRecord[] = [];
-  while (current && selected.length < options.tail) {
+  let visibleCount = 0;
+  const rawLimit = Math.max(200, options.tail * 6);
+  while (current && selected.length < rawLimit) {
     selected.push(current);
+    // 索引中只需读取元信息即可按可见消息分页，不用解析全部历史内容。
+    if (current.type === "compaction" || current.previewRole === "user" || current.previewRole === "assistant") {
+      visibleCount += 1;
+    }
+    if (visibleCount >= options.tail) break;
     current = current.parentId ? byId.get(current.parentId) : undefined;
   }
   let thinkingLevel: string | undefined;

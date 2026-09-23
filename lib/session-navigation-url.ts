@@ -1,6 +1,9 @@
 export function replaceSessionUrl(sessionId: string | null): void {
   const url = new URL(window.location.href);
-  if (sessionId) url.searchParams.set("session", sessionId);
+  if (sessionId) {
+    url.searchParams.delete("cwd");
+    url.searchParams.set("session", sessionId);
+  }
   else url.searchParams.delete("session");
   window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
 }

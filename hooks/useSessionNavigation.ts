@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { clearTabOpenSession, setTabOpenNewSession, setTabOpenSession } from "@/lib/tab-session";
 import { clearDraft } from "@/lib/draft-store";
 import { releaseNewSessionMaterialization } from "@/lib/new-session-materialization-client";
 import { replaceSessionUrl } from "@/lib/session-navigation-url";
@@ -61,6 +62,7 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
       ?? activeWorkspaceKeyRef.current
       ?? workspaceKeyOf(selectedSession);
     setLastOpenSession(workspaceKey, selectedSession.id);
+    setTabOpenSession(selectedSession.id);
   }, [selectedSession]);
 
   const hydrateSelectedSession = useCallback((sessionId: string) => {
@@ -87,7 +89,9 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
     setInitialSessionRestored(true);
     if (isMobile && !isRestore) onMobileSelect();
     if (isRestore) suppressCwdBumpRef.current = true;
-    else replaceSessionUrl(session.id);
+    if (!isRestore || new URLSearchParams(window.location.search).get("session") !== session.id) {
+      replaceSessionUrl(session.id);
+    }
   }, [bumpSessionKey, isMobile, onMobileSelect, resetSessionViews]);
 
   const isActiveSession = useCallback((sessionId: string) => activeSessionIdRef.current === sessionId, []);
@@ -115,10 +119,14 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
       setPendingNewSessions((current) => new Map(current).set(cwd, DEFAULT_PENDING_NEW_SESSION_CONTROL));
     }
     setNewSessionCwd(cwd);
+    setTabOpenNewSession(cwd);
     bumpSessionKey();
     resetSessionViews();
     if (isMobile) onMobileSelect();
-    replaceSessionUrl(null);
+    const url = new URL(window.location.href);
+    url.searchParams.delete("session");
+    url.searchParams.set("cwd", cwd);
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
   }, [bumpSessionKey, invalidateNotificationNavigation, invalidateWorkspaceRestore, isMobile, onMobileSelect, pendingNewSessions, resetSessionViews]);
 
   const sessionCreated = useCallback((session: SessionInfo) => {
@@ -135,6 +143,7 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
       return next;
     });
     setSelectedSession(session);
+    setTabOpenSession(session.id);
     onRefresh();
     hydrateSelectedSession(session.id);
     replaceSessionUrl(session.id);
@@ -144,6 +153,7 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
     invalidateWorkspaceRestore();
     invalidateNotificationNavigation();
     activeSessionIdRef.current = newSessionId;
+    setTabOpenSession(newSessionId);
     onRefresh();
     bumpSessionKey();
     setNewSessionCwd(null);
@@ -159,10 +169,12 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
     invalidateWorkspaceRestore();
     invalidateNotificationNavigation();
     onRefresh();
+    clearTabOpenSession(sessionId);
     if (selectedSession?.id !== sessionId) return;
     activeSessionIdRef.current = null;
     setSelectedSession(null);
     setNewSessionCwd(selectedSession.cwd ?? null);
+    if (selectedSession.cwd) setTabOpenNewSession(selectedSession.cwd);
     bumpSessionKey();
     resetSessionViews();
     router.replace("/", { scroll: false });
@@ -184,6 +196,7 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
     invalidateNotificationNavigation();
     suppressCwdBumpRef.current = true;
     setNewSessionCwd(cwd);
+    setTabOpenNewSession(cwd);
   }, [invalidateNotificationNavigation, invalidateWorkspaceRestore]);
   const consumeCwdSyncSuppression = useCallback(() => {
     if (!suppressCwdBumpRef.current) return false;
@@ -203,6 +216,7 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
     invalidateWorkspaceRestore();
     invalidateNotificationNavigation();
     setNewSessionCwd(cwd);
+    if (cwd) setTabOpenNewSession(cwd);
   }, [invalidateNotificationNavigation, invalidateWorkspaceRestore]);
 
   const restoreWorkspaceContext = useCallback((workspaceKey: string) => {
@@ -231,6 +245,7 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
       });
   }, [applySessionSelection]);
   const completeInitialRestore = useCallback(() => setInitialSessionRestored(true), []);
+  const markInitialRestorePending = useCallback(() => setInitialSessionRestored(false), []);
   const applyGeneratedTitle = useCallback((sessionId: string, title: string) => {
     if (activeSessionIdRef.current !== sessionId) return false;
     setSelectedSession((current) => current?.id === sessionId ? { ...current, name: title } : current);
@@ -244,6 +259,7 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
     consumeCwdSyncSuppression,
     dispatchPending,
     initialSessionRestored,
+    markInitialRestorePending,
     isActiveSession,
     isNavigationActive,
     leaveWorkspace,

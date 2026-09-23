@@ -23,12 +23,13 @@ const THINKING_LEVEL_DESC_KEYS: Record<ThinkingLevelOption, string> = {
 interface ThinkingControlProps {
   isMobile: boolean;
   modelState: ModelSelectionViewState;
+  isStreaming: boolean;
   onChange?: (level: ThinkingLevelOption) => void;
 }
 
-const ThinkingControl = memo(function ThinkingControl({ isMobile, modelState, onChange }: ThinkingControlProps) {
+const ThinkingControl = memo(function ThinkingControl({ isMobile, modelState, isStreaming, onChange }: ThinkingControlProps) {
   const { t } = useI18n();
-  const { thinkingLevel, availableThinkingLevels, thinkingLevelMap } = modelState;
+  const { thinkingLevel, isAutoThinkingSelection, availableThinkingLevels, thinkingLevelMap } = modelState;
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
   const thinkingDropdownRef = useRef<HTMLDivElement>(null);
   const thinkingDisplayLabel = (() => {
@@ -36,6 +37,9 @@ const ThinkingControl = memo(function ThinkingControl({ isMobile, modelState, on
     if (level === "auto" || !thinkingLevelMap) return level;
     return thinkingLevelMap[level] ?? level;
   })();
+  const displayedThinkingLabel = isStreaming && modelState.fastEnabled
+    ? `${thinkingDisplayLabel} + Fast`
+    : thinkingDisplayLabel;
   useEffect(() => {
     if (!thinkingDropdownOpen) return;
     const close = (event: MouseEvent) => {
@@ -45,12 +49,12 @@ const ThinkingControl = memo(function ThinkingControl({ isMobile, modelState, on
     return () => document.removeEventListener("mousedown", close);
   }, [thinkingDropdownOpen]);
   const onThinkingLevelChange = onChange;
-  if (!onThinkingLevelChange) return null;
   return (
               <div ref={thinkingDropdownRef} style={{ position: "relative" }}>
                 <button
                   onClick={() => setThinkingDropdownOpen((open) => !open)}
-                   title={t("chat.changeReasoning", { level: thinkingDisplayLabel })}
+                  disabled={isStreaming || !onThinkingLevelChange}
+                   title={t(isStreaming ? "chat.currentReasoning" : "chat.changeReasoning", { level: displayedThinkingLabel })}
                    aria-label={t("chat.changeReasoningLabel")}
                   style={{
                     display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
@@ -79,9 +83,9 @@ const ThinkingControl = memo(function ThinkingControl({ isMobile, modelState, on
                     <line x1="7" y1="18" x2="12" y2="18" />
                     <line x1="8" y1="21" x2="11" y2="21" />
                   </svg>
-                  <span style={{ whiteSpace: "nowrap" }}>{thinkingDisplayLabel}</span>
+                  <span style={{ whiteSpace: "nowrap" }}>{displayedThinkingLabel}</span>
                 </button>
-                {thinkingDropdownOpen && (
+                {thinkingDropdownOpen && !isStreaming && (
                   <div style={{
                     position: "absolute", bottom: "calc(100% + 6px)", ...(isMobile ? { left: 0 } : { right: 0 }),
                     zIndex: 100, background: "var(--bg)", border: "1px solid var(--border)",
@@ -93,7 +97,9 @@ const ThinkingControl = memo(function ThinkingControl({ isMobile, modelState, on
                       if (lvl === "auto") return true;
                       return availableThinkingLevels.includes(lvl);
                     }).map((lvl) => {
-                      const isActive = (thinkingLevel ?? "auto") === lvl;
+                      const isActive = lvl === "auto"
+                        ? isAutoThinkingSelection
+                        : !isAutoThinkingSelection && thinkingLevel === lvl;
                        const desc = t(THINKING_LEVEL_DESC_KEYS[lvl]);
                       const mappedVal = (lvl !== "auto" && thinkingLevelMap) ? thinkingLevelMap[lvl] : undefined;
                       const displayLabel = (mappedVal != null && mappedVal !== lvl) ? mappedVal : lvl;
@@ -101,7 +107,7 @@ const ThinkingControl = memo(function ThinkingControl({ isMobile, modelState, on
                       return (
                         <button
                           key={lvl}
-                          onClick={() => { setThinkingDropdownOpen(false); if (!isActive) onThinkingLevelChange(lvl); }}
+                          onClick={() => { setThinkingDropdownOpen(false); if (!isActive || isAutoThinkingSelection) onThinkingLevelChange?.(lvl); }}
                           style={{
                             display: "flex", alignItems: "center", gap: 8,
                             width: "100%", padding: "7px 12px",
@@ -270,15 +276,13 @@ interface RunControlsProps {
   isMobile: boolean;
   isStreaming: boolean;
   showLabel: boolean;
-  thinkingLevel: ModelSelectionViewState["thinkingLevel"];
-  thinkingDisplayLabel: string;
   onCompact?: () => void;
   onAbortCompaction?: () => void;
   isCompacting?: boolean;
   onAbort: () => void;
 }
 
-const RunControls = memo(function RunControls({ isMobile, isStreaming, showLabel, thinkingLevel, thinkingDisplayLabel, onCompact, onAbortCompaction, isCompacting, onAbort }: RunControlsProps) {
+const RunControls = memo(function RunControls({ isMobile, isStreaming, showLabel, onCompact, onAbortCompaction, isCompacting, onAbort }: RunControlsProps) {
   const { t } = useI18n();
   return (
     <>
@@ -326,32 +330,6 @@ const RunControls = memo(function RunControls({ isMobile, isStreaming, showLabel
 
             {isStreaming && (
               <>
-                {/* 流式时只读展示当前思考强度（不可修改） */}
-                {thinkingLevel !== undefined && (
-                  <div
-                    title={t("chat.currentReasoning", { level: thinkingDisplayLabel })}
-                    style={{
-                      display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
-                      padding: isMobile ? "0 6px" : "8px 12px",
-                      height: 32,
-                      background: "var(--bg-hover)",
-                      border: "1px solid var(--border)",
-                      borderRadius: 9,
-                      color: "var(--text-muted)",
-                      fontSize: 12,
-                      whiteSpace: "nowrap",
-                      userSelect: "none",
-                      cursor: "default",
-                    }}
-                  >
-                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M9.5 2A5.5 5.5 0 0 0 4 7.5c0 1.7.78 3.21 2 4.21V14a1 1 0 0 0 1 1h5a1 1 0 0 0 1-1v-2.29c1.22-1 2-2.51 2-4.21A5.5 5.5 0 0 0 9.5 2z" />
-                      <line x1="7" y1="18" x2="12" y2="18" />
-                      <line x1="8" y1="21" x2="11" y2="21" />
-                    </svg>
-                    <span style={{ whiteSpace: "nowrap" }}>{thinkingDisplayLabel}</span>
-                  </div>
-                )}
                 <button
                 onClick={onAbort}
                  title={t("chat.stopAgent")}
@@ -516,15 +494,6 @@ export const InputControls = memo(function InputControls({
   notificationEnabled, notificationPermission, onNotificationToggle,
 }: InputControlsProps) {
   const { t } = useI18n();
-  const { thinkingLevel, thinkingLevelMap } = modelState;
-  const thinkingDisplayLabel = (() => {
-    const level = thinkingLevel ?? "auto";
-    if (level === "auto" || !thinkingLevelMap) return level;
-    return thinkingLevelMap[level] ?? level;
-  })();
-  const runningThinkingDisplayLabel = modelState.fastEnabled
-    ? `${thinkingDisplayLabel} + Fast`
-    : thinkingDisplayLabel;
   const [controlsMenuOpen, setControlsMenuOpen] = useState(false);
   const controlsMenuRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -596,11 +565,11 @@ export const InputControls = memo(function InputControls({
               isMobile={isMobile}
               isOpen={controlsMenuOpen}
               onClose={() => setControlsMenuOpen(false)}
-              modelControls={!isStreaming && (!isMobile || controlsMenuOpen) ? (
+              modelControls={(!isMobile || controlsMenuOpen) ? (
                 <>
-                  <ThinkingControl isMobile={isMobile} modelState={modelState} onChange={onThinkingLevelChange} />
-                  <FastModeControl isMobile={isMobile} modelState={modelState} onChange={modelActions.changeFastEnabled} />
-                  <ToolPresetControl isMobile={isMobile} toolPreset={toolPreset} onChange={onToolPresetChange} />
+                  <ThinkingControl isMobile={isMobile} modelState={modelState} isStreaming={isStreaming} onChange={onThinkingLevelChange} />
+                  {!isStreaming && <FastModeControl isMobile={isMobile} modelState={modelState} onChange={modelActions.changeFastEnabled} />}
+                  {!isStreaming && <ToolPresetControl isMobile={isMobile} toolPreset={toolPreset} onChange={onToolPresetChange} />}
                 </>
               ) : null}
               runControls={(
@@ -608,8 +577,6 @@ export const InputControls = memo(function InputControls({
                   isMobile={isMobile}
                   isStreaming={isStreaming}
                   showLabel={!isMobile || controlsMenuOpen}
-                  thinkingLevel={thinkingLevel}
-                  thinkingDisplayLabel={runningThinkingDisplayLabel}
                   onCompact={onCompact}
                   onAbortCompaction={onAbortCompaction}
                   isCompacting={isCompacting}

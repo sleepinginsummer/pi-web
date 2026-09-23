@@ -4,11 +4,15 @@ import { useState } from "react";
 import { getFileIcon } from "./FileIcons";
 import { useI18n } from "@/hooks/useI18n";
 import type { FileTab } from "@/lib/file-panel-model";
-import type { FileViewerState } from "@/lib/file-viewer-state";
+import type { FileViewerDisplayMode, FileViewerState } from "@/lib/file-viewer-state";
 
 export type Tab = FileTab & {
   kind?: "terminal";
   closing?: boolean;
+  sourceSessionId?: string | null;
+  initialDisplayMode?: FileViewerDisplayMode;
+  /** PDF 页码由链接的 #page=N 指定。 */
+  page?: number;
   viewerState?: FileViewerState;
   viewerRevision?: number;
 };

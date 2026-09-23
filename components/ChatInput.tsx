@@ -24,6 +24,7 @@ import { useI18n } from "@/hooks/useI18n";
 import { useOptimisticInputSubmission, type OptimisticInputSnapshot } from "@/hooks/useOptimisticInputSubmission";
 import { ModelPicker, type ModelPickerOption } from "./ModelPicker";
 import { InputControls } from "./InputControls";
+import { ImagePreview } from "./ImagePreview";
 import { useChatAppearance } from "@/hooks/useChatAppearance";
 import type { ToolPreset } from "@/lib/tool-presets";
 
@@ -1416,14 +1417,18 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         {attachedImages.length > 0 && (
           <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
             {attachedImages.map((img, i) => (
-              <div key={i} style={{ position: "relative", flexShrink: 0 }}>
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={img.previewUrl}
-                  alt=""
-                  style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 6, border: "1px solid var(--border)", display: "block" }}
-                />
+              <div key={img.previewUrl} style={{ position: "relative", flexShrink: 0 }}>
+                <ImagePreview src={img.previewUrl}>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={img.previewUrl}
+                    alt=""
+                    style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 6, border: "1px solid var(--border)", display: "block" }}
+                  />
+                </ImagePreview>
                 <button
+                  type="button"
+                  aria-label={t("chat.removeImage")}
                   onClick={() => removeImage(i)}
                   style={{
                     position: "absolute", top: -4, right: -4,

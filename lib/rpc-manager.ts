@@ -10,11 +10,16 @@ import { expandMultiSkillCommand } from "./multi-skill-command";
 import { invalidateModelsCache, updateCachedDefaultModel } from "./models-cache";
 import { PendingPromptTracker } from "./pending-prompt-tracker";
 import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
-import { cacheSessionPath, invalidateSessionListCache, resolveSessionPath } from "./session-reader";
+import { cacheSessionPath, getLatestModelChange, invalidateSessionListCache, readLatestSessionEntryId, resolveSessionPath } from "./session-reader";
 import { restoreShadowSessionSettingSafely, ShadowSessionSetting } from "./shadow-session-setting";
 import { parseShadowMindToggleCommand, SHADOW_MIND_SESSION_STATE } from "./shadow-session-protocol";
 import { createClonedSession, createForkedSession } from "./session-fork";
 import { generateTitleForSessionFile } from "./session-file-title";
+import {
+  createProjectCommandBashExtension,
+  createProjectCommandBashOperations,
+  preferUserBashExtension,
+} from "./project-command-env";
 import { getProjectTrustStatus, projectTrustReloadOptions } from "./project-trust";
 import { persistExplicitStartupPreferences } from "./startup-preferences";
 import { hasActiveSessionLivenessProvider } from "./session-liveness";
@@ -32,7 +37,6 @@ import { createHeadlessCustomUiTui, DEFAULT_CUSTOM_UI_COLUMNS, type HeadlessCust
 import { clearAttentionSession, publishAttentionEvent } from "./attention-events";
 import { FastSessionSetting, FAST_SESSION_STATE, type FastRuntimeSnapshot } from "./fast-session-setting";
 import { readModelsConfigSnapshot } from "./models-config-commit";
-import { createProjectCommandBashExtension, createProjectCommandBashOperations, preferUserBashExtension } from "./project-command-env";
 import { createSubagentExtension, preferPiWebSubagentExtension } from "./subagent-extension";
 import {
   listSubagentProfiles,
@@ -44,7 +48,9 @@ import { createSubagentController } from "./subagent-runtime";
 import { isBuiltInSubagentsEnabled } from "./subagent-settings";
 import { resolveShellTools } from "./powershell-settings";
 import { CHAT_ONLY_RESOURCE_LOADER_OPTIONS, contextFilesSystemPrompt } from "./chat-only";
+import { createExactSystemPromptExtension } from "./exact-system-prompt";
 import {
+  appendClearedSessionToolSelection,
   appendSessionToolSelection,
   readSessionToolSelection,
   validateSessionToolSelection,
@@ -275,6 +281,7 @@ function findUnfinishedToolCall(messages: unknown[]): { toolCallId: string; tool
 
 export class AgentSessionWrapper {
   private listeners: EventListener[] = [];
+  private activeToolEvents = new Map<string, AgentEvent>();
   private pendingUiResponses = new Map<string, PendingUiResponse>();
   private pendingUiRequests = new Map<string, AgentEvent>();
   // SSE 重连时必须先恢复 ask 的完整问题定义，否则逐题 select 会被前端误判为普通单题弹窗。
@@ -329,7 +336,6 @@ export class AgentSessionWrapper {
     this.exactSystemPrompt = options.exactSystemPrompt;
     this.chatOnly = options.chatOnly ?? false;
     this.suppressCompletionNotifications = options.suppressCompletionNotifications ?? false;
-    this.installSystemPromptContinuation();
     const sessionEntries = () => (
       typeof this.inner.sessionManager.getEntries === "function"
         ? this.inner.sessionManager.getEntries()
@@ -360,7 +366,6 @@ export class AgentSessionWrapper {
         if (entry) this.emit({ type: "entry_appended", entry });
       },
     });
-    this.applySystemPromptPolicy();
   }
 
   private installFastRuntimeSnapshot(fastModels: ReadonlySet<string>, configGeneration: string): void {
@@ -407,6 +412,21 @@ export class AgentSessionWrapper {
     return this._alive && (this.pendingPrompts.active || this.inner.isStreaming || this.inner.isCompacting || this.inner.isBashRunning);
   }
 
+  /**
+   * Drop this idle wrapper when the on-disk JSONL has an entry the in-memory
+   * index never saw (another pi process appended). Rechecks isRunning() so a
+   * prompt that started during the probe cannot be disposed.
+   */
+  evictIfDiskAhead(): boolean {
+    if (!this.isAlive() || this.isRunning()) return false;
+    const diskLatestId = readLatestSessionEntryId(this.sessionFile);
+    if (!diskLatestId || this.inner.sessionManager.getEntry(diskLatestId)) return false;
+    if (this.isRunning()) return false;
+    this.destroy();
+    invalidateSessionListCache();
+    return true;
+  }
+
   isChatOnly(): boolean {
     return this.chatOnly;
   }
@@ -435,6 +455,14 @@ export class AgentSessionWrapper {
         this.maybeAutoContinueUnfinishedTool();
         // 会话第一轮结束后自动生成标题（文件级独立 services，不与主 agent 争用 transport）
         this.maybeAutoTitleSession();
+      }
+      const toolCallId = event.toolCallId;
+      if (typeof toolCallId === "string") {
+        if (event.type === "tool_execution_start" || event.type === "tool_execution_update") {
+          this.activeToolEvents.set(toolCallId, event);
+        } else if (event.type === "tool_execution_end") {
+          this.activeToolEvents.delete(toolCallId);
+        }
       }
       if (IDLE_RESET_EVENT_TYPES.has(event.type)) this.resetIdleTimer();
       this.emit(event);
@@ -503,12 +531,10 @@ export class AgentSessionWrapper {
 
   setForceEmptySystemPrompt(force: boolean): void {
     this.forceEmptySystemPrompt = force;
-    this.applyForcedEmptySystemPrompt();
   }
 
   setActiveToolSelection(toolNames: string[]): void {
     this.inner.setActiveToolsByName(withExtensionTools(this.inner, toolNames));
-    this.applySystemPromptPolicy();
   }
 
   beginExtensionBinding(options: ExtensionBindingOptions = {}): void {
@@ -524,8 +550,7 @@ export class AgentSessionWrapper {
   private ensureExtensionsBound(options: ExtensionBindingOptions = {}): Promise<void> {
     if (options.forceEmptySystemPrompt) this.forceEmptySystemPrompt = true;
     if (this.extensionsBound) {
-      this.applyForcedEmptySystemPrompt();
-      return Promise.resolve();
+        return Promise.resolve();
     }
     if (this.extensionBindingPromise) return this.extensionBindingPromise;
 
@@ -565,8 +590,7 @@ export class AgentSessionWrapper {
       await this.restoreShadowSessionSetting();
       await this.fastSessionSetting.restoreAfterRuntimeReset();
       this.extensionsBound = true;
-      this.applyForcedEmptySystemPrompt();
-      console.log(`[pi-web] session_start dispatched to extensions for session ${this.inner.sessionId}`);
+        console.log(`[pi-web] session_start dispatched to extensions for session ${this.inner.sessionId}`);
     })().catch((err) => {
       this.extensionBindingError = err;
       throw err;
@@ -611,33 +635,6 @@ export class AgentSessionWrapper {
     }
   }
 
-  private applyForcedEmptySystemPrompt(): void {
-    this.applySystemPromptPolicy();
-  }
-
-  private applySystemPromptPolicy(): void {
-    if (!this.inner.agent?.state) return;
-    if (this.forceEmptySystemPrompt) {
-      this.inner.agent.state.systemPrompt = "";
-    } else if (this.exactSystemPrompt) {
-      this.inner.agent.state.systemPrompt = this.exactSystemPrompt();
-    }
-  }
-
-  private installSystemPromptContinuation(): void {
-    if (!this.exactSystemPrompt || !this.inner.agent) return;
-    const previous = this.inner.agent.prepareNextTurnWithContext;
-    this.inner.agent.prepareNextTurnWithContext = async (turn, signal) => {
-      const prepared = await previous?.(turn, signal);
-      return {
-        ...prepared,
-        context: {
-          ...(prepared?.context ?? turn.context),
-          systemPrompt: this.forceEmptySystemPrompt ? "" : this.exactSystemPrompt!(),
-        },
-      };
-    };
-  }
   private emit(event: AgentEvent): void {
     if (
       event.type === "tool_execution_start"
@@ -700,6 +697,9 @@ export class AgentSessionWrapper {
     // ask 插件会把多问题拆成多个扩展 UI 请求；重放顺序与首次执行保持一致。
     for (const event of this.activeAskToolStarts.values()) listener(event);
     for (const event of this.pendingUiRequests.values()) listener(event);
+    for (const [toolCallId, event] of this.activeToolEvents) {
+      if (!this.activeAskToolStarts.has(toolCallId)) listener(event);
+    }
     return () => {
       const i = this.listeners.indexOf(listener);
       if (i !== -1) this.listeners.splice(i, 1);
@@ -811,7 +811,9 @@ export class AgentSessionWrapper {
           contextUsage: contextUsage
             ? { percent: contextUsage.percent, contextWindow: contextUsage.contextWindow, tokens: contextUsage.tokens }
             : null,
-          systemPrompt: this.inner.agent.state?.systemPrompt ?? "",
+          // An exact prompt is projected onto each run by the inline extension;
+          // the SDK state only shows Pi's structured sections.
+          systemPrompt: this.exactSystemPrompt?.() ?? this.inner.agent.state?.systemPrompt ?? "",
           thinkingLevel: this.inner.agent.state?.thinkingLevel ?? "off",
           fastEnabled: this.fastSessionSetting.current,
           fastAvailable: this.fastSessionSetting.available,
@@ -1016,8 +1018,7 @@ export class AgentSessionWrapper {
         const toolNames = command.toolNames as string[];
         this.setForceEmptySystemPrompt(toolNames.length === 0);
         this.inner.setActiveToolsByName(withExtensionTools(this.inner, toolNames));
-        this.applyForcedEmptySystemPrompt();
-        return null;
+            return null;
       }
 
       case "reload": {
@@ -1034,7 +1035,6 @@ export class AgentSessionWrapper {
         }
         await this.restoreShadowSessionSetting();
         await this.fastSessionSetting.restoreAfterRuntimeReset();
-        this.applyForcedEmptySystemPrompt();
         invalidateModelsCache(this.cwd);
         return { success: true };
       }
@@ -1099,6 +1099,9 @@ export class AgentSessionWrapper {
     if (!this._alive) return;
     this._alive = false;
     clearAttentionSession(this.sessionId);
+    // Tell attached SSE listeners to drop this instance so the browser
+    // EventSource errors and reconnects instead of staying OPEN on a dead wrapper.
+    this.emit({ type: "session_shutdown" });
     if (this.idleTimer) clearTimeout(this.idleTimer);
     if (this.inner.isBashRunning) this.inner.abortBash();
     this.unsubscribe?.();
@@ -1107,6 +1110,7 @@ export class AgentSessionWrapper {
     this.pendingUiResponses.clear();
     this.pendingUiRequests.clear();
     this.activeAskToolStarts.clear();
+    this.activeToolEvents.clear();
     this.clearExtensionWidgets(false);
     try {
       this.inner.dispose();
@@ -1734,8 +1738,7 @@ export class AgentSessionWrapper {
           },
         });
         await this.fastSessionSetting.restoreAfterRuntimeReset();
-        this.applyForcedEmptySystemPrompt();
-      },
+          },
     };
   }
 
@@ -1849,13 +1852,20 @@ export interface SetRpcSessionToolsResult {
   recreated: boolean;
 }
 
-/** 持久化普通会话的工具选择；跨越 Chat-only 边界时重建资源运行时。 */
+/**
+ * Persist a normal session's tool selection and rebuild when resource policy changes.
+ * An undefined requestedToolNames returns the session to pi's configured defaults:
+ * the pin is retracted and the session is rebuilt, because the loadout that
+ * settings.json defaultTools resolves to is only known once pi builds the session.
+ */
 export async function setRpcSessionTools(
   sessionId: string,
   sessionFile: string | undefined,
   requestedToolNames: unknown,
 ): Promise<SetRpcSessionToolsResult> {
-  const toolNames = validateSessionToolSelection(requestedToolNames);
+  const toolNames = requestedToolNames === undefined
+    ? undefined
+    : validateSessionToolSelection(requestedToolNames);
   const existing = getRpcSession(sessionId);
 
   if (!existing?.isAlive()) {
@@ -1864,7 +1874,8 @@ export async function setRpcSessionTools(
     if (readSubagentSessionResources(manager.getEntries() as unknown as SessionEntry[])) {
       throw new Error("Subagent tool selection is fixed by its profile");
     }
-    appendSessionToolSelection(manager, toolNames);
+    if (toolNames === undefined) appendClearedSessionToolSelection(manager);
+    else appendSessionToolSelection(manager, toolNames);
     invalidateSessionListCache();
     const started = await startRpcSession(sessionId, sessionFile, undefined);
     return { session: started.session, sessionId: started.realSessionId, recreated: false };
@@ -1875,10 +1886,16 @@ export async function setRpcSessionTools(
     throw new Error("Subagent tool selection is fixed by its profile");
   }
 
-  const crossesChatOnlyBoundary = existing.isChatOnly() !== (toolNames.length === 0);
-  appendSessionToolSelection(existing.inner.sessionManager, toolNames);
+  const hasCurrentResourcePolicy = typeof existing.isChatOnly === "function"
+    && typeof existing.setActiveToolSelection === "function";
+  const crossesChatOnlyBoundary = toolNames === undefined
+    || !hasCurrentResourcePolicy
+    || existing.isChatOnly() !== (toolNames.length === 0);
+  if (toolNames === undefined) appendClearedSessionToolSelection(existing.inner.sessionManager);
+  else appendSessionToolSelection(existing.inner.sessionManager, toolNames);
   invalidateSessionListCache();
-  if (!crossesChatOnlyBoundary) {
+
+  if (toolNames !== undefined && !crossesChatOnlyBoundary) {
     existing.setActiveToolSelection(toolNames);
     return { session: existing, sessionId, recreated: false };
   }
@@ -1897,7 +1914,7 @@ export async function setRpcSessionTools(
   }
 
   const started = await startRpcSession(`__recreate__${randomUUID()}`, "", sessionCwd, {
-    toolNames,
+    ...(toolNames !== undefined ? { toolNames } : {}),
     ...(model ? { initialModel: { provider: model.provider, modelId: model.id } } : {}),
     allowInitialModelFallback: true,
     ...(currentThinkingLevel && THINKING_LEVEL_NAMES.has(currentThinkingLevel as ThinkingLevel)
@@ -1924,12 +1941,18 @@ function runtimeMessageActivityMs(entry: SessionMessageEntry): number | undefine
   return Number.isNaN(timestamp) ? undefined : timestamp;
 }
 
-/** 返回尚未落盘或正在运行的内存会话投影，供会话列表合并。 */
-export function getRpcSessionInfos(): SessionInfo[] {
+/**
+ * Return live sessions that should be visible in the session list. Pi delays
+ * the first JSONL flush until an assistant message exists, so an accepted new
+ * prompt must temporarily be described from its in-memory SessionManager.
+ */
+export function getRpcSessionInfos(options: { includeTransient?: boolean } = {}): SessionInfo[] {
   const sessions: SessionInfo[] = [];
   for (const session of getRegistry().values()) {
-    if (!session.isAlive()) continue;
-    const manager = session.inner.sessionManager;
+    if (typeof session.isAlive !== "function" || !session.isAlive()) continue;
+
+    const manager = session.inner?.sessionManager;
+    if (!manager) continue;
     const header = manager.getHeader();
     const entries = manager.getEntries() as unknown as Array<
       { type: string; timestamp: string } | SessionMessageEntry
@@ -1938,12 +1961,11 @@ export function getRpcSessionInfos(): SessionInfo[] {
     const firstUserMessage = messages.find((entry) => entry.message.role === "user");
     const sessionFile = manager.getSessionFile() ?? session.sessionFile;
     const persisted = Boolean(sessionFile && existsSync(sessionFile));
-    const subagent = readSubagentRun(
-      entries as unknown as SessionEntry[],
-      header?.id ?? session.sessionId,
-      sessionFile ?? "",
-    );
-    if (!persisted && (!session.isRunning() || !firstUserMessage)) continue;
+    const subagent = readSubagentRun(entries as unknown as SessionEntry[], header?.id ?? session.sessionId, sessionFile ?? "");
+
+    // An ensure_session call creates an idle, empty runtime while the composer
+    // loads commands. Do not leak it into history before a prompt is accepted.
+    if (!persisted && !options.includeTransient && (!session.isRunning() || !firstUserMessage)) continue;
 
     const created = header?.timestamp ?? entries[0]?.timestamp ?? new Date().toISOString();
     const headerTimestamp = new Date(created).getTime();
@@ -2150,6 +2172,13 @@ export async function startRpcSession(
     startupStage = "services";
     let stageStartedAt = performance.now();
     const modelConfigSnapshot = await readModelsConfigSnapshot();
+    // Chat-only sessions and subagents that replace Pi's prompt send an exact
+    // system prompt. The prompt is resolved at prompt time through this inline
+    // extension: it may read the session's context files, which exist only
+    // after the session is created, so the getter is filled in below.
+    const exactSystemPromptRef: { current?: () => string } = {};
+    const exactSystemPromptExtension = createExactSystemPromptExtension(() => exactSystemPromptRef.current?.());
+    const usesExactSystemPrompt = chatOnly || subagentResources?.exactSystemPrompt !== undefined;
     const services = await createAgentSessionServices({
       cwd: sessionCwd,
       agentDir,
@@ -2165,9 +2194,10 @@ export async function startRpcSession(
               ? { systemPrompt: " ", systemPromptOverride: () => undefined }
               : {}),
             appendSystemPrompt: subagentResources.appendSystemPrompt,
+            ...(usesExactSystemPrompt ? { extensionFactories: [exactSystemPromptExtension] } : {}),
           }
         : chatOnly
-          ? CHAT_ONLY_RESOURCE_LOADER_OPTIONS
+          ? { ...CHAT_ONLY_RESOURCE_LOADER_OPTIONS, extensionFactories: [exactSystemPromptExtension] }
           : {
               extensionFactories: [
                 createProjectCommandBashExtension({ cwd: sessionCwd, settings: settingsManager }),
@@ -2196,7 +2226,13 @@ export async function startRpcSession(
     startupTimings.modelScope = elapsedMs(stageStartedAt);
     const defaultProvider = services.settingsManager.getDefaultProvider();
     const defaultModelId = services.settingsManager.getDefaultModel();
-    const hasExistingMessages = sessionManager.getBranch().some((entry) => entry.type === "message");
+    // 系统消息描述运行时提示词，不代表对话已经开始；已有会话优先恢复分支记录的模型。
+    const branch = sessionManager.getBranch();
+    const hasExistingMessages = branch.some((entry) => entry.type === "message" && entry.message.role !== "system");
+    const savedModel = hasExistingMessages ? getLatestModelChange(branch as unknown as SessionEntry[]) : null;
+    const restoredModel = savedModel
+      ? services.modelRuntime.getModel(savedModel.provider, savedModel.modelId)
+      : undefined;
     const effectiveInitialModel = initialModel && (
       !allowInitialModelFallback
       || scope.visible.some((model) => model.provider === initialModel.provider && model.id === initialModel.modelId)
@@ -2210,14 +2246,17 @@ export async function startRpcSession(
           : {}),
         ...(thinkingLevel ? { thinkingLevel } : {}),
       });
+    const startupModel = restoredModel && services.modelRuntime.hasConfiguredAuth(restoredModel.provider)
+      ? restoredModel
+      : initial?.model;
     startupStage = "sessionCreate";
     stageStartedAt = performance.now();
     const { session: inner } = await createAgentSessionFromServices({
       services,
       sessionManager,
-      ...(initial.model ? { model: initial.model } : {}),
-      ...(initial.thinkingLevel ? { thinkingLevel: initial.thinkingLevel } : {}),
-      ...(initial.scopedModels.length > 0 ? { scopedModels: initial.scopedModels } : {}),
+      ...(startupModel ? { model: startupModel } : {}),
+      ...(initial?.thinkingLevel ? { thinkingLevel: initial.thinkingLevel } : {}),
+      ...(scope.scopedModels.length > 0 ? { scopedModels: [...scope.scopedModels] } : {}),
       ...(toolsOption !== undefined ? { tools: toolsOption } : {}),
       ...(subagentResources ? { excludeTools: [...SUBAGENT_CONTROL_TOOL_NAMES] } : {}),
     });
@@ -2251,11 +2290,14 @@ export async function startRpcSession(
       inner.setActiveToolsByName(withExtensionTools(inner, selectedToolNames));
     }
 
-    const exactSystemPrompt = chatOnly
-      ? subagentResources
-        ? () => subagentResources.appendSystemPrompt[0] ?? ""
-        : () => contextFilesSystemPrompt(inner.resourceLoader.getAgentsFiles().agentsFiles)
-      : undefined;
+    const exactSystemPrompt = subagentResources?.exactSystemPrompt !== undefined
+      ? () => subagentResources.exactSystemPrompt!
+      : chatOnly
+        ? subagentResources
+          ? () => subagentResources.appendSystemPrompt[0] ?? ""
+          : () => contextFilesSystemPrompt(inner.resourceLoader.getAgentsFiles().agentsFiles)
+        : undefined;
+    exactSystemPromptRef.current = exactSystemPrompt;
     const wrapper = new AgentSessionWrapper(
       inner,
       modelConfigSnapshot.fastModels,

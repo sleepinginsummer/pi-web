@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { isValidWebCredentials, isWebPasswordEnabled } from "@/lib/web-auth";
+import { getAuthRetryAfterMs, recordAuthFailure, recordAuthSuccess, retryAfterSeconds } from "@/lib/auth-throttle";
 import {
   createWebSessionToken,
   getOrCreateWebSessionSecret,
@@ -30,6 +31,11 @@ function sessionCookieOptions(request: Request, remember: boolean) {
   };
 }
 
+/** 设置面板只需要知道站点是否启用了登录，不返回任何会话或凭据。 */
+export async function GET() {
+  return NextResponse.json({ enabled: isWebPasswordEnabled() }, { headers: { "Cache-Control": "no-store" } });
+}
+
 export async function POST(request: Request) {
   const contentLength = Number(request.headers.get("content-length") ?? "0");
   if (Number.isFinite(contentLength) && contentLength > MAX_REQUEST_BYTES) {
@@ -48,10 +54,21 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "站点未启用密码登录" }, { status: 409 });
     }
 
+    // 同一服务只供单个操作者使用；全局退避避免伪造来源地址绕过登录限速。
+    const retryAfterMs = getAuthRetryAfterMs();
+    if (retryAfterMs > 0) {
+      return NextResponse.json(
+        { error: "登录尝试过于频繁", retryAfterMs },
+        { status: 429, headers: { "Retry-After": String(retryAfterSeconds(retryAfterMs)) } },
+      );
+    }
     if (!isValidWebCredentials(username, password, configuredPassword)) {
-      console.warn("Web 登录失败", { username });
+      const delayMs = recordAuthFailure();
+      console.warn("Web 登录失败", { username, retryAfterMs: delayMs });
       return NextResponse.json({ error: "用户名或密码错误" }, { status: 401 });
     }
+
+    recordAuthSuccess();
 
     const response = NextResponse.json({ success: true });
     response.cookies.set(

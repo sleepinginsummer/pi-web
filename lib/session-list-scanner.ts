@@ -1,11 +1,13 @@
 // Cache session-list metadata without building the SDK's unused allMessagesText.
-// New and changed files still require a full scan; unchanged files only need stat.
+// Normal listings rescan only new/changed files; summary listings reuse whatever
+// the index already holds and fall back to header/stat metadata for the files
+// that changed, which a later normal listing hydrates.
 // ponytail: size/mtime fingerprints miss same-size edits with restored mtime;
 // use content hashes if detecting those edits becomes necessary.
-import { createReadStream, existsSync, readFileSync, watch, type FSWatcher } from "node:fs";
+import { closeSync, createReadStream, existsSync, openSync, readFileSync, readSync, watch, type FSWatcher } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import type { Dirent } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { writePrivateFileAtomicSync } from "./atomic-file";
@@ -20,12 +22,16 @@ export interface ScannedSessionInfo {
 	messageCount: number;
 	firstMessage: string;
 	parentSessionPath?: string;
+	/** True when only header/stat metadata was available for this listing. */
+	detailsPending?: boolean;
 }
 
 interface Fingerprint {
 	size: number;
 	mtimeMs: number;
 }
+
+const SUMMARY_HEADER_MAX_BYTES = 64 * 1024;
 
 interface IndexEntry {
 	fp: Fingerprint;
@@ -85,6 +91,67 @@ function parseLine(line: string): RawEntry | null {
 	} catch {
 		return null;
 	}
+}
+
+/** Read only the first physical line needed to identify a session file. */
+function readSessionHeaderSummary(filePath: string): RawEntry | null {
+	const fd = openSync(filePath, "r");
+	try {
+		const buffer = Buffer.allocUnsafe(SUMMARY_HEADER_MAX_BYTES);
+		const bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
+		if (bytesRead <= 0) return null;
+		const source = buffer.subarray(0, bytesRead).toString("utf8");
+		for (const line of source.split("\n")) {
+			const entry = parseLine(line.replace(/\r$/, ""));
+			if (!entry) continue;
+			return entry.type === "session" ? entry : null;
+		}
+		return null;
+	} catch {
+		return null;
+	} finally {
+		closeSync(fd);
+	}
+}
+
+function hasMatchingFingerprint(
+	cached: IndexEntry | undefined,
+	fingerprint: Fingerprint,
+): cached is IndexEntry {
+	return Boolean(
+		cached
+		&& cached.fp.size === fingerprint.size
+		&& cached.fp.mtimeMs === fingerprint.mtimeMs,
+	);
+}
+
+/** Build a session row from the header alone, without parsing the transcript. */
+function deferredSessionInfo(
+	filePath: string,
+	fingerprint: Fingerprint,
+): ScannedSessionInfo | null {
+	const header = readSessionHeaderSummary(filePath);
+	if (
+		!header
+		|| typeof header.id !== "string"
+		|| typeof header.cwd !== "string"
+		|| typeof header.timestamp !== "string"
+	) return null;
+
+	const created = new Date(header.timestamp);
+	if (!Number.isFinite(created.getTime())) return null;
+
+	return {
+		path: filePath,
+		id: header.id,
+		cwd: header.cwd,
+		created,
+		modified: new Date(fingerprint.mtimeMs),
+		messageCount: 0,
+		firstMessage: "",
+		...(typeof header.parentSession === "string" ? { parentSessionPath: header.parentSession } : {}),
+		detailsPending: true,
+	};
 }
 
 function extractTextContent(message: RawEntry): string {
@@ -326,92 +393,87 @@ function queueIndexPersist(): void {
  * (size, mtimeMs) changed since the last pass. Output ordering matches the SDK
  * catalogue (modified descending).
  */
-export async function listSessionsIncremental(options: { trustWatcher?: boolean } = {}): Promise<ScannedSessionInfo[]> {
-	loadPersistedIndex();
+export async function listSessionsIncremental(
+  options: { trustWatcher?: boolean; deferDetails?: boolean } = {},
+): Promise<ScannedSessionInfo[]> {
+  loadPersistedIndex();
+  const sessionsDir = join(getAgentDir(), "sessions");
+  ensureDirectoryWatcher(sessionsDir);
+  let directory = globalThis.__piWebSessionDirectorySnapshot;
+  const needsReconcile = !options.trustWatcher || !directory || directory.dirty
+    || Date.now() - directory.checkedAt >= DIRECTORY_RECONCILE_MS;
+  if (needsReconcile) {
+    const files = await enumerateSessionFiles(sessionsDir);
+    directory = { files, checkedAt: Date.now(), dirty: false, changedFiles: new Set(files) };
+    globalThis.__piWebSessionDirectorySnapshot = directory;
+  }
+  if (!directory) throw new Error("会话目录快照初始化失败");
 
-	const sessionsDir = join(getAgentDir(), "sessions");
-	ensureDirectoryWatcher(sessionsDir);
-	let directory = globalThis.__piWebSessionDirectorySnapshot;
-	const needsReconcile = !options.trustWatcher || !directory || directory.dirty || Date.now() - directory.checkedAt >= DIRECTORY_RECONCILE_MS;
-	if (needsReconcile) {
-		const files = await enumerateSessionFiles(sessionsDir);
-		directory = { files, checkedAt: Date.now(), dirty: false, changedFiles: new Set(files) };
-		globalThis.__piWebSessionDirectorySnapshot = directory;
-	}
-	if (!directory) throw new Error("会话目录快照初始化失败");
-	const files = directory.files;
+  const files = directory.files;
+  const index = getIndex();
+  const present = new Set(files);
+  const stale = [...index.keys()].filter((filePath) => !present.has(filePath));
+  for (const filePath of stale) index.delete(filePath);
 
-	const index = getIndex();
-	const present = new Set(files);
-	const stale: string[] = [];
-	for (const known of index.keys()) {
-		if (!present.has(known)) stale.push(known);
-	}
-	for (const pathKey of stale) index.delete(pathKey);
+  const results = new Map<string, ScannedSessionInfo>();
+  for (const [filePath, cached] of index) {
+    if (present.has(filePath)) results.set(filePath, cached.info);
+  }
+  const filesToStat = needsReconcile ? files : [...directory.changedFiles];
+  directory.changedFiles.clear();
+  const fingerprints = await Promise.all(filesToStat.map(async (filePath) => {
+    try {
+      const stats = await stat(filePath);
+      return { filePath, fp: { size: stats.size, mtimeMs: stats.mtimeMs } as Fingerprint };
+    } catch {
+      return { filePath, fp: null as Fingerprint | null };
+    }
+  }));
 
-	const filesToStat = needsReconcile ? files : [...directory.changedFiles];
-	directory.changedFiles.clear();
-	const fingerprints = await Promise.all(
-		filesToStat.map(async (filePath) => {
-			try {
-				const s = await stat(filePath);
-				return {
-					filePath,
-					fp: { size: s.size, mtimeMs: s.mtimeMs } as Fingerprint,
-				};
-			} catch {
-				return { filePath, fp: null as Fingerprint | null };
-			}
-		}),
-	);
+  const changed: Array<{ filePath: string; fp: Fingerprint }> = [];
+  for (const { filePath, fp } of fingerprints) {
+    if (!fp) {
+      index.delete(filePath);
+      results.delete(filePath);
+      directory.files = directory.files.filter((candidate) => candidate !== filePath);
+      continue;
+    }
+    const cached = index.get(filePath);
+    if (hasMatchingFingerprint(cached, fp)) {
+      results.set(filePath, cached.info);
+      continue;
+    }
+    if (options.deferDetails) {
+      const summary = deferredSessionInfo(filePath, fp);
+      if (summary) results.set(filePath, summary);
+      else {
+        index.delete(filePath);
+        results.delete(filePath);
+      }
+      continue;
+    }
+    changed.push({ filePath, fp });
+  }
 
-	const changed: Array<{ filePath: string; fp: Fingerprint; resultIndex: number }> = [];
-	const results = new Map<string, ScannedSessionInfo>();
-	for (const [filePath, cached] of index) {
-		if (present.has(filePath)) results.set(filePath, cached.info);
-	}
-	for (const { filePath, fp } of fingerprints) {
-		if (!fp) {
-			index.delete(filePath);
-			results.delete(filePath);
-			directory.files = directory.files.filter((candidate) => candidate !== filePath);
-			continue;
-		}
-		if (!present.has(filePath)) {
-			directory.files.push(filePath);
-			present.add(filePath);
-		}
-		const cached = index.get(filePath);
-		if (
-			cached &&
-			cached.fp.size === fp.size &&
-			cached.fp.mtimeMs === fp.mtimeMs
-		) {
-			results.set(filePath, cached.info);
-			continue;
-		}
-		changed.push({ filePath, fp, resultIndex: 0 });
-	}
+  await runPool(changed, async ({ filePath, fp }) => {
+    const info = await scanSessionFileInfo(filePath);
+    if (info) {
+      index.set(filePath, { fp, info });
+      results.set(filePath, info);
+    } else {
+      index.delete(filePath);
+      results.delete(filePath);
+    }
+  });
+  if (changed.length > 0 || stale.length > 0) queueIndexPersist();
 
-	await runPool(changed, async ({ filePath, fp }) => {
-		const info = await scanSessionFileInfo(filePath);
-		if (info) {
-			index.set(filePath, { fp, info });
-			results.set(filePath, info);
-		} else {
-			index.delete(filePath);
-			results.delete(filePath);
-		}
-	});
-
-	if (changed.length > 0 || stale.length > 0) queueIndexPersist();
-
-	// Preserve catalogue order for timestamp ties, independently of cache hits
-	// and the order in which concurrent file reads complete.
-	return directory.files
-		.map((filePath) => results.get(filePath) ?? null)
-		.filter((info): info is ScannedSessionInfo => info !== null)
-		.sort((a, b) => b.modified.getTime() - a.modified.getTime());
+  // 缓存命中和并发读取均不能改变会话顺序；时间相同则沿用 SDK 的文件名规则。
+  return directory.files
+    .map((filePath) => results.get(filePath) ?? null)
+    .filter((info): info is ScannedSessionInfo => info !== null)
+    .sort((a, b) => b.modified.getTime() - a.modified.getTime()
+      || (index.get(b.path)?.fp.mtimeMs ?? 0) - (index.get(a.path)?.fp.mtimeMs ?? 0)
+      || basename(b.path).localeCompare(basename(a.path)));
 }
 
 /** 应用内文件变更无法依赖 watcher 的调度时序，显式要求下一次读取校对目录。 */
