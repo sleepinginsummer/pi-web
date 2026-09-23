@@ -52,3 +52,11 @@ test("查询命令不淘汰会话列表缓存", () => {
   assert.match(helperSource, /"get_commands"/);
   assert.match(helperSource, /"get_session_stats"/);
 });
+
+test("发送前拒绝运行中外部写入，并在空闲时重建 wrapper", () => {
+  const postSource = source.slice(source.indexOf("export async function POST"), source.indexOf("// GET /api/agent/[id]"));
+  assert.match(postSource, /current\.hasUnseenDiskEntry\(\)/);
+  assert.match(postSource, /code: "session_external_write", accepted: false/);
+  assert.match(postSource, /current\.evictIfDiskAhead\(\)/);
+  assert.ok(postSource.indexOf("current.hasUnseenDiskEntry()") < postSource.indexOf("session.send(body)"));
+});

@@ -28,6 +28,7 @@ export function useSessionList({ refreshKey, onSessionsChange }: UseSessionListO
   const [refreshDone, setRefreshDone] = useState(false);
   const requestGateRef = useRef(new LatestRequestGate());
   const initialLoadDoneRef = useRef(false);
+  const summaryLoadedRef = useRef(false);
   const refreshDoneTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const onSessionsChangeRef = useRef(onSessionsChange);
   onSessionsChangeRef.current = onSessionsChange;
@@ -51,10 +52,12 @@ export function useSessionList({ refreshKey, onSessionsChange }: UseSessionListO
     const requestGate = requestGateRef.current;
     const generation = requestGate.begin(requestKey);
     if (showInitialLoading) setLoading(true);
+    const summary = showInitialLoading && !summaryLoadedRef.current;
 
     try {
       const params = new URLSearchParams();
-      if (directoryVersionRef.current !== null) params.set("since", String(directoryVersionRef.current));
+      if (summary) params.set("summary", "1");
+      else if (directoryVersionRef.current !== null) params.set("since", String(directoryVersionRef.current));
       const response = await fetch(`/api/sessions${params.size > 0 ? `?${params}` : ""}`, { cache: "no-store" });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json() as {
@@ -71,16 +74,29 @@ export function useSessionList({ refreshKey, onSessionsChange }: UseSessionListO
         for (const session of data.upserts ?? []) byId.set(session.id, session);
         return [...byId.values()].sort((left, right) => Date.parse(right.modified) - Date.parse(left.modified));
       })();
-      if (typeof data.sessionDirectoryVersion === "number") directoryVersionRef.current = data.sessionDirectoryVersion;
+      if (summary) {
+        // 摘要和完整列表不能共享增量版本，完整扫描必须重新取全量。
+        summaryLoadedRef.current = true;
+        directoryVersionRef.current = null;
+      } else if (typeof data.sessionDirectoryVersion === "number") {
+        directoryVersionRef.current = data.sessionDirectoryVersion;
+      }
       commitSessions(nextSessions);
       setError(null);
+      if (summary) queueMicrotask(() => void loadSessions(false));
       if (!showInitialLoading) {
         setRefreshDone(true);
         if (refreshDoneTimerRef.current) clearTimeout(refreshDoneTimerRef.current);
         refreshDoneTimerRef.current = setTimeout(() => setRefreshDone(false), 2000);
       }
     } catch (cause) {
-      if (requestGate.isLatest(requestKey, generation)) setError(String(cause));
+      if (requestGate.isLatest(requestKey, generation)) {
+        if (summary) {
+          // 摘要不可用时仍尝试完整列表，不让首屏卡在失败状态。
+          summaryLoadedRef.current = true;
+          queueMicrotask(() => void loadSessions(false));
+        } else setError(String(cause));
+      }
     } finally {
       // 后发的静默刷新也必须结束首次 loading，否则旧请求失效后无人清理加载态。
       if (requestGate.isLatest(requestKey, generation)) setLoading(false);

@@ -50,3 +50,10 @@ test("context route data reports when pagination reaches the root", () => {
   assert.deepEqual(page.entryIds, []);
   assert.equal(page.hasMore, false);
 });
+
+test("context 首屏先检查外部写入，运行中返回冲突而不是读取旧 wrapper", () => {
+  assert.match(routeSrc, /liveRpc\.hasUnseenDiskEntry\(\)/);
+  assert.match(routeSrc, /liveRpc\.isRunning\(\)/);
+  assert.match(routeSrc, /liveRpc\.evictIfDiskAhead\(\)/);
+  assert.ok(routeSrc.indexOf("liveRpc.hasUnseenDiskEntry()") < routeSrc.indexOf("readSessionBrowseSnapshot(id)"));
+});

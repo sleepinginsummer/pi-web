@@ -80,6 +80,16 @@ export async function POST(
       if (identityError) return identityError;
     }
 
+    // 拒绝从旧 leaf 写入：空闲时重建，运行中保留 wrapper 并要求用户稍后刷新。
+    const current = getRpcSession(id);
+    if (current?.isAlive() && current.hasUnseenDiskEntry()) {
+      if (current.isRunning()) {
+        console.warn("[pi-web] 运行中会话被外部修改，拒绝命令", { sessionId: id, commandType: body.type });
+        return NextResponse.json({ error: "会话文件已被外部修改，运行结束前不能继续写入", code: "session_external_write", accepted: false }, { status: 409 });
+      }
+      current.evictIfDiskAhead();
+    }
+
     if (body.type === "set_tools") {
       const existing = getRpcSession(id);
       const filePath = existing?.sessionFile || await resolveSessionPath(id) || undefined;

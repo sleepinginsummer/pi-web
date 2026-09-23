@@ -447,3 +447,10 @@ test("delegates Shadow runtime, slash, and toggle behavior to the focused hook",
   assert.match(source, /toggle: handleShadowMindToggle/);
   assert.doesNotMatch(source, /setShadowMindEnabled|setShadowMindAvailable|setShadowMindTogglePending/);
 });
+
+test("历史页缓存仅在会话版本和 leaf 均与 context 响应一致时恢复", () => {
+  assert.match(source, /saved\.revision === loaded\.snapshot\.version && saved\.leafId === loaded\.leafId/);
+  assert.match(source, /if \(saved\) deleteSessionViewSnapshot\(sid\)/);
+  assert.match(source, /fetchSessionContext\(sid, signal, \{ skipCache: options\.validateView \}\)/);
+  assert.match(source, /setSessionViewSnapshot\(\{ sessionId: sid, revision: contextVersionRef\.current/);
+});

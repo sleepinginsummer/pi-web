@@ -417,11 +417,16 @@ export class AgentSessionWrapper {
    * index never saw (another pi process appended). Rechecks isRunning() so a
    * prompt that started during the probe cannot be disposed.
    */
-  evictIfDiskAhead(): boolean {
-    if (!this.isAlive() || this.isRunning()) return false;
+  hasUnseenDiskEntry(): boolean {
+    if (!this.isAlive()) return false;
     const diskLatestId = readLatestSessionEntryId(this.sessionFile);
-    if (!diskLatestId || this.inner.sessionManager.getEntry(diskLatestId)) return false;
+    return Boolean(diskLatestId && !this.inner.sessionManager.getEntry(diskLatestId));
+  }
+
+  evictIfDiskAhead(): boolean {
+    if (!this.isAlive() || this.isRunning() || !this.hasUnseenDiskEntry()) return false;
     if (this.isRunning()) return false;
+    console.info("[pi-web] 检测到会话文件外部写入，淘汰空闲会话", { sessionId: this.sessionId });
     this.destroy();
     invalidateSessionListCache();
     return true;

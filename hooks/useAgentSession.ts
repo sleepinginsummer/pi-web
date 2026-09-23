@@ -14,6 +14,8 @@ import type { AgentRuntimeSnapshot, AgentRuntimeState, AgentSubmitAcknowledgemen
 import type { SelectedModel } from "@/lib/model-types";
 import type { ModelSelectionViewActions, ModelSelectionViewState } from "@/lib/model-selection-types";
 import { resolveFastModeAvailability } from "@/lib/fast-mode";
+import { deleteSessionViewSnapshot, getSessionViewSnapshot, setSessionViewSnapshot } from "@/lib/session-view-cache";
+
 import { isThinkingLevel, type ThinkingLevelOption } from "@/lib/thinking-levels";
 import { recordThinkingLevelPreference } from "@/lib/thinking-level-preference-client";
 import { materializeNewSession, releaseNewSessionMaterialization, type NewSessionMaterializationResult } from "@/lib/new-session-materialization-client";
@@ -562,6 +564,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     hasMore: boolean;
     loading: boolean;
   }>({ sid: null, oldestEntryId: null, hasMore: false, loading: false });
+  // 卸载时从 ref 读取最终已分页窗口，避免 mount effect 的闭包捕获首帧状态。
+  const viewSnapshotRef = useRef({ leafId: activeLeafId, page: historyPage, model: contextModel, thinkingLevel: "off", totalActiveMs: 0 });
   const [streamState, dispatch] = useReducer(streamReducer, INITIAL_STREAMING_STATE);
   const dispatchStreamBatch = useCallback((events: ClientAssistantMessageEvent[]) => {
     dispatch({ type: "delta_batch", events });
@@ -838,6 +842,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       generation: backfillRequestRef.current.generation + 1,
       controller: null,
     };
+    viewSnapshotRef.current.thinkingLevel = snapshot.thinkingLevel;
     setContextModel(snapshot.model);
     contextVersionRef.current = snapshot.version;
     setContextVersion(snapshot.version);
@@ -866,6 +871,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setLoading(false);
     return true;
   }, [modelSelectionActions, requestScrollPosition]);
+
+  viewSnapshotRef.current.leafId = activeLeafId;
+  viewSnapshotRef.current.page = historyPage;
+  viewSnapshotRef.current.model = contextModel;
+  viewSnapshotRef.current.totalActiveMs = sessionTotalActiveMs;
 
   /** 按活动分支游标向前加载一页；请求串行且只允许提交到发起时的会话和边界。 */
   const loadEarlierMessages = useCallback(async (): Promise<boolean> => {
@@ -954,7 +964,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     sid: string,
     showLoading = false,
     includeState = false,
-    options: { preserveScroll?: boolean } = {},
+    options: { preserveScroll?: boolean; validateView?: boolean } = {},
   ) => {
     const performancePrefix = `pi-session:${sid}`;
     if (showLoading) {
@@ -984,7 +994,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     try {
       const contextResult = await contextLoaderRef.current.run(
         sid,
-        (signal) => fetchSessionContext(sid, signal),
+        (signal) => fetchSessionContext(sid, signal, { skipCache: options.validateView }),
         (loaded) => {
           if (sessionIdRef.current !== sid) return false;
           if (loaded.kind === "missing") {
@@ -1004,6 +1014,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             setLoading(false);
             return false;
           }
+          const saved = options.validateView ? getSessionViewSnapshot(sid) : null;
+          if (saved && saved.revision === loaded.snapshot.version && saved.leafId === loaded.leafId
+            && saved.entryIds.length >= loaded.snapshot.entryIds.length) {
+            // 版本及活动 leaf 均一致才保留已分页的大窗口；其它元数据以服务端为准。
+            const wider = { ...loaded.snapshot, messages: saved.messages, entryIds: saved.entryIds,
+              oldestEntryId: saved.oldestEntryId, hasMore: saved.hasMore };
+            return commitContextSnapshot(sid, wider, loaded.leafId, { preserveScroll: true }) ? loaded : null;
+          }
+          if (saved) deleteSessionViewSnapshot(sid);
           return commitContextSnapshot(sid, loaded.snapshot, loaded.leafId, options) ? loaded : null;
       });
       if (!contextResult.committed || !contextResult.value) return { loaded: false, agentState: null };
@@ -2563,7 +2582,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (session) {
       sessionIdRef.current = session.id;
       void connectEvents(session.id);
-      loadSession(session.id, true, true).then(({ agentState }) => {
+      // 先向服务端验证版本和活动 leaf，不能把旧窗口直接显示在另一个分支上。
+      loadSession(session.id, true, true, { validateView: true }).then(({ agentState }) => {
         if (agentState?.alive) {
           loadTools(session.id);
           const runtimeState = agentState.state;
@@ -2602,6 +2622,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return () => {
       const sid = sessionIdRef.current;
       if (sid) {
+        const { leafId, page, model, thinkingLevel, totalActiveMs } = viewSnapshotRef.current;
+        if (!agentRunningRef.current && !bashRunningRef.current && contextVersionRef.current
+          && page.sid === sid && messagesRef.current.length === entryIdsRef.current.length) {
+          setSessionViewSnapshot({ sessionId: sid, revision: contextVersionRef.current,
+            messages: messagesRef.current, entryIds: entryIdsRef.current, leafId,
+            oldestEntryId: page.oldestEntryId, hasMore: page.hasMore,
+            thinkingLevel, model, totalActiveMs, loadedEntryIds: entryIdsRef.current });
+        }
+        if (agentRunningRef.current || bashRunningRef.current) deleteSessionViewSnapshot(sid);
         contextLoaderRef.current.cancel(sid);
         contextRefreshSchedulerRef.current.cancel(sid);
         shadowLifecycleRef.current.reset();

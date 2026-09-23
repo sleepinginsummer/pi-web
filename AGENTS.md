@@ -139,7 +139,7 @@ hooks/
 - Pi SDK 0.85.1 checks the complete context after tool results and before the next model request, compacting at the configured threshold when needed. Keep this upstream behavior intact when upgrading the SDK; do not reintroduce the removed pi-web mid-run compaction patch.
 
 ### Session first-paint loading
-- Existing sessions load `/api/sessions/[id]/context` first and commit messages immediately. `/details` (file path + projected branch tree) and `/state` use independent abort controllers and load afterward; details failures must not hide a valid context or runtime snapshot.
+- Existing sessions load `/api/sessions/[id]/context` first and commit messages immediately. 切回已结束的会话时，只有 `/context` 验证文件版本与活动 leaf 均一致，才恢复有上限的页面内历史快照；不一致就丢弃。 `/details` (file path + projected branch tree) and `/state` use independent abort controllers and load afterward; details failures must not hide a valid context or runtime snapshot.
 - Delayed details are identity-bound to the session id so an old tree cannot pair with a new leaf. `/details` must not read entries or build context.
 - `ChatWindow` groups history into lightweight index descriptors, applies the visible window, and only then creates JSX. The window count is keyed by session id/cwd so a newly selected session cannot inherit an expanded history window from the previous session.
 
@@ -171,7 +171,10 @@ The top bar Shadow switch controls only the current session. `lib/shadow-session
 `GET /api/models` returns `defaultModel` read from `~/.pi/agent/settings.json`. `ChatWindow` pre-selects this on mount for new sessions. Explicit browser model/thinking selections are applied atomically during AgentSession construction, then `lib/startup-preferences.ts` persists their effective values without replaying `set_model`/`set_thinking_level`; implicit `enabledModels` fallbacks and thinking pins are not persisted.
 
 ### `enabledModels` scoping
+- `/api/models/enabled` 通过独立事务锁串行化读取、编辑和写入，并在锁内新建 SDK `SettingsManager`；不能在调用 SDK 时外层再锁 `settings.json`，否则会与 SDK 自身文件锁冲突。
 The `enabledModels` setting uses pi's `--models` syntax: minimatch globs against `provider/modelId` or a bare `modelId`, fuzzy matching for non-glob patterns, and an optional `:thinkingLevel` suffix. Never compare those patterns as literal strings — `lib/model-scope.ts` delegates to the SDK's `resolveModelScopeWithDiagnostics()` so pi-web and the TUI agree on the visible model list, and falls back to all available models when patterns resolve to nothing. `startRpcSession()` resolves that scope before creating an AgentSession and passes the selected initial model, thinking pin, and SDK-native `scopedModels` atomically; `GET /api/models` reuses the helper only for selector data, `thinkingLevelPins`, and `modelScopeWarnings` display.
+
+- `/context` 和 `/details` 在读取存活 wrapper 前检查外部 JSONL 追加：空闲时淘汰旧 wrapper，运行中返回 409，不展示旧 leaf。Agent 命令发送前也经过这一边界；尾部探测会按需越过 64 KB，直到找到完整记录。
 
 ### SSE reconnect on page refresh mid-stream
 On `ChatWindow` mount, `GET /api/agent/[id]` is called. If `state.isStreaming === true`, SSE is reconnected automatically. `thinkingLevel` and `isCompacting` are also synced from this response.

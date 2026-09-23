@@ -22,6 +22,13 @@ export async function GET(
   try {
     const requestStartedAt = performance.now();
     const liveRpc = getRpcSession(id);
+    // 浏览与发送使用同一新鲜度边界；运行中的 wrapper 不允许被淘汰。
+    if (liveRpc?.isAlive() && liveRpc.hasUnseenDiskEntry()) {
+      if (liveRpc.isRunning()) {
+        return NextResponse.json({ error: "会话正在运行且文件被外部修改，请等待运行结束后刷新" }, { status: 409 });
+      }
+      liveRpc.evictIfDiskAhead();
+    }
     const live = liveRpc?.isAlive() ? await readSessionBrowseSnapshot(id) : null;
     const filePath = live ? null : await resolveSessionPath(id);
     if (!live && !filePath) {

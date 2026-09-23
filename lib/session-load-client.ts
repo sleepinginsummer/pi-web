@@ -169,7 +169,10 @@ export async function fetchSessionContext(
       return knownCached.result;
     }
     if (response.status === 404) return { kind: "missing" };
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    if (!response.ok) {
+      const failure = await response.json().catch(() => null) as { error?: unknown } | null;
+      throw new Error(typeof failure?.error === "string" ? failure.error : `HTTP ${response.status}`);
+    }
     const payload = await response.json() as { context: Omit<SessionContextSnapshot, "version">; leafId: string | null; totalActiveMs?: number; version?: string };
     const version = payload.version ?? response.headers.get("X-Session-Version");
     if (!version) throw new Error("服务端会话上下文缺少版本");

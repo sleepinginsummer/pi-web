@@ -115,28 +115,35 @@ function readEntryId(line: string): string | undefined {
   }
 }
 
-/**
- * Newest entry id recorded on disk, read from a bounded tail so large sessions
- * stay cheap. Undefined when the file is absent (a wrapper that has not flushed
- * its first assistant turn yet) or unreadable.
- *
- * Used only on ?force=1 session reads (mount / page refresh). An id the
- * in-memory wrapper never saw means another pi process appended to the file.
- */
+/** 从文件尾按块倒查完整 JSONL 行；超长记录按需延伸，不截断 64 KB 边界。 */
 export function readLatestSessionEntryId(filePath: string | undefined): string | undefined {
   if (!filePath) return undefined;
-  let lines: string[];
+  let fd: number;
+  try { fd = openSync(filePath, "r"); } catch { return undefined; }
   try {
-    lines = readBoundedTailLines(filePath, SESSION_TAIL_PROBE_MAX_BYTES);
-  } catch {
-    return undefined;
+    let position = fstatSync(fd).size;
+    // 从右向左保存当前跨块记录的片段；只在遇到换行后拼接一次。
+    let fragments: Buffer[] = [];
+    while (position > 0) {
+      const size = Math.min(SESSION_TAIL_PROBE_MAX_BYTES, position);
+      position -= size;
+      const chunk = Buffer.allocUnsafe(size);
+      const count = readSync(fd, chunk, 0, size, position);
+      let end = count;
+      for (let cursor = count - 1; cursor >= 0; cursor -= 1) {
+        if (chunk[cursor] !== 0x0a) continue;
+        const candidate = Buffer.concat([chunk.subarray(cursor + 1, end), ...fragments.reverse()]);
+        const id = readEntryId(candidate.toString("utf8").replace(/\r$/, ""));
+        if (id) return id;
+        fragments = [];
+        end = cursor;
+      }
+      fragments.push(chunk.subarray(0, end));
+    }
+    return readEntryId(Buffer.concat(fragments.reverse()).toString("utf8").replace(/\r$/, ""));
+  } finally {
+    closeSync(fd);
   }
-  // Walk backwards so a torn trailing line falls back to the previous entry.
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const entryId = readEntryId(lines[index]);
-    if (entryId) return entryId;
-  }
-  return undefined;
 }
 
 function readSessionRelationEntries(filePath: string): SessionEntry[] {

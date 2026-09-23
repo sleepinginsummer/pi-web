@@ -191,14 +191,14 @@ try {
   assert.equal(beforeRoot.context.hasMore, false);
   await api("/api/sessions/e2e-does-not-exist", 404);
   await api("/api/files/..%2F..%2Fetc%2Fpasswd?type=read", 403);
+  const thinkingProbe = await fetch(`${base}/api/sessions/${RICH}/entries/call/thinking?blockIndex=1`);
+  assert.equal(thinkingProbe.status, 200, `thinking endpoint: ${await thinkingProbe.text()}`);
   const compacted = await api(`/api/sessions/${COMPACTED}`);
   assert.equal(compacted.context.entryIds[0], "compact");
   assert.equal(compacted.context.messages.some((entry) => entry.role === "user"), false);
   console.log("PASS: bounded history, branch context, pagination root, and API errors");
 
-  // #632 regression: a live wrapper shadows the session file. Ordinary reads
-  // keep that snapshot (two processes writing one JSONL is unsupported). A
-  // mount/refresh GET (?force=1) must see the external append and stay stable.
+  // 外部写入通过界面实际使用的 /context 检测；普通详情仍可按需强制刷新。
   {
     const file = join(sessionDir, `2026-08-23T00-00-00-000Z_${APPEND}.jsonl`);
     await post(`/api/agent/${APPEND}`, { type: "get_state" });
@@ -208,14 +208,15 @@ try {
     const ordinaryRead = await api(`/api/sessions/${APPEND}`);
     assert.deepEqual(ordinaryRead.context.entryIds, ["root", "reply"], "post-turn reads must not probe disk");
     assert.equal(ordinaryRead.wrapperRebuilt, undefined);
+    const afterContext = await api(`/api/sessions/${APPEND}/context?tail=50`);
+    assert.deepEqual(afterContext.context.entryIds, ["root", "reply", "external"], "the UI context path must see the append");
     const afterForce = await api(`/api/sessions/${APPEND}?force=1`);
-    assert.deepEqual(afterForce.context.entryIds, ["root", "reply", "external"], "a mount/refresh read must see the external append");
-    assert.equal(afterForce.wrapperRebuilt, true);
+    assert.deepEqual(afterForce.context.entryIds, ["root", "reply", "external"]);
     const again = await api(`/api/sessions/${APPEND}`);
     assert.deepEqual(again.context.entryIds, ["root", "reply", "external"], "repeated reads must stay stable");
     const appended = await api(`/api/sessions/${APPEND}/context?tail=1`);
     assert.deepEqual(appended.context.entryIds, ["external"], "the appended entry must be readable on its own");
-    console.log("PASS: external session-file appends are visible on force/mount reads");
+    console.log("PASS: external session-file appends are visible on the UI context path");
   }
 
   browser = await chromium.launch();
@@ -301,6 +302,18 @@ try {
     await page.goto(`${base}/?session=${BRANCH}`, { waitUntil: "domcontentloaded" });
     await page.getByText("Active branch answer", { exact: true }).waitFor();
     assert.equal(await page.getByText("Inactive branch answer", { exact: true }).count(), 0);
+    if (viewport.width > 600) {
+      // 真正走浏览器挂载路径，而不只直接命中 ?force=1 接口。
+      await page.goto(`${base}/?session=${APPEND}`, { waitUntil: "domcontentloaded" });
+      await page.getByText("E2E external append", { exact: true }).waitFor();
+      await post(`/api/agent/${APPEND}`, { type: "get_state" });
+      const file = join(sessionDir, `2026-08-23T00-00-00-000Z_${APPEND}.jsonl`);
+      appendFileSync(file, `${JSON.stringify(message("ui-external", "external", "assistant", "E2E UI external append"))}\n`);
+      await page.goto(`${base}/?session=${BRANCH}`, { waitUntil: "domcontentloaded" });
+      await page.getByText("Active branch answer", { exact: true }).waitFor();
+      await page.goto(`${base}/?session=${APPEND}`, { waitUntil: "domcontentloaded" });
+      await page.getByText("E2E UI external append", { exact: true }).waitFor();
+    }
     const thinkingRequests = [];
     page.on("request", (request) => {
       if (new URL(request.url()).pathname.endsWith("/thinking")) thinkingRequests.push(request.url());
@@ -428,6 +441,8 @@ try {
       const agentRoute = `**/api/agent/${LONG}`;
       await page.route(agentRoute, (route) => route.fulfill({ json: {} }));
       try {
+        // 此分支专测未缓存窗口的分页取消；先清掉刚才验证过的历史快照。
+        await page.evaluate((id) => globalThis.__piSessionViewCache?.delete(id), LONG);
         const pendingHistory = page.waitForRequest((request) => request.url().includes(`/api/sessions/${LONG}/context?`) && new URL(request.url()).searchParams.has("before"));
         await page.locator(`[title="${text(0)}"]`).click();
         await pendingHistory;
