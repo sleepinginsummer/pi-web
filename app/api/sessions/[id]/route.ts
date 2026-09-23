@@ -41,14 +41,14 @@ export async function GET(
     const searchParams = new URL(req.url).searchParams;
     const force = searchParams.get("force") === "1";
 
-    // A live wrapper only reflects the appends pi-web itself made. When another
-    // pi process (the TUI) writes the same session file, the in-memory index
-    // stays stale. Only probe on ?force=1 (session mount / page refresh): two
-    // processes writing one JSONL is unsupported, so post-turn reads must not
-    // scan disk. Eviction is idle-only; mid-run the wrapper owns the write path.
+    // 完整详情路由仅在显式 force 时检查；首屏 /context、/details 和命令入口
+    // 会分别校验文件新鲜度。运行中或写入不完整时不能返回旧 leaf。
     let liveWrapper = rpc?.isAlive() ? rpc : undefined;
     let wrapperRebuilt = false;
-    if (force && liveWrapper?.evictIfDiskAhead()) {
+    if (force && liveWrapper && liveWrapper.diskFreshness() !== "current") {
+      if (liveWrapper.isRunning() || !liveWrapper.evictIfDiskAhead()) {
+        return NextResponse.json({ error: "会话文件正在被外部修改，请等待写入完成后刷新" }, { status: 409 });
+      }
       wrapperRebuilt = true;
       liveWrapper = undefined;
     }

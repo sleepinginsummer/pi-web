@@ -10,7 +10,9 @@ import { expandMultiSkillCommand } from "./multi-skill-command";
 import { invalidateModelsCache, updateCachedDefaultModel } from "./models-cache";
 import { PendingPromptTracker } from "./pending-prompt-tracker";
 import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
-import { cacheSessionPath, getLatestModelChange, invalidateSessionListCache, readLatestSessionEntryId, resolveSessionPath } from "./session-reader";
+import { cacheSessionPath, getLatestModelChange, invalidateSessionListCache, resolveSessionPath } from "./session-reader";
+import { SessionDiskInspector, type SessionDiskFreshness } from "./session-disk-freshness";
+import { canRunWithExternalSessionChange } from "./session-write-policy";
 import { restoreShadowSessionSettingSafely, ShadowSessionSetting } from "./shadow-session-setting";
 import { parseShadowMindToggleCommand, SHADOW_MIND_SESSION_STATE } from "./shadow-session-protocol";
 import { createClonedSession, createForkedSession } from "./session-fork";
@@ -133,6 +135,7 @@ type ExtensionBindingOptions = {
 };
 
 type AgentSessionWrapperOptions = {
+  persistedSessionFile?: boolean;
   exactSystemPrompt?: () => string;
   chatOnly?: boolean;
   suppressCompletionNotifications?: boolean;
@@ -279,7 +282,15 @@ function findUnfinishedToolCall(messages: unknown[]): { toolCallId: string; tool
 // Wraps AgentSession with the same interface the rest of the app expects
 // ============================================================================
 
+export class SessionFileConflictError extends Error {
+  constructor() {
+    super("会话文件已被外部修改，请刷新后重试");
+    this.name = "SessionFileConflictError";
+  }
+}
+
 export class AgentSessionWrapper {
+  private readonly diskInspector: SessionDiskInspector;
   private listeners: EventListener[] = [];
   private activeToolEvents = new Map<string, AgentEvent>();
   private pendingUiResponses = new Map<string, PendingUiResponse>();
@@ -327,6 +338,9 @@ export class AgentSessionWrapper {
     generation = "initial",
     options: AgentSessionWrapperOptions = {},
   ) {
+    // 已有会话即使在服务加载期间被删，也必须视为磁盘变更。
+    this.diskInspector = new SessionDiskInspector(inner.sessionManager, options.persistedSessionFile === true
+      || Boolean(inner.sessionFile && existsSync(inner.sessionFile)));
     const modelRuntime = inner.modelRuntime;
     this.fastRuntimeSnapshot = {
       generation: `0:${generation}`,
@@ -412,19 +426,13 @@ export class AgentSessionWrapper {
     return this._alive && (this.pendingPrompts.active || this.inner.isStreaming || this.inner.isCompacting || this.inner.isBashRunning);
   }
 
-  /**
-   * Drop this idle wrapper when the on-disk JSONL has an entry the in-memory
-   * index never saw (another pi process appended). Rechecks isRunning() so a
-   * prompt that started during the probe cannot be disposed.
-   */
-  hasUnseenDiskEntry(): boolean {
-    if (!this.isAlive()) return false;
-    const diskLatestId = readLatestSessionEntryId(this.sessionFile);
-    return Boolean(diskLatestId && !this.inner.sessionManager.getEntry(diskLatestId));
+  /** 已知 entry id 仍可能被重写；以文件版本变化触发完整内容校验。 */
+  diskFreshness(): SessionDiskFreshness {
+    return this.isAlive() ? this.diskInspector.inspect(this.sessionFile) : "current";
   }
 
   evictIfDiskAhead(): boolean {
-    if (!this.isAlive() || this.isRunning() || !this.hasUnseenDiskEntry()) return false;
+    if (!this.isAlive() || this.isRunning() || this.diskFreshness() !== "changed") return false;
     if (this.isRunning()) return false;
     console.info("[pi-web] 检测到会话文件外部写入，淘汰空闲会话", { sessionId: this.sessionId });
     this.destroy();
@@ -725,6 +733,10 @@ export class AgentSessionWrapper {
     this.resetIdleTimer();
     const type = command.type as string;
     if (this.shouldWaitForExtensions(type)) await this.waitForExtensionsBound();
+    // 扩展初始化可能跨越外部写入；实际 dispatch 前再次校验。
+    if (!canRunWithExternalSessionChange(type) && this.diskFreshness() !== "current") {
+      throw new SessionFileConflictError();
+    }
 
     if (type === "prompt" || type === "steer" || type === "follow_up") {
       const imageError = validateAgentImages(command.images);
@@ -1876,6 +1888,9 @@ export async function setRpcSessionTools(
   if (!existing?.isAlive()) {
     if (!sessionFile) throw new Error("Session not found");
     const manager = SessionManager.open(sessionFile, undefined);
+    if (new SessionDiskInspector(manager, true).inspect(sessionFile) !== "current") {
+      throw new SessionFileConflictError();
+    }
     if (readSubagentSessionResources(manager.getEntries() as unknown as SessionEntry[])) {
       throw new Error("Subagent tool selection is fixed by its profile");
     }
@@ -1887,6 +1902,7 @@ export async function setRpcSessionTools(
   }
 
   if (existing.isRunning()) throw new Error("Cannot change tools while the session is running");
+  if (existing.diskFreshness() !== "current") throw new SessionFileConflictError();
   if (readSubagentSessionResources(existing.inner.sessionManager.getEntries() as unknown as SessionEntry[])) {
     throw new Error("Subagent tool selection is fixed by its profile");
   }
@@ -2311,11 +2327,17 @@ export async function startRpcSession(
         exactSystemPrompt,
         chatOnly,
         suppressCompletionNotifications: Boolean(subagentResources),
+        persistedSessionFile: Boolean(sessionFile),
       },
     );
     registerRpcWrapper(wrapper);
     if (fastEnabled !== undefined) {
-      await wrapper.send({ type: "set_fast_enabled", enabled: fastEnabled });
+      try {
+        await wrapper.send({ type: "set_fast_enabled", enabled: fastEnabled });
+      } catch (error) {
+        wrapper.destroy();
+        throw error;
+      }
     }
 
     const realSessionId = inner.sessionId as string;

@@ -52,8 +52,8 @@ test("context route data reports when pagination reaches the root", () => {
 });
 
 test("context 首屏先检查外部写入，运行中返回冲突而不是读取旧 wrapper", () => {
-  assert.match(routeSrc, /liveRpc\.hasUnseenDiskEntry\(\)/);
+  assert.match(routeSrc, /liveRpc\.diskFreshness\(\)/);
   assert.match(routeSrc, /liveRpc\.isRunning\(\)/);
   assert.match(routeSrc, /liveRpc\.evictIfDiskAhead\(\)/);
-  assert.ok(routeSrc.indexOf("liveRpc.hasUnseenDiskEntry()") < routeSrc.indexOf("readSessionBrowseSnapshot(id)"));
+  assert.ok(routeSrc.indexOf("liveRpc.diskFreshness()") < routeSrc.indexOf("readSessionBrowseSnapshot(id)"));
 });

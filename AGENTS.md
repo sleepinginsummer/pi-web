@@ -174,7 +174,7 @@ The top bar Shadow switch controls only the current session. `lib/shadow-session
 - `/api/models/enabled` 通过独立事务锁串行化读取、编辑和写入，并在锁内新建 SDK `SettingsManager`；不能在调用 SDK 时外层再锁 `settings.json`，否则会与 SDK 自身文件锁冲突。
 The `enabledModels` setting uses pi's `--models` syntax: minimatch globs against `provider/modelId` or a bare `modelId`, fuzzy matching for non-glob patterns, and an optional `:thinkingLevel` suffix. Never compare those patterns as literal strings — `lib/model-scope.ts` delegates to the SDK's `resolveModelScopeWithDiagnostics()` so pi-web and the TUI agree on the visible model list, and falls back to all available models when patterns resolve to nothing. `startRpcSession()` resolves that scope before creating an AgentSession and passes the selected initial model, thinking pin, and SDK-native `scopedModels` atomically; `GET /api/models` reuses the helper only for selector data, `thinkingLevelPins`, and `modelScopeWarnings` display.
 
-- `/context` 和 `/details` 在读取存活 wrapper 前检查外部 JSONL 追加：空闲时淘汰旧 wrapper，运行中返回 409，不展示旧 leaf。Agent 命令发送前也经过这一边界；尾部探测会按需越过 64 KB，直到找到完整记录。
+- `/context` 和 `/details` 在读取存活 wrapper 前检查外部 JSONL 追加：空闲时淘汰旧 wrapper，运行中返回 409，不展示旧 leaf；仅允许停止与只读控制命令。新 wrapper 在启动后的实际命令派发前复查磁盘；文件版本变化时逐条核对 JSONL 与内存，连同 ID 重写也不能误认为未变。尾部读取工具能按需越过 64 KB，但 wrapper 新鲜度边界以完整文件校验为准。
 
 ### SSE reconnect on page refresh mid-stream
 On `ChatWindow` mount, `GET /api/agent/[id]` is called. If `state.isStreaming === true`, SSE is reconnected automatically. `thinkingLevel` and `isCompacting` are also synced from this response.

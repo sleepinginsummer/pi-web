@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
 import { invalidateSessionListCache, resolveSessionPath } from "@/lib/session-reader";
+import { canRunWithExternalSessionChange } from "@/lib/session-write-policy";
 import {
   getRpcSession,
+  SessionFileConflictError,
   getRpcSessionSnapshot,
   isShadowSettingCommandResult,
   setRpcSessionTools,
@@ -80,14 +82,15 @@ export async function POST(
       if (identityError) return identityError;
     }
 
-    // 拒绝从旧 leaf 写入：空闲时重建，运行中保留 wrapper 并要求用户稍后刷新。
+    // 运行中仍允许 Stop 和只读状态命令；不可确认完整性的文件禁止再写入。
     const current = getRpcSession(id);
-    if (current?.isAlive() && current.hasUnseenDiskEntry()) {
-      if (current.isRunning()) {
-        console.warn("[pi-web] 运行中会话被外部修改，拒绝命令", { sessionId: id, commandType: body.type });
-        return NextResponse.json({ error: "会话文件已被外部修改，运行结束前不能继续写入", code: "session_external_write", accepted: false }, { status: 409 });
+    if (current?.isAlive() && current.diskFreshness() !== "current") {
+      if (!current.isRunning() && current.evictIfDiskAhead()) {
+        // 空闲 wrapper 已淘汰，后续从最新磁盘状态启动。
+      } else if (!canRunWithExternalSessionChange(body.type)) {
+        console.warn("[pi-web] 会话文件外部修改，拒绝写入命令", { sessionId: id, commandType: body.type });
+        return NextResponse.json({ error: "会话文件已被外部修改，请等待写入完成后刷新", code: "session_external_write", accepted: false }, { status: 409 });
       }
-      current.evictIfDiskAhead();
     }
 
     if (body.type === "set_tools") {
@@ -137,6 +140,9 @@ export async function POST(
 
     return NextResponse.json({ success: true, data: result });
   } catch (error) {
+    if (error instanceof SessionFileConflictError) {
+      return NextResponse.json({ error: error.message, code: "session_external_write", accepted: false }, { status: 409 });
+    }
     return NextResponse.json({
       error: String(error),
       ...(commandType === "prompt"
