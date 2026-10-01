@@ -16,14 +16,29 @@ test("长会话渲染索引通过一次线性 memo 复用", () => {
 
   assert.match(indexSource, /const toolResults = new Map/);
   assert.match(indexSource, /const visibleRefIndexByMessage = new Map/);
-  assert.match(indexSource, /const assistantTimestampIndices = new Set/);
   assert.match(indexSource, /const writtenFilesByFinalAssistant = new Map/);
   assert.match(indexSource, /for \(let index = 0; index < messages\.length; index\+\+\)/);
   assert.match(indexSource, /\}, \[messageCwd, messages\]\);/);
   assert.doesNotMatch(indexSource, /buildMessageRenderGroups/);
-  assert.match(renderSource, /const \{ toolResults, visibleRefIndexByMessage, assistantTimestampIndices, writtenFilesByFinalAssistant \} = messageRenderIndex/);
+  assert.match(renderSource, /const \{ toolResults, visibleRefIndexByMessage, writtenFilesByFinalAssistant \} = messageRenderIndex/);
   assert.doesNotMatch(renderSource, /for \(let j = idx \+ 1; j < messages\.length; j\+\+\)/);
   assert.doesNotMatch(renderSource, /new Map<string, ToolResultMessage>/);
+});
+
+test("助手消息显示时间，流式尾消息隐藏时间并允许分段覆盖", () => {
+  const renderMessageSource = source.slice(
+    source.indexOf("              const renderMessage ="),
+    source.indexOf("              const renderGroup ="),
+  );
+  assert.match(renderMessageSource, /let showTimestamp = msg\.role === "assistant";/);
+  assert.match(renderMessageSource, /if \(showTimestamp && streamState\.isStreaming && idx === messages\.length - 1\) \{\s*showTimestamp = false;/);
+  assert.match(renderMessageSource, /if \(options\.showTimestamp !== undefined\) showTimestamp = options\.showTimestamp;/);
+  assert.match(renderMessageSource, /showTimestamp=\{showTimestamp\}/);
+});
+
+test("过程与答复拆分后只在答复显示同一条助手消息的时间", () => {
+  assert.match(source, /showTimestamp: processIdx !== finalAssistantIdx \|\| !finalAnswerMessage/);
+  assert.match(source, /if \(finalAnswerMessage\) nodes\.push\(renderMessage\(finalAssistantIdx, \{ messageOverride: finalAnswerMessage, writtenFiles \}\)\)/);
 });
 
 test("本地渲染窗口耗尽后继续请求服务端历史页", () => {
