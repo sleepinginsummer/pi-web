@@ -801,10 +801,8 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
   const messageRenderIndex = useMemo(() => {
     const toolResults = new Map<string, ToolResultMessage>();
     const visibleRefIndexByMessage = new Map<number, number>();
-    const assistantTimestampIndices = new Set<number>();
     const writtenFilesByFinalAssistant = new Map<number, WrittenFile[]>();
     let visibleCount = 0;
-    let lastAssistantIndex = -1;
     let turnStarted = false;
     let turnContent: AssistantContentBlock[] = [];
     let turnLastAssistantIndex = -1;
@@ -852,17 +850,10 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
       if (isMessageGroupAnchor(message) || message.role === "assistant") {
         visibleRefIndexByMessage.set(index, visibleCount++);
       }
-      if (message.role === "user") {
-        if (lastAssistantIndex >= 0) assistantTimestampIndices.add(lastAssistantIndex);
-        lastAssistantIndex = -1;
-      } else if (message.role === "assistant") {
-        lastAssistantIndex = index;
-      }
     }
-    if (lastAssistantIndex >= 0) assistantTimestampIndices.add(lastAssistantIndex);
     if (turnStarted) commitWrittenFilesForTurn();
 
-    return { toolResults, visibleRefIndexByMessage, assistantTimestampIndices, visibleCount, writtenFilesByFinalAssistant };
+    return { toolResults, visibleRefIndexByMessage, visibleCount, writtenFilesByFinalAssistant };
   }, [messageCwd, messages]);
   const inputHistory = useMemo(() => {
     const seen = new Set<string>();
@@ -1120,7 +1111,7 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
           <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
             <div ref={messageContentRef} onPointerUp={captureQuotedSelection} style={{ maxWidth: "var(--chat-content-max-width, 820px)", margin: "0 auto" }}>
             {(() => {
-              const { toolResults, visibleRefIndexByMessage, assistantTimestampIndices, writtenFilesByFinalAssistant } = messageRenderIndex;
+              const { toolResults, visibleRefIndexByMessage, writtenFilesByFinalAssistant } = messageRenderIndex;
               // Anchor for live-tail detection and scroll positioning: the last
               // user message, or a compaction summary when compaction replaced it.
               let lastAnchorIdx = -1;
@@ -1143,8 +1134,8 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
                 const currentRefIdx = visibleRefIndexByMessage.get(idx);
                 const keyPrefix = options.keyPrefix ?? "message";
                 const messageKey = entryIds[idx] ?? idx;
-                let showTimestamp = msg.role === "assistant" && assistantTimestampIndices.has(idx);
-                // Hide on the currently-streaming tail (the streaming bubble owns the live timestamp).
+                let showTimestamp = msg.role === "assistant";
+                // 流式尾消息沿用现有处理，避免与流式气泡重复显示。
                 if (showTimestamp && streamState.isStreaming && idx === messages.length - 1) {
                   showTimestamp = false;
                 }
@@ -1318,7 +1309,8 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
                     attachRef: false,
                     keyPrefix: "process",
                     messageOverride: message,
-                    showTimestamp: false,
+                    // 同一条消息拆成过程和答复时，只在答复处显示时间。
+                    showTimestamp: processIdx !== finalAssistantIdx || !finalAnswerMessage,
                   }));
                 }
 

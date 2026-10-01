@@ -20,6 +20,12 @@ test("restores collapsed projects before persisting further changes", () => {
   assert.match(source, /if \(!collapsedProjectsReady\) return;\s*saveCollapsedProjects\(collapsedProjects\)/);
 });
 
+test("点击项目文件夹只切换折叠状态，不切换工作区", () => {
+  const toggle = source.slice(source.indexOf("onToggleCollapsed: () => {"), source.indexOf("onMove: (source, target) =>"));
+  assert.match(toggle, /setCollapsedProjects\(\(current\) =>/);
+  assert.doesNotMatch(toggle, /commitCustomPath|setSelectedCwd|onSelectSession/);
+});
+
 test("仅在服务端列表缺失时合并已转正的当前会话", () => {
   assert.doesNotMatch(source, /optimisticSession/);
   assert.doesNotMatch(source, /setOptimisticSessions/);

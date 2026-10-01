@@ -127,7 +127,6 @@ export function useSidebarPreferences(sessions: SessionInfo[], sessionsReady: bo
     const existing = new Set(sessions.map((session) => session.id));
     return new Set(preferences.pinnedSessionIds.filter((id) => existing.has(id)));
   }, [preferences.pinnedSessionIds, sessions]);
-  const pinnedProjectPaths = useMemo(() => new Set(preferences.pinnedProjectPaths), [preferences.pinnedProjectPaths]);
 
   const moveSession = useCallback((source: string, target: string) => {
     enqueue({ type: "move_session", source, target, visibleIds: sessionOrder });
@@ -151,9 +150,6 @@ export function useSidebarPreferences(sessions: SessionInfo[], sessionsReady: bo
     });
   }, [enqueue]);
 
-  const toggleProjectPinned = useCallback((project: string) => {
-    enqueue({ type: "set_project_pinned", project, pinned: !pinnedProjectPaths.has(project) });
-  }, [enqueue, pinnedProjectPaths]);
 
   const removeProjects = useCallback((ids: string[]) => {
     if (ids.length > 0) enqueue({ type: "remove_projects", ids });
@@ -162,12 +158,10 @@ export function useSidebarPreferences(sessions: SessionInfo[], sessionsReady: bo
   return {
     sessionOrder,
     pinnedSessionIds,
-    pinnedProjectPaths,
     getProjectOrder,
     moveSession,
     toggleSessionPinned,
     moveProject,
-    toggleProjectPinned,
     removeProjects,
   };
 }

@@ -461,3 +461,76 @@ test("renders image warnings for known text-only defaults without an explicit mo
     clearDraft(draftKey);
   }
 });
+
+test("队列为带图和纯图片消息展示图片数量标识，不展示图片数据", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(I18nProvider, null, React.createElement(ChatInput, {
+      onSend() {}, onAbort() {}, isStreaming: true,
+      modelState: emptyModelState, modelActions: emptyModelActions,
+      queuedMessages: {
+        steering: [{ text: "检查附件", images: [{ data: "dGVzdA==", mimeType: "image/png" }] }],
+        followUp: [{ text: "", images: [
+          { data: "dGVzdA==", mimeType: "image/png" },
+          { data: "b3RoZXI=", mimeType: "image/png" },
+        ] }],
+      },
+    })),
+  );
+  assert.match(html, /检查附件/);
+  assert.match(html, /Images ×1/);
+  assert.match(html, /Images ×2/);
+  assert.doesNotMatch(html, /dGVzdA==|b3RoZXI=/);
+});
+
+test("多条队列移回的图片在草稿恢复时不被单次上传数量限制截断", () => {
+  const key = "queue-recall-many-images";
+  setDraft(key, {
+    value: "移回的队列",
+    images: Array.from({ length: 11 }, () => ({ data: "dGVzdA==", mimeType: "image/png" })),
+  });
+  try {
+    const html = renderToStaticMarkup(
+      React.createElement(I18nProvider, null, React.createElement(ChatInput, {
+        onSend() {}, onAbort() {}, isStreaming: false, draftKey: key,
+        modelState: emptyModelState, modelActions: emptyModelActions,
+      })),
+    );
+    assert.equal((html.match(/data:image\/png;base64,dGVzdA==/g) ?? []).length, 11);
+  } finally {
+    clearDraft(key);
+  }
+});
+
+test("移回入口恢复完整图片预览并保留现有附件和草稿", async () => {
+  const { prependChatDraft } = await jiti.import("../lib/queued-messages.ts");
+  const inputSource = ts.createSourceFile("ChatInput.tsx", readFileSync(new URL("./ChatInput.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  function findImperativeHandle(node) {
+    if (ts.isCallExpression(node) && node.expression.getText(inputSource) === "useImperativeHandle") return node.arguments[1];
+    return ts.forEachChild(node, findImperativeHandle);
+  }
+  const callback = new Script(ts.transpileModule(`(${findImperativeHandle(inputSource).getText(inputSource)})`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2020 },
+  }).outputText);
+  const existing = { data: "b3RoZXI=", mimeType: "image/png", previewUrl: "blob:existing" };
+  const valueRef = { current: "当前文字" };
+  const attachedImagesRef = { current: [existing] };
+  let persisted;
+  const handle = callback.runInNewContext({
+    textareaRef: { current: null }, valueRef, attachedImagesRef,
+    textAttachmentRef: { current: "TXT 附件" }, draftKeyRef: { current: "test-session" },
+    prependChatDraft,
+    imageToDraftImage: ({ data, mimeType }) => ({ data, mimeType }),
+    draftImageToAttachedImage: (image) => ({ ...image, previewUrl: `data:${image.mimeType};base64,${image.data}` }),
+    setValue() {}, setAttachedImages() {}, setAtQuery() {},
+    setDraft: (key, draft) => { persisted = { key, draft }; },
+    requestAnimationFrame: (callback) => callback(),
+  })();
+  handle.prependDraft({ value: "排队文字", images: [{ data: "dGVzdA==", mimeType: "image/png" }] });
+  assert.equal(valueRef.current, "排队文字\n\n当前文字");
+  assert.equal(attachedImagesRef.current.length, 2);
+  assert.equal(attachedImagesRef.current[0].previewUrl, "data:image/png;base64,dGVzdA==");
+  assert.equal(attachedImagesRef.current[1], existing);
+  assert.equal(persisted.key, "test-session");
+  assert.equal(persisted.draft.images.length, 2);
+  assert.equal(persisted.draft.textAttachment, "TXT 附件");
+});

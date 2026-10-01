@@ -1,3 +1,4 @@
+import type { QueuedMessages } from "./queued-messages";
 import type { ThinkingLevel } from "./thinking-levels";
 import type { ExtensionStatusItem, ExtensionWidgetItem } from "./types";
 
@@ -14,7 +15,7 @@ export interface AgentRuntimeState {
   model?: { id: string; provider: string };
   messageCount: number;
   pendingMessageCount: number;
-  queuedMessages: { steering: string[]; followUp: string[] };
+  queuedMessages: QueuedMessages;
   contextUsage: { percent: number | null; contextWindow: number; tokens: number | null } | null;
   systemPrompt: string;
   thinkingLevel: ThinkingLevel;

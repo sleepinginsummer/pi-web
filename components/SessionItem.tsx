@@ -276,7 +276,7 @@ export function SessionItem({ session, status, mobile, actions, tree = {} }: Ses
   };
 
   return (
-    <div style={{ height: ITEM_HEIGHT, position: "relative", overflow: "hidden" }}>
+    <div draggable={!isMobile && !mutations.renaming} style={{ height: ITEM_HEIGHT, position: "relative", overflow: "hidden" }}>
       {isMobile && !mutations.confirmDelete && !mutations.renaming && <SessionActions mobile open={swipeOpen} isPinned={isPinned} onTogglePinned={stopAndTogglePin} onRename={stopAndRename} onDelete={stopAndDelete} />}
       <div
         data-session-row

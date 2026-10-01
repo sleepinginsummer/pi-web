@@ -6,6 +6,7 @@ import { existsSync, realpathSync, writeFileSync } from "fs";
 import { resolve } from "path";
 import type { AgentRuntimeSnapshot, AgentRuntimeState } from "./agent-state";
 import { validateAgentImages } from "./image-attachments";
+import { readAgentMessageQueue, recallAgentMessageQueue } from "./agent-message-queue";
 import { expandMultiSkillCommand } from "./multi-skill-command";
 import { invalidateModelsCache, updateCachedDefaultModel } from "./models-cache";
 import { PendingPromptTracker } from "./pending-prompt-tracker";
@@ -450,6 +451,17 @@ export class AgentSessionWrapper {
 
   start(): void {
     this.unsubscribe = this.inner.subscribe((event: AgentEvent) => {
+      if (event.type === "queue_update") {
+        // SDK 入队时先广播纯文本事件、再写真实队列；等当前同步调用结束后读取附件。
+        queueMicrotask(() => {
+          if (this._alive) this.emit({ type: "queue_update", ...readAgentMessageQueue(this.inner.agent) });
+        });
+        return;
+      }
+      if (event.type === "message_start" && (event.message as { role?: string } | undefined)?.role === "user") {
+        // 纯图片消息不会触发 SDK 的文字匹配移除，也必须同步实际 drain 后的队列。
+        this.emit({ type: "queue_update", ...readAgentMessageQueue(this.inner.agent) });
+      }
       // SDK 会先广播 message_end，再把消息追加到 SessionManager。首条用户消息到达时
       // 先创建会话文件，后续 SDK 追加即可直接写盘，侧栏刷新也能立即扫描到该会话。
       if (
@@ -809,6 +821,7 @@ export class AgentSessionWrapper {
       case "get_state": {
         const model = this.inner.model;
         const contextUsage = this.inner.getContextUsage();
+        const queuedMessages = readAgentMessageQueue(this.inner.agent);
         return {
           sessionId: this.inner.sessionId,
           sessionFile: this.inner.sessionFile ?? "",
@@ -820,11 +833,8 @@ export class AgentSessionWrapper {
           autoRetryEnabled: this.inner.autoRetryEnabled,
           model: model ? { id: model.id, provider: model.provider } : undefined,
           messageCount: 0,
-          pendingMessageCount: this.inner.pendingMessageCount,
-          queuedMessages: {
-            steering: [...this.inner.getSteeringMessages()],
-            followUp: [...this.inner.getFollowUpMessages()],
-          },
+          pendingMessageCount: queuedMessages.steering.length + queuedMessages.followUp.length,
+          queuedMessages,
           contextUsage: contextUsage
             ? { percent: contextUsage.percent, contextWindow: contextUsage.contextWindow, tokens: contextUsage.tokens }
             : null,
@@ -977,7 +987,7 @@ export class AgentSessionWrapper {
       case "clear_queue": {
         // Full clear only: pi has no single-item dequeue, and clear+requeue
         // races against the agent loop pulling messages mid-flight.
-        return this.inner.clearQueue();
+        return recallAgentMessageQueue(this.inner);
       }
 
       case "steer": {

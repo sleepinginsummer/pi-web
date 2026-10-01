@@ -34,10 +34,6 @@ function parseAction(value: unknown): SidebarPreferenceAction | null {
         ? { type: body.type, source: body.source, target: body.target, visibleIds }
         : null;
     }
-    case "set_project_pinned":
-      return validString(body.project, MAX_PROJECT_LENGTH) && typeof body.pinned === "boolean"
-        ? { type: body.type, project: body.project, pinned: body.pinned }
-        : null;
     case "move_session": {
       const visibleIds = stringArray(body.visibleIds, MAX_SESSION_ID_LENGTH);
       return validString(body.source, MAX_SESSION_ID_LENGTH) && validString(body.target, MAX_SESSION_ID_LENGTH) && visibleIds

@@ -264,12 +264,10 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
   const {
     sessionOrder,
     pinnedSessionIds: pinnedIds,
-    pinnedProjectPaths,
     getProjectOrder,
     moveSession,
     toggleSessionPinned: togglePinned,
     moveProject,
-    toggleProjectPinned,
     projects: knownProjects,
     addProject,
     removeProject,
@@ -891,7 +889,6 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
                 name: projectName(project),
                 active,
                 collapsed,
-                pinned: pinnedProjectPaths.has(project),
                 isMobile,
                 activity: showProjectActivity(projectActivity.get(project), t),
                 sessions: projectSessions,
@@ -899,13 +896,11 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
               }}
               labels={{
                 empty: t("sidebar.noSessions"),
-                pin: t(pinnedProjectPaths.has(project) ? "sidebar.unpinProject" : "sidebar.pinProject", { name: projectName(project) }),
                 remove: t("sidebar.removeProjectButton", { name: projectName(project) }),
                 newSession: t("sidebar.newSessionTitle", { path: project }),
               }}
               actions={{
                 onToggleCollapsed: () => {
-                  void commitCustomPath(project);
                   setCollapsedProjects((current) => {
                     const next = new Set(current);
                     if (next.has(project)) next.delete(project);
@@ -914,7 +909,6 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
                   });
                 },
                 onMove: (source, target) => moveProject(source, target, visibleProjects),
-                onTogglePinned: () => toggleProjectPinned(project),
                 onRemove: () => {
                   setProjectRemovalError(null);
                   setProjectPendingRemoval(project);

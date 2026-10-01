@@ -27,7 +27,6 @@ function createProps(overrides = {}) {
       name: "repo",
       active: true,
       collapsed: false,
-      pinned: false,
       isMobile: false,
       sessions: [],
       sessionOrder: [],
@@ -35,14 +34,12 @@ function createProps(overrides = {}) {
     },
     labels: {
       empty: "No sessions",
-      pin: "Pin project",
       remove: "Remove project",
       newSession: "New session",
     },
     actions: {
       onToggleCollapsed() {},
       onMove() {},
-      onTogglePinned() {},
       onRemove() {},
       onNewSession() {},
       ...overrides.actions,
@@ -69,23 +66,22 @@ function renderProject(props) {
   return render(React.createElement(I18nProvider, null, React.createElement(ProjectSection, props)));
 }
 
-test("项目头触发折叠、Pin、删除和新建动作", () => {
+test("项目头只保留折叠、删除和新建动作", () => {
   const calls = [];
   renderProject(createProps({
     actions: {
       onToggleCollapsed: () => calls.push("collapse"),
-      onTogglePinned: () => calls.push("pin"),
       onRemove: () => calls.push("remove"),
       onNewSession: () => calls.push("new"),
     },
   }));
 
   fireEvent.click(screen.getByTitle("/repo"));
-  fireEvent.click(screen.getByRole("button", { name: "Pin project" }));
+  assert.equal(screen.getAllByRole("button").length, 3);
   fireEvent.click(screen.getByRole("button", { name: "Remove project" }));
   fireEvent.click(screen.getByRole("button", { name: "New session" }));
 
-  assert.deepEqual(calls, ["collapse", "pin", "remove", "new"]);
+  assert.deepEqual(calls, ["collapse", "remove", "new"]);
 });
 
 test("项目拖放将源路径和目标路径交给排序动作", () => {
@@ -126,6 +122,36 @@ test("会话树渲染会话并将选择事件传给父层", () => {
   assert.deepEqual(selected, ["session-1"]);
 });
 
+
+test("重命名期间输入框不继承会话拖拽，退出后恢复拖拽", () => {
+  const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
+  const originalCancelAnimationFrame = globalThis.cancelAnimationFrame;
+  globalThis.requestAnimationFrame = () => 1;
+  globalThis.cancelAnimationFrame = () => {};
+  const session = {
+    path: "/sessions/one.jsonl", id: "session-1", cwd: "/repo", name: "Session One",
+    created: "2026-03-01T00:00:00.000Z", modified: "2026-03-01T00:00:00.000Z",
+    messageCount: 2, firstMessage: "First message",
+  };
+  try {
+    const { container } = renderProject(createProps({
+      project: { sessions: [session], sessionOrder: [session.id] },
+    }));
+    const row = container.querySelector("[data-session-row]");
+    assert.ok(row);
+    assert.equal(row.parentElement.getAttribute("draggable"), "true");
+    fireEvent.mouseEnter(row);
+    fireEvent.click(screen.getByRole("button", { name: "Rename" }));
+    const input = row.querySelector("input");
+    assert.ok(input);
+    assert.equal(input.closest('[draggable="true"]'), null);
+    fireEvent.keyDown(input, { key: "Escape" });
+    assert.equal(row.parentElement.getAttribute("draggable"), "true");
+  } finally {
+    globalThis.requestAnimationFrame = originalRequestAnimationFrame;
+    globalThis.cancelAnimationFrame = originalCancelAnimationFrame;
+  }
+});
 test("通知定位请求只滚动目标会话一次", () => {
   const originalResizeObserver = globalThis.ResizeObserver;
   const originalScrollTo = dom.window.HTMLElement.prototype.scrollTo;

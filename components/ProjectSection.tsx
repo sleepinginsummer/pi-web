@@ -1,6 +1,5 @@
 "use client";
 
-import { Pin as PinIcon } from "lucide-react";
 import { useLayoutEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
 import type { SessionInfo } from "@/lib/types";
 import { buildSessionTree, type SessionTreeNode } from "@/lib/session-tree";
@@ -12,7 +11,6 @@ interface ProjectSectionProps {
     name: string;
     active: boolean;
     collapsed: boolean;
-    pinned: boolean;
     isMobile: boolean;
     activity?: ReactNode;
     sessions: SessionInfo[];
@@ -20,14 +18,12 @@ interface ProjectSectionProps {
   };
   labels: {
     empty: string;
-    pin: string;
     remove: string;
     newSession: string;
   };
   actions: {
     onToggleCollapsed: () => void;
     onMove: (source: string, target: string) => void;
-    onTogglePinned: () => void;
     onRemove: () => void;
     onNewSession: () => void;
   };
@@ -122,16 +118,6 @@ function ProjectHeader({
         </svg>
         <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 13, fontWeight: 600 }}>{project.name}</span>
         {project.activity}
-      </button>
-      <button
-        type="button"
-        onClick={actions.onTogglePinned}
-        title={labels.pin}
-        aria-label={labels.pin}
-        aria-pressed={project.pinned}
-        style={{ width: 28, height: 28, padding: 0, display: "flex", alignItems: "center", justifyContent: "center", border: 0, borderRadius: 5, background: project.pinned ? "color-mix(in srgb, #f59e0b 12%, transparent)" : "transparent", color: project.pinned ? "#d97706" : "var(--text-dim)", cursor: "pointer", flexShrink: 0 }}
-      >
-        <PinIcon size={13} strokeWidth={2.2} aria-hidden="true" style={{ transform: "rotate(45deg)" }} />
       </button>
       <button
         type="button"
@@ -327,7 +313,6 @@ function SessionTreeRow({
   const hasChildren = node.children.length > 0;
   return (
     <div
-      draggable={!isMobile}
       onDragStart={(event) => {
         event.dataTransfer.effectAllowed = "move";
         event.dataTransfer.setData("text/plain", node.session.id);

@@ -3,14 +3,12 @@ export interface SidebarPreferences {
   revision: number;
   legacyMigrationCompleted: boolean;
   projectOrder: string[];
-  pinnedProjectPaths: string[];
   sessionOrder: string[];
   pinnedSessionIds: string[];
 }
 
 export type SidebarPreferenceAction =
   | { type: "move_project"; source: string; target: string; visibleIds: string[] }
-  | { type: "set_project_pinned"; project: string; pinned: boolean }
   | { type: "move_session"; source: string; target: string; visibleIds: string[] }
   | { type: "set_session_pinned"; sessionId: string; pinned: boolean }
   | { type: "remove_projects"; ids: string[] }
@@ -28,7 +26,6 @@ export function emptySidebarPreferences(): SidebarPreferences {
     revision: 0,
     legacyMigrationCompleted: false,
     projectOrder: [],
-    pinnedProjectPaths: [],
     sessionOrder: [],
     pinnedSessionIds: [],
   };
@@ -42,7 +39,6 @@ export function parseSidebarPreferences(value: unknown): SidebarPreferences {
     revision: Number.isSafeInteger(raw.revision) && (raw.revision ?? -1) >= 0 ? raw.revision! : 0,
     legacyMigrationCompleted: raw.legacyMigrationCompleted === true,
     projectOrder: uniquePreferenceIds(raw.projectOrder),
-    pinnedProjectPaths: uniquePreferenceIds(raw.pinnedProjectPaths),
     sessionOrder: uniquePreferenceIds(raw.sessionOrder),
     pinnedSessionIds: uniquePreferenceIds(raw.pinnedSessionIds),
   };
@@ -97,9 +93,8 @@ export function reduceSidebarPreferences(
   if (action.type === "merge_legacy" && current.legacyMigrationCompleted) return current;
   if (action.type === "remove_projects") {
     const projectOrder = removeIds(current.projectOrder, action.ids);
-    const pinnedProjectPaths = removeIds(current.pinnedProjectPaths, action.ids);
-    if (sameIds(projectOrder, current.projectOrder) && sameIds(pinnedProjectPaths, current.pinnedProjectPaths)) return current;
-    return { ...current, revision: current.revision + (incrementRevision ? 1 : 0), projectOrder, pinnedProjectPaths };
+    if (sameIds(projectOrder, current.projectOrder)) return current;
+    return { ...current, revision: current.revision + (incrementRevision ? 1 : 0), projectOrder };
   }
   if (action.type === "remove_sessions") {
     const sessionOrder = removeIds(current.sessionOrder, action.ids);
@@ -111,9 +106,6 @@ export function reduceSidebarPreferences(
   switch (action.type) {
     case "move_project":
       next.projectOrder = moveVisibleItem(current.projectOrder, action.visibleIds, action.source, action.target);
-      break;
-    case "set_project_pinned":
-      next.pinnedProjectPaths = setPinned(current.pinnedProjectPaths, action.project, action.pinned);
       break;
     case "move_session":
       next.sessionOrder = moveVisibleItem(current.sessionOrder, action.visibleIds, action.source, action.target);

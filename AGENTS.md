@@ -181,6 +181,11 @@ On `ChatWindow` mount, `GET /api/agent/[id]` is called. If `state.isStreaming ==
 
 Active `ask_user_question` tool starts are retained by `AgentSessionWrapper` for the wrapper lifetime. A new SSE listener receives those starts before pending extension UI requests so a multi-question ask is reconstructed before its first per-question `select` request. Replaying the same tool-call id must preserve the mounted questionnaire state and its request deduplication state so transient reconnects cannot erase answers or duplicate queued questions.
 
+### 排队消息附件与移回
+- `lib/queued-messages.ts` 是队列 SSE、运行状态和 `clear_queue` 的统一契约，每条消息包含文字和完整 base64 图片；输入框显示图片数量，移回时同时恢复文字、图片及已有草稿。
+- `lib/agent-message-queue.ts` 将 Pi 0.87.0 的内部 `steeringQueue.messages` / `followUpQueue.messages` 只读依赖隔离在单一边界，结构不兼容时在清空前报错。SDK 的纯文本 getter 和单批 `peekQueuedMessages()` 不能用于移回；以真实队列为准，避免重复移回已 drain 的消息。升级 SDK 必须复核此适配器并运行其集成测试。
+- SDK 在真实入队之前广播 `queue_update`，wrapper 延迟到 microtask 读取完整队列；用户 `message_start` 也同步实际队列，覆盖纯图片消息无法被 SDK 文字匹配移除的情况。
+
 ### Compaction SSE events
 Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `auto_compaction_start` / `auto_compaction_end`. `handleAgentEvent` accepts both sets to keep `isCompacting` in sync. Manual compact is a blocking POST — the button stays disabled until the response returns.
 
@@ -210,7 +215,7 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 - Bulk backfill lives in `lib/bulk-title.ts` (`POST/GET/DELETE /api/titles/bulk`, no UI button — it was requested as a one-off backfill and the button was later removed, but the API remains for curl-triggered runs). It snapshots trash + all active sessions and processes its list sequentially. All callers share the global title-task registry; delete/restore path changes migrate the task target while the stable session id remains the scheduling key.
 
 ### Sidebar order and Pin synchronization
-- `lib/sidebar-preference-state.ts` is the shared pure reducer for project/session order and Pin actions. The server and optimistic client path must use the same reducer.
+- `lib/sidebar-preference-state.ts` 是项目/会话排序与会话 Pin 的共享纯归约器；目录不再提供 Pin 按钮或保存 Pin 状态。服务端与客户端乐观更新必须使用同一归约器。
 - `lib/sidebar-preferences.ts` persists versioned state in `~/.pi/agent/pi-web-sidebar-preferences.json`; PATCH actions use `withPrivateFileLock()` plus revision conflict detection. `lib/project-directories.ts` uses the same lock helper for atomic multi-browser membership changes. Clients rebase and retry once after a `409`.
 - `hooks/useSidebarNavigation.ts` composes the two client synchronization boundaries: `useSidebarPreferences` owns versioned order/Pin state, while `useProjectDirectories` owns serialized directory membership GET/POST/DELETE and focus refresh. Remote membership removals flow into explicit, idempotent preference-removal actions. Do not expose raw directory setters or reintroduce localStorage order/Pin hooks.
 

@@ -38,7 +38,7 @@ test("removes only completed detached subagent ids", () => {
 test("marks timed-out detached subagents terminal from inspect results", () => {
   const deriveSource = source.slice(
     source.indexOf("function deriveDetachedSubagentStatuses"),
-    source.indexOf("export interface QueuedMessages"),
+    source.indexOf("function normalizeQueuedMessages"),
   );
   const eventSource = source.slice(
     source.lastIndexOf("const handleAgentEvent = useCallback"),
@@ -55,7 +55,7 @@ test("marks timed-out detached subagents terminal from inspect results", () => {
 test("restores unfinished detached subagents from session history", () => {
   const rebuildSource = source.slice(
     source.indexOf("function pendingDetachedSubagentIds"),
-    source.indexOf("export interface QueuedMessages"),
+    source.indexOf("function normalizeQueuedMessages"),
   );
   const loadSource = source.slice(
     source.indexOf("const commitContextSnapshot = useCallback"),
@@ -453,4 +453,47 @@ test("历史页缓存仅在会话版本和 leaf 均与 context 响应一致时�
   assert.match(source, /if \(saved\) deleteSessionViewSnapshot\(sid\)/);
   assert.match(source, /fetchSessionContext\(sid, signal, \{ skipCache: options\.validateView \}\)/);
   assert.match(source, /setSessionViewSnapshot\(\{ sessionId: sid, revision: contextVersionRef\.current/);
+});
+
+test("移回请求期间切换会话，图片恢复到原会话草稿而非新输入框", async () => {
+  const ts = (await import("typescript")).default;
+  const { Script } = await import("node:vm");
+  const { createJiti } = await import("jiti");
+  const jiti = createJiti(import.meta.url, { tsconfigPaths: true });
+  const { queuedMessagesToDraft, prependChatDraft } = await jiti.import("../lib/queued-messages.ts");
+  const ast = ts.createSourceFile("useAgentSession.ts", source, ts.ScriptTarget.Latest, true);
+  function findRecall(node) {
+    if (ts.isVariableDeclaration(node) && node.name.getText(ast) === "handleRecallQueue") return node.initializer.arguments[0];
+    return ts.forEachChild(node, findRecall);
+  }
+  const script = new Script(ts.transpileModule(`(${findRecall(ast).getText(ast)})`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2020 },
+  }).outputText);
+  let active = true;
+  let resolve;
+  const response = new Promise((r) => { resolve = r; });
+  const sessionIdRef = { current: "original" };
+  let restored;
+  let inputCalls = 0;
+  let cleared = false;
+  const callback = script.runInNewContext({
+    sessionIdRef, navigationKey: "original", isNavigationActive: () => active,
+    opts: { chatInputRef: { current: { prependDraft() { inputCalls += 1; } } } },
+    sendAgentCommand: () => response,
+    queuedMessagesToDraft, prependChatDraft,
+    getDraft: () => ({ value: "原草稿", images: [] }),
+    setDraft: (id, draft) => { restored = { id, draft }; },
+    setQueuedMessages: () => { cleared = true; },
+    addNotice() { assert.fail("不应报错"); }, console,
+  });
+  const pending = callback();
+  active = false;
+  sessionIdRef.current = "next-session";
+  resolve({ steering: [], followUp: [{ text: "排队", images: [{ data: "dGVzdA==", mimeType: "image/png" }] }] });
+  await pending;
+  assert.equal(inputCalls, 0);
+  assert.equal(cleared, false);
+  assert.equal(restored.id, "original");
+  assert.equal(restored.draft.value, "排队\n\n原草稿");
+  assert.equal(restored.draft.images[0].data, "dGVzdA==");
 });

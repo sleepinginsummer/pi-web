@@ -12,9 +12,10 @@ test("偏好更新要求 revision 并返回冲突快照", () => {
 });
 
 test("API 仅接受受控的排序、Pin 和迁移动作", () => {
-  for (const action of ["move_project", "set_project_pinned", "move_session", "set_session_pinned", "remove_projects", "remove_sessions", "merge_legacy"]) {
+  for (const action of ["move_project", "move_session", "set_session_pinned", "remove_projects", "remove_sessions", "merge_legacy"]) {
     assert.match(source, new RegExp(`case "${action}"`));
   }
+  assert.doesNotMatch(source, /set_project_pinned/);
 });
 
 test("限制偏好动作的标识数量和长度", () => {

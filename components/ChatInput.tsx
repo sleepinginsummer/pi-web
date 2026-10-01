@@ -6,7 +6,8 @@ import type { ModelSelectionViewActions, ModelSelectionViewState } from "@/lib/m
 import type { ModelsDataDiagnostic } from "@/lib/model-types";
 import type { WorktreeInfo } from "@/lib/types";
 import type { SkillsResponse } from "@/lib/api-types";
-import { clearDraft, getDraft, setDraft, type ChatDraftImage } from "@/lib/draft-store";
+import { clearDraft, getDraft, setDraft, type ChatDraft, type ChatDraftImage } from "@/lib/draft-store";
+import { prependChatDraft, type QueuedMessage } from "@/lib/queued-messages";
 import { applySlashSelection, findSlashQuery } from "@/lib/slash-command";
 import {
   MAX_ATTACHED_IMAGE_BYTES,
@@ -79,6 +80,7 @@ export interface ChatInputHandle {
   insertText: (text: string) => void;
   insertIfEmpty: (text: string) => void;
   prependText: (text: string) => void;
+  prependDraft: (draft: ChatDraft) => void;
   addImages: (files: File[]) => void;
   /** 首条消息获服务端确认、临时会话升级前同步清空输入与草稿。 */
   clearAcceptedPrompt: () => void;
@@ -130,7 +132,7 @@ function draftImageToAttachedImage(image: ChatDraftImage): AttachedImage {
 function draftImagesToAttachedImages(images: ChatDraftImage[] | undefined): AttachedImage[] {
   return (images ?? [])
     .filter(isBase64ImageWithinLimits)
-    .slice(0, MAX_ATTACHED_IMAGES)
+    // 多条排队消息移回后可能超过单次上传限制；恢复草稿不能截断已有图片。
     .map(draftImageToAttachedImage);
 }
 
@@ -140,7 +142,10 @@ function revokeImagePreview(image: AttachedImage): void {
   }
 }
 
-function QueuedMessageRow({ kind, text }: { kind: "steer" | "follow-up"; text: string }) {
+function QueuedMessageRow({ kind, message }: { kind: "steer" | "follow-up"; message: QueuedMessage }) {
+  const { t } = useI18n();
+  const text = message.text;
+  const imageLabel = t("chat.queuedImages", { count: message.images.length });
   return (
     <div
       title={text}
@@ -168,6 +173,16 @@ function QueuedMessageRow({ kind, text }: { kind: "steer" | "follow-up"; text: s
         {kind}
       </span>
       <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{text}</span>
+      {message.images.length > 0 && (
+        <span title={imageLabel} style={{ display: "inline-flex", alignItems: "center", gap: 4, flexShrink: 0, color: "var(--text-muted)" }}>
+          <svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2" />
+            <circle cx="8.5" cy="8.5" r="1.5" />
+            <polyline points="21 15 16 10 5 21" />
+          </svg>
+          {imageLabel}
+        </span>
+      )}
     </div>
   );
 }
@@ -395,6 +410,29 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         ta.focus();
         ta.style.height = "auto";
         ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+      });
+    },
+    prependDraft(draft: ChatDraft) {
+      const ta = textareaRef.current;
+      const restored = prependChatDraft(draft, {
+        value: ta ? ta.value : valueRef.current,
+        images: attachedImagesRef.current.map(imageToDraftImage),
+        textAttachment: textAttachmentRef.current ?? undefined,
+      });
+      // 原有 blob 预览继续复用；移回的 base64 图片不经过上传数量/大小过滤，避免静默丢失。
+      const images = [...draft.images.map(draftImageToAttachedImage), ...attachedImagesRef.current];
+      valueRef.current = restored.value;
+      attachedImagesRef.current = images;
+      setValue(restored.value);
+      setAttachedImages(images);
+      setAtQuery(null);
+      if (draftKeyRef.current) setDraft(draftKeyRef.current, restored);
+      requestAnimationFrame(() => {
+        if (!ta) return;
+        ta.focus();
+        ta.setSelectionRange(restored.value.length, restored.value.length);
+        ta.style.height = "auto";
+        ta.style.height = `${Math.min(ta.scrollHeight, TEXTAREA_MAX_HEIGHT)}px`;
       });
     },
     prependText(text: string) {
@@ -1341,11 +1379,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 </button>
               )}
             </div>
-            {queuedMessages?.steering.map((text, i) => (
-              <QueuedMessageRow key={`steer-${i}`} kind="steer" text={text} />
+            {queuedMessages?.steering.map((message, i) => (
+              <QueuedMessageRow key={`steer-${i}`} kind="steer" message={message} />
             ))}
-            {queuedMessages?.followUp.map((text, i) => (
-              <QueuedMessageRow key={`followup-${i}`} kind="follow-up" text={text} />
+            {queuedMessages?.followUp.map((message, i) => (
+              <QueuedMessageRow key={`followup-${i}`} kind="follow-up" message={message} />
             ))}
           </div>
         )}
@@ -1416,8 +1454,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         {/* Image previews */}
         {attachedImages.length > 0 && (
           <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
+            {/* 同图可从多条队列恢复，base64 预览 URL 不唯一，必须区分各附件位置。 */}
             {attachedImages.map((img, i) => (
-              <div key={img.previewUrl} style={{ position: "relative", flexShrink: 0 }}>
+              <div key={`${i}:${img.previewUrl}`} style={{ position: "relative", flexShrink: 0 }}>
                 <ImagePreview src={img.previewUrl}>
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img

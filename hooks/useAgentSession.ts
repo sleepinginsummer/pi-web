@@ -32,7 +32,9 @@ import { normalizeAssistantMessage } from "@/lib/normalize";
 import { getPreferredToolPreset, setPreferredToolPreset } from "@/lib/tool-preset-preference";
 import type { ToolPreset } from "@/lib/tool-presets";
 import { isPromptRejectedError, sendAgentCommand } from "@/lib/agent-client";
-import { setDraft, type ChatDraft } from "@/lib/draft-store";
+import { prependChatDraft, queuedMessagesToDraft, type QueuedMessages } from "@/lib/queued-messages";
+export type { QueuedMessages } from "@/lib/queued-messages";
+import { getDraft, setDraft, type ChatDraft } from "@/lib/draft-store";
 import { getToolNamesForPreset, type ToolEntry } from "@/lib/tool-presets";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import {
@@ -243,12 +245,7 @@ export function deriveTodos(messages: AgentMessage[]): TodoItem[] {
   return [];
 }
 
-export interface QueuedMessages {
-  steering: string[];
-  followUp: string[];
-}
-
-function normalizeQueuedMessages(q?: { steering?: string[]; followUp?: string[] } | null): QueuedMessages {
+function normalizeQueuedMessages(q?: Partial<QueuedMessages> | null): QueuedMessages {
   return { steering: q?.steering ?? [], followUp: q?.followUp ?? [] };
 }
 
@@ -517,6 +514,7 @@ export interface ChatInputHandle {
   insertText: (text: string) => void;
   insertIfEmpty: (content: string) => void;
   prependText: (text: string) => void;
+  prependDraft: (draft: ChatDraft) => void;
   addImages: (files: File[]) => void;
   clearAcceptedPrompt: () => void;
 }
@@ -1955,10 +1953,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
       case "queue_update":
-        setQueuedMessages({
-          steering: [...((event.steering as string[] | undefined) ?? [])],
-          followUp: [...((event.followUp as string[] | undefined) ?? [])],
-        });
+        setQueuedMessages(normalizeQueuedMessages(event as Partial<QueuedMessages>));
         break;
       case "auto_retry_start":
         setRetryInfo({ attempt: event.attempt as number, maxAttempts: event.maxAttempts as number, errorMessage: event.errorMessage as string | undefined });
@@ -2503,21 +2498,27 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const handleRecallQueue = useCallback(async () => {
     const sid = sessionIdRef.current;
-    if (!sid) return;
+    if (!sid || !isNavigationActive(navigationKey) || !opts.chatInputRef?.current) return;
     try {
-      const result = await sendAgentCommand<{ steering?: string[]; followUp?: string[] }>(sid, { type: "clear_queue" });
-      // clearQueue also emits an empty queue_update, but that only reaches us
-      // while SSE is connected — clear locally so idle recalls update the UI.
+      const result = await sendAgentCommand<QueuedMessages>(sid, { type: "clear_queue" });
+      const draft = queuedMessagesToDraft(result);
+      // 移回请求期间切换会话，附件只能恢复到原会话草稿，不能插入新会话。
+      if (!isNavigationActive(navigationKey) || sessionIdRef.current !== sid || !opts.chatInputRef?.current) {
+        if (draft.value || draft.images.length > 0) {
+          setDraft(sid, prependChatDraft(draft, getDraft(sid) ?? { value: "", images: [] }));
+        }
+        return;
+      }
+      // 无 SSE 的空闲会话也立即清除队列显示。
       setQueuedMessages({ steering: [], followUp: [] });
-      const texts = [...(result?.steering ?? []), ...(result?.followUp ?? [])];
-      if (texts.length > 0) {
-        opts.chatInputRef?.current?.prependText(texts.join("\n\n"));
+      if (draft.value || draft.images.length > 0) {
+        opts.chatInputRef?.current?.prependDraft(draft);
       }
     } catch (e) {
       console.error("Failed to recall queued messages:", e);
       addNotice({ type: "error", message: "Failed to recall queued messages" });
     }
-  }, [opts.chatInputRef, addNotice]);
+  }, [opts.chatInputRef, addNotice, isNavigationActive, navigationKey]);
 
   const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption) => {
     if (creationSettingsLocked) return;
