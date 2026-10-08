@@ -35,7 +35,8 @@ test("ask flyout supports collapse and preserves transcript scrolling", () => {
   assert.match(globalStyles, /\.ask-input-flyout-content\s*\{[\s\S]*?pointer-events: auto/);
   assert.match(questionnaireSource, /className="ask-collapse-button"[\s\S]*?chat\.askCollapse/);
   assert.match(flyoutSource, /className="ask-collapsed-bar"[\s\S]*?chat\.askExpand/);
-  assert.match(chatWindowSource, /<AskInputFlyout[\s\S]*?className=\{`flex-1[\s\S]*?chat-scroll-ask-reserve/);
+  assert.match(chatWindowSource, /className=\{`[^`]*flex-1[^`]*chat-scroll-ask-reserve/);
+  assert.match(chatWindowSource, /<AskInputFlyout/);
   assert.doesNotMatch(chatWindowSource, /askCollapseState|askCollapsed/);
   assert.match(globalStyles, /\.chat-scroll-ask-reserve\s*\{[\s\S]*?padding-bottom: calc\(var\(--ask-max-height\) \+ var\(--ask-gap\)\)/);
   assert.match(globalStyles, /\.chat-window:has\(\.ask-input-flyout-content\.is-collapsed\) \.chat-scroll-ask-reserve\s*\{[\s\S]*?padding-bottom: calc\(var\(--ask-collapsed-height\) \+ var\(--ask-gap\)\)/);

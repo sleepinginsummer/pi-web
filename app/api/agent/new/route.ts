@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import type { NewSessionMaterializationResult } from "@/lib/new-session-protocol";
+import type { NewSessionMaterializationResult, NewSessionRuntimeCreated } from "@/lib/new-session-protocol";
 import type { AgentRuntimeState } from "@/lib/agent-state";
 import { isThinkingLevel, type ThinkingLevel } from "@/lib/thinking-levels";
 import { existsSync, realpathSync } from "fs";
@@ -54,9 +54,8 @@ function materializationFailed(sessionId: string, error: unknown): NewSessionMat
 }
 
 // POST /api/agent/new  body: { cwd: string; type: string; message?: string; ... }
-// Spawns a brand-new pi session. Most calls immediately send the first command;
-// type:"ensure_session" only creates the runtime so clients can query commands.
-// Returns pi's real session id plus the model/thinking state selected at startup.
+// ensure_session 的 create 阶段仅交付 runtime 身份，供前端接通审批事件；
+// finalize-existing 完成初始化后返回模型/思考状态。其它调用继续派发首条命令。
 export async function POST(req: Request) {
   let commandType: string | undefined;
   let promptAccepted = false;
@@ -118,6 +117,19 @@ export async function POST(req: Request) {
       throw error;
     }
     const { session, realSessionId } = materialization;
+
+    // 扩展 session_start 可以等待审批；先交付身份，让前端连接 SSE 并响应，
+    // 再通过 finalize-existing 应用 Shadow 预设和等待完整状态，避免循环等待。
+    if (operation === "create" && promptCommand.type === "ensure_session") {
+      allowFileRoot(cwd);
+      invalidateSessionListCache();
+      console.info("[pi-web] 新会话 runtime 已创建，等待前端接管初始化", { sessionId: realSessionId, cwd });
+      return NextResponse.json({
+        success: true,
+        kind: "runtime-created",
+        sessionId: realSessionId,
+      } satisfies NewSessionRuntimeCreated);
+    }
 
     try {
       if (operation === "finalize-existing" && toolNames) {

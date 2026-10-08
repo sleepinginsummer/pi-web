@@ -45,7 +45,9 @@ export function buildMessageRenderGroups<T>(
   const groups: MessageRenderGroup[] = [];
   let liveTailStartIndex: number | null = null;
   for (let index = 0; index < messages.length;) {
-    if (!options.isAnchor(messages[index])) {
+    // 首页可能从轮次中途开始，仍将缺少 user 锚点的前缀作为一个完整过程组。
+    const hasAnchor = options.isAnchor(messages[index]);
+    if (!hasAnchor && index !== 0) {
       groups.push({ start: index, end: index + 1, finalAssistantIdx: -1, isLiveTail: false });
       index += 1;
       continue;
@@ -53,7 +55,7 @@ export function buildMessageRenderGroups<T>(
     const start = index;
     let end = start + 1;
     while (end < messages.length && !options.isAnchor(messages[end])) end += 1;
-    const finalAssistantIdx = options.findFinalAssistantIndex(messages, start, end);
+    const finalAssistantIdx = options.findFinalAssistantIndex(messages, hasAnchor ? start : start - 1, end);
     const isLiveTail = options.busy && end === messages.length && start === options.lastAnchorIndex;
     if (isLiveTail) liveTailStartIndex = groups.length;
     groups.push({ start, end, finalAssistantIdx, isLiveTail });

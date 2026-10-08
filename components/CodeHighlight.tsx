@@ -11,6 +11,9 @@ import vscDarkPlus from "react-syntax-highlighter/dist/esm/styles/prism/vsc-dark
 import { loadPrismLanguage } from "@/lib/prism-languages";
 
 
+// 暗色主题使用 background 简写，交由 customStyle 统一管理以免切换主题时重置背景。
+const codeBlockDarkTheme = { ...vscDarkPlus, 'pre[class*="language-"]': { ...vscDarkPlus['pre[class*="language-"]'] } };
+delete codeBlockDarkTheme['pre[class*="language-"]'].background;
 interface CodeHighlightProps {
   code: string;
   lang: string;
@@ -43,7 +46,7 @@ export default function CodeHighlight({ code, lang, isDark }: CodeHighlightProps
   return (
     <PrismLight
       language={lang || "text"}
-      style={isDark ? vscDarkPlus : vs}
+      style={isDark ? codeBlockDarkTheme : vs}
       showLineNumbers
       lineNumberStyle={{ color: "var(--text-dim)", fontStyle: "normal" }}
       customStyle={{

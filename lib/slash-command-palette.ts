@@ -2,6 +2,8 @@ export interface SlashCommandPaletteItem {
   name: string;
   description?: string;
   source: "builtin" | "extension" | "prompt" | "skill";
+  /** 运行期间可直接执行的内置命令，避免被当作排队消息。 */
+  availableWhileStreaming?: boolean;
 }
 
 export type SlashCommandSource = SlashCommandPaletteItem["source"];

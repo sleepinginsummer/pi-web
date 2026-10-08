@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const source = await readFile(new URL("./useAgentSession.ts", import.meta.url), "utf8");
+const inputControlsSource = await readFile(new URL("../components/InputControls.tsx", import.meta.url), "utf8");
 
 test("tracks detached subagents by id across parent turns", () => {
   const eventSource = source.slice(
@@ -174,7 +175,7 @@ test("uses one snapshot reconciliation path for SSE, polling, and mount recovery
   assert.match(reconcileSource, /generation !== reconcileRequestGenerationRef\.current/);
   assert.equal((source.match(/const reconcileAgentState = useCallback/g) ?? []).length, 1);
   assert.match(mountSource, /agentState\.busy && runtimeState/);
-  assert.match(reconcileSource, /applyRuntimeState\(snapshot\.state\)/);
+  assert.match(reconcileSource, /applyRuntimeState\(snapshot\.state, \{ sid, runId, requestId: usageRequestId \}\)/);
   assert.equal((source.match(/setExtensionStatuses\(state\.extensionStatuses\)/g) ?? []).length, 1);
   assert.match(mountSource, /connectEvents\(session\.id\)/);
 });
@@ -221,9 +222,9 @@ test("context loads atomically through the shared latest loader", () => {
   assert.match(navigationSource, /navigationChainRef\.current\.get\(sid\)/);
   assert.match(navigationSource, /navigationChainRef\.current\.delete\(sid\)/);
   assert.match(navigationSource, /navigationGenerationRef\.current\.delete\(sid\)/);
-  assert.match(navigationSource, /await sendAgentCommand\(sid, \{ type: "navigate_tree"/);
+  assert.match(navigationSource, /await sendAgentCommand(?:<[^\n]+>)?\(sid, \{ type: "navigate_tree"/);
   assert.match(navigationSource, /await loadContext\(sid, leafId\)/);
-  assert.equal((navigationSource.match(/sendAgentCommand\(sid, \{ type: "navigate_tree"/g) ?? []).length, 1);
+  assert.equal((navigationSource.match(/sendAgentCommand(?:<[^\n]+>)?\(sid, \{ type: "navigate_tree"/g) ?? []).length, 1);
 });
 
 test("历史分页按游标串行前插并拒绝重复 entryId", () => {
@@ -343,16 +344,12 @@ test("待创建 Shadow 预设在首轮前应用并持久化 materialized session
 });
 
 test("Slash 命令加载拒绝过期响应，并在失败后允许输入框重试", () => {
-  const loadSource = source.slice(
-    source.indexOf("const loadSlashCommands = useCallback"),
-    source.indexOf("const closeEvents = useCallback"),
-  );
-
-  assert.match(loadSource, /const requestId = \+\+slashCommandsRequestIdRef\.current/);
-  assert.match(loadSource, /requestId !== slashCommandsRequestIdRef\.current \|\| sessionIdRef\.current !== sid/);
-  assert.match(loadSource, /if \(requestId !== slashCommandsRequestIdRef\.current\) return \[\]/);
-  assert.match(loadSource, /throw e;/);
-  assert.match(loadSource, /requestId === slashCommandsRequestIdRef\.current\) setSlashCommandsLoading\(false\)/);
+  const loadSource = source.slice(source.indexOf("const requestSlashCommands = useCallback"), source.indexOf("const slashCommandsForMcp = useCallback"));
+  assert.match(loadSource, /const generation = \+\+slashCommandsGenerationRef\.current/);
+  assert.match(loadSource, /current\(\) && sessionIdRef\.current === sid/);
+  assert.match(loadSource, /slashCommandsLoadRef\.current === load/);
+  assert.match(loadSource, /commands === null\) throw new Error/);
+  assert.match(loadSource, /setSlashCommandsLoading\(false\)/);
 });
 
 test("surfaces auto-continue events from the RPC wrapper as notices", () => {
@@ -496,4 +493,21 @@ test("移回请求期间切换会话，图片恢复到原会话草稿而非新�
   assert.equal(restored.id, "original");
   assert.equal(restored.draft.value, "排队\n\n原草稿");
   assert.equal(restored.draft.images[0].data, "dGVzdA==");
+});
+
+test("keeps the compaction control reachable while a turn is auto-compacting", () => {
+  // Auto-compaction starts mid-turn, so `isStreaming` (sessionBusy) is already true. Hiding
+  // the control behind `!isStreaming` left only the generic stop button, which aborts the
+  // whole prompt instead of the compaction.
+  const controlBlock = inputControlsSource.slice(
+    inputControlsSource.indexOf("onClick={isCompacting ? onAbortCompaction : onCompact}") - 200,
+    inputControlsSource.indexOf('aria-label={isCompacting ? t("chat.stopCompaction")'),
+  );
+
+  assert.match(controlBlock, /\{\(!isStreaming \|\| isCompacting\) && onCompact && \(/);
+  assert.doesNotMatch(controlBlock, /\{!isStreaming && onCompact && \(/);
+  // The "streaming but not compacting" state is now unreachable, so its disabled styling
+  // must be gone rather than left as dead branches.
+  assert.doesNotMatch(controlBlock, /isStreaming && !isCompacting/);
+  assert.match(controlBlock, /cursor: "pointer"/);
 });

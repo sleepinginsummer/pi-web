@@ -13,6 +13,7 @@ import { PendingPromptTracker } from "./pending-prompt-tracker";
 import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
 import { cacheSessionPath, getLatestModelChange, invalidateSessionListCache, resolveSessionPath } from "./session-reader";
 import { SessionDiskInspector, type SessionDiskFreshness } from "./session-disk-freshness";
+import { isolateToolResultPersistence } from "./session-message-persistence";
 import { canRunWithExternalSessionChange } from "./session-write-policy";
 import { restoreShadowSessionSettingSafely, ShadowSessionSetting } from "./shadow-session-setting";
 import { parseShadowMindToggleCommand, SHADOW_MIND_SESSION_STATE } from "./shadow-session-protocol";
@@ -45,6 +46,7 @@ import {
   listSubagentProfiles,
   readSubagentRun,
   readSubagentSessionResources,
+  subagentExtensionLoaderOptions,
   SUBAGENT_CONTROL_TOOL_NAMES,
 } from "./subagents";
 import { createSubagentController } from "./subagent-runtime";
@@ -52,6 +54,12 @@ import { isBuiltInSubagentsEnabled } from "./subagent-settings";
 import { resolveShellTools } from "./powershell-settings";
 import { CHAT_ONLY_RESOURCE_LOADER_OPTIONS, contextFilesSystemPrompt } from "./chat-only";
 import { createExactSystemPromptExtension } from "./exact-system-prompt";
+import { createPiWebBuiltinExtensions } from "./builtin-extensions";
+import type { McpHost } from "./mcp-host";
+import { mcpPromptPreparation, type McpCommandCandidate } from "./mcp-command";
+import { createReadOnlyMcpPolicyExtension } from "./mcp-read-only-policy";
+import { createSubagentSkillsBinding } from "./subagent-skills";
+import { isNestedToolExecutionEvent } from "./agent-event-wire";
 import {
   appendClearedSessionToolSelection,
   appendSessionToolSelection,
@@ -140,6 +148,8 @@ type AgentSessionWrapperOptions = {
   exactSystemPrompt?: () => string;
   chatOnly?: boolean;
   suppressCompletionNotifications?: boolean;
+  /** Connects the session's MCP servers before a prompt starts a run, and lets go of them when it closes (lib/mcp-host.ts). */
+  mcpHost?: Pick<McpHost, "prepareForPrompt" | "dispose">;
 };
 
 const RUNNING_STATE_EVENT_TYPES = new Set([
@@ -151,6 +161,7 @@ const RUNNING_STATE_EVENT_TYPES = new Set([
   "compaction_start",
   "compaction_end",
 ]);
+export const MCP_WAIT_STOPPED_MESSAGE = "Stopped while MCP servers were connecting; the message was not sent.";
 
 const IDLE_RESET_EVENT_TYPES = new Set([
   "agent_end",
@@ -174,6 +185,31 @@ export function resolveSessionIdleTimeoutMs(
 }
 
 const SESSION_IDLE_TIMEOUT_MS = resolveSessionIdleTimeoutMs();
+
+const DEFAULT_SESSION_SHUTDOWN_DEADLINE_MS = 5_000;
+
+/**
+ * Resolves the PI_WEB_SHUTDOWN_DEADLINE_MS environment variable into the time
+ * extensions get to handle `session_shutdown` before the wrapper disposes the
+ * SDK session anyway. An unset/blank value returns the 5-second default, and
+ * positive values up to Node's timer limit (2147483647 ms) are used as-is.
+ * `0`, invalid and out-of-range values fall back to the default with a console
+ * warning: shutdown always has a deadline.
+ * @param rawValue Value to parse; defaults to the environment variable.
+ */
+export function resolveSessionShutdownDeadlineMs(
+  rawValue: string | undefined = process.env.PI_WEB_SHUTDOWN_DEADLINE_MS,
+): number {
+  if (rawValue !== undefined && rawValue.trim() !== "") {
+    const parsed = Number(rawValue);
+    if (Number.isFinite(parsed) && parsed > 0 && parsed <= 2_147_483_647) return parsed;
+    console.warn(`[pi-web] invalid PI_WEB_SHUTDOWN_DEADLINE_MS "${rawValue}", falling back to 5 seconds`);
+  }
+  return DEFAULT_SESSION_SHUTDOWN_DEADLINE_MS;
+}
+
+const SESSION_SHUTDOWN_DEADLINE_MS = resolveSessionShutdownDeadlineMs();
+
 export interface RpcSessionStartOptions {
   toolNames?: string[];
   initialModel?: { provider: string; modelId: string };
@@ -224,17 +260,38 @@ class PlainTextTheme extends Theme {
 const PLAIN_TEXT_THEME = new PlainTextTheme();
 const CUSTOM_UI_KEYBINDINGS = new TuiKeybindingsManager(TUI_KEYBINDINGS);
 
-function withExtensionTools(session: AgentSessionLike, toolNames: string[]): string[] {
-  if (toolNames.length === 0) return [];
+// Tools that belong to the session, not to a branch of it: the ones that reach other tools,
+// and pi-web's subagent tools, which the built-in subagent setting switches on for the whole
+// session. Navigation keeps them although the target branch was recorded without them.
+const SESSION_TOOL_NAMES = new Set<string>(["codemode", "tool_search", ...SUBAGENT_CONTROL_TOOL_NAMES]);
+
+/**
+ * The active tools for a coding tool selection. The selection replaces only the coding
+ * tools: every other tool named in `carry` that is still registered and not withdrawn stays
+ * active, so a tool an extension, `tool_search`, or `defaultTools` activated survives, and a
+ * tool one switched off stays off. Nothing else is added: pi itself activates the extension
+ * tools it registers (all of them when it builds or reloads a session, then each new one), so
+ * `carry` already holds them. An empty selection is Chat only.
+ */
+export function resolveActiveToolNames(
+  session: AgentSessionLike,
+  requested: readonly string[],
+  carry: readonly string[],
+): string[] {
+  if (requested.length === 0) return [];
 
   const codingToolNames = new Set(CODING_TOOL_NAMES);
-  const selectedToolNames = resolveShellTools(toolNames, session.settingsManager.getDefaultTools());
-  const extensionToolNames = session
-    .getAllTools()
-    .map((t) => t.name)
-    .filter((name) => !codingToolNames.has(name));
+  const registered = new Map(session.getAllTools().map((tool) => [tool.name, tool]));
+  const selectedToolNames = resolveShellTools(
+    requested.filter((name) => codingToolNames.has(name)),
+    session.settingsManager.getDefaultTools(),
+  );
+  const carriedToolNames = carry.filter((name) => {
+    const tool = registered.get(name);
+    return tool !== undefined && !codingToolNames.has(name) && tool.exposure !== "hidden";
+  });
 
-  return [...new Set([...selectedToolNames, ...extensionToolNames])];
+  return [...new Set([...selectedToolNames, ...carriedToolNames])];
 }
 
 
@@ -292,7 +349,10 @@ export class SessionFileConflictError extends Error {
 
 export class AgentSessionWrapper {
   private readonly diskInspector: SessionDiskInspector;
-  private listeners: EventListener[] = [];
+  // A Set, not an array: an SSE stream unsubscribes from inside emit() when it
+  // closes on session_shutdown, and splicing an array mid-iteration made the
+  // next stream miss that same event.
+  private listeners = new Set<EventListener>();
   private activeToolEvents = new Map<string, AgentEvent>();
   private pendingUiResponses = new Map<string, PendingUiResponse>();
   private pendingUiRequests = new Map<string, AgentEvent>();
@@ -306,10 +366,16 @@ export class AgentSessionWrapper {
   private extensionWidgetGenerations = new Map<string, number>();
   private extensionWidgetsResetting = false;
   private promptRunning = false;
+  private sessionReplacement: "fork" | "clone" | null = null;
+  private promptAdmissionTail: Promise<void> = Promise.resolve();
   private extensionsBound = false;
   private extensionBindingPromise: Promise<void> | null = null;
   private extensionBindingError: unknown = null;
   private forceEmptySystemPrompt = false;
+  private readonly mcpHost?: Pick<McpHost, "prepareForPrompt" | "dispose">;
+  private mcpHostDisposed = false;
+  // The MCP wait of the prompt being admitted; Stop ends it.
+  private mcpPromptWait: { controller: AbortController; done: Promise<void> } | null = null;
   private unsubscribe: (() => void) | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private onDestroyCallback: (() => void) | null = null;
@@ -332,6 +398,15 @@ export class AgentSessionWrapper {
   private readonly exactSystemPrompt?: () => string;
   private readonly chatOnly: boolean;
   private readonly suppressCompletionNotifications: boolean;
+  private sessionShutdownEmitted = false;
+  private forceShutdownOnIdle = false;
+  // The armed idle timer is the forced cleanup Stop scheduled.
+  private forcedIdleTimerArmed = false;
+  private resolveDisposed: () => void = () => {};
+  private readonly disposed = new Promise<void>((resolve) => { this.resolveDisposed = resolve; });
+  // Set when shutdown() starts. The SDK session stays usable until destroy(),
+  // but lookups must treat the wrapper as gone from this point on.
+  private closing = false;
 
   constructor(
     public readonly inner: AgentSessionLike,
@@ -351,6 +426,7 @@ export class AgentSessionWrapper {
     this.exactSystemPrompt = options.exactSystemPrompt;
     this.chatOnly = options.chatOnly ?? false;
     this.suppressCompletionNotifications = options.suppressCompletionNotifications ?? false;
+    this.mcpHost = options.mcpHost;
     const sessionEntries = () => (
       typeof this.inner.sessionManager.getEntries === "function"
         ? this.inner.sessionManager.getEntries()
@@ -419,8 +495,13 @@ export class AgentSessionWrapper {
     return this.inner.isStreaming;
   }
 
+  /**
+   * False from the moment shutdown() or destroy() begins, not only once the SDK
+   * session is disposed: extensions may take up to the shutdown deadline to
+   * handle session_shutdown, and a prompt routed here meanwhile would be lost.
+   */
   isAlive(): boolean {
-    return this._alive;
+    return this._alive && !this.closing;
   }
 
   isRunning(): boolean {
@@ -472,6 +553,8 @@ export class AgentSessionWrapper {
       }
       if (event.type === "agent_end") {
         invalidateSessionListCache();
+        // Every tool call of the run has finished; nothing is left to replay.
+        this.activeToolEvents.clear();
         // SDK 的 agent_end 携带完整消息数组；缓存到 agent_settled 时做未闭合工具调用检测
         this.lastAgentEndMessages = Array.isArray(event.messages) ? (event.messages as unknown[]) : null;
         this.lastAgentEndWillRetry = event.willRetry === true;
@@ -481,14 +564,7 @@ export class AgentSessionWrapper {
         // 会话第一轮结束后自动生成标题（文件级独立 services，不与主 agent 争用 transport）
         this.maybeAutoTitleSession();
       }
-      const toolCallId = event.toolCallId;
-      if (typeof toolCallId === "string") {
-        if (event.type === "tool_execution_start" || event.type === "tool_execution_update") {
-          this.activeToolEvents.set(toolCallId, event);
-        } else if (event.type === "tool_execution_end") {
-          this.activeToolEvents.delete(toolCallId);
-        }
-      }
+      this.trackActiveToolEvent(event);
       if (IDLE_RESET_EVENT_TYPES.has(event.type)) this.resetIdleTimer();
       this.emit(event);
       if (RUNNING_STATE_EVENT_TYPES.has(event.type)) notifyRunningChange();
@@ -554,12 +630,22 @@ export class AgentSessionWrapper {
       });
   }
 
-  setForceEmptySystemPrompt(force: boolean): void {
-    this.forceEmptySystemPrompt = force;
+  private trackActiveToolEvent(event: AgentEvent): void {
+    const toolCallId = event.toolCallId;
+    if (typeof toolCallId !== "string" || isNestedToolExecutionEvent(event)) return;
+    if (event.type === "tool_execution_start" || event.type === "tool_execution_update") {
+      this.activeToolEvents.set(toolCallId, event);
+    } else if (event.type === "tool_execution_end") {
+      this.activeToolEvents.delete(toolCallId);
+      const nestedPrefix = `${toolCallId}/`;
+      for (const id of this.activeToolEvents.keys()) {
+        if (id.startsWith(nestedPrefix)) this.activeToolEvents.delete(id);
+      }
+    }
   }
 
-  setActiveToolSelection(toolNames: string[]): void {
-    this.inner.setActiveToolsByName(withExtensionTools(this.inner, toolNames));
+  setForceEmptySystemPrompt(force: boolean): void {
+    this.forceEmptySystemPrompt = force;
   }
 
   beginExtensionBinding(options: ExtensionBindingOptions = {}): void {
@@ -637,6 +723,19 @@ export class AgentSessionWrapper {
     }
   }
 
+  /** The session's extension commands as pi looks them up: by invocation name, with the extension's path. */
+  private extensionCommandCandidates(): McpCommandCandidate[] {
+    try {
+      return this.inner.extensionRunner.getRegisteredCommands().map((command) => ({
+        name: command.invocationName,
+        sourceInfo: command.sourceInfo,
+      }));
+    } catch {
+      // Unreadable: treat the prompt as one that may start a run, as before.
+      return [];
+    }
+  }
+
   private shouldWaitForExtensions(type: string): boolean {
     return type === "prompt" || type === "steer" || type === "follow_up" || type === "get_commands" || type === "get_state" || type === "set_shadow_mind_enabled";
   }
@@ -660,6 +759,36 @@ export class AgentSessionWrapper {
     }
   }
 
+  /** Apply a coding tool selection; `carry` defaults to the tools active now. */
+  setActiveToolSelection(toolNames: string[], carry: readonly string[] = this.inner.getActiveToolNames()): void {
+    this.inner.setActiveToolsByName(resolveActiveToolNames(this.inner, toolNames, carry));
+  }
+
+  /**
+   * pi restores the target branch's loadout from its transcript when it navigates the tree,
+   * which can bring back coding tools the pinned preset leaves out and drop codemode, so a
+   * normal session applies its selection again. Chat only declares no tools, and a
+   * subagent's tools are fixed by its profile; both keep what pi restored.
+   */
+  private async navigateTreeKeepingToolSelection(
+    targetId: string,
+    options: { summarize?: boolean },
+  ): Promise<{ cancelled: boolean }> {
+    const activeBefore = this.inner.getActiveToolNames();
+    const result = await this.inner.navigateTree(targetId, options);
+    if (result.cancelled || this.chatOnly) return { cancelled: result.cancelled };
+
+    const entries = this.inner.sessionManager.getEntries() as unknown as SessionEntry[];
+    if (!readSubagentSessionResources(entries)) {
+      const activeAfter = this.inner.getActiveToolNames();
+      this.setActiveToolSelection(
+        readSessionToolSelection(entries) ?? activeAfter,
+        [...activeAfter, ...activeBefore.filter((name) => SESSION_TOOL_NAMES.has(name))],
+      );
+    }
+    return { cancelled: false };
+  }
+
   private emit(event: AgentEvent): void {
     if (
       event.type === "tool_execution_start"
@@ -674,27 +803,48 @@ export class AgentSessionWrapper {
     ) {
       this.activeAskToolStarts.delete(event.toolCallId);
     }
-    for (const listener of this.listeners) listener(event);
+    // 固定本次派发快照；单个 SSE 监听器异常不能打断其余客户端或 prompt 收尾。
+    for (const listener of [...this.listeners]) {
+      try {
+        listener(event);
+      } catch (error) {
+        console.error("[pi-web] session event listener failed:", error instanceof Error ? error.message : error);
+      }
+    }
     // 统一出口确保扩展 UI 等直接事件不会漏掉；发布器只转发需要用户关注的事件。
     publishAttentionEvent(this.sessionId, event);
   }
 
   private resetIdleTimer(): void {
+    if (!this._alive) {
+      if (this.idleTimer) clearTimeout(this.idleTimer);
+      return;
+    }
+    if (!this.isRunning()) this.forceShutdownOnIdle = false;
+    // A stuck user reloads, reopens the session or presses Stop again, and
+    // each of those commands lands here. Moving the forced deadline for them
+    // would keep a run that Stop cannot unwind alive indefinitely.
+    if (this.forceShutdownOnIdle && this.forcedIdleTimerArmed) return;
     if (this.idleTimer) clearTimeout(this.idleTimer);
-    if (!this._alive) return;
-    if (SESSION_IDLE_TIMEOUT_MS === 0) return;
+    // A resolved timeout of 0 disables idle shutdown, but a run that Stop could
+    // not unwind is still reaped after the default delay; otherwise it stays
+    // running until the server restarts (#656).
+    const timeoutMs = SESSION_IDLE_TIMEOUT_MS
+      || (this.forceShutdownOnIdle ? DEFAULT_SESSION_IDLE_TIMEOUT_MS : 0);
+    this.forcedIdleTimerArmed = timeoutMs !== 0 && this.forceShutdownOnIdle;
+    if (timeoutMs === 0) return;
     this.idleTimer = setTimeout(() => {
-      if (this.isRunning() || hasActiveSessionLivenessProvider({
+      if (!this.forceShutdownOnIdle && (this.isRunning() || hasActiveSessionLivenessProvider({
         sessionId: this.sessionId,
         sessionFile: this.sessionFile || undefined,
-      })) {
+      }))) {
         this.resetIdleTimer();
         return;
       }
       void this.shutdown().catch((error) => {
         console.error("[pi-web] failed to shut down idle session:", error instanceof Error ? error.message : error);
       });
-    }, SESSION_IDLE_TIMEOUT_MS);
+    }, timeoutMs);
   }
 
   private persistPendingSession(): void {
@@ -718,16 +868,15 @@ export class AgentSessionWrapper {
   }
 
   onEvent(listener: EventListener): () => void {
-    this.listeners.push(listener);
-    // ask 插件会把多问题拆成多个扩展 UI 请求；重放顺序与首次执行保持一致。
+    this.listeners.add(listener);
+    // ask 问卷必须先于逐题 UI 请求重放。
     for (const event of this.activeAskToolStarts.values()) listener(event);
     for (const event of this.pendingUiRequests.values()) listener(event);
     for (const [toolCallId, event] of this.activeToolEvents) {
       if (!this.activeAskToolStarts.has(toolCallId)) listener(event);
     }
     return () => {
-      const i = this.listeners.indexOf(listener);
-      if (i !== -1) this.listeners.splice(i, 1);
+      this.listeners.delete(listener);
     };
   }
 
@@ -739,6 +888,60 @@ export class AgentSessionWrapper {
 
   onDestroy(cb: () => void): void {
     this.onDestroyCallback = cb;
+  }
+
+  /**
+   * Resolves `true` once the SDK session is disposed, or `false` after `timeoutMs`:
+   * shutdown() waits for extension binding without a deadline.
+   */
+  waitUntilDisposed(timeoutMs: number): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), timeoutMs);
+      timer.unref?.();
+    });
+    return Promise.race([this.disposed.then(() => true), timedOut]).finally(() => clearTimeout(timer));
+  }
+
+  private async withSessionReplacement<T>(
+    replacement: "fork" | "clone",
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    if (this.sessionReplacement) throw new Error("Session is already being copied");
+    this.sessionReplacement = replacement;
+    try {
+      return await operation();
+    } finally {
+      if (this._alive) this.sessionReplacement = null;
+    }
+  }
+
+  private isSessionRunningForReplacement(): boolean {
+    return this.inner.isBashRunning
+      || this.inner.isStreaming
+      || this.inner.isCompacting
+      || this.pendingPrompts.active;
+  }
+
+  private async shutdownAfterSessionReplacement(replacement: "fork" | "clone"): Promise<void> {
+    try {
+      await this.shutdown();
+    } catch (error) {
+      console.error(
+        `[pi-web] ${replacement} succeeded, but source session shutdown failed:`,
+        error instanceof Error ? error.message : error,
+      );
+    }
+  }
+
+  private async acquirePromptAdmission(): Promise<() => void> {
+    const previous = this.promptAdmissionTail;
+    let release!: () => void;
+    this.promptAdmissionTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    return release;
   }
 
   async send(command: Record<string, unknown>): Promise<unknown> {
@@ -757,59 +960,150 @@ export class AgentSessionWrapper {
 
     switch (type) {
       case "prompt": {
-        if (this.extensionUiAbortController.signal.aborted) {
-          this.extensionUiAbortController = new AbortController();
-        }
-        const shadowToggle = typeof command.message === "string"
-          ? parseShadowMindToggleCommand(command.message)
-          : null;
-        if (shadowToggle !== null) {
-          return { kind: "shadow-setting", enabled: await this.shadowSessionSetting.setEnabled(shadowToggle) };
-        }
-        if (this.inner.isBashRunning) {
-          throw new Error("Cannot send a prompt while a shell command is running");
-        }
-        // Fire and forget — events come via subscribe
-        const promptImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
-        const requestedStreamingBehavior = command.streamingBehavior as "steer" | "followUp" | undefined;
-        // 用户点击发送与扩展 follow-up 可能同时抢占空闲边界。默认 followUp 可保证竞态中消息进入队列而非被 SDK 拒绝。
-        const streamingBehavior = requestedStreamingBehavior ?? "followUp";
-        const promptToken = this.pendingPrompts.begin();
-        notifyRunningChange();
-        // 新一轮用户请求开始，重置工具中断自动恢复的计数与无进展记录
-        this.autoContinueCount = 0;
-        this.lastAutoContinuedToolCallId = null;
-        const loadedSkills = this.inner.resourceLoader.getSkills().skills;
-        const multiSkill = expandMultiSkillCommand(command.message as string, loadedSkills);
-        this.inner.prompt(multiSkill.text, {
-          ...(multiSkill.expanded ? { expandPromptTemplates: false } : {}),
-          ...(promptImages?.length ? { images: promptImages } : {}),
-          streamingBehavior,
-          source: "rpc",
-        }).then(() => {
-          if (!requestedStreamingBehavior && !this.inner.isStreaming) this.emit({ type: "prompt_done" });
-        }).catch((error) => {
-          this.emit({
-            type: "prompt_error",
-            errorMessage: error instanceof Error ? error.message : String(error),
+        // Serialize only admission. Once the preceding prompt has either
+        // passed or failed preflight, the SDK can atomically decide whether
+        // this submission starts a run or joins its streaming queue.
+        const releaseAdmission = await this.acquirePromptAdmission();
+        try {
+          const shadowToggle = typeof command.message === "string" ? parseShadowMindToggleCommand(command.message) : null;
+          if (shadowToggle !== null) {
+            return { kind: "shadow-setting", enabled: await this.shadowSessionSetting.setEnabled(shadowToggle) };
+          }
+          if (this.inner.isBashRunning) {
+            throw new Error("Cannot send a prompt while a shell command is running");
+          }
+          if (this.extensionUiAbortController.signal.aborted) {
+            this.extensionUiAbortController = new AbortController();
+          }
+          const promptImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
+          const streamingBehavior = command.streamingBehavior as "steer" | "followUp" | undefined;
+          let preflightAccepted = false;
+          let preflightSettled = false;
+          let promptSettled = false;
+          let acceptPreflight!: () => void;
+          let rejectPreflight!: (error: unknown) => void;
+          const preflight = new Promise<void>((resolve, reject) => {
+            acceptPreflight = () => {
+              preflightAccepted = true;
+              if (preflightSettled) return;
+              preflightSettled = true;
+              resolve();
+            };
+            rejectPreflight = (error) => {
+              if (preflightSettled) return;
+              preflightSettled = true;
+              reject(error);
+            };
           });
-          if (!requestedStreamingBehavior) this.emit({ type: "prompt_done" });
-        }).finally(() => {
-          this.pendingPrompts.finish(promptToken);
-          this.resetIdleTimer();
-          invalidateSessionListCache();
+          const promptToken = this.pendingPrompts.begin();
           notifyRunningChange();
-        });
-        return null;
+          const finishPrompt = () => {
+            if (promptSettled) return;
+            promptSettled = true;
+            this.pendingPrompts.finish(promptToken);
+            invalidateSessionListCache();
+            notifyRunningChange();
+            this.resetIdleTimer();
+          };
+
+          // A prompt that may start a run first connects the session's MCP servers and
+          // waits for the ones still connecting. The SDK runs before_agent_start before a
+          // run has an abort signal, so Stop is honoured here: it ends the wait, and the
+          // message is rejected unsent, which returns it to the composer. pi runs an
+          // extension command before anything else and starts no run for it: another
+          // extension's command skips this, and the built-in `/mcp`, which acts on the
+          // registered servers, registers them without waiting (`mcpPromptPreparation()`).
+          const mcpPreparation = this.mcpHost && !this.inner.isStreaming
+            ? mcpPromptPreparation(typeof command.message === "string" ? command.message : "", this.extensionCommandCandidates())
+            : "none";
+          if (this.mcpHost && mcpPreparation !== "none") {
+            const controller = new AbortController();
+            const waited = this.mcpHost.prepareForPrompt(controller.signal, { wait: mcpPreparation === "wait" })
+              .catch((error: unknown) => {
+                console.error("[pi-web] MCP servers could not be prepared:", error instanceof Error ? error.message : error);
+              })
+              .then(() => {
+                if (!controller.signal.aborted) return;
+                finishPrompt();
+                throw new Error(MCP_WAIT_STOPPED_MESSAGE);
+              });
+            const wait = { controller, done: waited.then(() => undefined, () => undefined) };
+            this.mcpPromptWait = wait;
+            try {
+              await waited;
+            } finally {
+              if (this.mcpPromptWait === wait) this.mcpPromptWait = null;
+            }
+          }
+          this.autoContinueCount = 0;
+          this.lastAutoContinuedToolCallId = null;
+          const loadedSkills = this.inner.resourceLoader.getSkills().skills;
+          const multiSkill = expandMultiSkillCommand(command.message as string, loadedSkills);
+          let prompt: Promise<void>;
+          try {
+            prompt = this.inner.prompt(multiSkill.text, {
+              ...(multiSkill.expanded ? { expandPromptTemplates: false } : {}),
+              ...(promptImages?.length ? { images: promptImages } : {}),
+              streamingBehavior: streamingBehavior ?? "followUp",
+              source: "rpc",
+              // Match pi's RPC contract: acknowledge only after synchronous prompt
+              // validation and extension preflight have accepted the submission.
+              // Every disposition (handled, queued, started) is an acceptance; a
+              // rejected prompt never calls this and rejects `prompt` instead.
+              preflightResult: () => acceptPreflight(),
+            });
+          } catch (error) {
+            finishPrompt();
+            throw error;
+          }
+
+          void prompt.then(() => {
+            // Compatibility fallback if a future SDK resolves without invoking
+            // the internal callback. This waits for the run, but never acks early.
+            acceptPreflight();
+            finishPrompt();
+            if (!streamingBehavior) this.emit({ type: "prompt_done" });
+          }, (error) => {
+            rejectPreflight(error);
+            finishPrompt();
+            invalidateSessionListCache();
+            // A preflight rejection is returned by the POST itself. Only an
+            // unexpected failure after acceptance needs the asynchronous event.
+            if (preflightAccepted) {
+              this.emit({
+                type: "prompt_error",
+                errorMessage: error instanceof Error ? error.message : String(error),
+              });
+              if (!streamingBehavior) this.emit({ type: "prompt_done" });
+            }
+          }).catch((error) => {
+            console.error(
+              "[pi-web] prompt completion handler failed:",
+              error instanceof Error ? error.message : error,
+            );
+          });
+
+          await preflight;
+          return null;
+        } finally {
+          releaseAdmission();
+        }
       }
 
       case "abort": {
         if (this.aborting) return null;
         this.aborting = true;
+        this.forceShutdownOnIdle = true;
+        this.resetIdleTimer();
         clearAttentionSession(this.sessionId);
         try {
           // Stop 必须先打断等待用户输入的扩展命令，否则 SDK 会一直等待 idle。
           this.extensionUiAbortController.abort(new DOMException("Extension UI cancelled by Stop", "AbortError"));
+          if (this.mcpPromptWait) {
+            const wait = this.mcpPromptWait;
+            wait.controller.abort();
+            await wait.done;
+          }
           this.activeAskToolStarts.clear();
           await this.withFinalRunningNotification(() => this.inner.abort());
         } finally {
@@ -838,9 +1132,14 @@ export class AgentSessionWrapper {
           contextUsage: contextUsage
             ? { percent: contextUsage.percent, contextWindow: contextUsage.contextWindow, tokens: contextUsage.tokens }
             : null,
-          // An exact prompt is projected onto each run by the inline extension;
-          // the SDK state only shows Pi's structured sections.
-          systemPrompt: this.exactSystemPrompt?.() ?? this.inner.agent.state?.systemPrompt ?? "",
+          // An exact prompt is projected onto each run by the inline extension. Every other
+          // session reports `agent.state.systemPrompt`, which replays the transcript: that is
+          // what the model actually saw, including sections a `before_agent_start` handler
+          // changed for the run. It stays empty until the first run persists a system message,
+          // so a session that has not sent anything yet falls back to the session getter, which
+          // renders the prompt from the current options. The getter alone would drop those
+          // per-run changes again once the run ends.
+          systemPrompt: this.exactSystemPrompt?.() ?? (this.inner.agent.state?.systemPrompt || this.inner.systemPrompt || ""),
           thinkingLevel: this.inner.agent.state?.thinkingLevel ?? "off",
           fastEnabled: this.fastSessionSetting.current,
           fastAvailable: this.fastSessionSetting.available,
@@ -875,6 +1174,7 @@ export class AgentSessionWrapper {
 
         if (!sessionManager.isPersisted()) return { cancelled: true };
         if (!currentSessionFile) throw new Error("Persisted session is missing a session file");
+        if (!existsSync(currentSessionFile)) throw new Error("Session has not been saved yet");
 
         // 文件级 Fork 不改变当前 AgentSession，因此原会话生成期间也可复制已落盘历史。
         const { newSessionId, newSessionFile } = createForkedSession(currentSessionFile, entryId);
@@ -884,14 +1184,15 @@ export class AgentSessionWrapper {
       }
 
       case "fork_branch": {
-        if (this.isRunning()) {
-          throw new Error("Cannot fork while the session is running");
+        if (this.inner.isBashRunning) {
+          throw new Error("Cannot fork while a shell command is running");
         }
         const entryId = command.entryId as string;
         const sessionManager = this.inner.sessionManager;
         const currentSessionFile = this.inner.sessionFile;
         if (!sessionManager.isPersisted()) return { cancelled: true };
         if (!currentSessionFile) throw new Error("Persisted session is missing a session file");
+        if (!existsSync(currentSessionFile)) throw new Error("Session has not been saved yet");
         const selectedEntry = sessionManager.getEntry(entryId);
         if (selectedEntry?.type !== "message" || selectedEntry.message.role !== "assistant") {
           throw new Error("Only assistant messages can start a quoted branch");
@@ -909,6 +1210,10 @@ export class AgentSessionWrapper {
         const sessionManager = this.inner.sessionManager;
         const currentSessionFile = this.inner.sessionFile;
         const leafId = typeof command.leafId === "string" ? command.leafId : sessionManager.getLeafId();
+        // 无 assistant 历史时没有可复制的答复，按原生命令契约返回取消。
+        if (leafId && !sessionManager.getBranch(leafId).some((entry) => entry.type === "message" && entry.message.role === "assistant")) {
+          return { cancelled: true };
+        }
         if (!sessionManager.isPersisted() || !currentSessionFile || !existsSync(currentSessionFile) || !leafId) {
           return { cancelled: true };
         }
@@ -923,8 +1228,7 @@ export class AgentSessionWrapper {
         if (this.inner.isBashRunning) {
           throw new Error("Cannot navigate while a shell command is running");
         }
-        const result = await this.inner.navigateTree(command.targetId as string, {});
-        return { cancelled: result.cancelled };
+        return this.navigateTreeKeepingToolSelection(command.targetId as string, {});
       }
 
       case "set_thinking_level": {
@@ -1003,12 +1307,21 @@ export class AgentSessionWrapper {
       }
 
       case "get_tools": {
-        const all: ToolInfo[] = this.inner.getAllTools();
+        // A hidden tool is withdrawn: pi ignores it when setting the active tools.
+        const all: ToolInfo[] = this.inner.getAllTools().filter((t) => t.exposure !== "hidden");
         const active = new Set<string>(this.inner.getActiveToolNames());
+        // The definition's description is not always what the model gets: `prepareLoadout`
+        // hooks rewrite the declared ones (codemode lists its nested tools and the MCP types).
+        const declared = new Map((this.inner.agent.state?.tools ?? []).map((t) => [t.name, t.description]));
+        // Active and callable, but requests leave the declaration out: codemode's "only" mode
+        // does this to active `direct` tools. The set is private to pi 0.99's AgentSession.
+        const hiddenDeclarations: unknown = Reflect.get(this.inner, "_hiddenDeclarations");
+        const hidden = hiddenDeclarations instanceof Set ? hiddenDeclarations : new Set<unknown>();
         return all.map((t) => ({
-          name: t.name,
-          description: t.description,
+          ...t,
+          description: declared.get(t.name) ?? t.description,
           active: active.has(t.name),
+          declarationHidden: hidden.has(t.name),
         }));
       }
 
@@ -1044,7 +1357,7 @@ export class AgentSessionWrapper {
       case "set_tools": {
         const toolNames = command.toolNames as string[];
         this.setForceEmptySystemPrompt(toolNames.length === 0);
-        this.inner.setActiveToolsByName(withExtensionTools(this.inner, toolNames));
+        this.setActiveToolSelection(toolNames);
             return null;
       }
 
@@ -1056,7 +1369,11 @@ export class AgentSessionWrapper {
         this.extensionStatuses.clear();
         this.resetExtensionWidgetsForReload();
         this.syncProjectTrust();
+        const activeToolNames = this.inner.getActiveToolNames();
         await this.reloadRuntime();
+        // pi rebuilds from the tools active before, then extensions adjust them as they start
+        // again; carry that result so a tool one switched off during reload stays off.
+        this.setActiveToolSelection(activeToolNames);
         if (typeof this.inner.bindExtensions !== "function") {
           this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "rpc");
         }
@@ -1113,6 +1430,8 @@ export class AgentSessionWrapper {
       }
 
       case "abort_bash": {
+        this.forceShutdownOnIdle = true;
+        this.resetIdleTimer();
         this.inner.abortBash();
         return null;
       }
@@ -1122,10 +1441,26 @@ export class AgentSessionWrapper {
     }
   }
 
+  /**
+   * Once, as closing starts and before extensions hear session_shutdown: the
+   * MCP host's own handler runs after every other extension's, and one that
+   * never returns would leave its records behind (lib/mcp-host.ts).
+   */
+  private disposeMcpHost(): void {
+    if (this.mcpHostDisposed) return;
+    this.mcpHostDisposed = true;
+    try {
+      this.mcpHost?.dispose();
+    } catch (error) {
+      console.error("[pi-web] MCP host dispose failed:", error instanceof Error ? error.message : error);
+    }
+  }
+
   destroy(): void {
     if (!this._alive) return;
     this._alive = false;
     clearAttentionSession(this.sessionId);
+    this.disposeMcpHost();
     // Tell attached SSE listeners to drop this instance so the browser
     // EventSource errors and reconnects instead of staying OPEN on a dead wrapper.
     this.emit({ type: "session_shutdown" });
@@ -1139,20 +1474,51 @@ export class AgentSessionWrapper {
     this.activeAskToolStarts.clear();
     this.activeToolEvents.clear();
     this.clearExtensionWidgets(false);
-    try {
-      this.inner.dispose();
-    } finally {
+
+    const finishDispose = () => {
       try {
-        this.onDestroyCallback?.();
+        this.inner.dispose();
       } finally {
-        notifyRunningChange();
+        try {
+          this.onDestroyCallback?.();
+        } finally {
+          notifyRunningChange();
+          this.resolveDisposed();
+        }
       }
+    };
+
+    // Always emit session_shutdown before dispose, even when callers skip
+    // shutdown() (process exit, direct destroy). Await when possible so
+    // extension MCP children can reap before the runner is invalidated.
+    if (this.sessionShutdownEmitted) {
+      finishDispose();
+      return;
     }
+
+    this.sessionShutdownEmitted = true;
+    const emit = this.inner.extensionRunner?.emit;
+    if (typeof emit !== "function") {
+      finishDispose();
+      return;
+    }
+
+    void this.emitSessionShutdown(emit)
+      .catch((error) => {
+        console.error(
+          "[pi-web] session_shutdown before dispose failed:",
+          error instanceof Error ? error.message : error,
+        );
+      })
+      .finally(finishDispose);
   }
 
   async shutdown(): Promise<void> {
     if (this.shutdownPromise) return this.shutdownPromise;
     if (!this._alive) return;
+    // Closing starts before the first await, so a request that arrives while
+    // extensions shut down starts a fresh wrapper instead of prompting this one.
+    this.closing = true;
 
     this.shutdownPromise = (async () => {
       try {
@@ -1164,12 +1530,51 @@ export class AgentSessionWrapper {
             error instanceof Error ? error.message : error,
           );
         }
-        await this.inner.extensionRunner.emit?.({ type: "session_shutdown", reason: "quit" });
+        // After binding, so the host's session_start has run and finds nothing to record later.
+        this.disposeMcpHost();
+        if (!this.sessionShutdownEmitted) {
+          this.sessionShutdownEmitted = true;
+          const emit = this.inner.extensionRunner?.emit;
+          if (typeof emit === "function") await this.emitSessionShutdown(emit);
+        }
       } finally {
         this.destroy();
       }
     })();
     return this.shutdownPromise;
+  }
+
+  /**
+   * Gives extensions at most SESSION_SHUTDOWN_DEADLINE_MS to handle
+   * session_shutdown, then returns so the SDK session is disposed and
+   * unregistered anyway. Closing an MCP connection has no upper bound: it waits
+   * for a token refresh in flight and for a stdio child whose daemonized
+   * grandchild may never close stdout.
+   */
+  private async emitSessionShutdown(
+    emit: NonNullable<AgentSessionLike["extensionRunner"]["emit"]>,
+  ): Promise<void> {
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<"timeout">((resolve) => {
+      deadlineTimer = setTimeout(() => resolve("timeout"), SESSION_SHUTDOWN_DEADLINE_MS);
+      // A quitting process must not wait for an extension's cleanup.
+      deadlineTimer.unref?.();
+    });
+    // A synchronous throw becomes a rejection, and a rejection that arrives
+    // after the deadline is still handled by the race below.
+    const handled = (async () => {
+      await emit.call(this.inner.extensionRunner, { type: "session_shutdown", reason: "quit" });
+      return "handled" as const;
+    })();
+    try {
+      if (await Promise.race([handled, deadline]) === "timeout") {
+        console.warn(
+          `[pi-web] extensions did not finish session_shutdown for session ${this.sessionId} within ${SESSION_SHUTDOWN_DEADLINE_MS} ms; disposing it anyway`,
+        );
+      }
+    } finally {
+      clearTimeout(deadlineTimer);
+    }
   }
 
   private resolveExtensionUiResponse(response: ExtensionUiResponse): void {
@@ -1750,10 +2155,8 @@ export class AgentSessionWrapper {
       },
       newSession: async () => ({ cancelled: true }),
       fork: async () => ({ cancelled: true }),
-      navigateTree: async (targetId, options) => {
-        const result = await this.inner.navigateTree(targetId, { summarize: options?.summarize });
-        return { cancelled: result.cancelled };
-      },
+      navigateTree: (targetId, options) =>
+        this.navigateTreeKeepingToolSelection(targetId, { summarize: options?.summarize }),
       switchSession: async () => ({ cancelled: true }),
       reload: async () => {
         this.extensionStatuses.clear();
@@ -1801,7 +2204,17 @@ function registerRpcWrapper(wrapper: AgentSessionWrapper): void {
   const registry = getRegistry();
   const sessionId = wrapper.sessionId;
   if (wrapper.sessionFile) cacheSessionPath(sessionId, wrapper.sessionFile);
-  wrapper.onDestroy(() => registry.delete(sessionId));
+  // A closing wrapper reports itself dead while extensions shut down, so the
+  // next request registers a replacement under the same id. Finishing later,
+  // the closing wrapper must not unregister that replacement.
+  wrapper.onDestroy(() => {
+    if (registry.get(sessionId) === wrapper) registry.delete(sessionId);
+  });
+  // A wrapper registered before a hot reload still unregisters by id alone.
+  const previous = registry.get(sessionId);
+  if (previous && previous !== wrapper && typeof previous.onDestroy === "function") {
+    previous.onDestroy(() => {});
+  }
   registry.set(sessionId, wrapper);
   wrapper.start();
   if (!wrapper.isChatOnly()) wrapper.beginExtensionBinding();
@@ -1812,7 +2225,7 @@ const SUBAGENT_CONTROLLER = createSubagentController({
   registerSession: (inner, options) => {
     const wrapper = new AgentSessionWrapper(inner, new Set(), "subagent", {
       ...(options?.exactSystemPrompt !== undefined
-        ? { exactSystemPrompt: () => options.exactSystemPrompt! }
+        ? { exactSystemPrompt: options.exactSystemPrompt }
         : {}),
       chatOnly: options?.chatOnly,
       suppressCompletionNotifications: true,
@@ -1842,6 +2255,37 @@ export function abortSubagent(sessionId: string) {
 function getLocks(): Map<string, Promise<{ session: AgentSessionWrapper; realSessionId: string }>> {
   if (!globalThis.__piStartLocks) globalThis.__piStartLocks = new Map();
   return globalThis.__piStartLocks;
+}
+
+const CLOSING_SESSION_WAIT_MARGIN_MS = 1_000;
+const closingSessionWaits = new WeakMap<AgentSessionWrapper, { done: boolean; promise: Promise<void> }>();
+
+/**
+ * The wait for a wrapper of `sessionId` that is shutting down, or null when there is none
+ * left to wait for. Until it is disposed the closing wrapper still owns the session: an
+ * extension's session_shutdown may append to the file, which a replacement opened earlier
+ * would branch away from, and dispose() releases provider resources (a Codex websocket) by
+ * session id, which the replacement shares. The wait is bounded so a shutdown stuck in
+ * extension binding cannot keep the session from starting again. One wait per closing
+ * wrapper: its bound runs from the first caller and later callers share it, so a
+ * shutdown still binding extensions can be overtaken.
+ */
+function closingRpcSessionWait(sessionId: string): Promise<void> | null {
+  const closing = getRegistry().get(sessionId);
+  // A wrapper from before a hot reload may lack waitUntilDisposed.
+  if (!closing || closing.isAlive() || typeof closing.waitUntilDisposed !== "function") return null;
+  let wait = closingSessionWaits.get(closing);
+  if (!wait) {
+    const entry = { done: false, promise: Promise.resolve() };
+    entry.promise = closing.waitUntilDisposed(SESSION_SHUTDOWN_DEADLINE_MS + CLOSING_SESSION_WAIT_MARGIN_MS)
+      .then((disposed) => {
+        if (!disposed) console.warn(`[pi-web] session ${sessionId} is still shutting down; starting it again anyway`);
+      })
+      .finally(() => { entry.done = true; });
+    closingSessionWaits.set(closing, entry);
+    wait = entry;
+  }
+  return wait.done ? null : wait.promise;
 }
 
 function normalizeRpcCwd(cwd: string): string {
@@ -1897,6 +2341,14 @@ export async function setRpcSessionTools(
 
   if (!existing?.isAlive()) {
     if (!sessionFile) throw new Error("Session not found");
+    // A wrapper still closing, or a start already under way, owns the file: wait for it and
+    // apply the selection to whatever it left, or a start that opened the file first would
+    // come up without the selection while this call reported success.
+    const pending = closingRpcSessionWait(sessionId) ?? getLocks().get(sessionId);
+    if (pending) {
+      await pending.catch(() => undefined);
+      return setRpcSessionTools(sessionId, sessionFile, requestedToolNames);
+    }
     const manager = SessionManager.open(sessionFile, undefined);
     if (new SessionDiskInspector(manager, true).inspect(sessionFile) !== "current") {
       throw new SessionFileConflictError();
@@ -2146,6 +2598,17 @@ export async function startRpcSession(
   const inflight = locks.get(sessionId);
   if (inflight) return inflight;
 
+  const closingWait = closingRpcSessionWait(sessionId);
+  if (closingWait) {
+    // Concurrent starts share this lock, then the one start that follows it.
+    const waiting: Promise<{ session: AgentSessionWrapper; realSessionId: string }> = closingWait.then(() => {
+      if (locks.get(sessionId) === waiting) locks.delete(sessionId);
+      return startRpcSession(sessionId, sessionFile, cwd, options);
+    });
+    locks.set(sessionId, waiting);
+    return waiting;
+  }
+
   let sessionManager: SessionManager;
   if (sessionFile) {
     sessionManager = SessionManager.open(sessionFile, undefined);
@@ -2153,6 +2616,7 @@ export async function startRpcSession(
     if (!cwd) throw new Error("cwd is required for a new session");
     sessionManager = SessionManager.create(cwd, undefined);
   }
+  isolateToolResultPersistence(sessionManager);
   const sessionCwd = sessionManager.getCwd();
   const sessionEntries = sessionManager.getEntries() as unknown as SessionEntry[];
   const subagentResources = sessionFile ? readSubagentSessionResources(sessionEntries) : null;
@@ -2209,15 +2673,25 @@ export async function startRpcSession(
     // after the session is created, so the getter is filled in below.
     const exactSystemPromptRef: { current?: () => string } = {};
     const exactSystemPromptExtension = createExactSystemPromptExtension(() => exactSystemPromptRef.current?.());
-    const usesExactSystemPrompt = chatOnly || subagentResources?.exactSystemPrompt !== undefined;
+    // codemode, tool-search, and mcp, as the pi CLI loads them, and the host that decides
+    // which MCP servers the session connects (ADR 0006).
+    const builtins = subagentResources || chatOnly
+      ? undefined
+      : await createPiWebBuiltinExtensions({ agentDir });
+    const skillsBinding = subagentResources ? createSubagentSkillsBinding({
+      loadSkills: subagentResources.loadSkills,
+      skills: subagentResources.skills,
+      exactSystemPrompt: subagentResources.exactSystemPrompt
+        ?? (chatOnly ? subagentResources.appendSystemPrompt[0] ?? "" : undefined),
+    }) : undefined;
     const services = await createAgentSessionServices({
       cwd: sessionCwd,
       agentDir,
       settingsManager,
       resourceLoaderOptions: subagentResources
         ? {
-            noExtensions: !subagentResources.loadExtensions,
-            noSkills: !subagentResources.loadSkills,
+            ...subagentExtensionLoaderOptions(subagentResources),
+            ...skillsBinding!.loaderOptions,
             noPromptTemplates: true,
             noThemes: true,
             noContextFiles: true,
@@ -2225,21 +2699,25 @@ export async function startRpcSession(
               ? { systemPrompt: " ", systemPromptOverride: () => undefined }
               : {}),
             appendSystemPrompt: subagentResources.appendSystemPrompt,
-            ...(usesExactSystemPrompt ? { extensionFactories: [exactSystemPromptExtension] } : {}),
           }
         : chatOnly
           ? { ...CHAT_ONLY_RESOURCE_LOADER_OPTIONS, extensionFactories: [exactSystemPromptExtension] }
-          : {
-              extensionFactories: [
-                createProjectCommandBashExtension({ cwd: sessionCwd, settings: settingsManager }),
-                createSubagentExtension(
-                  SUBAGENT_CONTROLLER.extensionRuntime,
-                  () => listSubagentProfiles(sessionCwd),
-                  isBuiltInSubagentsEnabled,
-                ),
-              ],
-              extensionsOverride: (base) => preferUserBashExtension(preferPiWebSubagentExtension(base)),
-            },
+        : {
+            extensionFactories: [
+              ...(builtins?.extensions ?? []),
+              createReadOnlyMcpPolicyExtension(),
+              createProjectCommandBashExtension({
+                cwd: sessionCwd,
+                settings: settingsManager,
+              }),
+              createSubagentExtension(
+                SUBAGENT_CONTROLLER.extensionRuntime,
+                () => listSubagentProfiles(sessionCwd),
+                isBuiltInSubagentsEnabled,
+              ),
+            ],
+            extensionsOverride: (base) => preferUserBashExtension(preferPiWebSubagentExtension(base)),
+          },
       ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),
     });
     const modelConfigAfterServices = await readModelsConfigSnapshot();
@@ -2314,19 +2792,22 @@ export async function startRpcSession(
       updateCachedDefaultModel(sessionCwd, { provider: inner.model.provider, modelId: inner.model.id });
     }
 
-    // If specific tool names were requested (non-empty), set the active tools to the
-    // requested builtin coding tools PLUS all extension/package tools, so installed
-    // extensions stay usable in Pi Web just like in the `pi` CLI.
-    if (!subagentResources && !chatOnly && selectedToolNames) {
-      inner.setActiveToolsByName(withExtensionTools(inner, selectedToolNames));
+    // A pinned selection replaces only the coding tools of the SDK's initial loadout, which
+    // already holds the extension tools pi activates on registration and whatever
+    // `defaultTools` names (such as `+codemode`), so installed extensions stay usable in
+    // Pi Web just like in the `pi` CLI.
+    if (!subagentResources && !chatOnly) {
+      const initialToolNames = inner.getActiveToolNames();
+      inner.setActiveToolsByName(
+        resolveActiveToolNames(inner, selectedToolNames ?? initialToolNames, initialToolNames),
+      );
     }
 
-    const exactSystemPrompt = subagentResources?.exactSystemPrompt !== undefined
-      ? () => subagentResources.exactSystemPrompt!
+    skillsBinding?.setActiveToolsGetter(() => inner.getActiveToolNames());
+    const exactSystemPrompt = subagentResources
+      ? skillsBinding!.getExactSystemPrompt
       : chatOnly
-        ? subagentResources
-          ? () => subagentResources.appendSystemPrompt[0] ?? ""
-          : () => contextFilesSystemPrompt(inner.resourceLoader.getAgentsFiles().agentsFiles)
+        ? () => contextFilesSystemPrompt(inner.resourceLoader.getAgentsFiles().agentsFiles)
         : undefined;
     exactSystemPromptRef.current = exactSystemPrompt;
     const wrapper = new AgentSessionWrapper(
@@ -2338,6 +2819,7 @@ export async function startRpcSession(
         chatOnly,
         suppressCompletionNotifications: Boolean(subagentResources),
         persistedSessionFile: Boolean(sessionFile),
+        ...(builtins?.mcpHost ? { mcpHost: builtins.mcpHost } : {}),
       },
     );
     registerRpcWrapper(wrapper);

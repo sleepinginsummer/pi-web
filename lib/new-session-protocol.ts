@@ -1,5 +1,7 @@
 export type NewSessionModel = { provider: string; modelId: string };
 
+export type NewSessionRuntimeCreated = { kind: "runtime-created"; success: true; sessionId: string };
+
 type NewSessionMaterializationBase = {
   sessionId: string;
   model?: NewSessionModel | null;
@@ -38,4 +40,14 @@ export function isNewSessionMaterializationResult(value: unknown): value is NewS
   return candidate.kind === "initialization-failed"
     && candidate.success === false
     && typeof candidate.error === "string";
+}
+
+/** 第一阶段只确认 runtime 身份，不把未完成的扩展初始化误报为 ready。 */
+export function isNewSessionRuntimeCreated(value: unknown): value is NewSessionRuntimeCreated {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Record<string, unknown>;
+  return candidate.kind === "runtime-created"
+    && candidate.success === true
+    && typeof candidate.sessionId === "string"
+    && candidate.sessionId.length > 0;
 }

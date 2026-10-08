@@ -6,7 +6,8 @@ import type { ModelSelectionViewActions, ModelSelectionViewState } from "@/lib/m
 import type { ModelsDataDiagnostic } from "@/lib/model-types";
 import type { WorktreeInfo } from "@/lib/types";
 import type { SkillsResponse } from "@/lib/api-types";
-import { clearDraft, getDraft, setDraft, type ChatDraft, type ChatDraftImage } from "@/lib/draft-store";
+import { clearDraft, createDraftFromUserMessage, getDraft, setDraft, type ChatDraft, type ChatDraftImage } from "@/lib/draft-store";
+import type { UserMessage } from "@/lib/types";
 import { prependChatDraft, type QueuedMessage } from "@/lib/queued-messages";
 import { applySlashSelection, findSlashQuery } from "@/lib/slash-command";
 import {
@@ -20,7 +21,10 @@ import {
 } from "@/lib/file-fuzzy";
 import { FileMentionPalette, HistoryPalette, SlashPalette } from "./InputPalettes";
 import { buildSlashCommandLayout, getSlashDescription, SLASH_SOURCE_ORDER, type SlashCommandPaletteItem } from "@/lib/slash-command-palette";
+import { getMarkdownListContinuation } from "@/lib/markdown-list-continuation";
+import { isBareMcpCommand, isBuiltinMcpCommand } from "@/lib/mcp-command";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useEnterSendMode } from "@/hooks/useEnterSendMode";
 import { useI18n } from "@/hooks/useI18n";
 import { useOptimisticInputSubmission, type OptimisticInputSnapshot } from "@/hooks/useOptimisticInputSubmission";
 import { ModelPicker, type ModelPickerOption } from "./ModelPicker";
@@ -77,6 +81,7 @@ interface Props {
 }
 
 export interface ChatInputHandle {
+  replaceMessage: (message: UserMessage) => void;
   insertText: (text: string) => void;
   insertIfEmpty: (text: string) => void;
   prependText: (text: string) => void;
@@ -102,10 +107,52 @@ const BUILTIN_SLASH_COMMANDS: SlashCommandPaletteItem[] = [
   { name: "compact", description: "chat.commandCompact", source: "builtin" },
   { name: "reload", description: "chat.commandReload", source: "builtin" },
   { name: "name", description: "chat.commandName", source: "builtin" },
-  { name: "session", description: "chat.commandSession", source: "builtin" },
-  { name: "copy", description: "chat.commandCopy", source: "builtin" },
+  { name: "session", description: "chat.commandSession", source: "builtin", availableWhileStreaming: true },
+  { name: "copy", description: "chat.commandCopy", source: "builtin", availableWhileStreaming: true },
   { name: "clone", description: "chat.commandClone", source: "builtin" },
 ];
+
+function getBuiltinSlashCommand(message: string): SlashCommandPaletteItem | undefined {
+  const match = message.trim().match(/^\/([^\s]+)(?:\s|$)/);
+  if (!match) return undefined;
+  return BUILTIN_SLASH_COMMANDS.find((command) => command.name === match[1]);
+}
+
+export function canRunBuiltinSlashCommandWhileStreaming(message: string): boolean {
+  return getBuiltinSlashCommand(message)?.availableWhileStreaming === true;
+}
+
+/**
+ * Whether a message sent while a run streams goes to the built-in handler
+ * first: a built-in that may run then, or a bare `/mcp`, which opens
+ * Settings › MCP when pi's built-in MCP extension owns it (useAgentSession)
+ * and is otherwise sent as before.
+ */
+export function offersBuiltinSlashCommandWhileStreaming(message: string): boolean {
+  return canRunBuiltinSlashCommandWhileStreaming(message) || isBareMcpCommand(message);
+}
+
+export function isExactSlashCommand(message: string, command: SlashCommandPaletteItem): boolean {
+  return command.source === "builtin" && message.trim() === `/${command.name}`;
+}
+
+/**
+ * Whether Enter on the highlighted palette entry submits the message rather
+ * than completing it to "/name ": a built-in typed in full (while a run
+ * streams, only one that may run then), or a bare `/mcp` on pi's built-in
+ * `/mcp`, which opens Settings › MCP at once, as it does before the command
+ * list has loaded. Every other extension command still takes a second Enter.
+ */
+export function submitsSlashCommandOnEnter(message: string, command: SlashCommandPaletteItem, isStreaming: boolean): boolean {
+  if (command.source === "builtin") {
+    return isExactSlashCommand(message, command) && (!isStreaming || command.availableWhileStreaming === true);
+  }
+  return isBuiltinMcpCommand(command) && isBareMcpCommand(message);
+}
+
+export function canClearBuiltinCommandInput(message: string, imageCount: number, submittedMessage: string): boolean {
+  return imageCount === 0 && message.trim() === submittedMessage;
+}
 
 function slashMatchRank(command: SlashCommandPaletteItem, query: string, t: (key: string) => string): number {
   const name = command.name.toLowerCase();
@@ -327,6 +374,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       name,
     }));
   }, [modelState.list, modelState.model?.provider, modelState.names]);
+  const enterSendMode = useEnterSendMode();
   const [value, setValue] = useState(() => (draftKey ? getDraft(draftKey)?.value ?? "" : ""));
   const [queuedSubmitPending, setQueuedSubmitPending] = useState(false);
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
@@ -477,6 +525,28 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     },
     addImages(files: File[]) {
       processImageFiles(files);
+    },
+    replaceMessage(message: UserMessage) {
+      // 编辑历史消息时替换文字与附件，并同步草稿及 DOM，防止旧输入回写。
+      clearInput();
+      const draft = createDraftFromUserMessage(message);
+      const images = draft.images.map(draftImageToAttachedImage);
+      valueRef.current = draft.value;
+      attachedImagesRef.current = images;
+      textAttachmentRef.current = draft.textAttachment ?? null;
+      setValue(draft.value);
+      setAttachedImages(images);
+      setTextAttachment(draft.textAttachment ?? null);
+      if (draftKeyRef.current) setDraft(draftKeyRef.current, draft);
+      requestAnimationFrame(() => {
+        const ta = textareaRef.current;
+        if (!ta) return;
+        ta.value = draft.value;
+        ta.focus();
+        ta.setSelectionRange(draft.value.length, draft.value.length);
+        ta.style.height = "auto";
+        ta.style.height = `${Math.min(ta.scrollHeight, TEXTAREA_MAX_HEIGHT)}px`;
+      });
     },
     clearAcceptedPrompt() {
       clearInput();
@@ -672,33 +742,66 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   }, [draftKey, fontSize, resizeTextarea, value, width]);
 
   useEffect(() => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    // Shift+Enter on desktop, Enter on mobile keyboards: every newline the
+    // textarea inserts arrives here, while IME confirmations and sends do not.
+    const continueList = (event: InputEvent) => {
+      if (event.inputType !== "insertLineBreak" || event.isComposing) return;
+      const edit = getMarkdownListContinuation(ta.value, ta.selectionStart, ta.selectionEnd);
+      if (!edit) return;
+      event.preventDefault();
+      ta.setSelectionRange(edit.start, edit.end);
+      // insertText keeps the edit on the native undo stack and fires the input
+      // event that updates the controlled value.
+      document.execCommand(edit.text ? "insertText" : "delete", false, edit.text);
+    };
+    ta.addEventListener("beforeinput", continueList);
+    return () => ta.removeEventListener("beforeinput", continueList);
+  }, []);
+
+  useEffect(() => {
     return () => {
       if (resizeFrameRef.current !== null) cancelAnimationFrame(resizeFrameRef.current);
       attachedImagesRef.current.forEach(revokeImagePreview);
     };
   }, []);
 
+  const [builtinCommandPending, setBuiltinCommandPending] = useState(false);
+  const builtinCommandPendingRef = useRef(false);
+  const runBuiltinCommand = useCallback(async (msg: string): Promise<boolean> => {
+    if (!msg.startsWith("/") || attachedImages.length || textAttachment || !onBuiltinCommand) return false;
+    if (builtinCommandPendingRef.current) return true;
+    builtinCommandPendingRef.current = true;
+    setBuiltinCommandPending(true);
+    try {
+      const result = await onBuiltinCommand(msg);
+      // 命令等待期间外部路径可能恢复草稿，只清理仍与提交内容一致的输入。
+      if (result.handled && !result.error && canClearBuiltinCommandInput(valueRef.current, attachedImagesRef.current.length, msg)) clearInput();
+      return result.handled;
+    } finally {
+      builtinCommandPendingRef.current = false;
+      setBuiltinCommandPending(false);
+    }
+  }, [attachedImages.length, textAttachment, onBuiltinCommand, clearInput]);
+
   const handleSend = useCallback(async () => {
     const msg = value.trim();
     if (!msg && !attachedImages.length && !textAttachment) return;
+    onAudioUnlock?.();
+    const builtinAllowed = !isStreaming || offersBuiltinSlashCommandWhileStreaming(msg);
+    if (builtinAllowed && !textAttachment && await runBuiltinCommand(msg)) return;
     if (isStreaming) return;
     onAudioUnlock?.();
     const messageWithTextAttachment = textAttachment
       ? [msg, `<attached_text filename="pasted-text.txt">\n${textAttachment}\n</attached_text>`].filter(Boolean).join("\n\n")
       : msg;
-    if (!attachedImages.length && !textAttachment && msg.startsWith("/") && onBuiltinCommand) {
-      const result = await onBuiltinCommand(msg);
-      if (result.handled) {
-        if (!result.error) clearInput();
-        return;
-      }
-    }
     const submittedImages = [...attachedImages];
     await submitOptimistically(
       { value, images: submittedImages, textAttachment, draftKey: draftKeyRef.current ?? null },
       () => onSend(messageWithTextAttachment, submittedImages.length ? submittedImages : undefined),
     );
-  }, [value, textAttachment, attachedImages, isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock, submitOptimistically]);
+  }, [value, textAttachment, attachedImages, isStreaming, runBuiltinCommand, onSend, onAudioUnlock, submitOptimistically]);
 
   const slashInputEnd = Math.min(slashCursor ?? value.length, value.length);
   const slashInputPrefix = value.slice(0, slashInputEnd);
@@ -707,7 +810,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   const filteredSlashCommands = useMemo(() => {
     if (slashQuery === null) return [];
-    const commands = [...(isStreaming ? [] : BUILTIN_SLASH_COMMANDS), ...(slashCommands ?? [])]
+    const commands = [...BUILTIN_SLASH_COMMANDS.filter((command) => !isStreaming || command.availableWhileStreaming), ...(slashCommands ?? [])]
       .filter((command) => !slash?.inline || command.source === "skill");
     return commands
       .filter((command) => {
@@ -929,6 +1032,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     setQueuedSubmitPending(true);
     onAudioUnlock?.();
     try {
+      if (!submittedImages.length && offersBuiltinSlashCommandWhileStreaming(msg) && await runBuiltinCommand(msg)) return;
       const accepted = await onQueuedSubmit(
         msg,
         mode === "steer" ? "steer" : "followUp",
@@ -946,7 +1050,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         setQueuedSubmitPending(false);
       }
     }
-  }, [value, attachedImages, textAttachment, onQueuedSubmit, clearInput, onAudioUnlock]);
+  }, [value, attachedImages, textAttachment, onQueuedSubmit, clearInput, onAudioUnlock, runBuiltinCommand]);
 
   const getNextSlashIndex = useCallback((direction: "up" | "down" | "left" | "right") => {
     const lastIndex = displayedSlashCommands.length - 1;
@@ -994,14 +1098,21 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
       const nativeEvent = e.nativeEvent;
-      const sendShortcut = e.key === "Enter" && !e.shiftKey && (!isMobile || e.ctrlKey || e.metaKey);
+      const enterKey = e.key === "Enter" && !e.shiftKey;
+      const sendShortcut = isMobile || enterSendMode === "ctrlEnter"
+        ? enterKey && (e.ctrlKey || e.metaKey)
+        : enterKey;
+      // Popup menus and the IME guard take plain Enter in either send mode on a
+      // desktop keyboard. Mobile keyboards insert a line break on Enter, so they
+      // keep using the send shortcut there.
+      const acceptShortcut = isMobile ? sendShortcut : enterKey;
       const recentlyComposed = Date.now() - lastCompositionEndAtRef.current < COMPOSITION_END_ENTER_GRACE_MS;
       const isComposing =
         isComposingRef.current ||
         nativeEvent.isComposing ||
         nativeEvent.keyCode === 229;
 
-      if (sendShortcut && (isComposing || recentlyComposed)) {
+      if (acceptShortcut && (isComposing || recentlyComposed)) {
         if (recentlyComposed) e.preventDefault();
         return;
       }
@@ -1022,7 +1133,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           setHistoryMenuOpen(false);
           return;
         }
-        if ((e.key === "Tab" || sendShortcut) && inputHistory[historyActiveIndex]) {
+        if ((e.key === "Tab" || acceptShortcut) && inputHistory[historyActiveIndex]) {
           e.preventDefault();
           applyHistoryInput(inputHistory[historyActiveIndex]);
           return;
@@ -1055,9 +1166,21 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           setSlashMenuOpen(false);
           return;
         }
-        if ((e.key === "Tab" || sendShortcut) && displayedSlashCommands[slashActiveIndex]) {
+        const selectedCommand = displayedSlashCommands[slashActiveIndex];
+        if (e.key === "Tab" && selectedCommand) {
           e.preventDefault();
-          applySlashCommand(displayedSlashCommands[slashActiveIndex]);
+          applySlashCommand(selectedCommand);
+          return;
+        }
+        if (acceptShortcut && selectedCommand) {
+          e.preventDefault();
+          if (sendShortcut && submitsSlashCommandOnEnter(value, selectedCommand, isStreaming)) {
+            setSlashMenuOpen(false);
+            if (isStreaming) void sendQueued(e.altKey ? "followup" : "steer");
+            else void handleSend();
+          } else {
+            applySlashCommand(selectedCommand);
+          }
           return;
         }
       }
@@ -1080,7 +1203,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           setAtMenuOpen(false);
           return;
         }
-        if ((e.key === "Tab" || sendShortcut) && atMatches[atActiveIndex]) {
+        if ((e.key === "Tab" || acceptShortcut) && atMatches[atActiveIndex]) {
           e.preventDefault();
           applyAtCompletion(atMatches[atActiveIndex]);
           return;
@@ -1112,7 +1235,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         }
       }
     },
-    [isMobile, isStreaming, onQueuedSubmit, onAbort, slashMenuOpen, slashQuery, displayedSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value]
+    [isMobile, enterSendMode, isStreaming, onQueuedSubmit, onAbort, slashMenuOpen, slashQuery, displayedSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value]
   );
 
   const handleInput = useCallback((event: React.FormEvent<HTMLTextAreaElement>) => {
@@ -1226,7 +1349,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
 
   return (
-    <div
+    <fieldset
+      disabled={builtinCommandPending}
+      aria-busy={builtinCommandPending}
+      className={compact ? undefined : "chat-input-shell"}
       style={{
         flexShrink: 0,
         background: "transparent",
@@ -1537,7 +1663,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 ? "rgba(234,179,8,0.4)"
                 : "color-mix(in srgb, var(--border) 70%, transparent)"}`,
               borderRadius: compact ? 0 : 14,
-              padding: compact ? 0 : "10px 10px 10px 14px",
+              padding: compact ? 0 : isMobile ? "6px 6px 6px 12px" : "10px 10px 10px 14px",
               boxShadow: compact ? "none" : "0 1px 2px rgba(15,23,42,0.04), 0 8px 24px -12px rgba(15,23,42,0.10)",
               transition: "border-color 0.15s, background 0.15s, box-shadow 0.15s",
             } as React.CSSProperties}
@@ -1653,11 +1779,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             <button
               onClick={handleSend}
               disabled={!value.trim() && !attachedImages.length && !textAttachment}
+              title={t("chat.send")}
+              aria-label={t("chat.send")}
               style={{
                 flexShrink: 0,
                 alignSelf: "flex-end",
-                display: "flex", alignItems: "center", gap: 6,
-                padding: "7px 14px",
+                display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+                ...(isMobile ? { width: 36, height: 36, padding: 0 } : { padding: "7px 14px" }),
                 background: (value.trim() || attachedImages.length || textAttachment) ? "var(--accent)" : "var(--bg-panel)",
                 border: "none",
                 borderRadius: 8,
@@ -1674,7 +1802,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 <line x1="2" y1="7" x2="11" y2="7" />
                 <polyline points="7.5 3 12 7 7.5 11" />
               </svg>
-              {t("chat.send")}
+              {!isMobile && t("chat.send")}
             </button>
           )}
           </div>
@@ -1688,8 +1816,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         )}
 
         {/* Bottom bar: left | center (context) | right */}
-        {!compact && <div style={{
-          marginTop: 8,
+        {!compact && <div className="chat-input-controls" style={{
+          marginTop: isMobile ? 4 : 8,
           display: isMobile ? "grid" : "flex",
           gridTemplateColumns: isMobile ? "minmax(0, 1fr) auto" : undefined,
           alignItems: "center",
@@ -1778,6 +1906,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           </section>
         </div>
       )}
-    </div>
+    </fieldset>
   );
 }));

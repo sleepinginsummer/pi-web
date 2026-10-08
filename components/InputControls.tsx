@@ -53,7 +53,7 @@ const ThinkingControl = memo(function ThinkingControl({ isMobile, modelState, is
               <div ref={thinkingDropdownRef} style={{ position: "relative" }}>
                 <button
                   onClick={() => setThinkingDropdownOpen((open) => !open)}
-                  disabled={isStreaming || !onThinkingLevelChange}
+                  disabled={!onThinkingLevelChange}
                    title={t(isStreaming ? "chat.currentReasoning" : "chat.changeReasoning", { level: displayedThinkingLabel })}
                    aria-label={t("chat.changeReasoningLabel")}
                   style={{
@@ -286,11 +286,10 @@ const RunControls = memo(function RunControls({ isMobile, isStreaming, showLabel
   const { t } = useI18n();
   return (
     <>
-            {!isStreaming && onCompact && (
+            {(!isStreaming || isCompacting) && onCompact && (
               <div>
                 <button
                   onClick={isCompacting ? onAbortCompaction : onCompact}
-                  disabled={isStreaming && !isCompacting}
                   style={{
                     display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
                     padding: isMobile ? "0 6px" : "8px 12px",
@@ -300,12 +299,11 @@ const RunControls = memo(function RunControls({ isMobile, isStreaming, showLabel
                     border: "none",
                     borderRadius: 9,
                     color: isCompacting ? "#ef4444" : "var(--text-muted)",
-                    cursor: (isStreaming && !isCompacting) ? "not-allowed" : "pointer",
-                    fontSize: 12, opacity: (isStreaming && !isCompacting) ? 0.5 : 1,
+                    cursor: "pointer",
+                    fontSize: 12,
                     transition: "background 0.12s, color 0.12s",
                   }}
                   onMouseEnter={(e) => {
-                    if (isStreaming && !isCompacting) return;
                     e.currentTarget.style.background = isCompacting ? "rgba(239,68,68,0.16)" : "var(--bg-hover)";
                     e.currentTarget.style.color = isCompacting ? "#ef4444" : "var(--text)";
                   }}

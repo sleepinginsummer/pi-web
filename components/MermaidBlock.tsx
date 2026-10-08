@@ -257,6 +257,7 @@ interface CodeBlockProps {
   isStreaming?: boolean;
 }
 
+
 /**
  * Syntax-highlighted code block with copy button.
  * Used as the "source" view for mermaid blocks and for all non-mermaid code fences.

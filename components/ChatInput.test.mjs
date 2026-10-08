@@ -12,7 +12,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { ChatInput, ModelDataDiagnosticBanner, ModelErrorBanner, ModelScopeWarningBanner, modelSupportsImageInput } = await jiti.import("./ChatInput.tsx");
+const { ChatInput, ModelDataDiagnosticBanner, ModelErrorBanner, ModelScopeWarningBanner, modelSupportsImageInput, canClearBuiltinCommandInput, canRunBuiltinSlashCommandWhileStreaming, isExactSlashCommand, offersBuiltinSlashCommandWhileStreaming, submitsSlashCommandOnEnter } = await jiti.import("./ChatInput.tsx");
 const { filterModelOptions } = await jiti.import("./ModelPicker.tsx");
 const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
 const { clearDraft, setDraft } = await jiti.import("../lib/draft-store.ts");
@@ -25,6 +25,33 @@ const emptyModelState = {
   fastEnabled: false, fastAvailable: false, fastPending: false,
 };
 const emptyModelActions = {};
+
+test("完整内置命令可直接提交，流式期间仅开放只读命令", () => {
+  const copy = { name: "copy", source: "builtin", availableWhileStreaming: true };
+  const compact = { name: "compact", source: "builtin" };
+  assert.equal(isExactSlashCommand(" /copy ", copy), true);
+  assert.equal(isExactSlashCommand("/co", copy), false);
+  assert.equal(isExactSlashCommand("/copy extra", copy), false);
+  assert.equal(submitsSlashCommandOnEnter("/copy", copy, true), true);
+  assert.equal(submitsSlashCommandOnEnter("/compact", compact, true), false);
+  assert.equal(submitsSlashCommandOnEnter("/compact", compact, false), true);
+  assert.equal(canRunBuiltinSlashCommandWhileStreaming("/session"), true);
+  assert.equal(canRunBuiltinSlashCommandWhileStreaming("/reload"), false);
+});
+
+test("内置命令完成后只清空未被修改的输入", () => {
+  assert.equal(canClearBuiltinCommandInput("/copy", 0, "/copy"), true);
+  assert.equal(canClearBuiltinCommandInput("新草稿", 0, "/copy"), false);
+  assert.equal(canClearBuiltinCommandInput("/copy", 1, "/copy"), false);
+});
+
+test("运行中仅裸 MCP 命令可打开设置，子命令仍进入消息队列", () => {
+  assert.equal(offersBuiltinSlashCommandWhileStreaming("/mcp"), true);
+  assert.equal(offersBuiltinSlashCommandWhileStreaming("/mcp login docs"), false);
+  const builtinMcp = { name: "mcp", source: "extension", sourceInfo: { path: "builtin:mcp" } };
+  assert.equal(submitsSlashCommandOnEnter("/mcp", builtinMcp, true), true);
+  assert.equal(submitsSlashCommandOnEnter("/mcp", { ...builtinMcp, sourceInfo: { path: "/ext/mcp.ts" } }, false), false);
+});
 
 test("renders structured model-data diagnostics at the presentation layer", () => {
   const html = renderToStaticMarkup(
@@ -68,13 +95,22 @@ test("follow-up shortcuts preserve newline, IME, mobile and completion behavior"
     ["slash completion takes priority", { altKey: true }, { slashMenuOpen: true, slashQuery: "help" }, "slash"],
     ["file completion takes priority", { altKey: true }, { atMenuOpen: true, atQuery: {} }, "file"],
     ["history selection takes priority", { altKey: true }, { historyMenuOpen: true }, "history"],
+    ["Ctrl+Enter mode: Enter inserts a newline", {}, { enterSendMode: "ctrlEnter", isStreaming: false }, "native"],
+    ["Ctrl+Enter mode: Ctrl+Enter sends", { ctrlKey: true }, { enterSendMode: "ctrlEnter", isStreaming: false }, "send"],
+    ["Ctrl+Enter mode: Cmd+Enter steers", { metaKey: true }, { enterSendMode: "ctrlEnter" }, "steer"],
+    ["Ctrl+Enter mode: composition grace blocks the newline", {}, { enterSendMode: "ctrlEnter", lastCompositionEndAtRef: { current: 950 } }, "prevented"],
+    ["Ctrl+Enter mode: Enter picks a file", {}, { enterSendMode: "ctrlEnter", atMenuOpen: true, atQuery: {} }, "file"],
+    ["Ctrl+Enter mode: Enter picks from history", {}, { enterSendMode: "ctrlEnter", historyMenuOpen: true }, "history"],
+    ["Ctrl+Enter mode: Enter completes an exact slash command instead of sending it", {}, { enterSendMode: "ctrlEnter", isStreaming: false, slashMenuOpen: true, slashQuery: "copy", value: "/copy", displayedSlashCommands: [{ name: "copy", source: "builtin" }] }, "slash"],
+    ["Ctrl+Enter mode: Ctrl+Enter sends an exact slash command", { ctrlKey: true }, { enterSendMode: "ctrlEnter", isStreaming: false, slashMenuOpen: true, slashQuery: "copy", value: "/copy", displayedSlashCommands: [{ name: "copy", source: "builtin" }] }, "send"],
+    ["mobile ignores Ctrl+Enter mode for plain Enter", {}, { enterSendMode: "ctrlEnter", isMobile: true }, "native"],
   ];
   for (const [name, keys, state, expected] of cases) {
     let action = "native";
     const handler = script.runInNewContext({
       Date: { now: () => 1000 },
       COMPOSITION_END_ENTER_GRACE_MS: 100,
-      isMobile: false, isStreaming: true,
+      isMobile: false, isStreaming: true, enterSendMode: "enter",
       isComposingRef: { current: false }, lastCompositionEndAtRef: { current: 0 },
       historyMenuOpen: false, inputHistory: ["previous"], historyActiveIndex: 0,
       slashMenuOpen: false, slashQuery: null, displayedSlashCommands: [{}], slashActiveIndex: 0,
@@ -82,7 +118,7 @@ test("follow-up shortcuts preserve newline, IME, mobile and completion behavior"
       onQueuedSubmit() {},
       sendQueued(mode) { action = mode; }, handleSend() { action = "send"; },
       applySlashCommand() { action = "slash"; },
-      value: "", setSlashMenuOpen() {},
+      submitsSlashCommandOnEnter, value: "", setSlashMenuOpen() {},
       applyAtCompletion() { action = "file"; },
       applyHistoryInput() { action = "history"; },
       ...state,

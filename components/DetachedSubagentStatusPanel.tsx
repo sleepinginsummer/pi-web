@@ -1,6 +1,5 @@
 "use client";
 
-import type { SubagentStatus } from "@/hooks/useAgentSession";
 
 type Translate = (key: string, params?: Record<string, string | number>) => string;
 type PanelStatus = { id: string; agent: string; task: string; mode: string; state: "running" | "completed" | "failed"; error?: string };

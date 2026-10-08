@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFile } from "node:fs/promises";
 import { createJiti } from "jiti";
 
 const jiti = createJiti(import.meta.url, {
@@ -73,6 +74,18 @@ test("CodeBlock defers highlighting behind a lazy fallback when not streaming", 
 
   assert.doesNotMatch(html, /class="token/);
   assert.match(html, /const x = 1;/);
+});
+
+test("CodeBlock 的普通代码沿用容器背景，不引入冲突的内联背景", async () => {
+  const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(css, /\.markdown-code-block \{[^}]*background: var\(--bg\);/);
+  for (const isStreaming of [false, true]) {
+    const html = renderCode({ code: "const x = 1;", lang: "javascript", isStreaming });
+    const pre = html.match(/<pre\b[^>]*>/)?.[0];
+    assert.ok(pre);
+    assert.match(pre, /class="markdown-code-plain"/);
+    assert.doesNotMatch(pre, /(?:[;\"]|^)background:/);
+  }
 });
 
 test("CodeBlock renders plain text without tokenization while streaming", () => {

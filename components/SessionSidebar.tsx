@@ -11,11 +11,41 @@ import { loadExplorerOpen, saveExplorerOpen } from "@/lib/file-explorer-state";
 import { loadCollapsedProjects, saveCollapsedProjects } from "@/lib/project-collapse-state";
 import { getProjectActivity, getRecentProjects, resolveSidebarProjectPath, sessionsForProject, sidebarProjectPath } from "@/lib/project-groups";
 import { commitCustomProjectSelection } from "@/lib/custom-project-selection";
+import { useScrollbarVisibility } from "@/hooks/useScrollbarVisibility";
 import { DirectoryPicker } from "./DirectoryPicker";
+import { DismissButton } from "./DismissButton";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import { ProjectSection, type SessionTreeSharedProps } from "./ProjectSection";
 import { TrashPanel } from "./TrashPanel";
 import { SessionSearch } from "./SessionSearch";
+
+// Fixed row height for the session list. SessionItem renders at exactly this
+// height, so the list can be windowed (only the visible slice is mounted).
+const SESSION_LIST_ITEM_HEIGHT = 54;
+
+interface FileManagerAvailability {
+  supported: boolean;
+  reason: string | null;
+  platform: string;
+}
+
+// Server error codes with a translation; any other code is shown verbatim.
+const FILE_MANAGER_ERROR_KEYS: Record<string, string> = {
+  remote: "sidebar.openInExplorerRemoteOnly",
+  "unsupported-platform": "sidebar.openInExplorerUnsupported",
+};
+
+export function getSessionListIndices(count: number, scrollTop: number, viewportHeight: number, focusedIndex = -1): number[] {
+  const overscan = 8;
+  const visibleCount = Math.ceil((viewportHeight || 600) / SESSION_LIST_ITEM_HEIGHT) + overscan * 2;
+  const start = Math.max(0, Math.min(Math.floor(scrollTop / SESSION_LIST_ITEM_HEIGHT) - overscan, count - visibleCount));
+  const end = Math.min(count, start + visibleCount);
+  const indices = Array.from({ length: end - start }, (_, offset) => start + offset);
+  // Keep a focused row mounted so scrolling cannot discard an inline rename.
+  if (focusedIndex >= 0 && focusedIndex < start) indices.unshift(focusedIndex);
+  if (focusedIndex >= end && focusedIndex < count) indices.push(focusedIndex);
+  return indices;
+}
 
 declare global {
   interface Window {
@@ -294,10 +324,17 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
   const [changesCollapsed, setChangesCollapsed] = useState(true);
   const [trashOpen, setTrashOpen] = useState(false);
   const [explorerRefreshDone, setExplorerRefreshDone] = useState(false);
+  const [fileManager, setFileManager] = useState<FileManagerAvailability | null>(null);
+  const [fileManagerError, setFileManagerError] = useState<string | null>(null);
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => loadUnreadSessionIds());
   const explorerRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fileExplorerRef = useRef<FileExplorerHandle>(null);
 
+  // Virtualized session list: only the visible window of rows is mounted.
+  const listScrollRef = useRef<HTMLDivElement>(null);
+  const explorerScrollRef = useRef<HTMLDivElement>(null);
+  useScrollbarVisibility(listScrollRef);
+  useScrollbarVisibility(explorerScrollRef, explorerOpen && Boolean(selectedCwdProp || selectedCwd));
   useEffect(() => {
     setExplorerOpen(loadExplorerOpen());
   }, []);
@@ -339,6 +376,54 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [loadSessions, selectedCwd, selectedCwdProp]);
+  // Only the server can raise a file-manager window, and only when the browser
+  // runs on that same machine. Ask it once so the button can pick the right
+  // label (Explorer / Finder / generic) and disable itself when unavailable.
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/open-in-explorer")
+      .then((res) => res.ok ? res.json() as Promise<FileManagerAvailability> : null)
+      .then((data) => { if (!cancelled && data) setFileManager(data); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  // A failure belongs to the project it happened on.
+  useEffect(() => {
+    setFileManagerError(null);
+  }, [selectedCwd, selectedCwdProp]);
+
+  const openInFileManager = useCallback(async () => {
+    const dir = selectedCwd ?? selectedCwdProp;
+    if (!dir) return;
+    try {
+      const res = await fetch("/api/open-in-explorer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd: dir }),
+      });
+      if (res.ok) {
+        setFileManagerError(null);
+        return;
+      }
+      const data = await res.json().catch(() => ({})) as { error?: string };
+      setFileManagerError(data.error ?? `HTTP ${res.status}`);
+    } catch (error) {
+      setFileManagerError(error instanceof Error ? error.message : String(error));
+    }
+  }, [selectedCwd, selectedCwdProp]);
+
+  const fileManagerLabel = t(
+    fileManager?.platform === "darwin"
+      ? "sidebar.openInFinder"
+      : fileManager?.platform === "win32"
+        ? "sidebar.openInExplorer"
+        : "sidebar.openInFileManager",
+  );
+  const fileManagerUnavailable = fileManager?.supported === false;
+  const fileManagerErrorMessage = fileManagerError
+    ? t(FILE_MANAGER_ERROR_KEYS[fileManagerError] ?? fileManagerError)
+    : null;
 
   // Persist unread markers so they survive a browser refresh before the user
   // has actually opened the completed session.
@@ -842,8 +927,8 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
         selectedSessionId={selectedSessionId}
         onSelectSession={handleSelectSessionFromList}
       >
-      {/* 项目目录与会话组成同一棵导航树，减少在目录选择器和会话列表之间切换。 */}
-      <div data-session-scroll style={{ flex: explorerOpen && (selectedCwdProp || selectedCwd) ? "1 1 0" : "1 1 auto", overflowY: "auto", padding: "0", minHeight: 80 }}>
+      {/* 项目目录与会话组成同一棵导航树。 */}
+      <div data-session-scroll ref={listScrollRef} className="scrollbar-subtle" style={{ flex: explorerOpen && (selectedCwdProp || selectedCwd) ? "1 1 0" : "1 1 auto", overflowY: "auto", padding: "0", minHeight: 80 }}>
         {loading && (
           <div style={{ padding: "16px 14px", color: "var(--text-muted)", fontSize: 12 }}>
             {t("sidebar.loading")}
@@ -967,6 +1052,18 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
               </svg>
               {t("files.explorer")}
             </button>
+            <ToolbarIconButton
+              onClick={() => { void openInFileManager(); }}
+              disabled={fileManagerUnavailable}
+              title={fileManagerUnavailable
+                ? t(fileManager?.reason === "remote" ? "sidebar.openInExplorerRemoteOnly" : "sidebar.openInExplorerUnsupported")
+                : fileManagerLabel}
+              color="var(--text-dim)"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M3 8a2 2 0 0 1 2-2h3.4l1.9 1.9H19a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
+              </svg>
+            </ToolbarIconButton>
             {onOpenTerminal && (
               <ToolbarIconButton
                 onClick={() => onOpenTerminal(selectedCwd ?? selectedCwdProp!)}
@@ -1046,8 +1143,14 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
               )}
             </ToolbarIconButton>
           </div>
+          {fileManagerErrorMessage && (
+            <div role="alert" style={{ display: "flex", alignItems: "flex-start", gap: 6, padding: "0 10px 6px", fontSize: 10, lineHeight: 1.35, color: "#f87171" }}>
+              <span style={{ minWidth: 0, flex: 1, overflowWrap: "anywhere" }}>{fileManagerErrorMessage}</span>
+              <DismissButton onClick={() => setFileManagerError(null)} title={t("files.dismissError")} />
+            </div>
+          )}
           {explorerOpen && (
-            <div style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
+            <div ref={explorerScrollRef} className="scrollbar-subtle" style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
               <FileExplorer
                 ref={fileExplorerRef}
                 cwd={selectedCwd ?? selectedCwdProp!}

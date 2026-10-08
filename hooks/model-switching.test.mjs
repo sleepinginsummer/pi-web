@@ -36,3 +36,13 @@ test("a completed model switch reloads canonical session state and reports failu
   assert.match(switchSource, /setCurrentModelOverride\(previousOverride\)/);
   assert.match(switchSource, /Failed to switch model:/);
 });
+
+test("已创建但未发送的新会话以服务端切换成功为准，失败保留原模型并提示", () => {
+  const newSessionSwitch = switchSource.slice(0, switchSource.indexOf("const target ="));
+  assert.match(newSessionSwitch, /creationSettingsLocked \|\| modelSwitchPendingRef\.current/);
+  const request = newSessionSwitch.indexOf('type: "set_model"');
+  const commit = newSessionSwitch.indexOf("newSessionModelOverrideRef.current = selectedModel");
+  assert.ok(request >= 0 && request < commit);
+  assert.match(newSessionSwitch, /catch \(e\)[\s\S]*?addNotice\([\s\S]*?return;/);
+  assert.match(newSessionSwitch, /finally[\s\S]*?modelSwitchPendingRef\.current = false;[\s\S]*?setModelSwitching\(false\)/);
+});

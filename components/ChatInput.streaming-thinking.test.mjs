@@ -8,9 +8,11 @@ const model = await readFile(new URL("../hooks/useModelSelection.ts", import.met
 const schema = await readFile(new URL("../lib/model-data-schema.ts", import.meta.url), "utf8");
 const thinking = controls.slice(controls.indexOf("const ThinkingControl ="), controls.indexOf("interface FastModeControlProps"));
 
-test("思考控制只有一份，运行中保留当前等级但不可修改", () => {
+// SDK 每次模型请求前重读推理等级，运行中修改应从下一次请求生效。
+test("思考控制只有一份，运行中仍可修改等级", () => {
   assert.match(controls, /<ThinkingControl[^>]*isStreaming=\{isStreaming\}/);
-  assert.match(thinking, /disabled=\{isStreaming \|\| !onThinkingLevelChange\}/);
+  assert.match(thinking, /disabled=\{!onThinkingLevelChange\}/);
+  assert.doesNotMatch(thinking, /disabled=\{isStreaming/);
   assert.match(thinking, /t\(isStreaming \? "chat.currentReasoning" : "chat.changeReasoning"/);
   assert.doesNotMatch(controls, /流式时只读展示当前思考强度/);
 });

@@ -71,6 +71,7 @@ export async function POST(
 ) {
   const { id } = await params;
   let commandType: string | undefined;
+  let promptAccepted = false;
 
   try {
     const body = await req.json() as { type: string; [key: string]: unknown };
@@ -121,6 +122,7 @@ export async function POST(
     }
 
     const result = await session.send(body);
+    promptAccepted = body.type === "prompt";
     if (shouldInvalidateSessionList(body.type)) invalidateSessionListCache();
     if (isShadowSettingCommandResult(result)) {
       return NextResponse.json({ success: true, data: { enabled: result.enabled } });
@@ -145,7 +147,7 @@ export async function POST(
     }
     return NextResponse.json({
       error: String(error),
-      ...(commandType === "prompt"
+      ...(commandType === "prompt" && !promptAccepted
         ? { code: "prompt_rejected", accepted: false }
         : {}),
     }, { status: 500 });

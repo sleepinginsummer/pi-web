@@ -1,5 +1,6 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { SettingsManager } from "@earendil-works/pi-coding-agent";
+import { writeDefaultPreferences, type DefaultPreferencesEdit } from "./default-preferences";
 
 export interface ExplicitStartupPreferences {
   model?: { provider: string; modelId: string };
@@ -13,11 +14,8 @@ export interface EffectiveStartupPreferences {
 }
 
 /**
- * Persist explicit browser selections without re-running AgentSession setters.
- *
- * The session constructor already records the effective model and thinking
- * level. Calling setModel()/setThinkingLevel() again would append duplicate
- * session entries and emit duplicate extension events.
+ * 仅持久化浏览器显式选择，避免再次调用会话 setter 产生重复事件和条目。
+ * 默认配置的落盘及 SDK 错误检查统一交给 writeDefaultPreferences。
  */
 export async function persistExplicitStartupPreferences(
   settingsManager: SettingsManager,
@@ -28,28 +26,23 @@ export async function persistExplicitStartupPreferences(
     return { modelDefaultChanged: false };
   }
 
-  let modelDefaultChanged = false;
-
+  const edit: DefaultPreferencesEdit = {};
   if (
     explicit.model
     && effective.model
     && explicit.model.provider === effective.model.provider
     && explicit.model.modelId === effective.model.modelId
   ) {
-    settingsManager.setDefaultModelAndProvider(
-      effective.model.provider,
-      effective.model.modelId,
-    );
-    modelDefaultChanged = true;
+    edit.model = effective.model;
   }
 
   if (
     explicit.thinkingLevel
     && (effective.supportsThinking || effective.thinkingLevel !== "off")
   ) {
-    settingsManager.setDefaultThinkingLevel(effective.thinkingLevel);
+    edit.thinkingLevel = effective.thinkingLevel;
   }
 
-  await settingsManager.flush();
-  return { modelDefaultChanged };
+  await writeDefaultPreferences(settingsManager, edit);
+  return { modelDefaultChanged: edit.model !== undefined };
 }

@@ -27,6 +27,7 @@ export interface ModelsData {
   modelList: ModelEntry[];
   defaultModel: SelectedModel | null;
   defaultThinkingLevel?: ThinkingLevel | null;
+  savedDefaultThinkingLevel?: ThinkingLevel | null;
   thinkingLevels: Record<string, ThinkingLevel[]>;
   thinkingLevelMaps: Record<string, ThinkingLevelMap>;
   /** `provider/modelId` → enabledModels `:level` 后缀固定的思考等级。 */

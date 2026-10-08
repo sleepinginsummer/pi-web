@@ -11,6 +11,7 @@ type PendingNewSessionSettingsState = PendingNewSessionSettings & { shadowMindEn
 export type PendingNewSessionControl =
   | ({ kind: "staged" } & PendingNewSessionSettingsState)
   | ({ kind: "materializing" } & PendingNewSessionSettingsState)
+  | ({ kind: "initializing"; sessionId: string } & PendingNewSessionSettingsState)
   | ({ kind: "recovering"; sessionId: string } & PendingNewSessionSettingsState)
   | { kind: "materialized"; sessionId: string }
   | { kind: "initialization-failed"; shadowMindEnabled: false; sessionId: string; error: string }
@@ -21,6 +22,7 @@ export type PendingNewSessionEvent =
   | { type: "SET_MODEL"; model: SelectedModel }
   | { type: "SET_THINKING_LEVEL"; level: ThinkingLevelOption }
   | { type: "START" }
+  | { type: "RUNTIME_CREATED"; sessionId: string }
   | { type: "RETRY" }
   | { type: "READY"; sessionId: string }
   | { type: "INIT_FAIL"; sessionId: string; error: string }
@@ -50,6 +52,7 @@ export function selectPendingNewSession(state: PendingNewSessionControl): Pendin
     case "materializing":
       return { busy: true, shadowPending: true, desiredShadowMindEnabled: state.shadowMindEnabled, transportSessionId: null, shadowMode: "staged" };
     case "recovering":
+    case "initializing":
       return { busy: true, shadowPending: true, desiredShadowMindEnabled: state.shadowMindEnabled, transportSessionId: state.sessionId, shadowMode: "staged" };
     case "materialized":
       return { busy: false, shadowPending: false, desiredShadowMindEnabled: true, transportSessionId: state.sessionId, shadowMode: "runtime" };
@@ -90,16 +93,26 @@ export function reducePendingNewSession(
       return state.kind === "materialization-failed"
         ? { ...state, kind: "recovering" }
         : state;
+    case "RUNTIME_CREATED":
+      return state.kind === "materializing" || state.kind === "recovering" || state.kind === "initializing"
+        ? {
+            kind: "initializing",
+            sessionId: event.sessionId,
+            shadowMindEnabled: state.shadowMindEnabled,
+            model: state.model,
+            thinkingLevel: state.thinkingLevel,
+          }
+        : state;
     case "READY":
-      return state.kind === "materializing" || state.kind === "recovering"
+      return state.kind === "materializing" || state.kind === "recovering" || state.kind === "initializing"
         ? { kind: "materialized", sessionId: event.sessionId }
         : state;
     case "INIT_FAIL":
-      return state.kind === "materializing" || state.kind === "recovering"
+      return state.kind === "materializing" || state.kind === "recovering" || state.kind === "initializing"
         ? { kind: "initialization-failed", shadowMindEnabled: false, sessionId: event.sessionId, error: event.error }
         : state;
     case "POST_START_FAIL":
-      return state.kind === "materializing" || state.kind === "recovering"
+      return state.kind === "materializing" || state.kind === "recovering" || state.kind === "initializing"
         ? { ...state, kind: "materialization-failed", sessionId: event.sessionId, error: event.error }
         : state;
     case "REQUEST_FAIL":

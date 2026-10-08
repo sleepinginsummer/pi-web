@@ -11,15 +11,20 @@ import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { CustomMessageView } from "./CustomMessageView";
 import { CopyActionIcon, MessageActions, createForkAction, type MessageAction } from "./MessageActions";
 import { formatMessageTime as formatTime, getMessageImages, getMessageText, MessageImage } from "./MessageContentPrimitives";
-import { getAssistantErrorMessage, getThinkingPreview, isAssistantTruncated, isDisplayableAssistantBlock } from "@/lib/message-display";
+import { getAssistantErrorMessage, getThinkingPreview, hasAssistantAnswer, isAssistantTruncated, isDisplayableAssistantBlock } from "@/lib/message-display";
 import { parseUnifiedPatch, type SplitDiffCell, type SplitDiffFile } from "@/lib/patch";
-import { isApplyPatchToolName } from "@/lib/tool-names";
-import { parseApplyPatchInput, applyPatchPreviewToFiles, extractApplyPatchPaths, getApplyPatchInputText } from "@/lib/apply-patch";
+import { isApplyPatchToolName, isEditToolName, isWriteToolName } from "@/lib/tool-names";
+import { parseApplyPatchInput, applyPatchPreviewToFiles, applyPatchResultHasFailures, extractApplyPatchPaths, getApplyPatchInputText } from "@/lib/apply-patch";
 import { parseSkillMessage } from "@/lib/skill-block";
 import { getLongUserMessageStats } from "@/lib/long-user-message";
 import { isThinkingExpandedByDefault, THINKING_EXPANDED_EVENT } from "@/lib/thinking-expansion-preference";
 import { TurnWrittenFiles } from "./TurnWrittenFiles";
 import type { WrittenFile } from "@/lib/turn-written-files";
+import { isToolCallExpanded, setToolCallExpanded } from "@/lib/tool-call-expansion";
+import type { SubagentToolDetails } from "@/lib/subagent-extension";
+import { CODEMODE_TOOL_NAME, codemodeCalls, codemodeScript, codemodeScriptPreview, stripCodemodeHeader } from "@/lib/codemode-view";
+import { CodemodeCallList } from "./CodemodeToolView";
+import { mcpToolLabel, prettyMcpResultText } from "@/lib/mcp-tool-display";
 import type {
   AgentMessage,
   UserMessage,
@@ -76,6 +81,12 @@ async function loadDeferredContent(url: string): Promise<unknown> {
   return pending;
 }
 
+/** 编辑技能消息时只替换展开文字，保留图片等非文字内容。 */
+export function replaceUserMessageText(message: UserMessage, text: string): UserMessage {
+  return { ...message, content: typeof message.content === "string" ? text
+    : [{ type: "text", text }, ...message.content.filter((block) => block.type !== "text")] };
+}
+
 function estimateTokens(text: string): number {
   let cjk = 0;
   let rest = 0;
@@ -86,7 +97,7 @@ function estimateTokens(text: string): number {
   return cjk + rest / 4;
 }
 
-function getTokenEstimateText(block: AssistantContentBlock): string | null {
+export function getTokenEstimateText(block: AssistantContentBlock): string | null {
   if (block.type === "text") return block.text;
   if (block.type === "thinking") return block.thinking;
   if (block.type === "toolCall") return block.rawInput ?? JSON.stringify(block.input ?? {});
@@ -185,15 +196,22 @@ interface Props {
   modelNames?: Record<string, string>;
   cwd?: string;
   onOpenFile?: (filePath: string) => void;
+  onOpenSession?: (sessionId: string) => void;
   entryId?: string;
   searchBlockIndex?: number;
   onFork?: (entryId: string, draft?: ChatDraft) => void;
   forking?: boolean;
+  onEditContent?: (message: UserMessage, entryId: string) => void;
+  onCancelEdit?: () => void;
+  isEditing?: boolean;
   showTimestamp?: boolean;
   prevTimestamp?: number;
   sessionId?: string;
   writtenFiles?: WrittenFile[];
   visibleBlockOffset?: number;
+  onCompact?: () => void;
+  isCompacting?: boolean;
+  compactError?: string | null;
 }
 function haveSameRelevantToolResults(
   message: AgentMessage,
@@ -209,12 +227,12 @@ function haveSameRelevantToolResults(
   return true;
 }
 
-export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, searchBlockIndex, onFork, forking, showTimestamp, prevTimestamp, sessionId, writtenFiles, visibleBlockOffset }: Props) {
+export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, onOpenSession, entryId, searchBlockIndex, onFork, forking, onEditContent, onCancelEdit, isEditing, showTimestamp, prevTimestamp, sessionId, writtenFiles, visibleBlockOffset, onCompact, isCompacting, compactError }: Props) {
   if (message.role === "user") {
-    return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} />;
+    return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} onEditContent={onEditContent} onCancelEdit={onCancelEdit} isEditing={isEditing} />;
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} searchBlockIndex={searchBlockIndex} onFork={onFork} forking={forking} writtenFiles={writtenFiles} visibleBlockOffset={visibleBlockOffset} />;
+    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} onOpenSession={onOpenSession} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} searchBlockIndex={searchBlockIndex} onFork={onFork} forking={forking} writtenFiles={writtenFiles} visibleBlockOffset={visibleBlockOffset} onCompact={onCompact} isCompacting={isCompacting} compactError={compactError} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
@@ -237,24 +255,34 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     && prev.modelNames === next.modelNames
     && prev.cwd === next.cwd
     && prev.onOpenFile === next.onOpenFile
+    && prev.onOpenSession === next.onOpenSession
     && prev.entryId === next.entryId
     && prev.searchBlockIndex === next.searchBlockIndex
     && prev.onFork === next.onFork
     && prev.forking === next.forking
+    && prev.onEditContent === next.onEditContent
+    && prev.onCancelEdit === next.onCancelEdit
+    && prev.isEditing === next.isEditing
     && prev.showTimestamp === next.showTimestamp
     && prev.prevTimestamp === next.prevTimestamp
     && prev.sessionId === next.sessionId
     && prev.writtenFiles === next.writtenFiles
-    && prev.visibleBlockOffset === next.visibleBlockOffset;
+    && prev.visibleBlockOffset === next.visibleBlockOffset
+    && prev.onCompact === next.onCompact
+    && prev.isCompacting === next.isCompacting
+    && prev.compactError === next.compactError;
 });
 
-function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking }: {
+function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, onEditContent, onCancelEdit, isEditing }: {
   message: UserMessage;
   cwd?: string;
   onOpenFile?: (filePath: string, page?: number) => void;
   entryId?: string;
   onFork?: (entryId: string, draft?: ChatDraft) => void;
   forking?: boolean;
+  onEditContent?: (message: UserMessage, entryId: string) => void;
+  onCancelEdit?: () => void;
+  isEditing?: boolean;
 }) {
   const { t } = useI18n();
   const [hovered, setHovered] = useState(false);
@@ -266,24 +294,30 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking }:
     ? undefined
     : message.content.find((block): block is TextContent => block.type === "text" && Boolean(block.deferredUrl))?.deferredUrl;
 
-  const content =
+  // Session files can hold `\r\n` or lone `\r` line endings (#680). Chrome renders
+  // a lone `\r` as a space even in the pre-wrap command-args and raw-text views.
+  // Copy uses this text too; the session file keeps the original endings.
+  const content = (
     typeof message.content === "string"
       ? message.content
       : message.content
           .filter((b): b is TextContent => b.type === "text")
           .map((b) => b.text)
-          .join("\n");
+          .join("\n")
+  ).replace(/\r\n?/g, "\n");
   const skillMessage = parseSkillMessage(content);
   const displayContent = deferredContent ?? skillMessage?.displayText ?? content;
-  const skillCommand = skillMessage
-    ? skillMessage.displayText
-    : null;
+  const skillCommand = skillMessage?.displayText ?? null;
   const longMessageStats = getLongUserMessageStats(displayContent);
 
   const displayableImages = getMessageImages(message.content);
 
   const time = formatTime(message.timestamp);
   const canFork = !!entryId && !!onFork;
+  const canEdit = !!entryId && !!onEditContent;
+  const canCancelEdit = !!isEditing && !!onCancelEdit;
+  // 技能展开消息编辑回斜杠命令，保留原消息的图片。
+  const editTarget = skillCommand ? replaceUserMessageText(message, skillCommand) : message;
 
   if (!displayContent && displayableImages.length === 0) return null;
   const copyContent = () => {
@@ -318,6 +352,16 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking }:
       onClick: () => onFork!(entryId!, createDraftFromUserMessage(message)),
     })] : []),
   ];
+  if (canCancelEdit) actions.push({
+    key: "cancel-edit", label: t("i18n.cancel"), title: t("i18n.cancel"),
+    onClick: onCancelEdit!, active: true,
+    icon: <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M6 6l12 12M18 6L6 18" /></svg>,
+  });
+  else if (canEdit) actions.push({
+    key: "edit", label: t("i18n.editFromHere"), title: t("i18n.editFromHereTitle"),
+    onClick: () => onEditContent!(editTarget, entryId!),
+    icon: <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><polyline points="15 10 20 15 15 20" /><path d="M4 4v7a4 4 0 0 0 4 4h12" /></svg>,
+  });
   return (
     <div
       style={{ marginBottom: 16, display: "flex", flexDirection: "column", alignItems: "flex-end" }}
@@ -329,8 +373,9 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking }:
           style={{
             flex: 1,
             minWidth: 0,
-            background: "var(--user-bg)",
-            border: "1px solid rgba(59,130,246,0.2)",
+            background: isEditing ? "color-mix(in srgb, var(--accent) 14%, var(--user-bg))" : "var(--user-bg)",
+            border: isEditing ? "1px solid color-mix(in srgb, var(--accent) 62%, var(--user-bg))" : "1px solid rgba(59,130,246,0.2)",
+            boxShadow: isEditing ? "0 0 0 2px color-mix(in srgb, var(--accent) 16%, transparent)" : undefined,
             borderRadius: 12,
             padding: "8px 12px",
             fontSize: "calc(14px + var(--chat-font-size-offset, 0px))",
@@ -386,7 +431,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking }:
               )}
             </div>
           ) : displayContent ? (
-            <MarkdownBody className="markdown-user-message" cwd={cwd} onOpenFile={onOpenFile}>{displayContent}</MarkdownBody>
+            <MarkdownBody className="markdown-user-message" cwd={cwd} onOpenFile={onOpenFile} keepLineBreaks>{displayContent}</MarkdownBody>
           ) : null}
           {deferredUrl && deferredContent === null && (
             <button type="button" onClick={loadDeferred} style={{ marginTop: 7, padding: 0, border: 0, background: "none", color: "var(--accent)", cursor: "pointer", fontSize: 11 }}>
@@ -400,7 +445,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking }:
 
       {/* Bottom row: shared actions + timestamp */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 6, marginTop: 3 }}>
-        <MessageActions actions={actions} visible={hovered || !!forking} />
+        <MessageActions actions={actions} visible={hovered || !!forking || canCancelEdit} />
         {time && <span style={{ fontSize: 10, color: "var(--text-dim)" }}>{time}</span>}
       </div>
     </div>
@@ -414,6 +459,7 @@ function AssistantMessageView({
   modelNames,
   cwd,
   onOpenFile,
+  onOpenSession,
   showTimestamp,
   prevTimestamp,
   sessionId,
@@ -423,6 +469,9 @@ function AssistantMessageView({
   forking,
   writtenFiles,
   visibleBlockOffset = 0,
+  onCompact,
+  isCompacting,
+  compactError,
 }: {
   message: AssistantMessage;
   isStreaming?: boolean;
@@ -430,6 +479,7 @@ function AssistantMessageView({
   modelNames?: Record<string, string>;
   cwd?: string;
   onOpenFile?: (filePath: string) => void;
+  onOpenSession?: (sessionId: string) => void;
   showTimestamp?: boolean;
   prevTimestamp?: number;
   sessionId?: string;
@@ -439,6 +489,9 @@ function AssistantMessageView({
   forking?: boolean;
   writtenFiles?: WrittenFile[];
   visibleBlockOffset?: number;
+  onCompact?: () => void;
+  isCompacting?: boolean;
+  compactError?: string | null;
 }) {
   const { t } = useI18n();
   const time = showTimestamp ? formatTime(message.timestamp) : null;
@@ -450,6 +503,7 @@ function AssistantMessageView({
   const blocks = blockItems.map(({ block }) => block);
   const providerError = getAssistantErrorMessage(message, { isStreaming });
   const truncated = isAssistantTruncated(message, { isStreaming });
+  const unansweredTruncation = truncated && !hasAssistantAnswer(message);
   const [hovered, setHovered] = useState(false);
   const [copied, setCopied] = useState(false);
   const streamStartRef = useRef<number | null>(null);
@@ -588,7 +642,7 @@ function AssistantMessageView({
       onClick: () => onFork!(entryId!),
     })] : []),
   ];
-  if (blocks.length === 0 && !isStreaming && !providerError) return null;
+  if (blocks.length === 0 && !isStreaming && !providerError && !truncated) return null;
 
   return (
     <div
@@ -642,7 +696,7 @@ function AssistantMessageView({
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {blockItems.map(({ block, originalIndex }) => (
-          <BlockView key={`${entryId ?? "stream"}-${originalIndex}`} block={block} searchTarget={originalIndex === searchBlockIndex} toolResults={toolResults} isStreaming={isStreaming} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} />
+          <BlockView key={`${entryId ?? "stream"}-${originalIndex}`} block={block} searchTarget={originalIndex === searchBlockIndex} toolResults={toolResults} isStreaming={isStreaming} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} onOpenSession={onOpenSession} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} />
         ))}
       </div>
 
@@ -684,7 +738,30 @@ function AssistantMessageView({
             overflowWrap: "anywhere",
           }}
         >
-          {t("chat.truncatedByOutputLimit")}
+          {t(unansweredTruncation ? "chat.truncatedWithoutAnswer" : "chat.truncatedByOutputLimit")}
+          {unansweredTruncation && onCompact && (
+            <button
+              type="button"
+              onClick={onCompact}
+              disabled={isCompacting}
+              style={{
+                display: "block",
+                marginTop: 8,
+                padding: "3px 8px",
+                border: "1px solid currentColor",
+                borderRadius: 5,
+                background: "transparent",
+                color: "inherit",
+                cursor: isCompacting ? "default" : "pointer",
+                font: "inherit",
+              }}
+            >
+              {t(isCompacting ? "chat.compacting" : "chat.compactContext")}
+            </button>
+          )}
+          {unansweredTruncation && compactError && (
+            <div style={{ marginTop: 8, color: "#ef4444", whiteSpace: "pre-wrap" }}>{compactError}</div>
+          )}
         </div>
       )}
 
@@ -709,7 +786,7 @@ function AssistantMessageView({
   );
 }
 
-function BlockView({ block, searchTarget, toolResults, isStreaming, streamingDuration, toolCallDurations, cwd, onOpenFile, sessionId, entryId, blockIndex }: { block: AssistantContentBlock; searchTarget?: boolean; toolResults?: Map<string, ToolResultMessage>; isStreaming?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; sessionId?: string; entryId?: string; blockIndex: number }) {
+function BlockView({ block, searchTarget, toolResults, isStreaming, streamingDuration, toolCallDurations, cwd, onOpenFile, onOpenSession, sessionId, entryId, blockIndex }: { block: AssistantContentBlock; searchTarget?: boolean; toolResults?: Map<string, ToolResultMessage>; isStreaming?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; onOpenSession?: (sessionId: string) => void; sessionId?: string; entryId?: string; blockIndex: number }) {
   if (block.type === "text") {
     return <div data-search-target={searchTarget || undefined}><TextBlock block={block as TextContent} isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile} /></div>;
   }
@@ -723,7 +800,7 @@ function BlockView({ block, searchTarget, toolResults, isStreaming, streamingDur
     const tc = block as ToolCallContent;
     const result = toolResults?.get(tc.toolCallId);
     const duration = toolCallDurations?.get(tc.toolCallId);
-    return <ToolCallBlock block={tc} result={result} duration={duration} />;
+    return <ToolCallBlock block={tc} result={result} duration={duration} onOpenSession={onOpenSession} />;
   }
   return null;
 }
@@ -871,12 +948,24 @@ export function ThinkingBlock({ block, duration, sessionId, entryId, blockIndex 
 }
 
 
-function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number }) {
+function isSubagentToolDetails(value: unknown): value is SubagentToolDetails {
+  if (!value || typeof value !== "object") return false;
+  const details = value as Partial<SubagentToolDetails>;
+  return details.kind === "pi-web-subagent" && typeof details.sessionId === "string";
+}
+
+function ToolCallBlock({ block, result, duration, onOpenSession }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number; onOpenSession?: (sessionId: string) => void }) {
   const { t } = useI18n();
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(() => isToolCallExpanded(block.toolCallId));
   const [deferredInput, setDeferredInput] = useState<unknown>(null);
   const [deferredError, setDeferredError] = useState<string | null>(null);
-  const inputStr = block.rawInput ?? JSON.stringify(deferredInput ?? block.input, null, 2);
+  const toggleExpanded = () => {
+    const next = !expanded;
+    setToolCallExpanded(block.toolCallId, next);
+    setExpanded(next);
+  };
+  const inputStr = getWrittenFileText(block) ?? (deferredInput === null
+    ? getToolCallInputText(block) : JSON.stringify(deferredInput, null, 2));
   const isStreamingInput = block.rawInput !== undefined;
   const isEditTool = isEditToolName(block.toolName);
   const resultDiff = result && !result.isError ? getResultDiff(result) : null;
@@ -884,15 +973,24 @@ function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; re
   const patchLabel = isApplyPatchToolName(block.toolName)
     ? summarizeApplyPatchInput(block)
     : null;
+  // A script and the calls it made, instead of the input JSON. Streamed input is
+  // still incomplete JSON and keeps the generic view.
+  const codemodeCode = block.toolName === CODEMODE_TOOL_NAME && !isStreamingInput ? codemodeScript(block.input) : null;
+  const codemode = codemodeCode === null ? null : { code: codemodeCode, ...codemodeCalls(result?.details) };
+  // A running script's progress snapshot has calls but no content yet.
+  const codemodeRunning = codemode !== null && result !== undefined && result.content.length === 0;
+
+  // `server/tool` instead of the registered `mcp__server__tool`, as pi's TUI shows it.
+  const mcpLabel = mcpToolLabel(block.toolName, result?.details);
 
   // Result display
-  const resultText = result
-    ? result.content.filter((b): b is { type: "text"; text: string } => b.type === "text").map((b) => b.text).join("\n")
+  const resultContent = result ? (codemode ? stripCodemodeHeader(result.content) : result.content) : [];
+  const joinedResultText = result
+    ? resultContent.filter((b): b is { type: "text"; text: string } => b.type === "text").map((b) => b.text).join("\n")
     : null;
-  const resultImages = getMessageImages(result?.content ?? []);
+  const resultText = mcpLabel && joinedResultText !== null ? prettyMcpResultText(joinedResultText) : joinedResultText;
+  const resultImages = getMessageImages(resultContent);
   const resultIsEmpty = resultText === null ? false : (resultText.trim() === "(no output)" || resultText.trim() === "");
-  const isError = result?.isError ?? false;
-
   useEffect(() => {
     if (!expanded || !block.deferredUrl || deferredInput !== null) return;
     let cancelled = false;
@@ -903,6 +1001,10 @@ function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; re
     });
     return () => { cancelled = true; };
   }, [block.deferredUrl, deferredInput, expanded]);
+  const isError = (result?.isError ?? false)
+    || (isApplyPatchToolName(block.toolName) && applyPatchResultHasFailures(result?.details));
+  const subagent = isSubagentToolDetails(result?.details) ? result.details : null;
+  const codemodeCallCount = codemode ? codemode.calls.length + codemode.omitted : 0;
 
   return (
     <div
@@ -915,38 +1017,66 @@ function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; re
       }}
     >
       {/* ── Tool call header ── */}
-      <button
-        onClick={() => setExpanded((v) => !v)}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 7,
-          width: "100%",
-          padding: "6px 10px",
-          background: "none",
-          border: "none",
-          color: "var(--text-muted)",
-          cursor: "pointer",
-          fontSize: 12,
-          textAlign: "left",
-          minWidth: 0,
-        }}
-      >
-        <span style={{ color: isError ? "#f87171" : "#16a34a", fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 11, flexShrink: 0 }}>
-          {block.toolName}
-        </span>
-        <span style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
-          {isStreamingInput ? t("chat.generatingToolInput") : getToolPreview(block)}
-        </span>
-        {duration !== undefined && (
-          <span style={{ fontSize: 11, color: "var(--text-dim)", flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>{duration}s</span>
+      <div style={{ display: "flex", alignItems: "stretch", minWidth: 0 }}>
+        <button
+          onClick={toggleExpanded}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 7,
+            flex: 1,
+            minWidth: 0,
+            padding: "6px 10px",
+            background: "none",
+            border: "none",
+            color: "var(--text-muted)",
+            cursor: "pointer",
+            fontSize: 12,
+            textAlign: "left",
+          }}
+        >
+          <span
+            title={mcpLabel ? block.toolName : undefined}
+            style={{ color: isError ? "#f87171" : "#16a34a", fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 11, flexShrink: 0 }}
+          >
+            {mcpLabel ? (
+              <>
+                <span style={{ fontWeight: 500, opacity: 0.75 }}>{mcpLabel.server}/</span>
+                {mcpLabel.tool}
+              </>
+            ) : block.toolName}
+          </span>
+          <span style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
+            {isStreamingInput
+              ? t("chat.generatingToolInput")
+              : (patchLabel ?? (codemode ? codemodeScriptPreview(codemode.code) : getToolPreview(block)))}
+          </span>
+          {codemodeCallCount > 0 && (
+            <span style={{ fontSize: 11, color: "var(--text-dim)", flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>
+              {codemodeCallCount === 1 ? t("codemode.callCountOne") : t("codemode.callCount", { count: codemodeCallCount })}
+            </span>
+          )}
+          {duration !== undefined && (
+            <span style={{ fontSize: 11, color: "var(--text-dim)", flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>{duration}s</span>
+          )}
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--text-dim)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, transform: expanded ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}>
+            <polyline points="2 3.5 5 6.5 8 3.5" />
+          </svg>
+        </button>
+        {subagent && onOpenSession && (
+          <button
+            type="button"
+            onClick={() => onOpenSession(subagent.sessionId)}
+            title={t("subagent.open")}
+            aria-label={t("subagent.open")}
+            style={{ width: 32, display: "grid", placeItems: "center", border: "none", borderLeft: "1px solid var(--border)", background: "none", color: "var(--text-muted)", cursor: "pointer", flexShrink: 0 }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M15 3h6v6" /><path d="M10 14 21 3" /><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /></svg>
+          </button>
         )}
-        <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--text-dim)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, transform: expanded ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}>
-          <polyline points="2 3.5 5 6.5 8 3.5" />
-        </svg>
-      </button>
+      </div>
 
-      {/* ── Expanded: input args (only when no richer view exists) ── */}
+      {/* ── Expanded: input args (only when no richer view exists); a codemode script in place of its JSON ── */}
       {expanded && (isStreamingInput || !isEditTool) && !patchFiles && (
         <pre
           style={{
@@ -962,9 +1092,14 @@ function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; re
             wordBreak: "break-all",
           }}
         >
-          {inputStr}
+          {codemode ? codemode.code.replace(/\r/g, "").trimEnd() : inputStr}
           {deferredError ? `\n${deferredError}` : ""}
         </pre>
+      )}
+
+      {/* ── Expanded: the calls a codemode script made ── */}
+      {expanded && codemode && (
+        <CodemodeCallList calls={codemode.calls} omitted={codemode.omitted} isError={isError} />
       )}
 
       {/* ── Result images — always visible, independent of the collapsed details ── */}
@@ -987,7 +1122,7 @@ function ToolCallBlock({ block, result, duration }: { block: ToolCallContent; re
           isError={isError}
         />
       )}
-      {expanded && result && !patchFiles && (
+      {expanded && result && !patchFiles && !codemodeRunning && (
         resultDiff ? (
           <PairedDiffResult
             diff={resultDiff}
@@ -1273,15 +1408,6 @@ function getResultDiff(result: ToolResultMessage): ResultDiff | null {
   return null;
 }
 
-function isEditToolName(toolName: string): boolean {
-  const name = toolName.toLowerCase();
-  return name === "edit" ||
-    name.startsWith("edit_") ||
-    name.endsWith(".edit") ||
-    name.endsWith("_edit") ||
-    name.includes("str_replace") ||
-    name.includes("replace_editor");
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -1414,6 +1540,21 @@ function CompactionFileList({ title, files }: { title: string; files: string[] }
       </ul>
     </div>
   );
+}
+export function getToolCallInputText(block: ToolCallContent): string {
+  return block.rawInput ?? JSON.stringify(block.input, null, 2);
+}
+
+const WRITE_VIEW_KEYS = new Set(["path", "file_path", "content"]);
+
+// A write's file text in place of its JSON. Streamed input is still incomplete
+// JSON, and any other argument (a mode, a title) would vanish from this view,
+// so those calls, and an empty file, keep the generic view.
+function getWrittenFileText(block: ToolCallContent): string | null {
+  if (block.rawInput !== undefined || !isWriteToolName(block.toolName)) return null;
+  const { content } = block.input;
+  if (typeof content !== "string" || content === "") return null;
+  return Object.keys(block.input).every((key) => WRITE_VIEW_KEYS.has(key)) ? content : null;
 }
 function getToolPreview(block: ToolCallContent): string {
   const input = block.input;

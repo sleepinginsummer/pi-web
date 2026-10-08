@@ -4,11 +4,19 @@ import {
   readModelsConfigWithCapabilities,
 } from "@/lib/models-config-commit";
 import { forceRefreshModelCatalog } from "@/lib/model-catalog-refresh";
+import { ModelsConfigReadError } from "@/lib/models-config-store";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  return NextResponse.json(await readModelsConfigWithCapabilities());
+  try {
+    return NextResponse.json(await readModelsConfigWithCapabilities());
+  } catch (error) {
+    if (error instanceof ModelsConfigReadError) {
+      return NextResponse.json({ error: error.message }, { status: 422 });
+    }
+    return NextResponse.json({ error: String(error) }, { status: 500 });
+  }
 }
 
 export async function PUT(req: Request) {
@@ -26,6 +34,9 @@ export async function PUT(req: Request) {
       return NextResponse.json({ success: true, catalogRefreshed: false });
     }
   } catch (error) {
+    if (error instanceof ModelsConfigReadError) {
+      return NextResponse.json({ error: error.message }, { status: 409 });
+    }
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }
 }

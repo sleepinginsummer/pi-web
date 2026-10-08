@@ -1,14 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { ProjectTrustStatus } from "@/lib/api-types";
+import type { McpErrorResponse, ProjectTrustStatus } from "@/lib/api-types";
+import type { ProjectTrustFailure } from "@/components/ProjectTrustDialog";
 import { CwdRequestGate } from "@/lib/cwd-request-gate";
 
 export function useProjectTrust({ cwd, onTrusted }: { cwd: string | null; onTrusted: () => void }) {
   const [status, setStatus] = useState<ProjectTrustStatus | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ProjectTrustFailure | null>(null);
   const gateRef = useRef<CwdRequestGate | null>(null);
   if (!gateRef.current) gateRef.current = new CwdRequestGate();
   useLayoutEffect(() => {
@@ -53,18 +54,28 @@ export function useProjectTrust({ cwd, onTrusted }: { cwd: string | null; onTrus
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ cwd }),
       });
-      const data = await response.json() as ProjectTrustStatus & { error?: string };
-      if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
+      const data = await response.json() as ProjectTrustStatus & Partial<McpErrorResponse>;
       if (!gateRef.current?.isCurrent(ticket)) return;
+      if (!response.ok || data.error) {
+        setError({ error: data.error ?? `HTTP ${response.status}`, ...(data.reason ? { reason: data.reason } : {}) });
+        return;
+      }
       setStatus(data);
       setDialogOpen(false);
       onTrusted();
     } catch (trustError) {
-      if (gateRef.current?.isCurrent(ticket)) setError(trustError instanceof Error ? trustError.message : String(trustError));
+      if (gateRef.current?.isCurrent(ticket)) setError({ error: trustError instanceof Error ? trustError.message : String(trustError) });
     } finally {
       if (gateRef.current?.isCurrent(ticket)) setBusy(false);
     }
   }, [busy, cwd, onTrusted]);
 
-  return { busy, closeDialog, dialogOpen, error, openDialog, status, trust };
+  // 来自设置面板或信任弹窗的新状态同时淘汰旧 GET，避免倒退。
+  const updateStatus = useCallback((targetCwd: string, nextStatus: ProjectTrustStatus) => {
+    if (targetCwd !== cwd) return;
+    gateRef.current!.begin(targetCwd);
+    setStatus(nextStatus);
+    setBusy(false);
+  }, [cwd]);
+  return { busy, closeDialog, dialogOpen, error, openDialog, status, trust, updateStatus };
 }

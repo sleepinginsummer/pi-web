@@ -135,8 +135,8 @@ hooks/
 - `globalThis` survives Next.js hot-reload; plain module-level Map does not
 - Idle timeout: 10 minutes. Concurrent `startRpcSession()` calls share a single start Promise (`globalThis.__piStartLocks`)
 - Do not cache or share complete `AgentSessionServices`: its settings manager, resource loader, and extension runtime are mutable and cwd/session-bound. Cold startup cost is measured in the `services` stage; optimize concrete immutable discovery inputs only, never by reusing services or executing extension factories in a throwaway warmup.
-- Pi SDK 0.85.1 has a single-cwd extension-module cache, so concurrent projects evict one another and repeatedly pay TypeScript/Jiti import cost. `scripts/patch-pi-sdk-extension-cache.mjs` applies a version-locked postinstall patch that caches factory modules for the eight most-recent cwd values while every session still gets a fresh runtime. The patch must fail closed on SDK upgrades; review upstream `extensions/loader` and update or remove it before changing the SDK version.
-- Pi SDK 0.85.1 checks the complete context after tool results and before the next model request, compacting at the configured threshold when needed. Keep this upstream behavior intact when upgrading the SDK; do not reintroduce the removed pi-web mid-run compaction patch.
+- Pi SDK 1.0.0 仍使用单 cwd 的扩展模块缓存；`scripts/patch-pi-sdk-extension-cache.mjs` 的版本锁定补丁保留最近八个 cwd 的工厂模块，每个会话继续创建独立 runtime。升级 SDK 时必须复核 `extensions/loader` 并更新或移除补丁，源结构或版本不符时须拒绝安装。
+- 保留 Pi SDK 1.0.0 原生的上下文阈值检查与自动压缩；升级 SDK 时须复核其压缩时机与完整上下文投影，不得重新引入已移除的 pi-web 运行中压缩补丁。
 
 ### Session first-paint loading
 - Existing sessions load `/api/sessions/[id]/context` first and commit messages immediately. 切回已结束的会话时，只有 `/context` 验证文件版本与活动 leaf 均一致，才恢复有上限的页面内历史快照；不一致就丢弃。 `/details` (file path + projected branch tree) and `/state` use independent abort controllers and load afterward; details failures must not hide a valid context or runtime snapshot.
@@ -164,6 +164,8 @@ The last preset explicitly selected by the user is stored in browser `localStora
 ### Session-level Shadow Mind toggle
 The top bar Shadow switch controls only the current session. `lib/shadow-session-setting.ts` is the single source of truth: it persists `pi-web-shadow-mind-state` custom entries, restores disabled state after wrapper/runtime reload, serializes concurrent pause/resume requests with last-write-wins semantics, and treats a missing optional Shadow extension as unavailable instead of failing session startup. Both the top-bar control and Web `/shadow pause|resume` paths must use `set_shadow_mind_enabled`; never infer state from the extension status text or call the extension command through a second unpersisted path. Unsent sessions are keyed by cwd in `AppShell`; `lib/pending-new-session.ts` owns their reducer and exhaustive UI projection, while `lib/new-session-materialization-client.ts` deduplicates create/finalize requests across `ChatWindow` remounts. An explicit disabled preference is applied and persisted before the first prompt; the default enabled preference is omitted so a missing optional Shadow extension cannot block session creation. Post-start failures retain the real session id and retry the idempotent `finalize-existing` operation only after canonical cwd/session identity validation.
 
+新会话 `ensure_session` 使用两阶段创建：`create` 只返回 `runtime-created` 与真实 session id，不等待扩展审批；前端进入 `initializing`，接管 id 并连接 SSE 后，再调用 `finalize-existing` 应用 Shadow 预设及读取完整状态。只有 `ready` 才解锁模型和发送控件。扩展审批仍需用户明确确认，不得自动批准或通过全局配置绕过。切换页面后重新挂载须恢复同一个 runtime 的 SSE 和初始化请求，失败重试不得创建第二个会话。已创建但尚未发送的新会话切换模型必须先等待服务端成功，再提交选择器状态；失败保留原选择并显示错误。
+
 ### Session-level OpenAI Fast mode
 `lib/fast-session-setting.ts` is the single source of truth for the session Fast preference. `lib/fast-mode.ts` contains only pure key/protocol/clone logic; model-level Priority capability declarations are stored by `lib/model-capabilities.ts` in `~/.pi/agent/pi-web-model-capabilities.json` because the SDK validates `models.json` strictly and sampling parameters are forwarded upstream. The ModelsConfig API temporarily merges this capability as `fast: true` for the form, strips it before writing `models.json`, and rebuilds the sidecar keys from the current model snapshot so deleted or renamed models leave no stale entries. `lib/models-config-commit.ts` is the only paired persistence/read boundary: PUT holds a `proper-lockfile` cross-process lock across snapshot, both atomic writes, and lock-owned rollback; GET takes the same lock only long enough to read immutable file contents and compute a generation hash. Slow SDK/extension catalog creation runs outside the lock and validates generation afterward without repeating side effects. Each `AgentSessionWrapper` atomically owns an immutable runtime snapshot containing one catalog resolver, its same-lifecycle Fast capability set, and a runtime generation; reload installs the whole snapshot once, and queued Fast work from an older generation becomes a no-op. Fast requires either the built-in OpenAI provider or an explicit model capability declaration plus `api: "openai-responses"` or `api: "openai-completions"`; OpenAI-compatible transport alone is insufficient. The setting persists `pi-web-fast-mode-state` custom entries and serializes toggle/model-switch/reload application with last-write-wins semantics. Never mutate `inner.model` or a `modelRuntime` catalog object: Fast application passes a session-private clone with independent `compat`/`samplingParams` objects to `setModel`. Disabling Fast must rebuild from the captured catalog resolver so an explicitly configured base `service_tier` is restored.
 
@@ -175,6 +177,7 @@ The top bar Shadow switch controls only the current session. `lib/shadow-session
 The `enabledModels` setting uses pi's `--models` syntax: minimatch globs against `provider/modelId` or a bare `modelId`, fuzzy matching for non-glob patterns, and an optional `:thinkingLevel` suffix. Never compare those patterns as literal strings — `lib/model-scope.ts` delegates to the SDK's `resolveModelScopeWithDiagnostics()` so pi-web and the TUI agree on the visible model list, and falls back to all available models when patterns resolve to nothing. `startRpcSession()` resolves that scope before creating an AgentSession and passes the selected initial model, thinking pin, and SDK-native `scopedModels` atomically; `GET /api/models` reuses the helper only for selector data, `thinkingLevelPins`, and `modelScopeWarnings` display.
 
 - `/context` 和 `/details` 在读取存活 wrapper 前检查外部 JSONL 追加：空闲时淘汰旧 wrapper，运行中返回 409，不展示旧 leaf；仅允许停止与只读控制命令。新 wrapper 在启动后的实际命令派发前复查磁盘；文件版本变化时逐条核对 JSONL 与内存，连同 ID 重写也不能误认为未变。尾部读取工具能按需越过 64 KB，但 wrapper 新鲜度边界以完整文件校验为准。
+- `lib/session-message-persistence.ts` 在主会话和内置子代理的 SDK 保存入口，按 JSONL 序列化规则复制最终工具结果。插件返回结果后再修改嵌套字段（例如 hashline 批次中止标记）不得污染已保存的内存历史；不能通过忽略 `details` 或放宽完整文件比较来规避 409。
 
 ### SSE reconnect on page refresh mid-stream
 On `ChatWindow` mount, `GET /api/agent/[id]` is called. If `state.isStreaming === true`, SSE is reconnected automatically. `thinkingLevel` and `isCompacting` are also synced from this response.
@@ -183,7 +186,7 @@ Active `ask_user_question` tool starts are retained by `AgentSessionWrapper` for
 
 ### 排队消息附件与移回
 - `lib/queued-messages.ts` 是队列 SSE、运行状态和 `clear_queue` 的统一契约，每条消息包含文字和完整 base64 图片；输入框显示图片数量，移回时同时恢复文字、图片及已有草稿。
-- `lib/agent-message-queue.ts` 将 Pi 0.87.0 的内部 `steeringQueue.messages` / `followUpQueue.messages` 只读依赖隔离在单一边界，结构不兼容时在清空前报错。SDK 的纯文本 getter 和单批 `peekQueuedMessages()` 不能用于移回；以真实队列为准，避免重复移回已 drain 的消息。升级 SDK 必须复核此适配器并运行其集成测试。
+- `lib/agent-message-queue.ts` 将 Pi 1.0.0 的内部 `steeringQueue.messages` / `followUpQueue.messages` 只读依赖隔离在单一边界，结构不兼容时在清空前报错。SDK 的纯文本 getter 和单批 `peekQueuedMessages()` 不能用于移回；以真实队列为准，避免重复移回已 drain 的消息。升级 SDK 必须复核此适配器并运行其集成测试。
 - SDK 在真实入队之前广播 `queue_update`，wrapper 延迟到 microtask 读取完整队列；用户 `message_start` 也同步实际队列，覆盖纯图片消息无法被 SDK 文字匹配移除的情况。
 
 ### Compaction SSE events
@@ -263,7 +266,7 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 - Browser autoplay policy means sound must be unlocked from a user gesture; `ChatInput` calls the unlock hook from interactive controls, and `ChatWindow` plays the tone from `onAgentEnd`.
 
 ### PWA 版本与 Service Worker 更新策略
-- 当前 Pi Web 版本使用 `0.8.11-37` 格式；此后每次代码变更都必须将最后一位递增 1（例如 `0.8.11-37` -> `0.8.11-38`），并同步更新 `package.json` 与 `package-lock.json`。
+- 当前合并版本使用 `0.10.0-merge.3`；此后每次代码变更都必须将最后一位递增 1（例如 `0.10.0-merge.3` -> `0.10.0-merge.4`），并同步更新 `package.json` 与 `package-lock.json`。
 - 生产环境必须使用每次构建唯一的版本标识注册 `/sw.js?v=<build-version>`，静态缓存名称也必须包含同一个版本；不能只使用长期不变的 `package.json` 版本，否则代码变化后浏览器可能继续命中旧 chunk。
 - 新 Service Worker 安装完成后保持 `waiting`，由界面提示“发现新版本”；用户确认后发送 `SKIP_WAITING`，并在 `controllerchange` 后刷新页面。不要在 `install` 阶段无条件调用 `skipWaiting()`。
 - 激活新 Service Worker 时只清理 `pi-web-` 前缀下的旧版本缓存，不得清理其它站点数据或认证信息。`/sw.js`、页面导航和 API 请求必须绕过静态资源缓存。

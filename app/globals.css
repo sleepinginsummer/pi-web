@@ -1,5 +1,7 @@
 @import "@xterm/xterm/css/xterm.css";
 @import "tailwindcss";
+/* demo/ is a separate project; keep its sources out of this app's class scan. */
+@source not "../demo";
 
 @theme {
   --color-bg: var(--bg);
@@ -442,9 +444,9 @@ html.dark .web-login-error {
  * Chromium-only scrollbars. Firefox renders its native ones, which the standard
  * `scrollbar-width` / `scrollbar-color` properties would only make thinner and
  * flatter, so this block stays webkit-prefixed on purpose.
- * The 10px box is the grab target; the thumb paints 6px of it through a
- * transparent border, so a scrollbar that is easy to catch does not also read
- * as a heavy rule down the side of every panel.
+ * The 10px box remains the grab target, but subtle scrollbars stay transparent
+ * until their scroll container is active. This keeps long panels usable without
+ * leaving a permanent rule down the side of every panel.
  */
 ::-webkit-scrollbar {
   width: 10px;
@@ -469,6 +471,19 @@ html.dark .web-login-error {
 }
 ::-webkit-scrollbar-corner {
   background: transparent;
+}
+
+.scrollbar-subtle::-webkit-scrollbar-thumb {
+  background-color: transparent;
+}
+.scrollbar-subtle.scrollbar-visible::-webkit-scrollbar-thumb {
+  background-color: color-mix(in srgb, var(--text-dim) 45%, transparent);
+}
+.scrollbar-subtle.scrollbar-visible::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in srgb, var(--text-dim) 72%, transparent);
+}
+.scrollbar-subtle.scrollbar-visible::-webkit-scrollbar-thumb:active {
+  background-color: var(--text-dim);
 }
 
 /* A touch screen scrolls by dragging the content, so the extra width buys
@@ -539,26 +554,32 @@ html.dark .web-login-error {
   white-space: nowrap;
 }
 
-.extension-widget-triggers {
+/* The widget triggers and the status line are one row that scrolls sideways as a
+   whole. The expanded panel sits above it and stays put. */
+.extension-status-row {
   display: flex;
   flex: 1 1 100%;
   align-items: stretch;
   min-width: 0;
-  height: 35px;
   overflow-x: auto;
   overflow-y: hidden;
   overscroll-behavior-x: contain;
-  scrollbar-width: none;
+  scrollbar-width: thin;
 }
 
-.extension-widget-triggers::-webkit-scrollbar {
-  display: none;
+.extension-widget-triggers {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: stretch;
+  height: 35px;
 }
 
 .extension-status-shelf.has-widgets.has-status .extension-widget-triggers {
-  flex: 0 0 auto;
-  max-width: 70%;
   border-right: 1px solid var(--border);
+}
+
+.extension-status-row > .extension-status-line {
+  flex: 0 0 auto;
 }
 
 .extension-widget-trigger {
@@ -686,7 +707,7 @@ button.extension-widget-trigger:focus-visible {
   min-width: 0;
   min-height: 35px;
   max-height: min(144px, 18dvh);
-  padding: 8px 12px;
+  padding: 0;
   overflow: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
@@ -694,13 +715,71 @@ button.extension-widget-trigger:focus-visible {
 }
 
 .extension-status-text {
+  display: flex;
   flex: 1;
+  align-items: stretch;
   min-width: 0;
+  min-height: 35px;
   color: var(--text-muted);
   font-family: var(--font-mono);
   font-size: 11px;
   line-height: 1.45;
   white-space: pre;
+}
+
+/* Every status is a cell of the status line, told apart from its neighbours by a
+   vertical rule like the widget triggers. A `command:` status is a button cell, as
+   tall as the line, so the whole cell can be clicked. */
+.extension-status-item {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  padding: 8px 12px;
+  border-right: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+}
+
+.extension-status-item:last-child {
+  border-right: 0;
+}
+
+.extension-status-command {
+  border-top: 0;
+  border-bottom: 0;
+  border-left: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  line-height: 1.45;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.extension-status-command:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.extension-status-command:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.extension-status-command:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* Touch screens get taller cells when there is something to tap, widget triggers
+   included, so the row stays level. */
+@media (pointer: coarse) {
+  .extension-status-shelf.has-commands .extension-status-text {
+    min-height: 44px;
+  }
+
+  .extension-status-shelf.has-commands .extension-widget-triggers,
+  .extension-status-shelf.has-commands .extension-widget-trigger {
+    height: 44px;
+  }
 }
 
 :root {
@@ -848,6 +927,7 @@ pre, code {
 }
 .markdown-table-wrap > table { width: max-content; }
 .markdown-body th, .markdown-body td {
+  max-width: 240px;
   border: 0;
   border-bottom: 1px solid var(--border);
   padding: 6px 10px;
@@ -2009,6 +2089,26 @@ span.token.table {
   to { transform: rotate(360deg); }
 }
 
+/* Compositor-friendly ping for the unread-activity ring: animating only
+   opacity keeps the ripple on the compositor thread, unlike SMIL <animate>
+   on geometry attributes (r / opacity inside SVG), which forces a main-
+   thread repaint of the whole page every frame while it runs. */
+@keyframes unread-ping {
+  0%, 100% { opacity: 0.28; }
+  50% { opacity: 0.04; }
+}
+
+.unread-ping {
+  animation: unread-ping 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .unread-ping {
+    animation: none;
+    opacity: 0.16;
+  }
+}
+
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.5; }
@@ -2465,5 +2565,26 @@ span.token.table {
   }
   .chat-input-textarea {
     font-size: max(16px, var(--chat-content-font-size, 14px)) !important;
+  }
+}
+
+/* While the software keyboard is up (set by useViewportHeight), only a few
+   hundred pixels remain above it. Hand them to the conversation: collapse the
+   model/controls row and the extension status shelf, and drop the home
+   indicator inset the keyboard already covers. Both come back when the
+   keyboard closes. Phone landscape is wider than the mobile breakpoint but
+   leaves the least room of all, so short touch screens opt in too; tablets
+   keep their controls because the keyboard leaves them enough height. */
+@media (max-width: 640px), (pointer: coarse) and (max-height: 500px) {
+  html[data-keyboard-open] .chat-input-controls,
+  html[data-keyboard-open] .extension-status-shelf,
+  html[data-keyboard-open] .extension-status-bar {
+    display: none !important;
+  }
+  html[data-keyboard-open] .chat-content {
+    padding-bottom: 0 !important;
+  }
+  html[data-keyboard-open] .chat-input-shell {
+    padding-bottom: 6px !important;
   }
 }

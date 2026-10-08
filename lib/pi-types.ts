@@ -1,5 +1,6 @@
 import type {
   AgentSessionEvent,
+  CustomMessageEntry as PiCustomMessage,
   BashOperations,
   ExtensionCommandContext,
   SessionManager,
@@ -10,10 +11,8 @@ import type {
 import type {
   AgentLoopTurnUpdate,
   AgentMessage as PiAgentMessage,
-  CustomMessage as PiCustomMessage,
   PrepareNextTurnContext,
 } from "@earendil-works/pi-agent-core";
-import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 
 export interface ContextUsage {
   percent: number | null;
@@ -32,6 +31,11 @@ export interface ModelLike {
 export interface ToolInfo {
   name: string;
   description: string;
+  parameters?: unknown;
+  promptGuidelines?: string[];
+  /** How the model reaches the tool (pi >= 0.99); absent means `direct`. */
+  exposure?: "direct" | "model-only" | "codemode" | "deferred" | "hidden";
+  sourceInfo?: unknown;
 }
 
 export interface NavigateTreeResult {
@@ -149,12 +153,22 @@ export interface AgentSessionLike {
   };
   readonly sessionManager: SessionManager;
   readonly settingsManager: SettingsManager;
+  /**
+   * The prompt this session would send right now, rendered from its current options.
+   *
+   * Readable before the first run, unlike `agent.state.systemPrompt`, which replays the
+   * transcript and is empty until a run persists a system message. It does not keep the
+   * sections a `before_agent_start` handler changed for a finished run; the replay does.
+   */
+  readonly systemPrompt: string;
   readonly agent: {
     state?: {
       /** Replayed from the transcript's system messages since Pi 0.86; never assign it. */
       readonly systemPrompt?: string;
       thinkingLevel?: string;
       streamingMessage?: PiAgentMessage;
+      /** The declared tools, with the descriptions `prepareLoadout` hooks set for the model. */
+      readonly tools?: readonly { readonly name: string; readonly description: string }[];
     };
     prepareNextTurnWithContext?: (
       context: PrepareNextTurnContext,
@@ -174,7 +188,8 @@ export interface AgentSessionLike {
     images?: Array<{ type: "image"; data: string; mimeType: string }>;
     streamingBehavior?: "steer" | "followUp";
     source?: "interactive" | "rpc";
-    preflightResult?: (success: boolean) => void;
+    /** Called once the SDK accepts the input; a rejected prompt only rejects the returned promise. */
+    preflightResult?: (disposition: "handled" | "queued" | "started") => void;
   }): Promise<void>;
   sendCustomMessage<T = unknown>(
     message: Pick<PiCustomMessage<T>, "customType" | "content" | "display" | "details">,
@@ -196,8 +211,8 @@ export interface AgentSessionLike {
   getLastAssistantText(): string | undefined;
   setAutoCompactionEnabled(enabled: boolean): void;
   setAutoRetryEnabled(enabled: boolean): void;
-  steer(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>): Promise<void>;
-  followUp(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>): Promise<void>;
+  steer(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>): Promise<"handled" | "queued">;
+  followUp(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>): Promise<"handled" | "queued">;
   readonly pendingMessageCount: number;
   getSteeringMessages(): readonly string[];
   getFollowUpMessages(): readonly string[];

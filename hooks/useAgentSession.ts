@@ -2,6 +2,8 @@
 
 import { useState, useCallback, useRef, useEffect, useMemo, useReducer } from "react";
 import type {
+  UserMessage,
+  ToolResultMessage,
   AgentMessage,
   ExtensionStatusItem,
   ExtensionUiRequest,
@@ -37,6 +39,10 @@ export type { QueuedMessages } from "@/lib/queued-messages";
 import { getDraft, setDraft, type ChatDraft } from "@/lib/draft-store";
 import { getToolNamesForPreset, type ToolEntry } from "@/lib/tool-presets";
 import type { SessionStatsInfo } from "@/lib/pi-types";
+import { isNestedToolExecutionEvent, isSystemMessageEvent } from "@/lib/agent-event-wire";
+import { CODEMODE_TOOL_NAME, getCodemodeProgress } from "@/lib/codemode-view";
+import { bareMcpOpensSettings } from "@/lib/mcp-command";
+import type { SettingsSection } from "@/lib/settings-navigation";
 import {
   fetchRuntimeState,
   fetchSessionContext,
@@ -323,7 +329,7 @@ export interface SlashCommandInfo {
 
 export type BuiltinSlashCommandResult =
   | { handled: false }
-  | { handled: true; message?: string; error?: string; action?: "openSessionStats" };
+  | { handled: true; message?: string; error?: string; action?: "openSessionStats" | "openSettings" };
 
 export interface UseAgentSessionOptions {
   navigationKey: number;
@@ -338,16 +344,23 @@ export interface UseAgentSessionOptions {
   onSessionForked?: (newSessionId: string) => void;
   modelsRefreshKey?: number;
   chatInputRef?: React.RefObject<ChatInputHandle | null>;
-  onBranchDataChange?: (tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void) => void;
+  onBranchDataChange?: (tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void, locked: boolean) => void;
   onSystemPromptChange?: (prompt: string | null) => void;
   /** 注册一个非 prompt 的启动动作，供系统面板按需读取系统提示词。 */
   onSystemPromptLoaderChange?: (loader: (() => Promise<void>) | null) => void;
   onToolsLoaderChange?: (loader: (() => Promise<ToolEntry[]>) | null) => void;
   onSessionStatsPanelOpen?: () => void;
+  /** Opens Settings on a section; a bare `/mcp` the built-in MCP extension owns opens Settings › MCP. */
+  onOpenSettings?: (section: SettingsSection) => void;
   setToolPreset?: (preset: ToolPreset) => void;
 }
 
 // 父轮结束后，扩展可能异步注入一轮新的 agent run（例如后台子代理完成）。
+
+// Session id -> user entry being edited. ChatWindow remounts per session, so a
+// pending edit lives here as long as that session's in-memory draft does.
+const pendingHistoryEdits = new Map<string, string>();
+
 const EVENT_STREAM_IDLE_GRACE_MS = 30_000;
 const AGENT_STATE_RECONCILE_MS = 15_000;
 const BASH_STATE_RECONCILE_MS = 1_000;
@@ -511,6 +524,7 @@ function readCompactResult(result: unknown, reason: string): CompactResultInfo |
 }
 
 export interface ChatInputHandle {
+  replaceMessage: (message: UserMessage) => void;
   insertText: (text: string) => void;
   insertIfEmpty: (content: string) => void;
   prependText: (text: string) => void;
@@ -533,7 +547,7 @@ type SlashCommandsResponse = {
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
     navigationKey, isNavigationActive, session, newSessionCwd, pendingNewSessionControl, onPendingNewSessionEvent, onSessionCreated, onSessionListRefresh, onSessionForked,
-    modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onSessionStatsPanelOpen,
+    modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onSessionStatsPanelOpen, onOpenSettings,
   } = opts;
 
   const isNew = session === null && newSessionCwd !== null;
@@ -597,6 +611,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [toolPreset, setToolPreset] = useState<ToolPreset>("default");
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxAttempts: number; errorMessage?: string } | null>(null);
   const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
+  const contextUsageRequestIdRef = useRef(0);
+  // Highest request id whose reply was applied. A reply applies only when it
+  // is newer, so a failed newer read never discards an older good one.
+  const contextUsageAppliedIdRef = useRef(0);
   const [systemPrompt, setSystemPrompt] = useState<string | null>(null);
   const [forkingEntryId, setForkingEntryId] = useState<string | null>(null);
   const [currentModelOverride, setCurrentModelOverride] = useState<{ provider: string; modelId: string } | null>(null);
@@ -605,10 +623,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [isCompacting, setIsCompacting] = useState(false);
   const [compactError, setCompactError] = useState<string | null>(null);
   const [compactResult, setCompactResult] = useState<CompactResultInfo | null>(null);
+  const [activeToolResults, setActiveToolResults] = useState<Map<string, ToolResultMessage>>(new Map());
+  const sessionHookMountedRef = useRef(true);
+  useEffect(() => {
+    sessionHookMountedRef.current = true;
+    return () => { sessionHookMountedRef.current = false; };
+  }, []);
   const [agentPhase, setAgentPhase] = useState<AgentPhase>(null);
   const [slashCommands, setSlashCommands] = useState<SlashCommandInfo[]>([]);
   const [slashCommandsLoading, setSlashCommandsLoading] = useState(false);
-  const slashCommandsRequestIdRef = useRef(0);
   const [noticeState, dispatchNotice] = useReducer(noticeReducer, { visible: [], pending: [] });
   const [sessionStatsOverride, setSessionStatsOverride] = useState<SessionStatsInfo | null>(null);
   const [sessionTotalActiveMs, setSessionTotalActiveMs] = useState(0);
@@ -635,6 +658,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
 
   const eventSourceRef = useRef<EventSource | null>(null);
+  const eventStreamConnectionRef = useRef<{
+    sessionId: string; source: EventSource;
+    promise: Promise<EventStreamConnectionResult>; settled: boolean;
+  } | null>(null);
   const eventStreamGraceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const eventStreamGraceGenerationRef = useRef(0);
   // detached 子代理可能跨越多个父轮，必须按 agentId 保持到对应 completion 到达。
@@ -669,8 +696,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       position,
     }));
   }, []);
+  const handleNavigateRef = useRef<((entryId: string) => Promise<boolean>) | undefined>(undefined);
+  // The command list as last loaded, and the get_commands request under way, if
+  // any. A bare /mcp reads them to tell whose /mcp it is (handleBuiltinSlashCommand).
+  // The generation moves on with every request and every clear, and only a request
+  // still current writes its answer: one that set_tools outdated (or a newer request)
+  // would otherwise put back the list of a session that is no longer there.
+  const slashCommandsRef = useRef<SlashCommandInfo[]>([]);
+  const slashCommandsLoadRef = useRef<Promise<SlashCommandInfo[] | null> | null>(null);
+  const slashCommandsGenerationRef = useRef(0);
   const newSessionPromotedRef = useRef(false);
-  const initialPendingSettings = pendingNewSessionControl.kind === "staged" ? pendingNewSessionControl : null;
+  const initialPendingSettings = "model" in pendingNewSessionControl ? pendingNewSessionControl : null;
   const newSessionModelOverrideRef = useRef<SelectedModel | null>(initialPendingSettings?.model ?? null);
   const thinkingLevelOverrideRef = useRef<Exclude<ThinkingLevelOption, "auto"> | null>(
     initialPendingSettings?.thinkingLevel === "auto" ? null : initialPendingSettings?.thinkingLevel ?? null,
@@ -763,6 +799,26 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     ? modelList.find((model) => model.provider === displayModel.provider && model.id === displayModel.modelId)?.fastAvailable ?? false
     : false;
 
+  // Editing a past message only prefills the composer; the branch moves when it is sent,
+  // so cancelling or reloading never hides the rest of the conversation.
+  const [editEntryId, setEditEntryId] = useState(() => {
+    const sid = session?.id;
+    if (sid && !getDraft(sid)) pendingHistoryEdits.delete(sid);
+    return (sid && pendingHistoryEdits.get(sid)) || null;
+  });
+  const setEdit = useCallback((entryId: string | null) => {
+    if (!session?.id) return;
+    if (entryId) pendingHistoryEdits.set(session.id, entryId);
+    else pendingHistoryEdits.delete(session.id);
+    setEditEntryId(entryId);
+  }, [session?.id]);
+  const handleEditContent = useCallback((message: UserMessage, entryId: string) => {
+    if (!session?.id) return;
+    opts.chatInputRef?.current?.replaceMessage(message);
+    setEdit(entryId);
+  }, [opts.chatInputRef, session?.id, setEdit]);
+  const cancelEdit = useCallback(() => setEdit(null), [setEdit]);
+
   const sessionStats = useMemo(() => {
     if (sessionStatsOverride) return {
       ...sessionStatsOverride,
@@ -806,9 +862,29 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } satisfies SessionStatsInfo;
   }, [messages, sessionStatsOverride, contextUsage, details?.filePath, session?.id, session?.name, sessionTotalActiveMs]);
 
+  // 只让已成功读取的较新用量覆盖旧值；失败的新请求不影响仍在等待的旧请求。
+  const applyContextUsage = useCallback((sid: string, runId: number, requestId: number, usage: AgentRuntimeState["contextUsage"]) => {
+    if (!sessionHookMountedRef.current || sessionIdRef.current !== sid || promptRunIdRef.current !== runId
+      || requestId <= contextUsageAppliedIdRef.current) return;
+    contextUsageAppliedIdRef.current = requestId;
+    setContextUsage(usage);
+  }, []);
+
+  const refreshContextUsage = useCallback(async (sid: string) => {
+    const runId = promptRunIdRef.current;
+    const requestId = ++contextUsageRequestIdRef.current;
+    try {
+      const response = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
+      if (!response.ok) return;
+      const snapshot = await response.json() as AgentRuntimeSnapshot;
+      if (snapshot.state) applyContextUsage(sid, runId, requestId, snapshot.state.contextUsage);
+    } catch (error) {
+      console.warn("刷新上下文用量失败", error);
+    }
+  }, [applyContextUsage]);
 
   /** 所有服务端运行状态都通过这一入口投影，避免挂载、reload、reconcile 字段漂移。 */
-  const applyRuntimeState = useCallback((state: AgentRuntimeState | undefined) => {
+  const applyRuntimeState = useCallback((state: AgentRuntimeState | undefined, usageRead?: { sid: string; runId: number; requestId: number }) => {
     setIsCompacting(state?.isCompacting ?? false);
     setQueuedMessages(normalizeQueuedMessages(state?.queuedMessages));
     if (!state) {
@@ -816,7 +892,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setRuntimeFastAvailable(null);
       return;
     }
-    setContextUsage(state.contextUsage);
+    if (usageRead) applyContextUsage(usageRead.sid, usageRead.runId, usageRead.requestId, state.contextUsage);
+    else setContextUsage(state.contextUsage);
     setSystemPrompt(state.systemPrompt);
     applyShadowRuntimeState(state);
     modelSelectionActions.setThinkingLevel(state.thinkingLevel);
@@ -824,7 +901,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setRuntimeFastAvailable(state.fastAvailable);
     setExtensionStatuses(state.extensionStatuses);
     setExtensionWidgets(filterVisibleExtensionWidgets(state.extensionWidgets));
-  }, [applyShadowRuntimeState, modelSelectionActions]);
+  }, [applyContextUsage, applyShadowRuntimeState, modelSelectionActions]);
 
   /** context 的所有派生状态统一原子提交，挂载加载和分支导航不得各维护一份字段列表。 */
   const commitContextSnapshot = useCallback((
@@ -1164,6 +1241,75 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     });
   }, [isNew, newSessionCwd, onSessionCreated, opts.chatInputRef]);
 
+  const closeEvents = useCallback(() => {
+    eventSourceRef.current?.close();
+    eventSourceRef.current = null;
+    eventStreamConnectionRef.current = null;
+  }, []);
+
+  const connectEvents = useCallback((sid: string): Promise<EventStreamConnectionResult> => {
+    // 并行的初始化请求复用同一条 SSE，避免互相关闭等待审批的连接。
+    const existing = eventStreamConnectionRef.current;
+    if (existing?.sessionId === sid && existing.source === eventSourceRef.current
+      && existing.source.readyState !== EventSource.CLOSED
+      && (existing.source.readyState === EventSource.OPEN || !existing.settled)) return existing.promise;
+    closeEvents();
+    const es = new EventSource(`/api/agent/${encodeURIComponent(sid)}/events`);
+    eventSourceRef.current = es;
+    const promise = new Promise<EventStreamConnectionResult>((resolve) => {
+      let settled = false;
+      const settle = (status: EventStreamConnectionStatus) => {
+        if (settled) return;
+        settled = true;
+        if (eventStreamConnectionRef.current?.source === es) eventStreamConnectionRef.current.settled = true;
+        clearTimeout(timeout);
+        resolve({ status, source: es });
+      };
+      const timeout = setTimeout(() => settle("timeout"), EVENT_STREAM_CONNECT_TIMEOUT_MS);
+      es.onmessage = (e) => {
+        if (eventSourceRef.current !== es || sessionIdRef.current !== sid) return;
+        try {
+          const event = JSON.parse(e.data) as AgentEvent;
+          if (event.type === "connected") {
+            settle("connected");
+            // /state 可能早于冷启动完成返回；建连后重新读取扩展状态。
+            const controller = new AbortController();
+            void fetchRuntimeState(sid, controller.signal).then((snapshot) => {
+              if (eventSourceRef.current === es && sessionIdRef.current === sid) applyRuntimeState(snapshot.state);
+            }).catch((error: unknown) => {
+              if (!(error instanceof DOMException && error.name === "AbortError")) {
+                console.error("Failed to refresh runtime state after event stream connected:", error);
+              }
+            });
+          }
+          handleAgentEventRef.current?.(event);
+        } catch (error) {
+          console.error("处理会话 SSE 事件失败", error);
+        }
+      };
+      es.onerror = () => {
+        if (es.readyState !== EventSource.CLOSED) return;
+        settle("closed");
+        if (eventSourceRef.current === es && agentRunningRef.current) {
+          eventSourceRef.current = null;
+          setTimeout(() => {
+            if (agentRunningRef.current && sessionIdRef.current === sid) void connectEvents(sid);
+          }, 1000);
+        }
+      };
+    });
+    eventStreamConnectionRef.current = { sessionId: sid, source: es, promise, settled: false };
+    return promise;
+  }, [applyRuntimeState, closeEvents]);
+
+  const ensureEventsConnected = useCallback(async (sid: string) => {
+    const result = await connectEvents(sid);
+    if (result.status === "connected" || result.source.readyState === EventSource.OPEN) return;
+    if (eventSourceRef.current === result.source) eventSourceRef.current = null;
+    result.source.close();
+    throw new EventStreamConnectionError(result.status);
+  }, [connectEvents]);
+
   const ensureNewSession = useCallback(async () => {
     if (!isNew || !newSessionCwd) return sessionIdRef.current;
     if (pendingControlKind === "initialization-failed") {
@@ -1176,6 +1322,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
     const recoverySessionId = pendingControlKind === "materialization-failed"
       || pendingControlKind === "recovering"
+      || pendingControlKind === "initializing"
       ? pendingNewSessionControl.sessionId
       : null;
     const requestedShadowMindEnabled = pendingNewSessionControl.shadowMindEnabled;
@@ -1201,6 +1348,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         ...(selectedModel ? { model: selectedModel } : {}),
         ...(selectedThinkingLevel ? { thinkingLevel: selectedThinkingLevel } : {}),
         ...(fastEnabled && displayModelFastAvailable ? { fastEnabled: true } : {}),
+      }, async (realId) => {
+        onPendingNewSessionEvent(newSessionCwd, { type: "RUNTIME_CREATED", sessionId: realId });
+        if (!isNavigationActive(navigationKey)) throw new Error("会话已切换，初始化保留待恢复");
+        sessionIdRef.current = realId;
+        await ensureEventsConnected(realId);
+        if (!isNavigationActive(navigationKey)) throw new Error("会话已切换，初始化保留待恢复");
       });
     } catch (error) {
       onPendingNewSessionEvent(newSessionCwd, {
@@ -1211,6 +1364,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
 
     const realId = result.sessionId;
+    // 旧挂载不能覆盖已由新挂载接管的初始化状态。
+    if (!isNavigationActive(navigationKey)) throw new Error("会话已切换，初始化保留待恢复");
     sessionIdRef.current = realId;
     if (result.kind === "materialization-failed") {
       onPendingNewSessionEvent(newSessionCwd, {
@@ -1245,7 +1400,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
     if (result.kind === "initialization-failed") throw new Error(result.error);
     return realId;
-  }, [applyShadowRuntimeState, displayModelFastAvailable, fastEnabled, isNew, loadTools, newSessionCwd, onPendingNewSessionEvent, pendingControlKind, pendingNewSessionControl, toolPreset]);
+  }, [applyShadowRuntimeState, displayModelFastAvailable, ensureEventsConnected, fastEnabled, isNavigationActive, isNew, loadTools, modelSelectionActions, navigationKey, newSessionCwd, onPendingNewSessionEvent, pendingControlKind, pendingNewSessionControl, toolPreset]);
 
   // 系统面板可在首条消息发送前读取提示词；这里只初始化运行时并查询状态，
   // 不触发 prompt，也不会向会话历史追加消息。
@@ -1257,106 +1412,70 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setSystemPrompt(state.systemPrompt ?? "");
   }, [ensureNewSession]);
 
-  const loadSlashCommands = useCallback(async () => {
-    const requestId = ++slashCommandsRequestIdRef.current;
-    setSlashCommandsLoading(true);
-    try {
-      const sid = await ensureNewSession();
-      if (!sid) {
-        if (requestId === slashCommandsRequestIdRef.current) setSlashCommands([]);
-        return [] as SlashCommandInfo[];
-      }
-      const data = await sendAgentCommand<SlashCommandsResponse>(sid, { type: "get_commands" });
-      const commands = data?.commands ?? [];
-      // 会话切换或后发请求已经接管时，旧响应不得覆盖当前命令列表。
-      if (requestId !== slashCommandsRequestIdRef.current || sessionIdRef.current !== sid) return commands;
-      setSlashCommands(commands);
-      return commands;
-    } catch (e) {
-      console.error("Failed to load slash commands:", e);
-      if (requestId !== slashCommandsRequestIdRef.current) return [] as SlashCommandInfo[];
-      setSlashCommands([]);
-      // 交给输入框恢复请求标记，用户继续输入或重新打开菜单时可以重试。
-      throw e;
-    } finally {
-      if (requestId === slashCommandsRequestIdRef.current) setSlashCommandsLoading(false);
-    }
-  }, [ensureNewSession]);
-
-  const closeEvents = useCallback(() => {
-    eventSourceRef.current?.close();
-    eventSourceRef.current = null;
+  const replaceSlashCommands = useCallback((commands: SlashCommandInfo[]) => {
+    slashCommandsRef.current = commands;
+    setSlashCommands(commands);
   }, []);
 
-  const connectEvents = useCallback((sid: string): Promise<EventStreamConnectionResult> => {
-    closeEvents();
-    const es = new EventSource(`/api/agent/${encodeURIComponent(sid)}/events`);
-    eventSourceRef.current = es;
+  // The session's tools changed (set_tools may have rebuilt it as Chat only): forget the
+  // list and the request under way, so the next reader asks the session as it is now.
+  const clearSlashCommands = useCallback(() => {
+    slashCommandsGenerationRef.current += 1;
+    slashCommandsLoadRef.current = null;
+    replaceSlashCommands([]);
+  }, [replaceSlashCommands]);
 
-    return new Promise((resolve) => {
-      let settled = false;
-      const settle = (status: EventStreamConnectionStatus) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeout);
-        resolve({ status, source: es });
-      };
-      const timeout = setTimeout(() => settle("timeout"), EVENT_STREAM_CONNECT_TIMEOUT_MS);
+  // Null when get_commands failed, which an empty list (a Chat-only session's) must not be mistaken for.
+  const requestSlashCommands = useCallback((): Promise<SlashCommandInfo[] | null> => {
+    const generation = ++slashCommandsGenerationRef.current;
+    const current = () => slashCommandsGenerationRef.current === generation;
+    const load = (async () => {
+      const sid = sessionIdRef.current ?? await ensureNewSession();
+      if (!sid) {
+        if (current()) replaceSlashCommands([]);
+        return [] as SlashCommandInfo[];
+      }
+      setSlashCommandsLoading(true);
+      try {
+        const data = await sendAgentCommand<SlashCommandsResponse>(sid, { type: "get_commands" });
+        const commands = data?.commands ?? [];
+        if (current() && sessionIdRef.current === sid) replaceSlashCommands(commands);
+        return commands;
+      } catch (e) {
+        console.error("Failed to load slash commands:", e);
+        if (current()) replaceSlashCommands([]);
+        return null;
+      } finally {
+        // A newer request under way keeps the palette's "Loading" until it answers.
+        if (current() || !slashCommandsLoadRef.current) setSlashCommandsLoading(false);
+      }
+    })();
+    slashCommandsLoadRef.current = load;
+    const settle = () => {
+      if (slashCommandsLoadRef.current === load) slashCommandsLoadRef.current = null;
+    };
+    load.then(settle, settle);
+    return load;
+  }, [ensureNewSession, replaceSlashCommands]);
 
-      es.onmessage = (e) => {
-        // close() 不能保证已经进入浏览器任务队列的消息不再触发；旧连接或旧会话事件必须丢弃。
-        if (eventSourceRef.current !== es || sessionIdRef.current !== sid) return;
-        try {
-          const event = JSON.parse(e.data) as AgentEvent;
-          if (event.type === "connected") {
-            settle("connected");
-            // SSE 的 connected 只会在冷启动 runtime 完成后发送。挂载时并行的 /state
-            // 可能更早返回 alive=false，因此必须在这里重新读取一次扩展状态。
-            const controller = new AbortController();
-            void fetchRuntimeState(sid, controller.signal)
-              .then((snapshot) => {
-                if (eventSourceRef.current === es && sessionIdRef.current === sid) {
-                  applyRuntimeState(snapshot.state);
-                }
-              })
-              .catch((error: unknown) => {
-                if (!(error instanceof DOMException && error.name === "AbortError")) {
-                  console.error("Failed to refresh runtime state after event stream connected:", error);
-                }
-              });
-          }
-          handleAgentEventRef.current?.(event);
-        } catch {
-          // ignore
-        }
-      };
-      es.onerror = () => {
-        if (es.readyState === EventSource.CLOSED) {
-          // Fatal error (404/500/content-type mismatch): browser won't
-          // auto-reconnect. Settle the Promise and manually reconnect for
-          // already-running sessions.
-          settle("closed");
-          if (eventSourceRef.current === es && agentRunningRef.current) {
-            eventSourceRef.current = null;
-            setTimeout(() => {
-              if (agentRunningRef.current) void connectEvents(sid);
-            }, 1000);
-          }
-        }
-        // Recoverable errors (CONNECTING): let EventSource auto-reconnect.
-        // The timeout above resolves only to let callers decide whether this
-        // connection must be ready before they continue.
-      };
-    });
-  }, [applyRuntimeState, closeEvents]);
+  const loadSlashCommands = useCallback(async () => {
+    const commands = await requestSlashCommands();
+    if (commands === null) throw new Error("读取扩展命令失败，请重试");
+    return commands;
+  }, [requestSlashCommands]);
 
-  const ensureEventsConnected = useCallback(async (sid: string) => {
-    const result = await connectEvents(sid);
-    if (result.status === "connected" || result.source.readyState === EventSource.OPEN) return;
-    if (eventSourceRef.current === result.source) eventSourceRef.current = null;
-    result.source.close();
-    throw new EventStreamConnectionError(result.status);
-  }, [connectEvents]);
+  // The list a bare /mcp is decided by: the request under way (the palette starts
+  // one as "/mcp" is typed, often still unanswered at Enter), else the list already
+  // loaded, else a new request. Null when it cannot be read: guessing would either
+  // swallow another extension's /mcp or send one Settings should have taken.
+  const slashCommandsForMcp = useCallback(async (): Promise<SlashCommandInfo[] | null> => {
+    const pending = slashCommandsLoadRef.current;
+    const known = slashCommandsRef.current;
+    if (!pending && known.length > 0) return known;
+    const loaded = await (pending ?? requestSlashCommands()).catch(() => null);
+    return loaded ?? (known.length > 0 ? known : null);
+  }, [requestSlashCommands]);
+
 
   const sendExtensionUiResponse = useCallback(async (
     request: ExtensionUiDialogRequest,
@@ -1588,10 +1707,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         opts.chatInputRef?.current?.insertText(request.text);
         break;
       case "custom":
-        setExtensionCustomUi((current) => {
-          if (request.closed) return current?.id === request.id ? null : current;
-          return request;
-        });
+        if (request.closed) {
+          setExtensionCustomUi((current) => current?.id === request.id ? null : current);
+        } else setExtensionCustomUi(request);
         break;
     }
   }, [addNotice, opts.chatInputRef, queueAskQuestionnaireRequest, respondToExtensionUi]);
@@ -1679,9 +1797,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     sid: string,
     runId: number,
     snapshot: AgentRuntimeSnapshot,
+    usageRequestId: number,
   ) => {
-    if (sessionIdRef.current !== sid || promptRunIdRef.current !== runId) return;
-    applyRuntimeState(snapshot.state);
+    if (!sessionHookMountedRef.current || sessionIdRef.current !== sid || promptRunIdRef.current !== runId) return;
+    applyRuntimeState(snapshot.state, { sid, runId, requestId: usageRequestId });
 
     if (snapshot.busy) {
       agentRunningRef.current = true;
@@ -1696,10 +1815,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const reconcileAgentState = useCallback(async (sid: string, runId = promptRunIdRef.current) => {
     const generation = reconcileRequestGenerationRef.current + 1;
     reconcileRequestGenerationRef.current = generation;
+    const usageRequestId = ++contextUsageRequestIdRef.current;
     const snapshot = await readAgentSnapshot(sid);
     // 同一 run 的多个触发可能乱序返回，只允许最新请求提交状态。
     if (generation !== reconcileRequestGenerationRef.current || !snapshot) return;
-    await applyAgentSnapshot(sid, runId, snapshot);
+    await applyAgentSnapshot(sid, runId, snapshot, usageRequestId);
   }, [applyAgentSnapshot, readAgentSnapshot]);
   reconcileAgentStateRef.current = reconcileAgentState;
 
@@ -1762,6 +1882,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const handleAgentEvent = useCallback((event: AgentEvent) => {
     switch (event.type) {
+      case "connected": {
+        // 重连只清理服务端已经关闭的弹窗；保留同一工具问卷的已填写状态。
+        if (Array.isArray(event.pendingExtensionUiIds)) {
+          const pending = new Set(event.pendingExtensionUiIds as string[]);
+          setExtensionDialog((current) => current && pending.has(current.id) ? current : null);
+          if (extensionDialogRef.current && !pending.has(extensionDialogRef.current.id)) extensionDialogRef.current = null;
+          setExtensionCustomUi((current) => current && pending.has(current.id) ? current : null);
+        }
+        if (event.isStreaming === true) {
+          cancelEventStreamGrace();
+          if (!agentRunningRef.current) enterMainRun({ kind: "waiting_model" });
+        }
+        break;
+      }
       case "agent_start":
         cancelEventStreamGrace();
         // 新一轮运行开始：重置流式消息计数（message_end 的 updater 会重新累计）。
@@ -1819,6 +1953,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
         break;
       case "message_start":
+        if (isSystemMessageEvent(event)) break;
         // Reconnects may receive the in-flight assistant snapshot before the
         // next delta. The reducer owns the canonical streaming message shape.
         if (!agentRunningRef.current) break;
@@ -1827,6 +1962,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setAgentPhase(null);
         break;
       case "message_update": {
+        if (isSystemMessageEvent(event)) break;
         // Ignore streaming events arriving after this run already finished
         // (e.g. SSE data buffered while the tab was frozen, flushed after
         // reconcile) — they would resurrect a ghost streaming bubble.
@@ -1845,6 +1981,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
       case "message_end": {
+        if (isSystemMessageEvent(event)) break;
         const completed = event.message as AgentMessage | undefined;
         // detached completion 可能在父轮结束后到达，状态区仍必须消费。
         if (!agentRunningRef.current && completed?.role !== "custom") break;
@@ -1897,12 +2034,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             lastStreamedMessageCountRef.current = next.length;
             return next;
           });
+          if (completed.role === "assistant" && sessionIdRef.current) void refreshContextUsage(sessionIdRef.current);
         }
         dispatch({ type: "end" });
         setAgentPhase({ kind: "waiting_model" });
         break;
       }
       case "tool_execution_start": {
+        // A call a tool made itself (a codemode script's) belongs to its
+        // parent's card; listed here it would show as a top-level running tool,
+        // and a call cut off by its script can end after the parent did.
+        if (isNestedToolExecutionEvent(event)) break;
         const id = event.toolCallId as string;
         const name = event.toolName as string;
         if (name === "ask_user_question") {
@@ -1927,8 +2069,55 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
         break;
       }
-      case "tool_execution_end": {
+      case "tool_execution_update": {
+        if (isNestedToolExecutionEvent(event)) break;
         const id = event.toolCallId as string;
+        const name = event.toolName as string;
+        const partialResult = event.partialResult as Partial<ToolResultMessage> | undefined;
+        const content = partialResult?.content;
+        // Live output for shells; for codemode, the calls its script has made so far.
+        if ((name === "bash" || name === "powershell" || name === CODEMODE_TOOL_NAME) && Array.isArray(content)) {
+          setActiveToolResults((prev) => {
+            const next = new Map(prev);
+            next.set(id, {
+              role: "toolResult",
+              toolCallId: id,
+              toolName: name,
+              content,
+              timestamp: Date.now(),
+              isError: partialResult?.isError,
+              details: partialResult?.details,
+            });
+            return next;
+          });
+        }
+        const progress = name === CODEMODE_TOOL_NAME
+          ? getCodemodeProgress(event.partialResult)
+          : getToolExecutionProgress(event.partialResult);
+        setAgentPhase((prev) => {
+          const tools = prev?.kind === "running_tools" ? [...prev.tools] : [];
+          const existing = tools.find((tool) => tool.id === id);
+          const updated = {
+            id,
+            name: name || existing?.name || "tool",
+            progress: progress ?? existing?.progress,
+          };
+          return {
+            kind: "running_tools",
+            tools: [...tools.filter((tool) => tool.id !== id), updated],
+          };
+        });
+        break;
+      }
+      case "tool_execution_end": {
+        if (isNestedToolExecutionEvent(event)) break;
+        const id = event.toolCallId as string;
+        setActiveToolResults((previous) => {
+          if (!previous.has(id)) return previous;
+          const next = new Map(previous);
+          next.delete(id);
+          return next;
+        });
         submittedAskToolCallIdsRef.current.delete(id);
         if (askQuestionnaireRef.current?.toolCallId === id) clearAskQuestionnaire();
         setAgentPhase((prev) => {
@@ -1936,19 +2125,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           const tools = prev.tools.filter((t) => t.id !== id);
           if (tools.length === 0) return { kind: "waiting_model" };
           return { kind: "running_tools", tools };
-        });
-        break;
-      }
-      case "tool_execution_update": {
-        const id = typeof event.toolCallId === "string" ? event.toolCallId : "";
-        const progress = getToolExecutionProgress(event.partialResult);
-        if (!id || !progress) break;
-        setAgentPhase((prev) => {
-          if (prev?.kind !== "running_tools") return prev;
-          return {
-            kind: "running_tools",
-            tools: prev.tools.map((tool) => tool.id === id ? { ...tool, progress } : tool),
-          };
         });
         break;
       }
@@ -1997,7 +2173,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
     }
-  }, [addNotice, cancelEventStreamGrace, clearAskQuestionnaire, consumeShadowEntry, enqueueStreamDelta, enterMainRun, flushStreamDeltas, handleExtensionUiRequest, isNew, loadCompactedSession, loadSession, onSessionListRefresh, reconcileAgentState, resetStreamDeltas, scheduleContextRefresh, scheduleEventStreamClose]);
+  }, [addNotice, cancelEventStreamGrace, clearAskQuestionnaire, consumeShadowEntry, enqueueStreamDelta, enterMainRun, flushStreamDeltas, handleExtensionUiRequest, isNew, loadCompactedSession, loadSession, onSessionListRefresh, reconcileAgentState, refreshContextUsage, resetStreamDeltas, scheduleContextRefresh, scheduleEventStreamClose]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
@@ -2021,6 +2197,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         .catch((error) => {
           console.error("刷新当前 Git 分支失败", error);
         });
+    }
+    if (editEntryId) {
+      // Navigate and prompt are two RPCs: a prompt rejected after navigating
+      // keeps the new leaf until the server can apply both atomically.
+      const entryId = editEntryId;
+      setEdit(null);
+      if (!(await handleNavigateRef.current?.(entryId))) {
+        setEdit(entryId);
+        return false;
+      }
     }
     const isSlashCommandPrompt = !images?.length && trimmedMessage.startsWith("/");
 
@@ -2132,7 +2318,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       dispatch({ type: "end" });
       return false;
     }
-  }, [addNotice, closeEvents, ensureEventsConnected, ensureNewSession, enterMainRun, isNavigationActive, isNew, navigationKey, newSessionCwd, newSessionModel, pendingControlKind, promoteNewSession, reconcileAgentState, requestScrollPosition, resetStreamDeltas, session]);
+  }, [addNotice, closeEvents, editEntryId, ensureEventsConnected, ensureNewSession, enterMainRun, isNavigationActive, isNew, navigationKey, newSessionCwd, newSessionModel, pendingControlKind, promoteNewSession, reconcileAgentState, requestScrollPosition, resetStreamDeltas, session, setEdit]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
     if (agentRunningRef.current || bashRunningRef.current) return;
@@ -2203,43 +2389,72 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
     } catch (e) {
       console.error("Fork failed:", e);
+      addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
     } finally {
       setForkingEntryId(null);
     }
-  }, [onSessionForked]);
+  }, [addNotice, onSessionForked]);
 
-  const navigateToLeaf = useCallback((sid: string, leafId: string | null): Promise<void> => {
-    const generation = navigationSequenceRef.current + 1;
-    navigationSequenceRef.current = generation;
+  /** 同一会话的导航串行执行，过期导航和扩展取消均不提交视图。 */
+  const navigateToLeaf = useCallback((sid: string, leafId: string | null): Promise<boolean> => {
+    const generation = ++navigationSequenceRef.current;
     navigationGenerationRef.current.set(sid, generation);
     const previous = navigationChainRef.current.get(sid) ?? Promise.resolve();
-    const baseOperation = previous.then(async () => {
-      if (navigationGenerationRef.current.get(sid) !== generation || sessionIdRef.current !== sid) return;
-      if (leafId) await sendAgentCommand(sid, { type: "navigate_tree", targetId: leafId });
-      if (navigationGenerationRef.current.get(sid) !== generation || sessionIdRef.current !== sid) return;
+    const operation = previous.then(async () => {
+      if (navigationGenerationRef.current.get(sid) !== generation || sessionIdRef.current !== sid) return false;
+      if (leafId) {
+        const result = await sendAgentCommand<{ cancelled?: boolean }>(sid, { type: "navigate_tree", targetId: leafId });
+        if (result?.cancelled) return false;
+      }
+      if (navigationGenerationRef.current.get(sid) !== generation || sessionIdRef.current !== sid) return false;
       await loadContext(sid, leafId);
+      return sessionIdRef.current === sid;
     }).catch((error) => {
       if (navigationGenerationRef.current.get(sid) === generation) console.error("Failed to navigate session:", error);
+      return false;
     });
-    const operation = baseOperation.finally(() => {
-      if (navigationChainRef.current.get(sid) !== operation) return;
+    const queued = operation.then(() => {});
+    navigationChainRef.current.set(sid, queued);
+    void queued.finally(() => {
+      if (navigationChainRef.current.get(sid) !== queued) return;
       navigationChainRef.current.delete(sid);
       navigationGenerationRef.current.delete(sid);
     });
-    navigationChainRef.current.set(sid, operation);
     return operation;
   }, [loadContext]);
-  const handleLeafChange = useCallback(async (leafId: string | null) => {
-    if (bashRunningRef.current) return;
+  const handleNavigate = useCallback(async (entryId: string): Promise<boolean> => {
     const sid = sessionIdRef.current;
-    if (!sid) return;
+    if (!sid || bashRunningRef.current || agentRunningRef.current || isCompacting) return false;
+    return navigateToLeaf(sid, entryId);
+  }, [isCompacting, navigateToLeaf]);
+  handleNavigateRef.current = handleNavigate;
+  const handleLeafChange = useCallback(async (leafId: string | null) => {
+    const sid = sessionIdRef.current;
+    if (!sid || bashRunningRef.current || agentRunningRef.current || isCompacting) return;
     await navigateToLeaf(sid, leafId);
-  }, [navigateToLeaf]);
+  }, [isCompacting, navigateToLeaf]);
 
   const handleModelChange = useCallback(async (provider: string, modelId: string) => {
     if (isNew) {
-      if (creationSettingsLocked) return;
+      if (creationSettingsLocked || modelSwitchPendingRef.current) return;
       const selectedModel = { provider, modelId };
+      const sid = sessionIdRef.current;
+      if (sid) {
+        // 已创建但未发送的会话，以服务端切换成功作为选择器提交条件。
+        modelSwitchPendingRef.current = true;
+        setModelSwitching(true);
+        try {
+          await sendAgentCommand(sid, { type: "set_model", provider, modelId });
+        } catch (e) {
+          console.error("Failed to set model:", e);
+          addNotice({ type: "error", message: `切换模型失败：${e instanceof Error ? e.message : String(e)}` });
+          return;
+        } finally {
+          modelSwitchPendingRef.current = false;
+          setModelSwitching(false);
+        }
+        if (!isNavigationActive(navigationKey) || sessionIdRef.current !== sid) return;
+      }
       newSessionModelOverrideRef.current = selectedModel;
       if (newSessionCwd) onPendingNewSessionEvent(newSessionCwd, { type: "SET_MODEL", model: selectedModel });
       const selection = await modelSelectionActions.selectNewSessionModel(
@@ -2251,13 +2466,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         recommendedThinkingLevelRef.current = selection.preferredThinking ?? null;
       }
       setPendingModel(selectedModel);
-      const sid = sessionIdRef.current;
-      if (!sid) return;
-      try {
-        await sendAgentCommand(sid, { type: "set_model", provider, modelId });
-      } catch (e) {
-        console.error("Failed to set model:", e);
-      }
       return;
     }
     const sid = sessionIdRef.current;
@@ -2286,7 +2494,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       modelSwitchPendingRef.current = false;
       setModelSwitching(false);
     }
-  }, [addNotice, creationSettingsLocked, currentModelOverride, isNew, loadSession, modelSelectionActions, newSessionCwd, onPendingNewSessionEvent]);
+  }, [addNotice, creationSettingsLocked, currentModelOverride, isNavigationActive, isNew, loadSession, modelSelectionActions, navigationKey, newSessionCwd, onPendingNewSessionEvent]);
 
   const handleCompact = useCallback(async () => {
     const sid = sessionIdRef.current;
@@ -2321,6 +2529,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [isNew, modelSelectionActions, newSessionCwd, session?.cwd]);
 
 
+
   const handleBuiltinSlashCommand = useCallback(async (text: string): Promise<BuiltinSlashCommandResult> => {
     if (!text.startsWith("/")) return { handled: false };
     const match = text.match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/);
@@ -2333,7 +2542,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (!result.handled) return result;
       if (result.error) {
         addNotice({ type: "error", message: result.error });
-      } else if (result.action !== "openSessionStats") {
+      } else if (!result.action) {
+        // A command that opens a panel says nothing: the panel is the answer.
         addNotice({ type: "success", message: result.message ?? "Command completed" });
       }
       return result;
@@ -2409,6 +2619,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (!shadowResult.success) return complete({ handled: true, error: shadowResult.error });
           return complete({ handled: true, message: shadowResult.message });
         }
+        case "mcp": {
+          // Only a bare /mcp, and only when pi's built-in MCP extension owns it or
+          // nothing does (lib/mcp-command.ts): another extension's /mcp is sent as
+          // before, and so is every subcommand, since `/mcp login`, `logout` and
+          // `reconnect` act on this session's own connections. Returning before
+          // onSend leaves no "/mcp" bubble and no sidebar row for a new chat; a
+          // streaming run is not touched.
+          if (args || !onOpenSettings) return { handled: false };
+          const commands = await slashCommandsForMcp();
+          if (!commands || !bareMcpOpensSettings(commands)) return { handled: false };
+          onOpenSettings("mcp");
+          return complete({ handled: true, action: "openSettings" });
+        }
 
         case "copy": {
           if (!sid) return complete({ handled: true, error: "No active session" });
@@ -2444,7 +2667,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       if (commandName === "compact") setIsCompacting(false);
     }
-  }, [activeLeafId, addNotice, ensureNewSession, isCompacting, loadCompactedSession, loadModels, loadSession, loadSlashCommands, loadTools, onSessionForked, promoteNewSession, onSessionStatsPanelOpen, runShadowSlashCommand]);
+  }, [activeLeafId, addNotice, ensureNewSession, isCompacting, loadCompactedSession, loadModels, loadSession, loadSlashCommands, loadTools, onSessionForked, promoteNewSession, onSessionStatsPanelOpen, runShadowSlashCommand, onOpenSettings, slashCommandsForMcp]);
 
   // 运行中提交统一走确认式契约：只有服务端确认 Pi 已接受后才允许输入框清空。
   // 斜杠命令需要保留 prompt 的模板展开语义，普通文本则使用原生 steer/followUp 队列。
@@ -2455,6 +2678,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   ): Promise<boolean> => {
     if (!isNavigationActive(navigationKey)) return false;
     const sid = sessionIdRef.current;
+    if (editEntryId) {
+      addNotice({ type: "error", message: "历史消息编辑需要等待当前运行结束" });
+      return false;
+    }
     if (!sid) {
       addNotice({ type: "error", message: "当前会话尚未就绪，消息未发送" });
       return false;
@@ -2484,7 +2711,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       addNotice({ type: "error", message: `消息发送失败，输入已保留：${detail}` });
       return false;
     }
-  }, [addNotice, isNavigationActive, navigationKey, runShadowSlashCommand]);
+  }, [addNotice, editEntryId, isNavigationActive, navigationKey, runShadowSlashCommand]);
 
   const handleAbortCompaction = useCallback(async () => {
     const sid = sessionIdRef.current;
@@ -2571,15 +2798,32 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const sid = sessionIdRef.current;
     if (!sid) return;
     try {
-      await sendAgentCommand(sid, { type: "set_tools", toolNames });
+      const result = await sendAgentCommand<{ sessionId?: string; recreated?: boolean }>(sid, { type: "set_tools", toolNames });
+      if (sessionIdRef.current !== sid) return;
+      const activeSessionId = result?.sessionId ?? sid;
+      clearSlashCommands();
+      if (result?.recreated || activeSessionId !== sid) {
+        closeEvents();
+        clearAskQuestionnaire();
+        setExtensionDialog(null);
+        setExtensionCustomUi(null);
+        sessionIdRef.current = activeSessionId;
+        await ensureEventsConnected(activeSessionId);
+      }
+      await loadTools(activeSessionId);
+      const snapshot = await fetchRuntimeState(activeSessionId, new AbortController().signal);
+      if (sessionIdRef.current === activeSessionId) applyRuntimeState(snapshot.state);
     } catch (e) {
       console.error("Failed to set tools:", e);
+      addNotice({ type: "error", message: `切换工具失败：${e instanceof Error ? e.message : String(e)}` });
     }
-  }, [creationSettingsLocked, setToolPresetState]);
+  }, [creationSettingsLocked, setToolPresetState, clearSlashCommands, closeEvents, clearAskQuestionnaire, ensureEventsConnected, loadTools, applyRuntimeState, addNotice]);
 
   // Load session on mount
   useEffect(() => {
     applyRuntimeState(undefined);
+    contextUsageAppliedIdRef.current = contextUsageRequestIdRef.current;
+    setActiveToolResults(new Map());
     if (session) {
       sessionIdRef.current = session.id;
       void connectEvents(session.id);
@@ -2603,6 +2847,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           // 刷新后只恢复后台监听，不能把 detached 子代理显示成主代理思考。
           void connectEvents(session.id);
         }
+      });
+    } else if (pendingControlKind === "materializing" || pendingControlKind === "initializing" || pendingControlKind === "recovering") {
+      // 重新挂载后接管已有 runtime，先连接 SSE 再完成初始化，不创建第二个会话。
+      void ensureNewSession().catch((error: unknown) => {
+        if (isNavigationActive(navigationKey)) addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
       });
     } else if (materializedNewSessionId) {
       sessionIdRef.current = materializedNewSessionId;
@@ -2672,10 +2921,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return () => onToolsLoaderChange?.(null);
   }, [loadTools, onToolsLoaderChange]);
 
+  const branchSwitchLocked = agentRunning || bashRunning || isCompacting;
   useEffect(() => {
     if (!onBranchDataChange) return;
-    onBranchDataChange(details?.tree ?? [], activeLeafId, handleLeafChange);
-  }, [details?.tree, activeLeafId, handleLeafChange, onBranchDataChange]);
+    onBranchDataChange(details?.tree ?? [], activeLeafId, handleLeafChange, branchSwitchLocked);
+  }, [details?.tree, activeLeafId, handleLeafChange, branchSwitchLocked, onBranchDataChange]);
 
   // Load the model list with bounded retries; loadModels exposes each failure.
   useEffect(() => {
@@ -2766,6 +3016,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     notices: noticeState.visible, dismissNotice, extensionDialog, extensionCustomUi, askQuestionnaire, submitAskQuestionnaire, cancelAskQuestionnaire, extensionStatuses, extensionWidgets, detachedSubagentStatuses: [...detachedSubagentStatuses, ...shadowReportStatuses], todos, respondToExtensionUi, sendExtensionCustomInput, armCustomAnswer,
     agentPhase, completion,
     isNew, creationSettingsLocked, scrollPositionRequest,
+    activeToolResults, editEntryId,
     // Refs
     sessionIdRef, eventSourceRef,
     // Actions
@@ -2774,6 +3025,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleRecallQueue,
     handleBuiltinSlashCommand,
     handleShadowMindToggle, handleToolPresetChange, loadTools, loadSlashCommands, setActiveLeafId, setMessages,
+    handleEditContent,
+    cancelEdit: editEntryId ? cancelEdit : undefined,
+    addNotice,
     dispatch, setAgentRunning, setForkingEntryId,
     bashRunning, pendingBash,
     // Subscriptions
@@ -2787,6 +3041,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     noticeState.visible, dismissNotice, extensionDialog, extensionCustomUi, askQuestionnaire, submitAskQuestionnaire, cancelAskQuestionnaire, extensionStatuses, extensionWidgets, detachedSubagentStatuses, todos, respondToExtensionUi, sendExtensionCustomInput, armCustomAnswer,
     isNew, creationSettingsLocked, scrollPositionRequest,
     agentPhase, completion,
+    activeToolResults, editEntryId, handleEditContent, cancelEdit, addNotice, shadowReportStatuses,
     sessionIdRef, eventSourceRef,
     handleSend, handleAbort, handleFork, loadEarlierMessages,
     handleCompact, handleQueuedSubmit, handleAbortCompaction,

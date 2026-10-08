@@ -51,7 +51,7 @@ import {
 import { DEFAULT_PENDING_NEW_SESSION_CONTROL, type PendingNewSessionControl } from "@/lib/pending-new-session";
 import type { ChatInputHandle } from "./ChatInput";
 import { AppTopPanels } from "./AppTopPanels";
-import { getLastSettingsSection, type SettingsSection } from "@/lib/settings-navigation";
+import { getLastSettingsSection, settingsSectionRequiresProject, type SettingsSection } from "@/lib/settings-navigation";
 import { getSessionFamily } from "@/lib/session-family";
 import type { SessionInfo } from "@/lib/types";
 import type { ToolEntry } from "@/lib/tool-presets";
@@ -83,7 +83,8 @@ export function AppShell() {
     sessionScrollPositionsRef.current.set(sessionId, position);
   }, []);
   const [searchTarget, setSearchTarget] = useState<{ sessionId: string; entryId: string; blockIndex?: number } | null>(null);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(() => !initialNavigation.sidebarCollapsed);
+  const desktopSidebarOpenRef = useRef(!initialNavigation.sidebarCollapsed);
   const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([]);
   const [activeTerminalTabId, setActiveTerminalTabId] = useState<string | null>(null);
   const [terminalsRestored, setTerminalsRestored] = useState(false);
@@ -249,8 +250,9 @@ export function AppShell() {
   const reclampRightPanelWidth = rightPanelResizer.reclampWidth;
   // On mobile the sidebar is an overlay drawer; hide it by default so the chat
   // is visible on load. Runs once the breakpoint resolves after hydration.
+  // Mobile drawer actions must not change the remembered desktop preference.
   useEffect(() => {
-    if (isMobile) setSidebarOpen(false);
+    setSidebarOpen(isMobile ? false : desktopSidebarOpenRef.current);
   }, [isMobile]);
   useEffect(() => {
     setMobileSidebarReady(true);
@@ -439,9 +441,18 @@ export function AppShell() {
 
   const openSessionStatsPanel = useCallback(() => openTopPanel("session"), [openTopPanel]);
 
+  // The composer opens Settings too: a bare /mcp opens Settings › MCP (useAgentSession).
+  const openSettingsSection = useCallback((section: SettingsSection) => {
+    setSettingsSection(section);
+  }, []);
+
   const handleSidebarToggle = useCallback(() => {
     if (isMobile) closeTopPanel();
-    setSidebarOpen((open) => !open);
+    setSidebarOpen((open) => {
+      const next = !open;
+      if (!isMobile) desktopSidebarOpenRef.current = next;
+      return next;
+    });
   }, [closeTopPanel, isMobile]);
 
   // Same @mention format as the chat input's @ autocomplete, so the agent's
@@ -562,6 +573,22 @@ export function AppShell() {
 
 
 
+  const handleOpenSession = useCallback(async (sessionId: string) => {
+    const catalogued = sessionCatalog.find((item) => item.id === sessionId);
+    if (catalogued && !catalogued.transient) {
+      handleSelectSession(catalogued);
+      return;
+    }
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, { cache: "no-store" });
+      const data = await response.json() as { info?: SessionInfo; error?: string };
+      if (!response.ok || !data.info) throw new Error(data.error ?? `HTTP ${response.status}`);
+      handleSelectSession(data.info);
+    } catch (error) {
+      console.error("打开关联会话失败", error);
+    }
+  }, [handleSelectSession, sessionCatalog]);
+
   const handleOpenLinkedFile = useCallback((filePath: string, page?: number) => {
     handleOpenFile(filePath, getFileName(filePath), { sourceSessionId: selectedSession?.id ?? null, page });
   }, [handleOpenFile, selectedSession?.id]);
@@ -643,6 +670,7 @@ export function AppShell() {
     openDialog: openProjectTrustDialog,
     status: projectTrust,
     trust: handleTrustProject,
+    updateStatus: handleProjectTrustChanged,
   } = useProjectTrust({ cwd: projectTrustCwd, onTrusted: handleProjectTrusted });
 
   const activeFileTab = fileTabs.find((t) => t.id === activeFileTabId) ?? null;
@@ -691,7 +719,7 @@ export function AppShell() {
           ["models", translate("common.models")],
           ["skills", translate("common.skills")],
         ] as const).map(([section, label]) => {
-          const disabled = section !== "models" && !projectTrustCwd;
+          const disabled = settingsSectionRequiresProject(section) && !projectTrustCwd;
           return (
             <button
               key={section}
@@ -983,8 +1011,11 @@ export function AppShell() {
               onShadowMindControlChange={handleShadowMindControlChange}
               onSessionStatsChange={handleSessionStatsChange}
               onSessionStatsPanelOpen={openSessionStatsPanel}
+              onOpenSettings={openSettingsSection}
               onContextUsageChange={handleContextUsageChange}
               onOpenFile={handleOpenLinkedFile}
+              onFilesUploaded={handleExplorerRefresh}
+              onOpenSession={handleOpenSession}
               onAskInNewChat={handleAskInNewChat}
               quoteSelectionEnabled={quoteSelectionEnabled}
               initialPrompt={pendingQuotePrompt && pendingQuotePrompt.sessionId === selectedSession?.id ? pendingQuotePrompt.text : undefined}
@@ -1175,8 +1206,12 @@ export function AppShell() {
         }}
         onModelsChanged={() => setModelsRefreshKey((key) => key + 1)}
         onSessionReloaded={bumpSessionKey}
+        projectTrust={projectTrust}
+        onOpenTrustDialog={openProjectTrustDialog}
+        onProjectTrustChanged={handleProjectTrustChanged}
       />
     )}
+    {/* After Settings, so it opens above it (z-index 1100 over 1000) when Settings › MCP asks for it. */}
     {projectTrustDialogOpen && projectTrustCwd && (
       <ProjectTrustDialog
         cwd={projectTrustCwd}
@@ -1184,6 +1219,7 @@ export function AppShell() {
         error={projectTrustError}
         onCancel={closeProjectTrustDialog}
         onConfirm={() => void handleTrustProject()}
+        onStatus={(status) => handleProjectTrustChanged(projectTrustCwd, status)}
       />
     )}
     </>

@@ -2,7 +2,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { QueuedMessage, QueuedMessages } from "./queued-messages";
 
 /**
- * Pi 0.87.0 的公开队列接口只返回文字，peekQueuedMessages 也只预览下一批。
+ * Pi 1.0.0 的公开队列接口只返回文字，peekQueuedMessages 也只预览下一批。
  * 将内部结构依赖隔离在此处：只读真实的两条完整队列，不维护第二份队列，
  * 因而不会把已经 drain、但尚未广播 message_start 的消息错误地移回。
  * SDK 升级必须复核此边界；结构不兼容时在清空前报错，禁止静默丢附件。

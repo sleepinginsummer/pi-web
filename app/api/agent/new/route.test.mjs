@@ -29,3 +29,15 @@ test("新会话仅在显式关闭时初始化 Shadow，失败时返回同一 run
     "Shadow 预设必须先于首条 prompt 和状态返回生效",
   );
 });
+
+test("ensure_session 创建阶段先返回 runtime 身份，不等待审批或 get_state", () => {
+  const created = source.slice(
+    source.indexOf('if (operation === "create" && promptCommand.type === "ensure_session")'),
+    source.indexOf('if (operation === "finalize-existing" && toolNames)'),
+  );
+  assert.match(created, /kind: "runtime-created"/);
+  assert.match(created, /sessionId: realSessionId/);
+  assert.match(created, /return NextResponse\.json/);
+  assert.doesNotMatch(created, /await session\.send/);
+  assert.ok(source.indexOf('kind: "runtime-created"') < source.indexOf('type: "set_shadow_mind_enabled"'));
+});
