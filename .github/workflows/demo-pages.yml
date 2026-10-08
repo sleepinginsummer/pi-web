@@ -4,8 +4,7 @@ name: Demo
 # Pull requests that touch the demo only build it.
 
 on:
-  push:
-    branches: [main]
+  # 本地分支不自动构建/发布 Demo：fork 未启用 Pages 时该任务在 configure-pages 阶段必然失败，只保留 PR 与手动触发。
   pull_request:
     paths:
       - "demo/**"
