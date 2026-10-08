@@ -266,7 +266,7 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 - Browser autoplay policy means sound must be unlocked from a user gesture; `ChatInput` calls the unlock hook from interactive controls, and `ChatWindow` plays the tone from `onAgentEnd`.
 
 ### PWA 版本与 Service Worker 更新策略
-- 当前合并版本使用 `0.10.0-merge.5`；此后每次代码变更都必须将最后一位递增 1（例如 `0.10.0-merge.5` -> `0.10.0-merge.6`），并同步更新 `package.json` 与 `package-lock.json`。
+- 当前合并版本使用 `0.10.0-merge.6`；此后每次代码变更都必须将最后一位递增 1（例如 `0.10.0-merge.6` -> `0.10.0-merge.7`），并同步更新 `package.json` 与 `package-lock.json`。
 - 生产环境必须使用每次构建唯一的版本标识注册 `/sw.js?v=<build-version>`，静态缓存名称也必须包含同一个版本；不能只使用长期不变的 `package.json` 版本，否则代码变化后浏览器可能继续命中旧 chunk。
 - 新 Service Worker 安装完成后保持 `waiting`，由界面提示“发现新版本”；用户确认后发送 `SKIP_WAITING`，并在 `controllerchange` 后刷新页面。不要在 `install` 阶段无条件调用 `skipWaiting()`。
 - 激活新 Service Worker 时只清理 `pi-web-` 前缀下的旧版本缓存，不得清理其它站点数据或认证信息。`/sw.js`、页面导航和 API 请求必须绕过静态资源缓存。
@@ -275,6 +275,7 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 
 ### CI 工作流（fork 本地差异）
 - `demo-pages.yml` 在本 fork 只由 PR 与手动触发运行，已移除 push 触发：fork 未启用 GitHub Pages，push 触发会让 `actions/configure-pages` 必然失败。合并上游时不要恢复该 push 触发。
+- 上游 e2e 用例与它对应的产品改动必须成对合并。本 fork 重写了 `MarkdownBody`/`MermaidBlock`/`AppShell`/`run.mjs` 等文件，上一轮合并只带进了上游用例而丢掉了实现，CI 因此变红。三个已知配套点：`CodeHighlight.tsx` 与 `MermaidBlock.tsx` 的代码块背景必须用 `backgroundColor`（不能与 Prism 主题的 `background` 简写混用）；`AppShell` 根部必须挂 `useTheme()`，否则系统配色切换不生效；`extension-dialog.mjs` 的通知断言要按通知架可能同时保留同文案通知来写。
 
 ### Exported session HTML
 - `/api/sessions/[id]/export` delegates to pi's export helper, then patches recursive tree helpers in the generated HTML to iterative versions so very deep linear sessions do not overflow the browser call stack.

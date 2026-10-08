@@ -156,7 +156,9 @@ export async function checkExtensionDialogSizing(page, width) {
   const close = async (dialog, mode, result) => {
     await dialog.getByRole("button", { name: mode === "panel" ? "Close" : "Cancel", exact: true }).click();
     await dialog.waitFor({ state: "hidden" });
-    await page.getByText(`E2E ${mode} result: ${result}`, { exact: true }).waitFor();
+    // 通知架会同时保留同一文案的通知（prose 在这里被关闭两次），只断言结果通知已出现，
+    // 取最新一条避免 Playwright strict 模式因重复文本失败。
+    await page.getByText(`E2E ${mode} result: ${result}`, { exact: true }).last().waitFor();
     await page.getByRole("button", { name: "Stop agent", exact: true }).waitFor({ state: "hidden" });
   };
 

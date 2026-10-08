@@ -289,12 +289,12 @@ export function CodeBlock({ code, lang, headerAction, isStreaming }: CodeBlockPr
         </div>
       </div>
       {isStreaming ? (
-        <pre className="markdown-code-plain" style={{ margin: 0, padding: "11px 13px", fontSize: "calc(12.5px + var(--chat-font-size-offset, 0px))", lineHeight: 1.62, borderRadius: 0, overflow: "auto" }}>
+        <pre className="markdown-code-plain" style={{ margin: 0, padding: "11px 13px", fontSize: "calc(12.5px + var(--chat-font-size-offset, 0px))", lineHeight: 1.62, borderRadius: 0, overflow: "auto", backgroundColor: "color-mix(in srgb, var(--bg) 92%, var(--bg-panel))" }}>
           <code style={{ fontFamily: "var(--font-mono)", background: "none" }}>{code}</code>
         </pre>
       ) : <Suspense
         fallback={(
-          <pre className="markdown-code-plain" style={{ margin: 0, padding: "11px 13px", fontSize: "calc(12.5px + var(--chat-font-size-offset, 0px))", lineHeight: 1.62, borderRadius: 0, overflow: "auto" }}>
+          <pre className="markdown-code-plain" style={{ margin: 0, padding: "11px 13px", fontSize: "calc(12.5px + var(--chat-font-size-offset, 0px))", lineHeight: 1.62, borderRadius: 0, overflow: "auto", backgroundColor: "color-mix(in srgb, var(--bg) 92%, var(--bg-panel))" }}>
             <code style={{ fontFamily: "var(--font-mono)", background: "none" }}>{code}</code>
           </pre>
         )}

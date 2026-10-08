@@ -23,6 +23,13 @@ test("uses a compact narrow-phone action layer", () => {
   assert.doesNotMatch(topBarSource, /AppearanceControls|toggleTheme|common\.language/);
 });
 
+// 系统配色监听只在 useTheme 被挂载时存在；AppShell 是唯一全程存活的位置，
+// 少这一句会让跟随系统的页面在系统切换深浅色后停留在旧主题（e2e code-background 覆盖）。
+test("keeps the system theme subscription mounted at the app root", () => {
+  assert.match(appShellSource, /import \{ useTheme \} from "@\/hooks\/useTheme"/);
+  assert.match(appShellSource, /useTheme\(\);/);
+});
+
 test("keeps Shadow outside the narrow-phone action layer", () => {
   const layerStart = topBarSource.indexOf('data-mobile-toolbar-actions="true"');
   const layerEnd = topBarSource.indexOf("</div>", layerStart);

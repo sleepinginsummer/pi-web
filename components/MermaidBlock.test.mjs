@@ -76,7 +76,7 @@ test("CodeBlock defers highlighting behind a lazy fallback when not streaming", 
   assert.match(html, /const x = 1;/);
 });
 
-test("CodeBlock 的普通代码沿用容器背景，不引入冲突的内联背景", async () => {
+test("CodeBlock 的代码块背景由 pre 自己的 backgroundColor 承担", async () => {
   const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(css, /\.markdown-code-block \{[^}]*background: var\(--bg\);/);
   for (const isStreaming of [false, true]) {
@@ -84,8 +84,16 @@ test("CodeBlock 的普通代码沿用容器背景，不引入冲突的内联背�
     const pre = html.match(/<pre\b[^>]*>/)?.[0];
     assert.ok(pre);
     assert.match(pre, /class="markdown-code-plain"/);
+    // 背景必须写在 backgroundColor 上：Prism 浅色主题用 background-color、暗色主题用 background
+    // 简写，混用会让 React 的样式 diff 在切换主题时互相覆盖，代码块背景随之消失
+    // （e2e code-background 覆盖该回归）。
+    assert.match(pre, /background-color:color-mix/);
     assert.doesNotMatch(pre, /(?:[;\"]|^)background:/);
   }
+  const highlightSource = await readFile(new URL("./CodeHighlight.tsx", import.meta.url), "utf8");
+  assert.match(highlightSource, /backgroundColor: "color-mix\(in srgb, var\(--bg\) 92%, var\(--bg-panel\)\)"/);
+  assert.match(highlightSource, /border: "none"/);
+  assert.doesNotMatch(highlightSource, /background: "color-mix/);
 });
 
 test("CodeBlock renders plain text without tokenization while streaming", () => {

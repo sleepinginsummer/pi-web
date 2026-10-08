@@ -509,7 +509,18 @@ try {
       await page.locator(".markdown-code-block pre").waitFor();
       await checkChatAppearance(page);
       await page.setViewportSize(viewport);
-      // Returning from the mobile breakpoint restores the desktop sidebar preference in an effect, so wait for the toggle to settle.
+      // Returning from the mobile breakpoint restores the desktop sidebar preference in an effect.
+      // Wait until that state stops changing before deciding: a click landing in the same frame as the
+      // restore flips the just-restored sidebar closed again and the toggle then reads as an ordinary
+      // close, so the toggle would never become actionable for the rest of the run.
+      const sidebarContainer = page.locator(".sidebar-container");
+      let previousSidebarClass = null;
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        const currentSidebarClass = await sidebarContainer.getAttribute("class").catch(() => null);
+        if (currentSidebarClass && currentSidebarClass === previousSidebarClass) break;
+        previousSidebarClass = currentSidebarClass;
+        await page.waitForTimeout(50);
+      }
       const hideSidebar = page.getByRole("button", { name: "Hide sidebar", exact: true });
       const showSidebar = page.getByRole("button", { name: "Show sidebar", exact: true });
       await hideSidebar.or(showSidebar).waitFor({ state: "visible" });

@@ -15,6 +15,7 @@ import { TerminalPanel } from "./TerminalPanel";
 import { newTerminalTab, restoreTerminalTabs, TERMINAL_TABS_KEY, type TerminalTab } from "./terminal-tab-state";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useTheme } from "@/hooks/useTheme";
 import { useViewportHeight } from "@/hooks/useViewportHeight";
 import { useResizablePanel } from "@/hooks/useResizablePanel";
 import { useFilePanel } from "@/hooks/useFilePanel";
@@ -62,6 +63,9 @@ export function AppShell() {
   const [initialNavigation, setInitialNavigation] = useState(() => getInitialNavigation(searchParams ?? new URLSearchParams()));
   const { locale, t: translate } = useI18n();
   const isMobile = useIsMobile();
+  // 主题订阅必须挂在应用根部并全程存活：只有 useTheme 被挂载时才会监听系统配色变化，
+  // 否则跟随系统的页面在系统切换深浅色后不会更新 data-theme，代码块等背景会停留在旧主题。
+  useTheme();
   const [initialCwdStatus, setInitialCwdStatus] = useState<"idle" | "validating" | "ready" | "error">(
     () => initialNavigation.requestedCwd ? "validating" : "idle",
   );

@@ -37,7 +37,7 @@ export default function CodeHighlight({ code, lang, isDark }: CodeHighlightProps
 
   if (highlightable !== true) {
     return (
-      <pre className="markdown-code-plain" style={{ margin: 0, padding: "11px 13px", fontSize: "calc(12.5px + var(--chat-font-size-offset, 0px))", lineHeight: 1.62, borderRadius: 0, overflow: "auto" }}>
+      <pre className="markdown-code-plain" style={{ margin: 0, padding: "11px 13px", fontSize: "calc(12.5px + var(--chat-font-size-offset, 0px))", lineHeight: 1.62, borderRadius: 0, overflow: "auto", backgroundColor: "color-mix(in srgb, var(--bg) 92%, var(--bg-panel))" }}>
         <code style={{ fontFamily: "var(--font-mono)", background: "none" }}>{code}</code>
       </pre>
     );
@@ -54,8 +54,12 @@ export default function CodeHighlight({ code, lang, isDark }: CodeHighlightProps
         padding: "11px 13px",
         fontSize: "calc(12.5px + var(--chat-font-size-offset, 0px))",
         lineHeight: 1.62,
+        // 浅色 vs 主题自带 1px #ddd 边框，边框由外层 .markdown-code-block 负责。
+        border: "none",
         borderRadius: 0,
-        background: "color-mix(in srgb, var(--bg) 92%, var(--bg-panel))",
+        // 只能用 backgroundColor：Prism 浅色主题用 background-color、暗色主题用 background 简写，
+        // 混用会让 React 的样式 diff 在切换主题时互相覆盖，导致背景丢失。
+        backgroundColor: "color-mix(in srgb, var(--bg) 92%, var(--bg-panel))",
       }}
       codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
     >
