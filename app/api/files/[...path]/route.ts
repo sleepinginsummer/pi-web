@@ -14,6 +14,7 @@ import {
   documentPreviewKind,
   getAudioMime,
   getDocumentMime,
+  getInlineFileMime,
   getFileExt,
   getImageMime,
   getVideoMime,
@@ -21,7 +22,7 @@ import {
 import { resolveDirentIsDirectory } from "@/lib/file-dirent";
 import { getFileTreeVisibility } from "@/lib/file-tree-visibility";
 import { isFilePathReferencedBySession } from "@/lib/session-file-references";
-import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
+import { RAW_FILE_PATH_SEGMENT, hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import {
   inspectUploadTargets,
   parseUploadConflictStrategy,
@@ -33,9 +34,16 @@ import { filePathFromApiSegments, samePath } from "@/lib/paths";
 import { hasParentDirectorySegment } from "@/lib/path-security";
 import { readTextPreviewChunk } from "@/lib/text-preview";
 
-const FILE_REQUEST_TYPES = ["list", "read", "download", "meta", "preview", "watch"] as const;
+const FILE_REQUEST_TYPES = ["list", "read", "download", "meta", "preview", "raw", "watch"] as const;
 type FileRequestType = typeof FILE_REQUEST_TYPES[number];
 const FILE_REQUEST_TYPE_SET = new Set<string>(FILE_REQUEST_TYPES);
+// `/api/files/raw/<path>` serves the file as a document. The path-based form
+// exists because a previewed HTML page loads its stylesheets, scripts, and
+// images over relative URLs: those requests carry no query string, so a `type`
+// parameter cannot select the mode for them. A real top-level `/raw` directory
+// is therefore unreachable, the same trade-off `/api/files/reveal` makes. The
+// origin guard in lib/request-security.ts admits those subresource loads and
+// shares the segment constant.
 const MAX_UPLOAD_FILE_BYTES = 25 * 1024 * 1024;
 const MAX_UPLOAD_TOTAL_BYTES = 100 * 1024 * 1024;
 // Multipart boundaries and headers are not file bytes, but must be bounded too.
@@ -316,14 +324,20 @@ function streamFile(filePath: string, stat: fs.Stats, contentType: string, range
     "Content-Disposition": getContentDisposition(filePath, asDownload),
     "X-Content-Type-Options": "nosniff",
   };
-  // SVG is the only preview type a browser executes as a document. A
-  // repo-controlled SVG navigated to directly (for example through a link in
-  // a transcript) would otherwise run script in the Pi Web origin, where it
-  // can call any /api route. These headers only affect document rendering;
-  // <img> preview embedding ignores them.
+  // SVG and HTML are the two inline preview types a browser executes as a
+  // document. A repo-controlled file navigated to directly (for example
+  // through a link in a transcript) would otherwise run script in the Pi Web
+  // origin, where it can call any /api route. These headers only affect
+  // document rendering; <img> preview embedding ignores them.
   if (contentType === "image/svg+xml") {
     headers["Content-Security-Policy"] =
       "default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'";
+    headers["Referrer-Policy"] = "no-referrer";
+  } else if (contentType.startsWith("text/html")) {
+    // `sandbox` keeps the document in an opaque origin even when it is opened
+    // as a top-level tab, so page scripts cannot reach Pi Web's session. It
+    // still permits script and subresources, which a rendered preview needs.
+    headers["Content-Security-Policy"] = "sandbox allow-scripts; frame-ancestors 'self'";
     headers["Referrer-Policy"] = "no-referrer";
   }
 
@@ -441,7 +455,8 @@ export async function GET(
 ) {
   try {
     const { path: segments } = await params;
-    const filePath = filePathFromApiSegments(segments);
+    const isRawDocument = segments[0] === RAW_FILE_PATH_SEGMENT;
+    const filePath = filePathFromApiSegments(isRawDocument ? segments.slice(1) : segments);
     // Authorization collapses `..` lexically, but the filesystem applies it
     // after following links, so `link/../x` names a file beside the link's
     // target, outside the roots. URL parsing already drops real `..` segments;
@@ -452,7 +467,7 @@ export async function GET(
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }
     const rawType = request.nextUrl.searchParams.get("type") ?? "list";
-    const type = parseFileRequestType(rawType);
+    const type = isRawDocument ? "raw" : parseFileRequestType(rawType);
     if (!type) {
       return NextResponse.json({ error: "Invalid file request type" }, { status: 400 });
     }
@@ -483,6 +498,16 @@ export async function GET(
       && !isExistingFilePathAllowed(existingAuthorizationPath, allowedRoots)
     ) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
+    }
+
+    if (type === "raw") {
+      if (!stat?.isFile()) {
+        return NextResponse.json({ error: "Not a file" }, { status: 400 });
+      }
+      // Served inline with the file's own content type, so a previewed page is
+      // a real document and reaches its sibling assets through the same route.
+      // streamFile keeps HTML in a sandboxed opaque origin.
+      return streamFile(filePath, stat, getInlineFileMime(filePath), request.headers.get("range"));
     }
 
     if (type === "read") {

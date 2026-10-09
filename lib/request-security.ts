@@ -145,12 +145,52 @@ export function shouldCheckApiRequestOrigin(request: Request): boolean {
   return request.headers.has("origin") || request.headers.has("sec-fetch-site");
 }
 
+/** Path segment of the raw document namespace in the files route. */
+export const RAW_FILE_PATH_SEGMENT = "raw";
+const RAW_FILE_PATH_PREFIX = `/api/files/${RAW_FILE_PATH_SEGMENT}/`;
+
+// Destinations a browser only sends for resources a document displays or
+// executes. `fetch()` and XHR use "empty", and navigations use "document",
+// because those can carry a request body or a readable response.
+const RAW_FILE_SUBRESOURCE_DESTINATIONS = new Set([
+  "style",
+  "script",
+  "image",
+  "font",
+  "audio",
+  "video",
+]);
+
+/**
+ * A rendered HTML preview runs in a sandbox, so its origin is opaque and the
+ * browser reports every request it makes as cross-site. The page still has to
+ * load its own stylesheets, scripts, and images, which arrive as subresource
+ * loads of the raw document route.
+ *
+ * Those loads are safe to admit: `Sec-Fetch-Dest` is set by the browser and
+ * cannot be scripted, the route keeps its own root and session authorization,
+ * and the response carries no CORS header, so another origin can neither read
+ * the bytes nor gain any capability here. State-changing and readable requests
+ * (POST, fetch, XHR, navigations) stay rejected as before.
+ */
+export function isSandboxedPreviewAssetRequest(request: Request): boolean {
+  if (request.method !== "GET") return false;
+  const destination = request.headers.get("sec-fetch-dest");
+  if (!destination || !RAW_FILE_SUBRESOURCE_DESTINATIONS.has(destination)) return false;
+  try {
+    return new URL(request.url).pathname.startsWith(RAW_FILE_PATH_PREFIX);
+  } catch {
+    return false;
+  }
+}
+
 export function isApiRequestAllowed(
   request: Request,
   configuredHostnames = configuredHostnamesFromEnvironment(),
 ): boolean {
   if (!isApiRequestHostAllowed(request, configuredHostnames)) return false;
   if (isUserInitiatedSessionExportNavigation(request)) return true;
+  if (isSandboxedPreviewAssetRequest(request)) return true;
   return !shouldCheckApiRequestOrigin(request) || isApiRequestOriginAllowed(request);
 }
 

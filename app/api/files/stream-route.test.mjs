@@ -23,6 +23,15 @@ test("inline SVG is served with a script-blocking content security policy", () =
   assert.match(streamBlock, /frame-ancestors 'self'/);
 });
 
+test("served HTML stays in a sandboxed opaque origin", () => {
+  // HTML is the other inline preview type a browser executes as a document.
+  // The sandbox has to hold even when the file is opened as a top-level tab,
+  // so page script can never reach Pi Web's session.
+  assert.match(streamBlock, /contentType\.startsWith\("text\/html"\)/);
+  assert.match(streamBlock, /sandbox allow-scripts/);
+  assert.doesNotMatch(streamBlock, /sandbox[^"]*allow-same-origin/, "the document must keep an opaque origin");
+});
+
 test("the restrictive headers are applied to every streamFile response shape", () => {
   // The header object is shared by the full-body, 416, and 206 paths.
   const headerObject = streamBlock.indexOf("const headers");

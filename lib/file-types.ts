@@ -41,6 +41,32 @@ export const DOCUMENT_EXT_TO_MIME: Record<DocumentPreviewKind, string> = {
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 };
 
+// Content types for the files an inline preview loads as its own document or
+// as one of its subresources. A browser refuses a stylesheet or script served
+// with the wrong type, so the extensions a generated page commonly references
+// are listed explicitly. Image, audio, video, and document types keep using
+// their existing maps.
+export const WEB_ASSET_EXT_TO_MIME: Record<string, string> = {
+  html: "text/html; charset=utf-8",
+  htm: "text/html; charset=utf-8",
+  xhtml: "application/xhtml+xml",
+  css: "text/css; charset=utf-8",
+  js: "text/javascript; charset=utf-8",
+  mjs: "text/javascript; charset=utf-8",
+  cjs: "text/javascript; charset=utf-8",
+  json: "application/json; charset=utf-8",
+  map: "application/json; charset=utf-8",
+  xml: "application/xml; charset=utf-8",
+  txt: "text/plain; charset=utf-8",
+  csv: "text/csv; charset=utf-8",
+  md: "text/plain; charset=utf-8",
+  wasm: "application/wasm",
+  woff: "font/woff",
+  woff2: "font/woff2",
+  ttf: "font/ttf",
+  otf: "font/otf",
+};
+
 function getBaseName(filePath: string): string {
   return filePath.replace(/\\/g, "/").split("/").pop() ?? "";
 }
@@ -63,6 +89,22 @@ export function getVideoMime(filePath: string): string | null {
 
 export function getDocumentMime(filePath: string): string | null {
   return DOCUMENT_EXT_TO_MIME[getFileExt(filePath) as DocumentPreviewKind] ?? null;
+}
+
+/**
+ * Content type for serving a file inline as itself: a previewed page, the
+ * stylesheets and scripts it loads, or any other previewable asset. Unlike the
+ * per-kind getters above this one never returns null — an unknown extension
+ * still has to be served as bytes rather than as a missing content type.
+ */
+export function getInlineFileMime(filePath: string): string {
+  const ext = getFileExt(filePath);
+  return WEB_ASSET_EXT_TO_MIME[ext]
+    ?? IMAGE_EXT_TO_MIME[ext]
+    ?? AUDIO_EXT_TO_MIME[ext]
+    ?? VIDEO_EXT_TO_MIME[ext]
+    ?? DOCUMENT_EXT_TO_MIME[ext as DocumentPreviewKind]
+    ?? "application/octet-stream";
 }
 
 export function documentPreviewKind(filePath: string): DocumentPreviewKind | null {

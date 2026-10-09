@@ -227,6 +227,21 @@ function getFileApiUrl(
   return `/api/files/${encoded}?${searchParams.toString()}`;
 }
 
+/**
+ * Document URL for the HTML preview iframe. The `/raw/` path segment replaces
+ * the `type` query parameter because the page's own relative references — its
+ * stylesheets, scripts, and images — keep resolving to sibling files under the
+ * same prefix.
+ */
+function getRawDocumentUrl(filePath: string, sourceSessionId?: string | null, revision = 0): string {
+  const encoded = encodeFilePathForApi(filePath);
+  const searchParams = new URLSearchParams();
+  if (sourceSessionId) searchParams.set("sessionId", sourceSessionId);
+  if (revision > 0) searchParams.set("v", String(revision));
+  const query = searchParams.toString();
+  return `/api/files/raw/${encoded}${query ? `?${query}` : ""}`;
+}
+
 function DownloadLink({ filePath, sourceSessionId }: { filePath: string; sourceSessionId?: string | null }) {
   const { t } = useI18n();
   return (
@@ -1214,6 +1229,7 @@ function TextFileViewer({
   const [displayMode, setDisplayMode] = useState<DisplayMode>(requestedInitialDisplayMode);
   const [wrapLines, setWrapLines] = useState(initialWrapLines);
   const [watching, setWatching] = useState(false);
+  const [htmlPreviewRevision, setHtmlPreviewRevision] = useState(0);
   const esRef = useRef<EventSource | null>(null);
   const contentRequestRef = useRef(0);
   const gitDiffRequestRef = useRef(0);
@@ -1331,6 +1347,7 @@ function TextFileViewer({
     setData(null);
     setGitDiff(null);
     setGitDiffResolved(false);
+    setHtmlPreviewRevision(0);
     setWatching(false);
 
     fetchContent(filePath).finally(() => {
@@ -1367,7 +1384,12 @@ function TextFileViewer({
       synchronize();
     });
 
-    es.addEventListener("change", synchronize);
+    es.addEventListener("change", () => {
+      // The preview is a document request of its own, so the iframe has to be
+      // pointed at the new revision, not just the source text re-read.
+      setHtmlPreviewRevision((value) => value + 1);
+      synchronize();
+    });
 
     const markDisconnected = () => {
       setWatching(false);
@@ -1385,20 +1407,24 @@ function TextFileViewer({
     void fetchGitDiff(filePath);
   }, [fetchGitDiff, filePath, gitRefreshKey]);
 
+  const language = data?.language ?? "text";
+  const isHtml = language === "html";
+  const isMarkdown = language === "markdown";
+  // The HTML preview streams the file into an iframe, so a truncated source read
+  // never limits it; the markdown preview still renders the loaded text.
+  const hasPreview = isHtml || (isMarkdown && !data?.truncated);
+  const htmlPreviewSrc = getRawDocumentUrl(filePath, sourceSessionId, htmlPreviewRevision);
+
   useEffect(() => {
     // HTML gets the same rendered-first treatment as markdown: a generated page
     // is usually more useful viewed than read as source. Both have a preview
     // mode already; the source tab stays one click away. A restored choice or
     // explicit mode hint always wins over this default.
-    if (
-      defaultPreviewEligibleRef.current
-      && !data?.truncated
-      && (data?.language === "markdown" || data?.language === "html")
-    ) {
+    if (defaultPreviewEligibleRef.current && hasPreview) {
       defaultPreviewEligibleRef.current = false;
       updateDisplayMode("preview");
     }
-  }, [data?.language, data?.truncated, updateDisplayMode]);
+  }, [hasPreview, updateDisplayMode]);
 
   const hasGitDiff = gitDiff?.supported === true && typeof gitDiff.patch === "string";
   const isDeletedDiff = hasGitDiff && gitDiff.status === "deleted";
@@ -1427,10 +1453,6 @@ function TextFileViewer({
 
   const viewerContent = data?.content ?? "";
   const sourceLines = useMemo(() => viewerContent.split("\n"), [viewerContent]);
-  const language = data?.language ?? "text";
-  const isHtml = language === "html";
-  const isMarkdown = language === "markdown";
-  const hasPreview = !data?.truncated && (isHtml || isMarkdown);
   const effectiveDisplayMode = isDeletedDiff ? "diff" : displayMode;
   const useLightweightSource = sourceLines.length > SOURCE_HIGHLIGHT_MAX_LINES
     && !(effectiveDisplayMode === "diff" && hasGitDiff)
@@ -1773,10 +1795,11 @@ function TextFileViewer({
           <DiffView patch={gitDiff.patch!} />
         ) : isHtml && effectiveDisplayMode === "preview" ? (
           <iframe
-            srcDoc={content}
+            key={htmlPreviewSrc}
+            src={htmlPreviewSrc}
             sandbox="allow-scripts"
             style={{ width: "100%", height: "100%", border: "none", background: "var(--bg)" }}
-             title={t("i18n.htmlPreview")}
+            title={t("i18n.htmlPreview")}
           />
         ) : isMarkdown && effectiveDisplayMode === "preview" ? (
           <div
