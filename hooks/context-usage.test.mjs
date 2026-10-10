@@ -27,6 +27,9 @@ function setup() {
     setExtensionStatuses() {}, setExtensionWidgets() {}, filterVisibleExtensionWidgets: (widgets) => widgets,
     fetch: (url) => { const request = Promise.withResolvers(); requests.push({ ...request, url }); return request.promise; },
     syncLiveModel() {}, setIsCompacting() {}, setAutoCompactionEnabled() {}, setQueuedMessages() {},
+    // applyRuntimeState 也会把扩展绑定状态交给唯一状态机（新会话等待态）。
+    newSessionCwd: null, onPendingNewSessionEvent() {},
+    projectExtensionBinding: () => "bound",
     normalizeQueuedMessages: (value) => value, finishPromptWithoutStream: () => { throw new Error("busy run settled"); },
   });
   context.applyContextUsage = callback("applyContextUsage").runInContext(context);

@@ -21,10 +21,13 @@ import { deleteSessionViewSnapshot, getSessionViewSnapshot, setSessionViewSnapsh
 import { isThinkingLevel, type ThinkingLevelOption } from "@/lib/thinking-levels";
 import { recordThinkingLevelPreference } from "@/lib/thinking-level-preference-client";
 import { materializeNewSession, releaseNewSessionMaterialization, type NewSessionMaterializationResult } from "@/lib/new-session-materialization-client";
-import { selectPendingNewSession, type PendingNewSessionControl, type PendingNewSessionEvent } from "@/lib/pending-new-session";
+import { selectNewSessionRequest, selectPendingNewSession, type PendingNewSessionControl, type PendingNewSessionEvent } from "@/lib/pending-new-session";
+import { projectExtensionBinding } from "@/lib/new-session-protocol";
 import { retryModelLoad, useModelSelection } from "@/hooks/useModelSelection";
 import { useFrameBatchedStreamDispatch } from "@/hooks/useFrameBatchedStreamDispatch";
 import { useRunCompletion } from "@/hooks/useRunCompletion";
+import { STREAM_CLOSED, STREAM_OPEN, createStreamSource, type StreamEventSource } from "@/lib/sse-broker-client";
+import { SESSION_BINDING_DEADLINE_MS, useSessionBindingPoll } from "@/hooks/useSessionBindingPoll";
 import {
   clearManualStopNotificationSuppression,
   markManualStopNotificationSuppressed,
@@ -34,6 +37,7 @@ import { normalizeAssistantMessage } from "@/lib/normalize";
 import { getPreferredToolPreset, setPreferredToolPreset } from "@/lib/tool-preset-preference";
 import type { ToolPreset } from "@/lib/tool-presets";
 import { isPromptRejectedError, sendAgentCommand } from "@/lib/agent-client";
+import { isSessionExternalWriteError } from "@/lib/session-external-write";
 import { prependChatDraft, queuedMessagesToDraft, type QueuedMessages } from "@/lib/queued-messages";
 export type { QueuedMessages } from "@/lib/queued-messages";
 import { getDraft, setDraft, type ChatDraft } from "@/lib/draft-store";
@@ -374,7 +378,7 @@ type EventStreamConnectionStatus = "connected" | "timeout" | "closed";
 
 type EventStreamConnectionResult = {
   status: EventStreamConnectionStatus;
-  source: EventSource;
+  source: StreamEventSource;
 };
 
 class EventStreamConnectionError extends Error {
@@ -555,7 +559,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const pendingSessionView = selectPendingNewSession(pendingNewSessionControl);
   const pendingShadowMindEnabled = pendingSessionView.desiredShadowMindEnabled;
   const creationSettingsLocked = pendingSessionView.busy;
-  const materializedNewSessionId = pendingSessionView.transportSessionId;
+  // 挂载接管用的身份（有 runtime 就必须先连 SSE 再补读快照）；
+  // 控制类 UI 的授权是另一个投影（runtimeSessionId），两者不要混用。
+  const attachSessionId = pendingSessionView.transportSessionId;
   const { completion, beginRun, settleRun } = useRunCompletion();
 
   const [contextModel, setContextModel] = useState<SessionContextSnapshot["model"]>(null);
@@ -657,16 +663,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const todos = useMemo(() => deriveTodos(messages), [messages]);
 
 
-  const eventSourceRef = useRef<EventSource | null>(null);
+  const eventSourceRef = useRef<StreamEventSource | null>(null);
   const eventStreamConnectionRef = useRef<{
-    sessionId: string; source: EventSource;
+    sessionId: string; source: StreamEventSource;
     promise: Promise<EventStreamConnectionResult>; settled: boolean;
   } | null>(null);
   const eventStreamGraceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const eventStreamGraceGenerationRef = useRef(0);
   // detached 子代理可能跨越多个父轮，必须按 agentId 保持到对应 completion 到达。
   const pendingDetachedSubagentIdsRef = useRef(new Set<string>());
-  const sessionIdRef = useRef<string | null>(session?.id ?? materializedNewSessionId);
+  const sessionIdRef = useRef<string | null>(session?.id ?? attachSessionId);
   const contextVersionRef = useRef<string | null>(null);
   const modelSwitchPendingRef = useRef(false);
   useEffect(() => {
@@ -901,7 +907,43 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setRuntimeFastAvailable(state.fastAvailable);
     setExtensionStatuses(state.extensionStatuses);
     setExtensionWidgets(filterVisibleExtensionWidgets(state.extensionWidgets));
-  }, [applyContextUsage, applyShadowRuntimeState, modelSelectionActions]);
+    // 绑定完成事件可能早于监听建立；状态轮询也要按同一协议投影收敛（失败不能当成就绪）。
+    if (newSessionCwd && sessionIdRef.current) {
+      const binding = projectExtensionBinding(state);
+      if (binding === "bound") {
+        onPendingNewSessionEvent(newSessionCwd, { type: "EXTENSIONS_READY", sessionId: sessionIdRef.current });
+      } else if (binding === "failed") {
+        onPendingNewSessionEvent(newSessionCwd, {
+          type: "POST_START_FAIL",
+          sessionId: sessionIdRef.current,
+          error: state.extensionsError ?? "扩展初始化失败",
+        });
+      }
+    }
+  }, [applyContextUsage, applyShadowRuntimeState, modelSelectionActions, newSessionCwd, onPendingNewSessionEvent]);
+
+  // extensions-binding 是等待态：绑定完成事件可能错过（例如切走期间绑定已完成），
+  // 因此在这个状态里兜底轮询运行时状态，由同一协议投影收敛到就绪或失败。
+  const bindingPollSessionId = isNew && pendingSessionView.extensionsPending ? pendingSessionView.transportSessionId : null;
+  const bindingPollDeadline = useCallback(() => {
+    const sid = bindingPollSessionId;
+    if (!newSessionCwd || !sid) return;
+    // 总期限到期：收敛到可重试的失败态并保留同一 runtime 身份，不能永久停在初始化中。
+    onPendingNewSessionEvent(newSessionCwd, {
+      type: "POST_START_FAIL",
+      sessionId: sid,
+      error: `扩展初始化超过 ${Math.round(SESSION_BINDING_DEADLINE_MS / 1000)}s 仍未完成`,
+    });
+  }, [bindingPollSessionId, newSessionCwd, onPendingNewSessionEvent]);
+  useSessionBindingPoll({
+    sessionId: bindingPollSessionId,
+    enabled: bindingPollSessionId !== null,
+    onSnapshot: (snapshot) => {
+      if (snapshot.state && sessionIdRef.current === bindingPollSessionId) applyRuntimeState(snapshot.state);
+    },
+    deadlineMs: SESSION_BINDING_DEADLINE_MS,
+    onDeadline: bindingPollDeadline,
+  });
 
   /** context 的所有派生状态统一原子提交，挂载加载和分支导航不得各维护一份字段列表。 */
   const commitContextSnapshot = useCallback((
@@ -1158,12 +1200,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         return { loaded: false, agentState: null };
       }
       if (sessionIdRef.current === sid) {
+        // 会话文件写入冲突已经重试过一次。屏幕上还有本会话内容时保留它并给提示，
+        // 一次短暂的写入竞争不该把整个聊天区替换成错误页；没有内容可保留才回退错误页。
+        if (
+          isSessionExternalWriteError(error)
+          && messagesRef.current.length > 0
+          && viewSnapshotRef.current.page.sid === sid
+        ) {
+          addNotice({ type: "warning", message: "会话文件正在被写入，显示的是稍早的内容；写入结束后重新打开即可刷新" });
+          setLoading(false);
+          return { loaded: false, agentState: null };
+        }
         setError(String(error));
         setLoading(false);
       }
       return { loaded: false, agentState: null };
     }
-  }, [applyRuntimeState, commitContextSnapshot, loadSessionDetails]);
+  }, [addNotice, applyRuntimeState, commitContextSnapshot, loadSessionDetails]);
 
   /** Shadow lifecycle entry 使用单次 context-only 刷新，避免触发 details/backfill 或改变滚动位置。 */
   const scheduleContextRefresh = useCallback((sid: string) => {
@@ -1251,10 +1304,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // 并行的初始化请求复用同一条 SSE，避免互相关闭等待审批的连接。
     const existing = eventStreamConnectionRef.current;
     if (existing?.sessionId === sid && existing.source === eventSourceRef.current
-      && existing.source.readyState !== EventSource.CLOSED
-      && (existing.source.readyState === EventSource.OPEN || !existing.settled)) return existing.promise;
+      && existing.source.readyState !== STREAM_CLOSED
+      && (existing.source.readyState === STREAM_OPEN || !existing.settled)) return existing.promise;
     closeEvents();
-    const es = new EventSource(`/api/agent/${encodeURIComponent(sid)}/events`);
+    // 长连接经由同源 SharedWorker broker：连接数与窗口数解耦（不可用时自动直连）。
+    const es = createStreamSource(`/api/agent/${encodeURIComponent(sid)}/events`);
+    // 共享上游只对第一个订阅者重放待处理问卷/审批；后接入的窗口自己补一次，
+    // 否则第二个窗口看不到正在等的问卷，也无法接手回答。
+    es.onNeedsReplay = () => {
+      void sendAgentCommand(sid, { type: "replay_pending_ui" }).catch((error: unknown) => {
+        console.error("请求重放待处理扩展 UI 失败:", error);
+      });
+    };
     eventSourceRef.current = es;
     const promise = new Promise<EventStreamConnectionResult>((resolve) => {
       let settled = false;
@@ -1288,7 +1349,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
       };
       es.onerror = () => {
-        if (es.readyState !== EventSource.CLOSED) return;
+        if (es.readyState !== STREAM_CLOSED) return;
         settle("closed");
         if (eventSourceRef.current === es && agentRunningRef.current) {
           eventSourceRef.current = null;
@@ -1304,7 +1365,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const ensureEventsConnected = useCallback(async (sid: string) => {
     const result = await connectEvents(sid);
-    if (result.status === "connected" || result.source.readyState === EventSource.OPEN) return;
+    if (result.status === "connected" || result.source.readyState === STREAM_OPEN) return;
     if (eventSourceRef.current === result.source) eventSourceRef.current = null;
     result.source.close();
     throw new EventStreamConnectionError(result.status);
@@ -1320,12 +1381,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return pendingNewSessionControl.sessionId;
     }
 
-    const recoverySessionId = pendingControlKind === "materialization-failed"
-      || pendingControlKind === "recovering"
-      || pendingControlKind === "initializing"
-      ? pendingNewSessionControl.sessionId
-      : null;
-    const requestedShadowMindEnabled = pendingNewSessionControl.shadowMindEnabled;
+    // 身份一律取状态机的投影：漏掉任一等待态都会重复创建 runtime。
+    const sessionRequest = selectNewSessionRequest(pendingSessionView);
+    const requestedShadowMindEnabled = pendingSessionView.desiredShadowMindEnabled;
     if (pendingControlKind === "materialization-failed") {
       onPendingNewSessionEvent(newSessionCwd, { type: "RETRY" });
     } else if (pendingControlKind === "staged") {
@@ -1339,9 +1397,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     let result: NewSessionMaterializationResult;
     try {
       result = await materializeNewSession({
-        ...(recoverySessionId
-          ? { operation: "finalize-existing" as const, sessionId: recoverySessionId }
-          : { operation: "create" as const }),
+        ...sessionRequest,
         cwd: newSessionCwd,
         toolNames: getToolNamesForPreset(toolPreset),
         shadowMindEnabled: requestedShadowMindEnabled,
@@ -1384,7 +1440,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         error: result.error,
       });
     } else {
-      onPendingNewSessionEvent(newSessionCwd, { type: "READY", sessionId: realId });
+      // finalize 与运行时快照走同一个协议投影：绑定失败（false + 错误文本）不能当作 ready。
+      const binding = projectExtensionBinding(result);
+      if (binding === "failed") {
+        onPendingNewSessionEvent(newSessionCwd, {
+          type: "POST_START_FAIL",
+          sessionId: realId,
+          error: result.extensionsError ?? "扩展初始化失败",
+        });
+      } else if (binding === "binding") {
+        // runtime 已就绪但扩展仍在绑定：进入等待态，由 extensions_bound 事件解锁发送。
+        onPendingNewSessionEvent(newSessionCwd, { type: "EXTENSIONS_PENDING", sessionId: realId });
+      } else {
+        onPendingNewSessionEvent(newSessionCwd, { type: "READY", sessionId: realId });
+      }
     }
     if (result.model && newSessionModelOverrideRef.current === selectedModel) {
       setPendingModel(result.model);
@@ -1400,7 +1469,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
     if (result.kind === "initialization-failed") throw new Error(result.error);
     return realId;
-  }, [applyShadowRuntimeState, displayModelFastAvailable, ensureEventsConnected, fastEnabled, isNavigationActive, isNew, loadTools, modelSelectionActions, navigationKey, newSessionCwd, onPendingNewSessionEvent, pendingControlKind, pendingNewSessionControl, toolPreset]);
+  }, [applyShadowRuntimeState, displayModelFastAvailable, ensureEventsConnected, fastEnabled, isNavigationActive, isNew, loadTools, modelSelectionActions, navigationKey, newSessionCwd, onPendingNewSessionEvent, pendingControlKind, pendingNewSessionControl, pendingSessionView, toolPreset]);
 
   // 系统面板可在首条消息发送前读取提示词；这里只初始化运行时并查询状态，
   // 不触发 prompt，也不会向会话历史追加消息。
@@ -2140,6 +2209,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "auto_continue_stopped":
         addNotice({ type: "warning", message: "自动继续已停止：工具调用反复无法完成，请检查环境或手动处理" });
         break;
+      case "extensions_bound":
+        // 新会话第二阶段不等绑定；绑定完成的事件是解锁发送的信号。
+        if (newSessionCwd && sessionIdRef.current) {
+          onPendingNewSessionEvent(newSessionCwd, { type: "EXTENSIONS_READY", sessionId: sessionIdRef.current });
+        }
+        break;
+      case "extensions_error":
+        if (newSessionCwd && sessionIdRef.current) {
+          onPendingNewSessionEvent(newSessionCwd, {
+            type: "POST_START_FAIL",
+            sessionId: sessionIdRef.current,
+            error: typeof event.errorMessage === "string" ? event.errorMessage : "扩展初始化失败",
+          });
+        }
+        break;
       case "auto_retry_end":
         setRetryInfo(null);
         break;
@@ -2173,7 +2257,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
     }
-  }, [addNotice, cancelEventStreamGrace, clearAskQuestionnaire, consumeShadowEntry, enqueueStreamDelta, enterMainRun, flushStreamDeltas, handleExtensionUiRequest, isNew, loadCompactedSession, loadSession, onSessionListRefresh, reconcileAgentState, refreshContextUsage, resetStreamDeltas, scheduleContextRefresh, scheduleEventStreamClose]);
+  }, [addNotice, cancelEventStreamGrace, clearAskQuestionnaire, consumeShadowEntry, enqueueStreamDelta, enterMainRun, flushStreamDeltas, handleExtensionUiRequest, isNew, loadCompactedSession, loadSession, newSessionCwd, onPendingNewSessionEvent, onSessionListRefresh, reconcileAgentState, refreshContextUsage, resetStreamDeltas, scheduleContextRefresh, scheduleEventStreamClose]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
@@ -2848,24 +2932,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           void connectEvents(session.id);
         }
       });
-    } else if (pendingControlKind === "materializing" || pendingControlKind === "initializing" || pendingControlKind === "recovering") {
+    } else if (pendingSessionView.resumingInitialization) {
       // 重新挂载后接管已有 runtime，先连接 SSE 再完成初始化，不创建第二个会话。
       void ensureNewSession().catch((error: unknown) => {
         if (isNavigationActive(navigationKey)) addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
       });
-    } else if (materializedNewSessionId) {
-      sessionIdRef.current = materializedNewSessionId;
-      void connectEvents(materializedNewSessionId);
+    } else if (attachSessionId) {
+      // 失败态（例如绑定总超时）也走这里：只接管 SSE 与快照，不自动重跑初始化。
+      sessionIdRef.current = attachSessionId;
+      void connectEvents(attachSessionId);
       const controller = new AbortController();
       runtimeStateRequestRef.current = controller;
-      void fetchRuntimeState(materializedNewSessionId, controller.signal)
+      void fetchRuntimeState(attachSessionId, controller.signal)
         .then((snapshot) => {
-          if (sessionIdRef.current === materializedNewSessionId) applyRuntimeState(snapshot.state);
+          if (sessionIdRef.current === attachSessionId) applyRuntimeState(snapshot.state);
         })
         .catch((error: unknown) => {
           if (!(error instanceof DOMException && error.name === "AbortError")) {
             console.error("恢复待发送会话 runtime 状态失败:", error);
-            if (sessionIdRef.current === materializedNewSessionId) applyRuntimeState(undefined);
+            if (sessionIdRef.current === attachSessionId) applyRuntimeState(undefined);
           }
         });
     }

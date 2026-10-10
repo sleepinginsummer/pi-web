@@ -10,6 +10,7 @@ import { vs } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import ReactMarkdown from "react-markdown";
 import { useTheme } from "@/hooks/useTheme";
+import { useFileWatch } from "@/hooks/useFileWatch";
 import {
   DOCX_PREVIEW_MAX_BYTES,
   getFileExt,
@@ -18,7 +19,7 @@ import {
   isImagePath,
   isVideoPath,
 } from "@/lib/file-types";
-import { encodeFilePathForApi, getFileDirectory, getFileName, getRelativeFilePath } from "@/lib/file-paths";
+import { encodeFilePathForApi, getFileApiUrl, getFileDirectory, getFileName, getRelativeFilePath } from "@/lib/file-paths";
 import { parsePdfPageFragment, resolveLocalFileHref, shouldOpenLocalFileInApp } from "@/lib/file-links";
 import { parseFrontmatter } from "@/lib/frontmatter";
 import { markdownPreviewRehypePlugins, markdownPreviewRemarkPlugins, markdownUrlTransform, normalizeDisplayMath } from "@/lib/markdown";
@@ -212,20 +213,6 @@ function SourceCodeRenderer({ rows, stylesheet, useInlineStyles, wrapLines }: So
   });
 }
 
-function getFileApiUrl(
-  filePath: string,
-  type: "read" | "download" | "meta" | "preview" | "watch",
-  sourceSessionId?: string | null,
-  params: Record<string, string | number | undefined> = {},
-): string {
-  const encoded = encodeFilePathForApi(filePath);
-  const searchParams = new URLSearchParams({ type });
-  if (sourceSessionId) searchParams.set("sessionId", sourceSessionId);
-  for (const [key, value] of Object.entries(params)) {
-    if (value !== undefined) searchParams.set(key, String(value));
-  }
-  return `/api/files/${encoded}?${searchParams.toString()}`;
-}
 
 /**
  * Document URL for the HTML preview iframe. The `/raw/` path segment replaces
@@ -506,84 +493,20 @@ function DiffView({ patch }: { patch: string }) {
 
 function ImageViewer({ filePath, cwd, sourceSessionId, watchEnabled = true }: Props) {
   const { t } = useI18n();
-  const [watching, setWatching] = useState(false);
-  const [bust, setBust] = useState(0);
-  const [size, setSize] = useState<number | null>(null);
   const [naturalSize, setNaturalSize] = useState<{ w: number; h: number } | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const esRef = useRef<EventSource | null>(null);
-  const syncRequestRef = useRef(0);
+  // 解码失败不属于 watch 状态；元数据与解码错误必须在换文件时一起清掉。
+  const [imageLoadError, setImageLoadError] = useState<string | null>(null);
+  const resetMediaState = useCallback(() => {
+    setNaturalSize(null);
+    setImageLoadError(null);
+  }, []);
+  // 连接生命周期、版本号、尺寸与错误统一由 useFileWatch 管理（含连接额度与可见性门控）。
+  const { watching, bust, size, error } = useFileWatch({ filePath, sourceSessionId, enabled: watchEnabled, onReset: resetMediaState });
+  const displayError = error ?? imageLoadError;
 
   const ext = getFileName(filePath).toLowerCase().split(".").pop() ?? "";
 
-  useEffect(() => {
-    setBust(0);
-    setSize(null);
-    setNaturalSize(null);
-    setError(null);
-    setWatching(false);
-  }, [filePath, sourceSessionId]);
 
-  useEffect(() => {
-    setWatching(false);
-
-    if (esRef.current) {
-      esRef.current.close();
-      esRef.current = null;
-    }
-
-    if (!watchEnabled) return;
-
-    let active = true;
-    const synchronize = () => {
-      const requestId = ++syncRequestRef.current;
-      fetch(getFileApiUrl(filePath, "meta", sourceSessionId))
-        .then((response) => response.json())
-        .then((next: { size?: number; error?: string }) => {
-          if (!active || requestId !== syncRequestRef.current) return;
-          if (next.error) {
-            setError(next.error);
-            return;
-          }
-          if (typeof next.size === "number") setSize(next.size);
-          setNaturalSize(null);
-          setError(null);
-          setBust((value) => value + 1);
-        })
-        .catch((nextError) => {
-          if (active && requestId === syncRequestRef.current) setError(String(nextError));
-        });
-    };
-
-    const es = new EventSource(getFileApiUrl(filePath, "watch", sourceSessionId));
-    esRef.current = es;
-
-    es.addEventListener("connected", () => {
-      setWatching(true);
-      synchronize();
-    });
-    es.addEventListener("change", (e) => {
-      syncRequestRef.current += 1;
-      try {
-        const d = JSON.parse((e as MessageEvent).data) as { size?: number };
-        if (typeof d.size === "number") setSize(d.size);
-      } catch { /* ignore */ }
-      setNaturalSize(null);
-      setError(null);
-      setBust((b) => b + 1);
-    });
-    const markDisconnected = () => {
-      setWatching(false);
-    };
-    es.addEventListener("error", markDisconnected);
-    es.onerror = markDisconnected;
-
-    return () => {
-      active = false;
-      es.close();
-      if (esRef.current === es) esRef.current = null;
-    };
-  }, [filePath, sourceSessionId, watchEnabled]);
 
   const src = getFileApiUrl(filePath, "read", sourceSessionId, bust ? { v: bust } : undefined);
 
@@ -643,8 +566,8 @@ function ImageViewer({ filePath, cwd, sourceSessionId, watchEnabled = true }: Pr
           backgroundPosition: "0 0, 0 8px, 8px -8px, -8px 0px",
         }}
       >
-        {error ? (
-          <div style={{ color: "#f87171", fontSize: 13 }}>{error}</div>
+        {displayError ? (
+          <div style={{ color: "#f87171", fontSize: 13 }}>{displayError}</div>
         ) : (
           // eslint-disable-next-line @next/next/no-img-element
           <img
@@ -654,7 +577,7 @@ function ImageViewer({ filePath, cwd, sourceSessionId, watchEnabled = true }: Pr
               const img = e.currentTarget;
               setNaturalSize({ w: img.naturalWidth, h: img.naturalHeight });
             }}
-            onError={() => setError("Failed to load image")}
+            onError={() => setImageLoadError("Failed to load image")}
             style={{
               maxWidth: "100%",
               maxHeight: "100%",
@@ -678,84 +601,19 @@ function formatDuration(seconds: number): string {
 
 function AudioViewer({ filePath, cwd, sourceSessionId, watchEnabled = true }: Props) {
   const { t } = useI18n();
-  const [watching, setWatching] = useState(false);
-  const [bust, setBust] = useState(0);
-  const [size, setSize] = useState<number | null>(null);
   const [duration, setDuration] = useState<number | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const esRef = useRef<EventSource | null>(null);
-  const syncRequestRef = useRef(0);
+  // 解码失败不属于 watch 状态；时长与解码错误必须在换文件时一起清掉。
+  const [mediaLoadError, setMediaLoadError] = useState<string | null>(null);
+  const resetMediaState = useCallback(() => {
+    setDuration(null);
+    setMediaLoadError(null);
+  }, []);
+  // 连接生命周期、版本号、尺寸与错误统一由 useFileWatch 管理（含连接额度与可见性门控）。
+  const { watching, bust, size, error } = useFileWatch({ filePath, sourceSessionId, enabled: watchEnabled, onReset: resetMediaState });
+  const displayError = error ?? mediaLoadError;
 
   const ext = getFileName(filePath).toLowerCase().split(".").pop() ?? "";
 
-  useEffect(() => {
-    setBust(0);
-    setSize(null);
-    setDuration(null);
-    setError(null);
-    setWatching(false);
-  }, [filePath, sourceSessionId]);
-
-  useEffect(() => {
-    setWatching(false);
-
-    if (esRef.current) {
-      esRef.current.close();
-      esRef.current = null;
-    }
-
-    if (!watchEnabled) return;
-
-    let active = true;
-    const synchronize = () => {
-      const requestId = ++syncRequestRef.current;
-      fetch(getFileApiUrl(filePath, "meta", sourceSessionId))
-        .then((response) => response.json())
-        .then((next: { size?: number; error?: string }) => {
-          if (!active || requestId !== syncRequestRef.current) return;
-          if (next.error) {
-            setError(next.error);
-            return;
-          }
-          if (typeof next.size === "number") setSize(next.size);
-          setDuration(null);
-          setError(null);
-          setBust((value) => value + 1);
-        })
-        .catch((nextError) => {
-          if (active && requestId === syncRequestRef.current) setError(String(nextError));
-        });
-    };
-
-    const es = new EventSource(getFileApiUrl(filePath, "watch", sourceSessionId));
-    esRef.current = es;
-
-    es.addEventListener("connected", () => {
-      setWatching(true);
-      synchronize();
-    });
-    es.addEventListener("change", (e) => {
-      syncRequestRef.current += 1;
-      try {
-        const d = JSON.parse((e as MessageEvent).data) as { size?: number };
-        if (typeof d.size === "number") setSize(d.size);
-      } catch { /* ignore */ }
-      setDuration(null);
-      setError(null);
-      setBust((b) => b + 1);
-    });
-    const markDisconnected = () => {
-      setWatching(false);
-    };
-    es.addEventListener("error", markDisconnected);
-    es.onerror = markDisconnected;
-
-    return () => {
-      active = false;
-      es.close();
-      if (esRef.current === es) esRef.current = null;
-    };
-  }, [filePath, sourceSessionId, watchEnabled]);
 
   const src = getFileApiUrl(filePath, "read", sourceSessionId, bust ? { v: bust } : undefined);
 
@@ -809,9 +667,9 @@ function AudioViewer({ filePath, cwd, sourceSessionId, watchEnabled = true }: Pr
         }}
       >
         <div style={{ width: "min(680px, 100%)" }}>
-          {error && (
+          {displayError && (
             <div style={{ color: "#f87171", fontSize: 13, marginBottom: 12, textAlign: "center" }}>
-              {error}
+              {displayError}
             </div>
           )}
           <audio
@@ -820,7 +678,7 @@ function AudioViewer({ filePath, cwd, sourceSessionId, watchEnabled = true }: Pr
             preload="metadata"
             src={src}
             onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
-            onError={() => setError("Failed to load audio")}
+            onError={() => setMediaLoadError("Failed to load audio")}
             style={{ width: "100%" }}
           />
         </div>
@@ -831,84 +689,20 @@ function AudioViewer({ filePath, cwd, sourceSessionId, watchEnabled = true }: Pr
 
 function VideoViewer({ filePath, cwd, sourceSessionId, watchEnabled = true }: Props) {
   const { t } = useI18n();
-  const [watching, setWatching] = useState(false);
-  const [bust, setBust] = useState(0);
-  const [size, setSize] = useState<number | null>(null);
   const [duration, setDuration] = useState<number | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const esRef = useRef<EventSource | null>(null);
-  const syncRequestRef = useRef(0);
+  // 解码失败不属于 watch 状态；时长与解码错误必须在换文件时一起清掉。
+  const [mediaLoadError, setMediaLoadError] = useState<string | null>(null);
+  const resetMediaState = useCallback(() => {
+    setDuration(null);
+    setMediaLoadError(null);
+  }, []);
+  // 连接生命周期、版本号、尺寸与错误统一由 useFileWatch 管理（含连接额度与可见性门控）。
+  const { watching, bust, size, error } = useFileWatch({ filePath, sourceSessionId, enabled: watchEnabled, onReset: resetMediaState });
+  const displayError = error ?? mediaLoadError;
 
   const ext = getFileName(filePath).toLowerCase().split(".").pop() ?? "";
 
-  useEffect(() => {
-    setBust(0);
-    setSize(null);
-    setDuration(null);
-    setError(null);
-    setWatching(false);
-  }, [filePath, sourceSessionId]);
 
-  useEffect(() => {
-    setWatching(false);
-
-    if (esRef.current) {
-      esRef.current.close();
-      esRef.current = null;
-    }
-
-    if (!watchEnabled) return;
-
-    let active = true;
-    const synchronize = () => {
-      const requestId = ++syncRequestRef.current;
-      fetch(getFileApiUrl(filePath, "meta", sourceSessionId))
-        .then((response) => response.json())
-        .then((next: { size?: number; error?: string }) => {
-          if (!active || requestId !== syncRequestRef.current) return;
-          if (next.error) {
-            setError(next.error);
-            return;
-          }
-          if (typeof next.size === "number") setSize(next.size);
-          setDuration(null);
-          setError(null);
-          setBust((value) => value + 1);
-        })
-        .catch((nextError) => {
-          if (active && requestId === syncRequestRef.current) setError(String(nextError));
-        });
-    };
-
-    const es = new EventSource(getFileApiUrl(filePath, "watch", sourceSessionId));
-    esRef.current = es;
-
-    es.addEventListener("connected", () => {
-      setWatching(true);
-      synchronize();
-    });
-    es.addEventListener("change", (e) => {
-      syncRequestRef.current += 1;
-      try {
-        const d = JSON.parse((e as MessageEvent).data) as { size?: number };
-        if (typeof d.size === "number") setSize(d.size);
-      } catch { /* ignore */ }
-      setDuration(null);
-      setError(null);
-      setBust((b) => b + 1);
-    });
-    const markDisconnected = () => {
-      setWatching(false);
-    };
-    es.addEventListener("error", markDisconnected);
-    es.onerror = markDisconnected;
-
-    return () => {
-      active = false;
-      es.close();
-      if (esRef.current === es) esRef.current = null;
-    };
-  }, [filePath, sourceSessionId, watchEnabled]);
 
   const src = getFileApiUrl(filePath, "read", sourceSessionId, bust ? { v: bust } : undefined);
 
@@ -963,9 +757,9 @@ function VideoViewer({ filePath, cwd, sourceSessionId, watchEnabled = true }: Pr
         }}
       >
         <div style={{ width: "min(960px, 100%)", height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: 0 }}>
-          {error && (
+          {displayError && (
             <div style={{ color: "#f87171", fontSize: 13, marginBottom: 12, textAlign: "center" }}>
-              {error}
+              {displayError}
             </div>
           )}
           <video
@@ -975,7 +769,7 @@ function VideoViewer({ filePath, cwd, sourceSessionId, watchEnabled = true }: Pr
             preload="metadata"
             src={src}
             onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
-            onError={() => setError("Failed to load video")}
+            onError={() => setMediaLoadError("Failed to load video")}
             style={{ maxWidth: "100%", maxHeight: "100%" }}
           />
         </div>
@@ -986,119 +780,21 @@ function VideoViewer({ filePath, cwd, sourceSessionId, watchEnabled = true }: Pr
 
 function DocumentViewer({ filePath, cwd, sourceSessionId, initialPage, watchEnabled = true }: Props) {
   const { t } = useI18n();
-  const [watching, setWatching] = useState(false);
-  const [bust, setBust] = useState(0);
-  const [size, setSize] = useState<number | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const esRef = useRef<EventSource | null>(null);
-  const syncRequestRef = useRef(0);
-
   const ext = getFileExt(filePath);
   const isPdf = ext === "pdf";
+  // 连接生命周期、版本号、尺寸与错误统一由 useFileWatch 管理（含连接额度与可见性门控）。
+  // DOCX 超出预览上限时按错误展示，校验交给 hook 在读到尺寸时统一执行。
+  const validateSize = useCallback(
+    (next: number) => (!isPdf && next > DOCX_PREVIEW_MAX_BYTES ? "DOCX too large for preview (>10MB)" : null),
+    [isPdf],
+  );
+  const { watching, bust, size, error } = useFileWatch({ filePath, sourceSessionId, enabled: watchEnabled, validateSize });
   const pageFragment = isPdf && initialPage && initialPage > 0 ? `#page=${initialPage}` : "";
   const previewUrl = isPdf
     ? `${getFileApiUrl(filePath, "read", sourceSessionId, bust ? { v: bust } : undefined)}${pageFragment}`
     : getFileApiUrl(filePath, "preview", sourceSessionId, bust ? { v: bust } : undefined);
 
-  useEffect(() => {
-    setBust(0);
-    setSize(null);
-    setError(null);
-    setWatching(false);
 
-    let active = true;
-    const requestId = ++syncRequestRef.current;
-    fetch(getFileApiUrl(filePath, "meta", sourceSessionId))
-      .then((r) => r.json())
-      .then((d: { size?: number; error?: string }) => {
-        if (!active || requestId !== syncRequestRef.current) return;
-        if (d.error) setError(d.error);
-        if (typeof d.size === "number") {
-          setSize(d.size);
-          if (!isPdf && d.size > DOCX_PREVIEW_MAX_BYTES) {
-            setError("DOCX too large for preview (>10MB)");
-          }
-        }
-      })
-      .catch((nextError) => {
-        if (active && requestId === syncRequestRef.current) setError(String(nextError));
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [filePath, isPdf, sourceSessionId]);
-
-  useEffect(() => {
-    setWatching(false);
-
-    if (esRef.current) {
-      esRef.current.close();
-      esRef.current = null;
-    }
-
-    if (!watchEnabled) return;
-
-    let active = true;
-    const synchronize = () => {
-      const requestId = ++syncRequestRef.current;
-      fetch(getFileApiUrl(filePath, "meta", sourceSessionId))
-        .then((r) => r.json())
-        .then((d: { size?: number; error?: string }) => {
-          if (!active || requestId !== syncRequestRef.current) return;
-          if (d.error) {
-            setError(d.error);
-            return;
-          }
-          if (typeof d.size === "number") {
-            setSize(d.size);
-            if (!isPdf && d.size > DOCX_PREVIEW_MAX_BYTES) {
-              setError("DOCX too large for preview (>10MB)");
-              return;
-            }
-          }
-          setError(null);
-          setBust((value) => value + 1);
-        })
-        .catch((nextError) => {
-          if (active && requestId === syncRequestRef.current) setError(String(nextError));
-        });
-    };
-
-    const es = new EventSource(getFileApiUrl(filePath, "watch", sourceSessionId));
-    esRef.current = es;
-
-    es.addEventListener("connected", () => {
-      setWatching(true);
-      synchronize();
-    });
-    es.addEventListener("change", (e) => {
-      syncRequestRef.current += 1;
-      try {
-        const d = JSON.parse((e as MessageEvent).data) as { size?: number };
-        if (typeof d.size === "number") {
-          setSize(d.size);
-          if (!isPdf && d.size > DOCX_PREVIEW_MAX_BYTES) {
-            setError("DOCX too large for preview (>10MB)");
-            return;
-          }
-        }
-      } catch { /* ignore */ }
-      setError(null);
-      setBust((b) => b + 1);
-    });
-    const markDisconnected = () => {
-      setWatching(false);
-    };
-    es.addEventListener("error", markDisconnected);
-    es.onerror = markDisconnected;
-
-    return () => {
-      active = false;
-      es.close();
-      if (esRef.current === es) esRef.current = null;
-    };
-  }, [filePath, isPdf, sourceSessionId, watchEnabled]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
@@ -1228,9 +924,6 @@ function TextFileViewer({
   const initialScrollLeft = initialState?.scrollLeft ?? 0;
   const [displayMode, setDisplayMode] = useState<DisplayMode>(requestedInitialDisplayMode);
   const [wrapLines, setWrapLines] = useState(initialWrapLines);
-  const [watching, setWatching] = useState(false);
-  const [htmlPreviewRevision, setHtmlPreviewRevision] = useState(0);
-  const esRef = useRef<EventSource | null>(null);
   const contentRequestRef = useRef(0);
   const gitDiffRequestRef = useRef(0);
   const contentRef = useRef<HTMLDivElement | null>(null);
@@ -1347,8 +1040,6 @@ function TextFileViewer({
     setData(null);
     setGitDiff(null);
     setGitDiffResolved(false);
-    setHtmlPreviewRevision(0);
-    setWatching(false);
 
     fetchContent(filePath).finally(() => {
       if (active) setLoading(false);
@@ -1359,49 +1050,17 @@ function TextFileViewer({
     };
   }, [filePath, fetchContent, sourceSessionId]);
 
+  const { watching, bust } = useFileWatch({ filePath, sourceSessionId, enabled: watchEnabled });
+
+  // 版本号变化（连接建立或文件变更）时重新读取内容与 diff；
+  // HTML 预览用同一个版本号刷新 iframe，不再需要单独的 revision 状态。
+  const loadedBustRef = useRef(bust);
   useEffect(() => {
-    setWatching(false);
-
-    if (esRef.current) {
-      esRef.current.close();
-      esRef.current = null;
-    }
-
-    if (!watchEnabled) return;
-
-    const synchronize = () => {
-      void fetchContent(filePath);
-      void fetchGitDiff(filePath);
-    };
-
-    const es = new EventSource(getFileApiUrl(filePath, "watch", sourceSessionId));
-    esRef.current = es;
-
-    es.addEventListener("connected", () => {
-      setWatching(true);
-      // The server emits connected only after its watcher exists. Reading now
-      // closes the gap between the last snapshot and live events.
-      synchronize();
-    });
-
-    es.addEventListener("change", () => {
-      // The preview is a document request of its own, so the iframe has to be
-      // pointed at the new revision, not just the source text re-read.
-      setHtmlPreviewRevision((value) => value + 1);
-      synchronize();
-    });
-
-    const markDisconnected = () => {
-      setWatching(false);
-    };
-    es.addEventListener("error", markDisconnected);
-    es.onerror = markDisconnected;
-
-    return () => {
-      es.close();
-      if (esRef.current === es) esRef.current = null;
-    };
-  }, [filePath, fetchContent, fetchGitDiff, sourceSessionId, watchEnabled]);
+    if (bust === loadedBustRef.current) return;
+    loadedBustRef.current = bust;
+    void fetchContent(filePath);
+    void fetchGitDiff(filePath);
+  }, [bust, fetchContent, fetchGitDiff, filePath]);
 
   useEffect(() => {
     void fetchGitDiff(filePath);
@@ -1413,7 +1072,7 @@ function TextFileViewer({
   // The HTML preview streams the file into an iframe, so a truncated source read
   // never limits it; the markdown preview still renders the loaded text.
   const hasPreview = isHtml || (isMarkdown && !data?.truncated);
-  const htmlPreviewSrc = getRawDocumentUrl(filePath, sourceSessionId, htmlPreviewRevision);
+  const htmlPreviewSrc = getRawDocumentUrl(filePath, sourceSessionId, bust);
 
   useEffect(() => {
     // HTML gets the same rendered-first treatment as markdown: a generated page

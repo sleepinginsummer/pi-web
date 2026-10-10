@@ -28,7 +28,7 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import { useScrollbarVisibility } from "@/hooks/useScrollbarVisibility";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { AppUpdateResponse } from "@/lib/api-types";
-import type { PendingNewSessionControl, PendingNewSessionEvent } from "@/lib/pending-new-session";
+import { selectPendingNewSession, type PendingNewSessionControl, type PendingNewSessionEvent } from "@/lib/pending-new-session";
 import type { ShadowSessionControl } from "@/lib/shadow-session-control";
 import type { SessionListRefreshRequest } from "@/lib/session-list-refresh-coordinator";
 import { findChatScrollAnchor, type ChatReadingPosition } from "@/lib/chat-scroll-position";
@@ -293,10 +293,11 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
     onNotificationToggle, dismissNotificationPrompt, notifySession,
   } = notificationController;
   const isMobile = useIsMobile();
-  const materializedNewSessionId = pendingNewSessionControl.kind === "materialized"
-    || pendingNewSessionControl.kind === "initialization-failed"
-    ? pendingNewSessionControl.sessionId
-    : null;
+  // 与 useAgentSession 共用同一个纯选择器，避免 UI 自己解释状态机。
+  const pendingNewSessionView = selectPendingNewSession(pendingNewSessionControl);
+  // 控制类 UI（顶部 Shadow 开关）的授权身份；与"挂载时接管哪个 runtime"是两件事，
+  // 后者由 useAgentSession 用 transportSessionId 处理。
+  const controlSessionId = pendingNewSessionView.runtimeSessionId;
   const initialScrollPositionRef = useRef(searchTarget ? null : initialScrollPosition ?? null);
   const [pendingScrollRestore, setPendingScrollRestore] = useState<Extract<ChatReadingPosition, { atBottom: false }> | null>(() => {
     const position = initialScrollPositionRef.current;
@@ -352,13 +353,13 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
     if (!scopeKey) return;
     onShadowMindControlChange?.({
       scopeKey,
-      sessionId: session?.id ?? materializedNewSessionId,
+      sessionId: session?.id ?? controlSessionId,
       enabled: shadowMindEnabled,
       pending: shadowMindTogglePending,
       available: shadowMindAvailable,
       onToggle: handleShadowMindToggle,
     });
-  }, [handleShadowMindToggle, materializedNewSessionId, newSessionCwd, onShadowMindControlChange, session, shadowMindAvailable, shadowMindEnabled, shadowMindTogglePending]);
+  }, [controlSessionId, handleShadowMindToggle, newSessionCwd, onShadowMindControlChange, session, shadowMindAvailable, shadowMindEnabled, shadowMindTogglePending]);
   const notificationTitle = compactNotificationText(
     session?.name || session?.firstMessage || t("i18n.newSession"),
     48,
@@ -935,6 +936,8 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
       onQueuedSubmit={agentRunning ? handleQueuedSubmit : undefined}
       isStreaming={sessionBusy}
       creationSettingsLocked={creationSettingsLocked}
+      // runtime 已就绪但扩展仍在绑定：显式等待，不能让发送变成静默排队。
+      extensionsInitializing={pendingNewSessionView.extensionsPending}
       modelState={modelState}
       modelActions={modelActions}
       onCompact={session || isNew ? handleCompact : undefined}

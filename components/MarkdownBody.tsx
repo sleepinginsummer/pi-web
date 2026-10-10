@@ -1,14 +1,41 @@
 "use client";
 
-import { Children, cloneElement, createContext, isValidElement, useContext, useMemo, type ComponentProps, type MouseEvent, type ReactNode } from "react";
-import ReactMarkdown, { type Components, type ExtraProps } from "react-markdown";
+import { Children, cloneElement, createContext, isValidElement, memo, useCallback, useContext, useMemo, useRef, type ComponentProps, type MouseEvent, type ReactNode } from "react";
+import ReactMarkdown, { type Components, type ExtraProps, type Options as ReactMarkdownOptions } from "react-markdown";
 import { parsePdfPageFragment, resolveLocalFileHref, shouldOpenLocalFileInApp } from "@/lib/file-links";
 import { encodeFilePathForApi } from "@/lib/file-paths";
 import { markdownRehypePlugins, markdownRemarkPlugins, markdownUrlTransform, markdownUserRemarkPlugins, normalizeDisplayMath } from "@/lib/markdown";
+import { splitStreamingMarkdown } from "@/lib/streaming-markdown-blocks";
 import { ImagePreview } from "./ImagePreview";
 import { MermaidBlock, CodeBlock } from "./MermaidBlock";
 
 const MarkdownLinkContext = createContext(false);
+
+type MarkdownRenderConfig = Pick<ReactMarkdownOptions, "remarkPlugins" | "rehypePlugins" | "urlTransform" | "components">;
+
+/** 代码块渲染：已解析的围栏与流式中未闭合的围栏共用同一分支，避免样式与行为分叉。 */
+function renderCodeBlock(raw: string, lang: string, isStreaming?: boolean) {
+  const code = raw.replace(/\n$/, "");
+  if (lang === "mermaid") return <MermaidBlock code={code} isStreaming={isStreaming} defaultPreview />;
+  return <CodeBlock code={code} lang={lang} isStreaming={isStreaming} />;
+}
+
+/**
+ * 流式前缀块。`source` 与 `config` 都按值稳定（同一段文本、父组件 memo 化的配置），
+ * 块内容不再变化时 memo 会直接跳过，于是每帧只需要重新解析仍在增长的尾部。
+ */
+const StreamingMarkdownBlock = memo(function StreamingMarkdownBlock({ source, config }: { source: string; config: MarkdownRenderConfig }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={config.remarkPlugins}
+      rehypePlugins={config.rehypePlugins}
+      urlTransform={config.urlTransform}
+      components={config.components}
+    >
+      {source}
+    </ReactMarkdown>
+  );
+});
 
 interface MarkdownBodyProps {
   children: string;
@@ -68,24 +95,21 @@ function renderListItems(children: ReactNode, ordered: boolean, start = 1) {
 
 export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile, keepLineBreaks }: MarkdownBodyProps) {
   const normalizedMarkdown = useMemo(() => normalizeDisplayMath(children), [children]);
+  // 回调和配置都通过 ref 读取，让 components 只随 cwd / 流式状态 / 是否有打开文件
+  // 能力变化，块级 memo 才能在上游回调换身份时依然命中。
+  const onOpenFileRef = useRef(onOpenFile);
+  onOpenFileRef.current = onOpenFile;
+  const hasOnOpenFile = Boolean(onOpenFile);
+  const openFile = useCallback((filePath: string, page?: number) => {
+    onOpenFileRef.current?.(filePath, page);
+  }, []);
   // Stable renderer identities keep stateful blocks mounted across message hover updates.
   const components = useMemo<Components>(() => ({
     code({ className, children, ...props }) {
       const lang = className?.replace("language-", "").toLowerCase() ?? "";
       const raw = String(children);
       const isBlock = className?.includes("language-") || raw.includes("\n");
-      if (isBlock) {
-        if (lang === "mermaid") {
-          return (
-            <MermaidBlock
-              code={raw.replace(/\n$/, "")}
-              isStreaming={isStreaming}
-              defaultPreview
-            />
-          );
-        }
-        return <CodeBlock code={raw.replace(/\n$/, "")} lang={lang} isStreaming={isStreaming} />;
-      }
+      if (isBlock) return renderCodeBlock(raw, lang, isStreaming);
       return (
         <code
           className="markdown-inline-code"
@@ -110,9 +134,8 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
     a({ href, children, ...props }) {
       // `node` is react-markdown metadata, not a DOM attribute.
       delete props.node;
-      const filePath = onOpenFile ? resolveLocalFileHref(href, cwd) : null;
-      const openFile = onOpenFile;
-      if (!filePath || !openFile) {
+      const filePath = hasOnOpenFile ? resolveLocalFileHref(href, cwd) : null;
+      if (!filePath || !hasOnOpenFile) {
         return (
           <MarkdownLinkContext.Provider value={true}>
             <a href={href} {...props} target="_blank" rel="noopener noreferrer">
@@ -148,18 +171,47 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
         </div>
       );
     },
-  }), [cwd, isStreaming, onOpenFile]);
+  }), [cwd, hasOnOpenFile, isStreaming, openFile]);
+
+  const renderConfig = useMemo<MarkdownRenderConfig>(() => ({
+    remarkPlugins: keepLineBreaks ? markdownUserRemarkPlugins : markdownRemarkPlugins,
+    rehypePlugins: markdownRehypePlugins,
+    urlTransform: hasOnOpenFile ? markdownUrlTransform : undefined,
+    components,
+  }), [components, hasOnOpenFile, keepLineBreaks]);
+  // 流式期间把累积文本切成可缓存前缀块，每帧只重新解析仍在增长的尾部。
+  const streamingSplit = useMemo(
+    () => (isStreaming ? splitStreamingMarkdown(normalizedMarkdown) : null),
+    [isStreaming, normalizedMarkdown],
+  );
 
   return (
     <div className={["markdown-body", className].filter(Boolean).join(" ")}>
-      <ReactMarkdown
-        remarkPlugins={keepLineBreaks ? markdownUserRemarkPlugins : markdownRemarkPlugins}
-        rehypePlugins={markdownRehypePlugins}
-        urlTransform={onOpenFile ? markdownUrlTransform : undefined}
-        components={components}
-      >
-        {normalizedMarkdown}
-      </ReactMarkdown>
+      {streamingSplit ? (
+        <>
+          {streamingSplit.blocks.map((block, index) => (
+            <StreamingMarkdownBlock key={index} source={block} config={renderConfig} />
+          ))}
+          {streamingSplit.tail ? (
+            <StreamingMarkdownBlock source={streamingSplit.tail} config={renderConfig} />
+          ) : null}
+          {/* 未闭合的代码围栏按纯文本渲染，闭合后它会成为普通块重新解析。 */}
+          {streamingSplit.openFence ? renderCodeBlock(
+            streamingSplit.openFence.code,
+            streamingSplit.openFence.info.trim().split(/\s+/)[0]?.toLowerCase() ?? "",
+            isStreaming,
+          ) : null}
+        </>
+      ) : (
+        <ReactMarkdown
+          remarkPlugins={renderConfig.remarkPlugins}
+          rehypePlugins={renderConfig.rehypePlugins}
+          urlTransform={renderConfig.urlTransform}
+          components={renderConfig.components}
+        >
+          {normalizedMarkdown}
+        </ReactMarkdown>
+      )}
     </div>
   );
 }

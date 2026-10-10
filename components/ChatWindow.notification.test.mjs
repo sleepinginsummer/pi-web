@@ -10,7 +10,7 @@ const globalAttentionHookSource = await readFile(new URL("../hooks/useGlobalAtte
 test("attention notifications have one AppShell-level source", () => {
   assert.doesNotMatch(source, /useAttentionNotifications/);
   assert.match(appShellSource, /useGlobalAttentionNotifications\(\{/);
-  assert.match(globalAttentionHookSource, /new EventSource\("\/api\/agent\/attention\/events"\)/);
+  assert.match(globalAttentionHookSource, /createStreamSource\("\/api\/agent\/attention\/events"\)/);
   assert.equal((appShellSource.match(/useGlobalAttentionNotifications\(\{/g) ?? []).length, 1);
 });
 

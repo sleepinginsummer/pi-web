@@ -11,6 +11,7 @@ import {
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
 import { generateSessionTitle } from "./session-title";
+import { writeSessionInfoThroughLiveSession } from "./session-info-writer";
 import {
   SessionTitleTaskCoordinator,
   type SessionTitleTaskRegistry,
@@ -82,9 +83,19 @@ async function runTitleGeneration(task: SessionTitleTaskRunRequest): Promise<str
   const { session } = await createAgentSessionFromServices({ services, sessionManager });
   try {
     const result = await generateSessionTitle(session);
-    // 删除/恢复可能在模型请求期间 rename 文件。写入前重新打开任务的最新路径，
+    // 删除/恢复可能在模型请求期间 rename 文件。写入前重新解析最新目标，
     // 并核对稳定 session id。名称也必须仍与任务开始时一致：期间发生的 PATCH/RPC
     // 手动改名优先，异步模型结果不能覆盖用户更新。
+    const liveWrite = writeSessionInfoThroughLiveSession(
+      task.target.filePath,
+      result.title,
+      { sessionId: task.sessionId, requireName: initialName ?? null },
+    );
+    // 有存活 wrapper 但基线不匹配：说明文件已被外部改写或用户改名，放弃写入。
+    // 这种情况不能退回文件级写入，否则会再次造成内存与磁盘不一致。
+    if (liveWrite === "stale") return null;
+    if (liveWrite === "written") return result.title;
+
     let writer: SessionManager;
     try {
       writer = SessionManager.open(task.target.filePath);

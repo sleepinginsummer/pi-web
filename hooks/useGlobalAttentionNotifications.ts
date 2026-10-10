@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import { createStreamSource } from "@/lib/sse-broker-client";
 import type { AttentionEvent } from "@/lib/attention-events";
 
 type NotifySession = (title: string, body: string, sessionId?: string | null) => Promise<void>;
@@ -36,7 +37,8 @@ export function useGlobalAttentionNotifications({
   notifySessionRef.current = notifySession;
 
   useEffect(() => {
-    const eventSource = new EventSource("/api/agent/attention/events");
+    // 长连接经由同源 SharedWorker broker：连接数与窗口数解耦（不可用时自动直连）。
+    const eventSource = createStreamSource("/api/agent/attention/events");
     eventSource.onmessage = (message) => {
       let event: AttentionEvent;
       try {

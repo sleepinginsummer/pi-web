@@ -4,6 +4,7 @@ import { readSessionBrowseSnapshot, sessionVersionEtag } from "@/lib/session-bro
 import { computeSessionTotalActiveMs } from "@/lib/session-timing";
 import { getRpcSession } from "@/lib/rpc-manager";
 import { readIndexedContextPage, readIndexedSessionDetails } from "@/lib/session-content-index";
+import { sessionExternalWritePayload } from "@/lib/session-external-write";
 
 export async function GET(
   req: Request,
@@ -25,7 +26,11 @@ export async function GET(
     // 浏览与发送使用同一新鲜度边界；运行中的 wrapper 不允许被淘汰。
     if (liveRpc?.isAlive() && liveRpc.diskFreshness() !== "current") {
       if (liveRpc.isRunning() || !liveRpc.evictIfDiskAhead()) {
-        return NextResponse.json({ error: "会话文件正在被外部修改，请等待写入完成后刷新" }, { status: 409 });
+        // 客户端按可恢复冲突处理：重试一次并保留已有消息，不做整窗替换。
+        return NextResponse.json(
+          sessionExternalWritePayload("会话文件正在被外部修改，请等待写入完成后刷新"),
+          { status: 409 },
+        );
       }
     }
     const live = liveRpc?.isAlive() ? await readSessionBrowseSnapshot(id) : null;

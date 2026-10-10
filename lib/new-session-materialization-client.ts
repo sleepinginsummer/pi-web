@@ -8,6 +8,29 @@ import {
   type NewSessionModel,
 } from "./new-session-protocol";
 
+/** 创建/初始化请求的上限：静默排队（例如浏览器连接被占满）不能变成永久等待。 */
+const NEW_SESSION_REQUEST_TIMEOUT_MS = 30_000;
+
+/**
+ * 每个 cwd 的一次创建意图对应一个稳定 operationId。
+ * 请求超时只代表"结果未知"：服务端可能已经建好 runtime，
+ * 因此重试必须复用同一个 id，让服务端交回同一个 runtime 而不是再建一个孤儿会话。
+ */
+const creationOperations = new Map<string, string>();
+
+function creationOperationId(cwd: string): string {
+  const existing = creationOperations.get(cwd);
+  if (existing) return existing;
+  const created = globalThis.crypto?.randomUUID?.() ?? `new-session-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  creationOperations.set(cwd, created);
+  return created;
+}
+
+/** 仅供测试隔离模块级创建意图。 */
+export function resetCreationOperationsForTests(): void {
+  creationOperations.clear();
+}
+
 type NewSessionMaterializationConfig = {
   cwd: string;
   toolNames?: string[];
@@ -33,21 +56,32 @@ function materializationKey(request: NewSessionMaterializationRequest): string {
 async function requestNewSessionMaterialization(
   request: NewSessionMaterializationRequest,
 ): Promise<NewSessionMaterializationResult | NewSessionRuntimeCreated> {
-  const response = await fetch("/api/agent/new", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      cwd: request.cwd,
-      operation: request.operation,
-      ...(request.operation === "finalize-existing" ? { sessionId: request.sessionId } : {}),
-      type: "ensure_session",
-      ...(request.toolNames !== undefined ? { toolNames: request.toolNames } : {}),
-      ...(!request.shadowMindEnabled ? { shadowMindEnabled: false } : {}),
-      ...(request.model ? { provider: request.model.provider, modelId: request.model.modelId } : {}),
-      ...(request.thinkingLevel ? { thinkingLevel: request.thinkingLevel } : {}),
-      ...(request.fastEnabled ? { fastEnabled: true } : {}),
-    }),
-  });
+  // 请求带上限：静默排队（例如浏览器连接被占满）不能变成永久等待。
+  let response: Response;
+  try {
+    response = await fetch("/api/agent/new", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: AbortSignal.timeout(NEW_SESSION_REQUEST_TIMEOUT_MS),
+      body: JSON.stringify({
+        cwd: request.cwd,
+        operation: request.operation,
+        ...(request.operation === "finalize-existing" ? { sessionId: request.sessionId } : {}),
+        ...(request.operation === "create" ? { operationId: creationOperationId(request.cwd) } : {}),
+        type: "ensure_session",
+        ...(request.toolNames !== undefined ? { toolNames: request.toolNames } : {}),
+        ...(!request.shadowMindEnabled ? { shadowMindEnabled: false } : {}),
+        ...(request.model ? { provider: request.model.provider, modelId: request.model.modelId } : {}),
+        ...(request.thinkingLevel ? { thinkingLevel: request.thinkingLevel } : {}),
+        ...(request.fastEnabled ? { fastEnabled: true } : {}),
+      }),
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "TimeoutError") {
+      throw new Error(`新会话请求超过 ${NEW_SESSION_REQUEST_TIMEOUT_MS / 1000}s 未响应，请重试`);
+    }
+    throw error;
+  }
   const payload: unknown = await response.json();
   if (!isNewSessionMaterializationResult(payload) && !isNewSessionRuntimeCreated(payload)) {
     throw new Error(`新会话创建接口返回无效数据（HTTP ${response.status}）`);
@@ -102,6 +136,8 @@ export async function materializeNewSession(
 /** AppShell 已提交 terminal control 后释放该 cwd 的共享结果。 */
 export function releaseNewSessionMaterialization(cwd: string): void {
   materializations.delete(`create:${cwd}`);
+  // 终态（会话已接管或显式放弃）后才允许下一次创建意图使用新的 operationId。
+  creationOperations.delete(cwd);
   for (const key of materializations.keys()) {
     if (key.startsWith(`finalize:${cwd}:`)) materializations.delete(key);
   }

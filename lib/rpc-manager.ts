@@ -12,7 +12,7 @@ import { invalidateModelsCache, updateCachedDefaultModel } from "./models-cache"
 import { PendingPromptTracker } from "./pending-prompt-tracker";
 import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
 import { cacheSessionPath, getLatestModelChange, invalidateSessionListCache, resolveSessionPath } from "./session-reader";
-import { SessionDiskInspector, type SessionDiskFreshness } from "./session-disk-freshness";
+import { SessionDiskInspector, type SessionDiskFreshness, type SessionSelfAuthoredRewrite } from "./session-disk-freshness";
 import { isolateToolResultPersistence } from "./session-message-persistence";
 import { canRunWithExternalSessionChange } from "./session-write-policy";
 import { restoreShadowSessionSettingSafely, ShadowSessionSetting } from "./shadow-session-setting";
@@ -27,6 +27,8 @@ import {
 import { getProjectTrustStatus, projectTrustReloadOptions } from "./project-trust";
 import { persistExplicitStartupPreferences } from "./startup-preferences";
 import { hasActiveSessionLivenessProvider } from "./session-liveness";
+import { registerLiveSessionInfoWriter } from "./session-info-writer";
+import { sessionPathKey } from "./session-path";
 import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
 import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./pi-types";
 import type {
@@ -185,6 +187,25 @@ export function resolveSessionIdleTimeoutMs(
 }
 
 const SESSION_IDLE_TIMEOUT_MS = resolveSessionIdleTimeoutMs();
+
+const DEFAULT_EXTENSION_BINDING_WAIT_TIMEOUT_MS = 20_000;
+
+/**
+ * 解析扩展绑定的等待上限。绑定慢不能无限拖住首个 get_state/prompt，
+ * 超时只放弃这一次等待，绑定仍在后台继续；0 表示不限时（旧行为）。
+ */
+export function resolveExtensionBindingWaitTimeoutMs(
+  rawValue: string | undefined = process.env.PI_WEB_EXTENSION_BINDING_TIMEOUT_MS,
+): number {
+  if (rawValue !== undefined && rawValue.trim() !== "") {
+    const parsed = Number(rawValue);
+    if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 2_147_483_647) return parsed;
+    console.warn(`[pi-web] invalid PI_WEB_EXTENSION_BINDING_TIMEOUT_MS "${rawValue}", falling back to 20 seconds`);
+  }
+  return DEFAULT_EXTENSION_BINDING_WAIT_TIMEOUT_MS;
+}
+
+const EXTENSION_BINDING_WAIT_TIMEOUT_MS = resolveExtensionBindingWaitTimeoutMs();
 
 const DEFAULT_SESSION_SHUTDOWN_DEADLINE_MS = 5_000;
 
@@ -522,8 +543,42 @@ export class AgentSessionWrapper {
     return true;
   }
 
+  /**
+   * 通过 wrapper 自己的 SessionManager 追加 session_info（会话标题/重命名）。
+   * 与文件级独立 SessionManager 不同，SDK 会把 entry 同时写进内存与文件，
+   * 因此不会把 pi-web 自己的写入变成 wrapper 眼中的外部修改。
+   */
+  appendSessionInfoName(name: string): void {
+    this.inner.sessionManager.appendSessionInfo(name);
+    invalidateSessionListCache();
+  }
+
+  /**
+   * 登记 pi-web 自己对这个会话文件的改写（例如删除父会话时的级联 parentSession 重写）。
+   * 改写绕不过 SDK 的文件头/entry，只能让新鲜度校验认识这次改写，否则运行中的
+   * wrapper 会把自己人写的文件判成外部修改并一直 409。
+   */
+  adoptSelfAuthoredFileRewrite(rewrite: SessionSelfAuthoredRewrite): void {
+    this.diskInspector.adoptSelfAuthoredRewrite(rewrite);
+  }
+
   isChatOnly(): boolean {
     return this.chatOnly;
+  }
+
+  /**
+   * 扩展 session_start 尚未结束。Chat only 会话不绑定扩展，因此恒为 false；
+   * 绑定失败后也为 false，由 extensionsError 表达。
+   */
+  get extensionsInitializing(): boolean {
+    return this.extensionBindingPromise !== null && !this.extensionsBound && this.extensionBindingError === null;
+  }
+
+  get extensionsError(): string | null {
+    if (this.extensionBindingError === null) return null;
+    return this.extensionBindingError instanceof Error
+      ? this.extensionBindingError.message
+      : String(this.extensionBindingError);
   }
 
   hasSuppressedCompletionNotifications(): boolean {
@@ -701,26 +756,57 @@ export class AgentSessionWrapper {
       await this.restoreShadowSessionSetting();
       await this.fastSessionSetting.restoreAfterRuntimeReset();
       this.extensionsBound = true;
-        console.log(`[pi-web] session_start dispatched to extensions for session ${this.inner.sessionId}`);
+      console.log(`[pi-web] session_start dispatched to extensions for session ${this.inner.sessionId}`);
+      // 第二阶段只把绑定状态交给前端，不等它结束；完成时用事件解锁发送。
+      this.emit({ type: "extensions_bound" });
     })().catch((err) => {
       this.extensionBindingError = err;
+      this.emit({
+        type: "extensions_error",
+        errorMessage: err instanceof Error ? err.message : String(err),
+      });
       throw err;
     });
 
     return this.extensionBindingPromise;
   }
 
+  /**
+   * 等待扩展绑定，但有上限：绑定慢不能无限拖住首个 get_state/prompt。
+   * 超时只结束这一次等待，绑定仍在后台继续，完成后会发 extensions_bound。
+   */
   private async waitForExtensionsBound(): Promise<void> {
-    try {
-      if (this.extensionBindingPromise) await this.extensionBindingPromise;
-    } catch (err) {
-      throw err instanceof Error ? err : new Error(String(err));
+    const binding = this.extensionBindingPromise;
+    if (binding) {
+      const timeoutMs = EXTENSION_BINDING_WAIT_TIMEOUT_MS;
+      if (timeoutMs === 0) {
+        try {
+          await binding;
+        } catch (err) {
+          throw this.extensionBindingFailure(err);
+        }
+      } else {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const expired = new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            reject(new Error(`扩展初始化超过 ${Math.round(timeoutMs / 1000)}s 仍未完成，可在会话里等待它完成或重新加载会话`));
+          }, timeoutMs);
+        });
+        try {
+          // race 也订阅了 binding，绑定随后失败不会变成未处理拒绝。
+          await Promise.race([binding, expired]);
+        } catch (err) {
+          throw this.extensionBindingFailure(err);
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+      }
     }
-    if (this.extensionBindingError) {
-      throw this.extensionBindingError instanceof Error
-        ? this.extensionBindingError
-        : new Error(String(this.extensionBindingError));
-    }
+    if (this.extensionBindingError) throw this.extensionBindingFailure(this.extensionBindingError);
+  }
+
+  private extensionBindingFailure(error: unknown): Error {
+    return error instanceof Error ? error : new Error(String(error));
   }
 
   /** The session's extension commands as pi looks them up: by invocation name, with the extension's path. */
@@ -736,8 +822,12 @@ export class AgentSessionWrapper {
     }
   }
 
+  /**
+   * get_state 不等扩展绑定：第二阶段要立刻交出身份与状态，绑定进度由
+   * extensionsInitializing/extensionsError 字段和 extensions_bound 事件表达。
+   */
   private shouldWaitForExtensions(type: string): boolean {
-    return type === "prompt" || type === "steer" || type === "follow_up" || type === "get_commands" || type === "get_state" || type === "set_shadow_mind_enabled";
+    return type === "prompt" || type === "steer" || type === "follow_up" || type === "get_commands" || type === "set_shadow_mind_enabled";
   }
 
   private async withFinalRunningNotification<T>(operation: () => Promise<T>): Promise<T> {
@@ -1145,6 +1235,8 @@ export class AgentSessionWrapper {
           fastAvailable: this.fastSessionSetting.available,
           shadowMindEnabled: this.shadowSessionSetting.current,
           shadowMindAvailable: this.shadowSessionSetting.available,
+          extensionsInitializing: this.extensionsInitializing,
+          extensionsError: this.extensionsError,
           extensionStatuses: this.getExtensionStatuses(),
           extensionWidgets: this.getExtensionWidgets(),
         };
@@ -1385,6 +1477,17 @@ export class AgentSessionWrapper {
 
       case "abort_compaction": {
         this.inner.abortCompaction();
+        return null;
+      }
+
+      case "replay_pending_ui": {
+        // 共享 SSE 上游只对第一个订阅者触发服务端的按连接重放；后接入的窗口
+        // （或转发到本会话的其他窗口）需要显式请求一次，事件走同一条流广播给所有人。
+        for (const event of this.activeAskToolStarts.values()) this.emit(event);
+        for (const event of this.pendingUiRequests.values()) this.emit(event);
+        for (const [toolCallId, event] of this.activeToolEvents) {
+          if (!this.activeAskToolStarts.has(toolCallId)) this.emit(event);
+        }
         return null;
       }
 
@@ -2219,6 +2322,46 @@ function registerRpcWrapper(wrapper: AgentSessionWrapper): void {
   wrapper.start();
   if (!wrapper.isChatOnly()) wrapper.beginExtensionBinding();
 }
+
+/**
+ * 按文件路径查找存活 wrapper：pi-web 自己的文件级写入必须优先复用它的 SessionManager。
+ * 否则 wrapper 内存 entries 会少一条记录，运行中的会话随后持续被判成“外部修改”。
+ * 传入 sessionId 时只认属于该会话的 wrapper（路径缓存过期时按路径会命中别的会话）。
+ */
+function findLiveSessionWrapperByFile(filePath: string, sessionId?: string): AgentSessionWrapper | undefined {
+  const target = sessionPathKey(filePath);
+  for (const wrapper of getRegistry().values()) {
+    if (!wrapper.isAlive()) continue;
+    if (sessionId !== undefined && wrapper.sessionId !== sessionId) continue;
+    const sessionFile = wrapper.sessionFile;
+    if (sessionFile && sessionPathKey(sessionFile) === target) return wrapper;
+  }
+  return undefined;
+}
+
+// 存活 wrapper 优先写入 session_info（见 lib/session-info-writer.ts）：
+// 只有在「内存与磁盘一致」时才写，否则放弃写入而不是退回文件级写入。
+registerLiveSessionInfoWriter((filePath, name, options) => {
+  const wrapper = findLiveSessionWrapperByFile(filePath, options.sessionId);
+  if (!wrapper) return "no-live-session";
+  // 名称基线必须先建立在新鲜的内存上：外部手工改名会让内存里的名称过期，
+  // 用它当基线会把用户刚写的名字覆盖掉，也会把这次写入追加到过期的内容后面。
+  // 热更新前创建的 wrapper 可能没有这个方法：拿不到一致性结论时同样拒绝写入。
+  if (typeof wrapper.diskFreshness !== "function" || wrapper.diskFreshness() !== "current") return "stale";
+  if (options.requireName !== undefined) {
+    const currentName = wrapper.inner.sessionManager.getSessionName() ?? null;
+    if (currentName !== options.requireName) return "stale";
+  }
+  if (typeof wrapper.appendSessionInfoName === "function") {
+    wrapper.appendSessionInfoName(name);
+  } else {
+    // 热更新/升级前创建的 wrapper 没有这个便捷方法：直接用它的 SessionManager 追加，
+    // 效果相同（entry 同时进内存与文件），否则旧会话的重命名和自动命名会直接抛 TypeError。
+    wrapper.inner.sessionManager.appendSessionInfo(name);
+    invalidateSessionListCache();
+  }
+  return "written";
+});
 
 const SUBAGENT_CONTROLLER = createSubagentController({
   getSession: (sessionId) => getRegistry().get(sessionId),

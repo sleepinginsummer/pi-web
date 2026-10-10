@@ -5,6 +5,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { useI18n } from "@/hooks/useI18n";
 import { createTerminalWriter, terminalRequest } from "@/lib/terminal-client";
+import { requestDirectStreamSlots } from "@/lib/sse-broker-client";
 import type { TerminalEvent } from "@/lib/terminal-manager";
 import type { TerminalTab } from "./terminal-tab-state";
 
@@ -23,6 +24,8 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
   const terminalRef = useRef<Terminal | null>(null);
   const startRef = useRef<Promise<void>>(Promise.resolve());
   const writerRef = useRef<ReturnType<typeof createTerminalWriter> | null>(null);
+  /** 关闭流程要在另一个 effect 里先取消在途的额度申请（它是本 effect 的局部状态）。 */
+  const cancelSlotWaitRef = useRef<() => void>(() => {});
   const callbacksRef = useRef({ onClosed, onCloseError });
   callbacksRef.current = { onClosed, onCloseError };
   const [status, setStatus] = useState<"connecting" | "ready" | "exited" | "error">("connecting");
@@ -35,6 +38,145 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
     if (!container) return;
     let disposed = false;
     let events: EventSource | null = null;
+    // 真正建立连接的动作；只有拿到额度后才执行。
+    const openStream = () => {
+      // ptyStarted 未真时不能建 SSE：服务端还没有进程，连接只会 404。
+      // startupAborted：面板已关闭（可能还没卸载），迟到的恢复事件不得再建连。
+      if (disposed || exited || startupAborted || !navigator.onLine || streaming || !ptyStarted) return;
+      streaming = true;
+      events?.close();
+      // 终端刻意不接入共享上游：服务端的历史重放是按连接做的，而共享连接只对第一个
+      // 订阅者重放；同时"暂停"会断开监听，PTY 会被回收。因此终端保持自己的一条连接，
+      // 但这条连接同样吃同源额度，必须先通过 requestDirectStreamSlots 拿到许可。
+      events = new EventSource(`/api/terminal/${encodeURIComponent(id)}/events${offset === undefined ? "" : `?after=${offset}`}`);
+      events.onmessage = (message: MessageEvent) => {
+        const event = JSON.parse(message.data) as TerminalEvent;
+        if (event.type === "output") {
+          if (event.reset) terminal.reset();
+          else if (offset !== undefined && event.offset <= offset) return;
+          terminal.write(event.data);
+          offset = event.offset;
+        } else {
+          exited = true;
+          connected = false;
+          streaming = false;
+          terminal.options.disableStdin = true;
+          events?.close();
+          // 进程已退出：立刻归还额度，保留着的标签页不该继续压低 broker 上限。
+          releaseTerminalSlot();
+          setExitCode(event.type === "exit" ? event.exitCode : null);
+          setStatus("exited");
+        }
+      };
+      events.onopen = () => {
+        connected = true;
+        if (inputFailed) return;
+        terminal.options.disableStdin = false;
+        setStatus("ready");
+        fitAndResize();
+        writer.resize(terminal.cols, terminal.rows);
+        if (container.offsetWidth && container.offsetHeight) terminal.focus();
+      };
+      events.onerror = () => {
+        if (disposed || exited) return;
+        connected = false;
+        streaming = false;
+        terminal.options.disableStdin = true;
+        setStatus(events?.readyState === EventSource.CLOSED ? "error" : "connecting");
+      };
+    };
+
+    /**
+     * 终端占一条同源长连接额度：必须先拿到许可才建连（额度不足时等补授），
+     * 连接结束或面板卸载时立刻归还，保留的标签页不会继续压低 broker 上限。
+     */
+    // 关闭终止标志：必须早于任何回调声明，授予回调可能在同步路径里就读到它。
+    let startupAborted = false;
+    let lease: { release: () => void } | null = null;
+    let granted = 0;
+    let streaming = false;
+    let ptyStarted = false;
+    // 单个等待者 + 明确取消：丢弃 promise 回调会让启动流程永远卡住。
+    let slotWaiter: { settle: (grantedNow: boolean) => void } | null = null;
+    const settleSlotWait = (grantedNow: boolean) => {
+      const waiter = slotWaiter;
+      slotWaiter = null;
+      waiter?.settle(grantedNow);
+    };
+    const applyGrant = (slots: number) => {
+      if (startupAborted) return;
+      granted = slots;
+      if (granted >= 1) {
+        settleSlotWait(true);
+        if (ptyStarted && !streaming) openStream();
+        return;
+      }
+      // 许可被收回（例如后台恢复后重授为 0）：必须关掉已有连接，不能绕过预算继续收。
+      if (streaming) {
+        streaming = false;
+        events?.close();
+        events = null;
+        connected = false;
+        terminal.options.disableStdin = true;
+        if (!exited && !inputFailed) setStatus("connecting");
+      }
+    };
+    const acquireTerminalSlot = () => {
+      if (lease) return;
+      lease = { release: requestDirectStreamSlots(1, applyGrant) };
+    };
+    /**
+     * 等到真正拿到额度（创建 PTY 之前必须先满足它）。
+     * 返回 false 表示这次等待被取消（离线/后台/关闭），调用方据此决定重试还是收尾。
+     */
+    const waitForTerminalSlot = () => new Promise<boolean>((resolve) => {
+      if (granted >= 1) {
+        resolve(true);
+        return;
+      }
+      slotWaiter = { settle: resolve };
+      acquireTerminalSlot();
+    });
+    const releaseTerminalSlot = () => {
+      lease?.release();
+      lease = null;
+      granted = 0;
+    };
+    /** 页面离开/离线：本窗口的租约已被 worker 回收，本地许可作废并取消在途等待。 */
+    const invalidateTerminalSlot = () => {
+      releaseTerminalSlot();
+      settleSlotWait(false);
+    };
+    // 恢复等待也必须可结束：关闭时若正停在这一步，await startRef.current 会挂住。
+    let cancelResumeWait: (() => void) | null = null;
+    const waitForResume = () => new Promise<void>((resolve) => {
+      const done = () => {
+        window.removeEventListener("online", done);
+        window.removeEventListener("pageshow", done);
+        cancelResumeWait = null;
+        resolve();
+      };
+      cancelResumeWait = done;
+      window.addEventListener("online", done, { once: true });
+      window.addEventListener("pageshow", done, { once: true });
+    });
+    /**
+     * 关闭面板：终止启动流程（不是暂停）。终止后额度回执与恢复事件都不再创建进程，
+     * 且在途的额度等待与恢复等待都要立刻结束，否则关闭会被挂住。
+     */
+    cancelSlotWaitRef.current = () => {
+      // 关闭顺序不能反：先断开实际连接、清理本地状态，再归还额度。
+      // 反过来会让 broker 提前把额度给别人，而这条 SSE 还开着——连接数被低估。
+      startupAborted = true;
+      streaming = false;
+      connected = false;
+      events?.close();
+      events = null;
+      terminal.options.disableStdin = true;
+      settleSlotWait(false);
+      cancelResumeWait?.();
+      releaseTerminalSlot();
+    };
     let offset: number | undefined;
     let connected = false;
     let exited = false;
@@ -95,44 +237,27 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
     resizeObserver.observe(container);
 
     const connect = () => {
-      if (disposed || exited || !navigator.onLine) return;
-      events?.close();
-      events = new EventSource(`/api/terminal/${encodeURIComponent(id)}/events${offset === undefined ? "" : `?after=${offset}`}`);
-      events.onmessage = (message) => {
-        const event = JSON.parse(message.data) as TerminalEvent;
-        if (event.type === "output") {
-          if (event.reset) terminal.reset();
-          else if (offset !== undefined && event.offset <= offset) return;
-          terminal.write(event.data);
-          offset = event.offset;
-        } else {
-          exited = true;
-          connected = false;
-          terminal.options.disableStdin = true;
-          events?.close();
-          setExitCode(event.type === "exit" ? event.exitCode : null);
-          setStatus("exited");
-        }
-      };
-      events.onopen = () => {
-        connected = true;
-        if (inputFailed) return;
-        terminal.options.disableStdin = false;
-        setStatus("ready");
-        fitAndResize();
-        writer.resize(terminal.cols, terminal.rows);
-        if (container.offsetWidth && container.offsetHeight) terminal.focus();
-      };
-      events.onerror = () => {
-        if (disposed || exited) return;
-        connected = false;
-        terminal.options.disableStdin = true;
-        setStatus(events?.readyState === EventSource.CLOSED ? "error" : "connecting");
-      };
+      if (disposed || exited || startupAborted || !navigator.onLine) return;
+      streaming = false;
+      // 先取额度：拿不到就保持等待（授予回调里再建连），不能先连上再补账。
+      if (granted >= 1) openStream();
+      else void waitForTerminalSlot();
     };
 
     startRef.current = (async () => {
       fitAndResize();
+      // 服务端在 PTY 创建时就开始计"无监听回收"（120s）：额度排队太久会让进程被回收，
+      // 之后建 SSE 只会 404。因此先拿到额度再创建进程。
+      while (!disposed && !exited && !startupAborted) {
+        if (granted >= 1) break;
+        const grantedNow = await waitForTerminalSlot();
+        if (disposed || exited || startupAborted) return;
+        if (grantedNow) break;
+        // 等待被取消（离线/后台）：等下一次恢复事件再继续；关闭已由 startupAborted 排除。
+        await waitForResume();
+      }
+      // 关闭/卸载后绝不再创建进程。
+      if (disposed || exited || startupAborted) return;
       if (restored || reconnectKey > 0) {
         // Restoring a tab must never silently launch a replacement shell.
         await terminalRequest(`/api/terminal/${encodeURIComponent(id)}`);
@@ -143,17 +268,26 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
           body: JSON.stringify({ id, cwd, cols: terminal.cols, rows: terminal.rows }),
         });
       }
+      if (disposed || exited || startupAborted) return;
+      ptyStarted = true;
       connect();
     })().catch((reason: Error) => {
       if (disposed) return;
+      // 创建失败/已取消：立刻归还额度，别让它占着 broker 上限。
+      releaseTerminalSlot();
       setError(reason.message);
       setStatus("error");
     });
 
     const pageHide = () => {
       connected = false;
+      streaming = false;
       terminal.options.disableStdin = true;
       events?.close();
+      events = null;
+      // worker 已回收本窗口租约：本地许可一并作废，恢复后必须等重新授予，
+      // 否则会先建连再等许可，期间可能已经超过同源连接预算。
+      invalidateTerminalSlot();
       if (!exited && !inputFailed) setStatus("connecting");
     };
     const pageShow = (event: PageTransitionEvent) => { if (event.persisted) connect(); };
@@ -163,6 +297,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
     window.addEventListener("online", connect);
     return () => {
       disposed = true;
+      releaseTerminalSlot();
       events?.close();
       void writer.stop();
       resizeObserver.disconnect();
@@ -186,6 +321,8 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
     let cancelled = false;
     if (terminalRef.current) terminalRef.current.options.disableStdin = true;
     void (async () => {
+      // 先取消在途的额度申请/启动等待，否则"拿不到额度"会让关闭一直挂着。
+      cancelSlotWaitRef.current();
       await startRef.current;
       await writerRef.current?.stop();
       await terminalRequest(`/api/terminal/${encodeURIComponent(id)}`, { method: "DELETE", keepalive: true });

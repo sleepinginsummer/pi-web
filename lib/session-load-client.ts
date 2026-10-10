@@ -1,5 +1,6 @@
 import type { AgentRuntimeSnapshot } from "./agent-state";
 import type { AgentMessage, SessionTreeNode } from "./types";
+import { isSessionExternalWritePayload, SessionExternalWriteError } from "./session-external-write";
 
 export interface SessionContextSnapshot {
   messages: AgentMessage[];
@@ -48,6 +49,51 @@ function waitForConsumer<T>(promise: Promise<T>, signal: AbortSignal): Promise<T
     signal.addEventListener("abort", onAbort, { once: true });
     promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
   });
+}
+
+/** 会话文件写入冲突只持续很短时间：等一小段再取一次，仍冲突才交给调用方处理。 */
+const EXTERNAL_WRITE_RETRY_DELAY_MS = 700;
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(abortError());
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortError());
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/**
+ * 带一次重试的会话读取。
+ * 409 + session_external_write 表示会话文件正在写入（外部进程或一次性写入竞争），
+ * 不属于内容错误：稍后重取通常就能成功，失败时由调用方按可恢复状态处理。
+ */
+async function fetchWithExternalWriteRetry(url: string, init: RequestInit): Promise<Response> {
+  const response = await fetch(url, init);
+  if (response.status !== 409) return response;
+  const payload = await response.clone().json().catch(() => null);
+  if (!isSessionExternalWritePayload(payload)) return response;
+  // 重试等待只跟随请求自身的 signal：可缓存请求由多个调用方共用，
+  // 用某个调用方的 signal 会变成「一个人取消，所有人的重试一起被取消」；
+  // 单个调用方的取消语义由 waitForConsumer 负责。
+  await delay(EXTERNAL_WRITE_RETRY_DELAY_MS, init.signal ?? undefined);
+  return fetch(url, init);
+}
+
+/** 409 冲突时返回可恢复错误消息，其它响应返回 null。 */
+async function sessionExternalWriteMessage(response: Response): Promise<string | null> {
+  const payload = await response.clone().json().catch(() => null) as { error?: unknown } | null;
+  if (!isSessionExternalWritePayload(payload)) return null;
+  return typeof payload?.error === "string" ? payload.error : `HTTP ${response.status}`;
 }
 
 function enforceContextCacheLimits(): void {
@@ -157,12 +203,15 @@ export async function fetchSessionContext(
   }
   const request = async (): Promise<SessionContextResult> => {
     const generation = sessionContextGenerations.get(sid) ?? 0;
-    const response = await fetch(`/api/sessions/${encodeURIComponent(sid)}/context?${params}`, {
-      signal: cacheable && !options.skipCache ? undefined : signal,
-      headers: options.skipCache && knownCached
-        ? { "If-None-Match": `"${knownCached.result.snapshot.version}"` }
-        : undefined,
-    });
+    const response = await fetchWithExternalWriteRetry(
+      `/api/sessions/${encodeURIComponent(sid)}/context?${params}`,
+      {
+        signal: cacheable && !options.skipCache ? undefined : signal,
+        headers: options.skipCache && knownCached
+          ? { "If-None-Match": `"${knownCached.result.snapshot.version}"` }
+          : undefined,
+      },
+    );
     if (response.status === 304 && knownCached) {
       knownCached.createdAt = Date.now();
       knownCached.lastAccessedAt = Date.now();
@@ -170,6 +219,8 @@ export async function fetchSessionContext(
     }
     if (response.status === 404) return { kind: "missing" };
     if (!response.ok) {
+      const writeConflict = await sessionExternalWriteMessage(response);
+      if (writeConflict) throw new SessionExternalWriteError(writeConflict);
       const failure = await response.json().catch(() => null) as { error?: unknown } | null;
       throw new Error(typeof failure?.error === "string" ? failure.error : `HTTP ${response.status}`);
     }
@@ -204,16 +255,28 @@ export async function fetchSessionContext(
 }
 
 export async function fetchSessionDetails(sid: string, signal: AbortSignal): Promise<SessionDetails> {
-  const response = await fetch(`/api/sessions/${encodeURIComponent(sid)}/details`, { signal });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const response = await fetchWithExternalWriteRetry(
+    `/api/sessions/${encodeURIComponent(sid)}/details`,
+    { signal },
+  );
+  if (!response.ok) {
+    const writeConflict = await sessionExternalWriteMessage(response);
+    if (writeConflict) throw new SessionExternalWriteError(writeConflict);
+    throw new Error(`HTTP ${response.status}`);
+  }
   const details = await response.json() as Partial<SessionDetails>;
   const version = details.version ?? response.headers.get("X-Session-Version");
   if (!version) throw new Error("服务端会话详情缺少版本");
   return { ...details, version } as SessionDetails;
 }
 
+/** 运行时状态读取的上限：连接排队（浏览器同源连接被占满）不能变成永久等待。 */
+const RUNTIME_STATE_TIMEOUT_MS = 15_000;
+
 export async function fetchRuntimeState(sid: string, signal: AbortSignal): Promise<AgentRuntimeSnapshot> {
-  const response = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`, { signal });
+  const response = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`, {
+    signal: AbortSignal.any([signal, AbortSignal.timeout(RUNTIME_STATE_TIMEOUT_MS)]),
+  });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json() as Promise<AgentRuntimeSnapshot>;
 }

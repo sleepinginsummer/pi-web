@@ -28,6 +28,28 @@ import { readSessionToolSelection } from "@/lib/session-tool-selection";
 import { trashSessionFile } from "@/lib/trash";
 import { queueTrashSessionTitle } from "@/lib/session-file-title";
 import { jsonResponse } from "@/lib/json-response";
+import { sessionExternalWritePayload } from "@/lib/session-external-write";
+import { writeSessionInfoThroughLiveSession } from "@/lib/session-info-writer";
+
+/**
+ * 级联改写是 pi-web 自己做的文件改写：属于该会话的存活 wrapper 必须登记这次改写，
+ * 否则它会把自己人写的文件判成外部修改，运行中的子会话随后每个 /context 都 409。
+ * 空闲 wrapper 不需要处理：下一次读取会直接淘汰重建。
+ */
+function adoptSelfAuthoredRewrite(
+  sessionId: string | undefined,
+  filePath: string,
+  header: unknown,
+  entries: readonly unknown[],
+): void {
+  if (!sessionId) return;
+  const wrapper = getRpcSession(sessionId);
+  // 热更新前创建的 wrapper 可能没有这个方法。
+  if (!wrapper?.isAlive() || typeof wrapper.adoptSelfAuthoredFileRewrite !== "function") return;
+  if (sessionPathKey(wrapper.sessionFile) !== sessionPathKey(filePath)) return;
+  wrapper.adoptSelfAuthoredFileRewrite({ header, entries });
+  console.info("[pi-web] 级联改写会话文件后已同步存活 wrapper", { sessionId, filePath });
+}
 
 export async function GET(
   req: Request,
@@ -47,7 +69,10 @@ export async function GET(
     let wrapperRebuilt = false;
     if (force && liveWrapper && liveWrapper.diskFreshness() !== "current") {
       if (liveWrapper.isRunning() || !liveWrapper.evictIfDiskAhead()) {
-        return NextResponse.json({ error: "会话文件正在被外部修改，请等待写入完成后刷新" }, { status: 409 });
+        return NextResponse.json(
+          sessionExternalWritePayload("会话文件正在被外部修改，请等待写入完成后刷新"),
+          { status: 409 },
+        );
       }
       wrapperRebuilt = true;
       liveWrapper = undefined;
@@ -188,9 +213,12 @@ export async function PATCH(
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
 
-    // PATCH writes via appendSessionInfo — open fresh, bypassing the cache.
-    const sm = openSessionManager(filePath, { mutable: true });
-    sm.appendSessionInfo(name.trim());
+    // 显式重命名总是生效：存活 wrapper 且内存与磁盘一致时用它的 SessionManager 追加，
+    // 保证内存 entries 与文件同步；没有 wrapper 或它已经落后于磁盘时退回文件级写入
+    // （落后的 wrapper 会在下一次读取时被淘汰重建，不会把这次改名带进过期内容后面）。
+    if (writeSessionInfoThroughLiveSession(filePath, name.trim(), { sessionId: id }) !== "written") {
+      openSessionManager(filePath, { mutable: true }).appendSessionInfo(name.trim());
+    }
     invalidateSessionManagerCache(filePath);
     invalidateSessionListCache();
     return NextResponse.json({ ok: true });
@@ -303,7 +331,9 @@ export async function DELETE(
         try {
           const content = readFileSync(childPath, "utf8");
           const lines = content.split("\n");
-          const header = JSON.parse(lines[0]) as { type?: string; parentSession?: string };
+          const header = JSON.parse(lines[0]) as { type?: string; id?: string; parentSession?: string };
+          // pi-web 自己改写的 entry（当前只有下面的 subagent meta），写完要登记给存活 wrapper。
+          const rewrittenEntries: unknown[] = [];
           if (
             header.type === "session" &&
             header.parentSession &&
@@ -333,10 +363,12 @@ export async function DELETE(
                   parentSessionPath,
                 };
                 lines[index] = JSON.stringify(entry);
+                rewrittenEntries.push(entry);
                 break;
               }
             }
             writeFileSync(childPath, lines.join("\n"));
+            adoptSelfAuthoredRewrite(header.id, childPath, header, rewrittenEntries);
           }
         } catch { /* skip malformed */ }
       }

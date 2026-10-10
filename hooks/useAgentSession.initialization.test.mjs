@@ -29,13 +29,17 @@ test("并发初始化复用 SSE，断线和显式关闭后重新建立连接", a
     eventSourceRef.current = null;
     connectionRef.current = null;
   };
+  // 长连接构造已收敛到 broker 门面（不可用时它自己退回直连），这里注入等价实现。
   const connect = new Function(
-    "useCallback", "EventSource", "eventStreamConnectionRef", "eventSourceRef", "closeEvents",
+    "useCallback", "EventSource", "createStreamSource", "STREAM_OPEN", "STREAM_CLOSED",
+    "eventStreamConnectionRef", "eventSourceRef", "closeEvents",
     "EVENT_STREAM_CONNECT_TIMEOUT_MS", "fetchRuntimeState", "applyRuntimeState",
     "sessionIdRef", "handleAgentEventRef", "agentRunningRef",
     `${compiled}\nreturn connectEvents;`,
   )(
-    (callback) => callback, FakeEventSource, connectionRef, eventSourceRef, closeEvents,
+    (callback) => callback, FakeEventSource, (url) => new FakeEventSource(url),
+    FakeEventSource.OPEN, FakeEventSource.CLOSED,
+    connectionRef, eventSourceRef, closeEvents,
     1000, async () => ({ state: undefined }), () => {},
     { current: "session-1" }, { current: null }, { current: false },
   );

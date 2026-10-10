@@ -19,6 +19,6 @@ test("global attention stream forwards normalized attention events from every RP
 });
 
 test("attention notification hook subscribes independently of the selected session", () => {
-  assert.match(hookSource, /new EventSource\("\/api\/agent\/attention\/events"\)/);
+  assert.match(hookSource, /createStreamSource\("\/api\/agent\/attention\/events"\)/);
   assert.match(hookSource, /notifySessionRef\.current\(title, body, event\.sessionId\)/);
 });

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
 import { invalidateSessionListCache, resolveSessionPath } from "@/lib/session-reader";
+import { sessionExternalWritePayload } from "@/lib/session-external-write";
 import { canRunWithExternalSessionChange } from "@/lib/session-write-policy";
 import {
   getRpcSession,
@@ -90,7 +91,10 @@ export async function POST(
         // 空闲 wrapper 已淘汰，后续从最新磁盘状态启动。
       } else if (!canRunWithExternalSessionChange(body.type)) {
         console.warn("[pi-web] 会话文件外部修改，拒绝写入命令", { sessionId: id, commandType: body.type });
-        return NextResponse.json({ error: "会话文件已被外部修改，请等待写入完成后刷新", code: "session_external_write", accepted: false }, { status: 409 });
+        return NextResponse.json(
+          { ...sessionExternalWritePayload("会话文件已被外部修改，请等待写入完成后刷新"), accepted: false },
+          { status: 409 },
+        );
       }
     }
 
@@ -143,7 +147,10 @@ export async function POST(
     return NextResponse.json({ success: true, data: result });
   } catch (error) {
     if (error instanceof SessionFileConflictError) {
-      return NextResponse.json({ error: error.message, code: "session_external_write", accepted: false }, { status: 409 });
+      return NextResponse.json(
+        { ...sessionExternalWritePayload(error.message), accepted: false },
+        { status: 409 },
+      );
     }
     return NextResponse.json({
       error: String(error),

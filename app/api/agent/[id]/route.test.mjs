@@ -56,7 +56,7 @@ test("查询命令不淘汰会话列表缓存", () => {
 test("发送前拒绝旧 leaf 写入，但放行停止与只读命令", () => {
   const postSource = source.slice(source.indexOf("export async function POST"), source.indexOf("// GET /api/agent/[id]"));
   assert.match(postSource, /current\.diskFreshness\(\)/);
-  assert.match(postSource, /code: "session_external_write", accepted: false/);
+  assert.match(postSource, /sessionExternalWritePayload\("会话文件已被外部修改，请等待写入完成后刷新"\), accepted: false/);
   assert.match(postSource, /current\.evictIfDiskAhead\(\)/);
   assert.match(postSource, /canRunWithExternalSessionChange\(body\.type\)/);
   assert.match(postSource, /error instanceof SessionFileConflictError/);

@@ -21,6 +21,12 @@ export class AgentCommandError extends Error {
   }
 }
 
+/**
+ * 提交类命令（prompt/steer/follow_up）的响应上限。服务端通常毫秒级受理；
+ * 只有扩展绑定未完成、连接排队等异常才会拖长，超时按“响应丢失”处理并由调用方对账。
+ */
+const SUBMIT_COMMAND_TIMEOUT_MS = 60_000;
+
 export function isPromptRejectedError(error: unknown): error is AgentCommandError {
   return error instanceof AgentCommandError
     && error.code === "prompt_rejected"
@@ -62,6 +68,8 @@ export async function sendAgentCommand<T = unknown>(
   const res = await fetch(`/api/agent/${encodeURIComponent(sessionId)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    // 只有提交类命令等得起：静默排队或扩展绑定变慢时不能永久占住输入框。
+    ...(isSubmitCommand ? { signal: AbortSignal.timeout(SUBMIT_COMMAND_TIMEOUT_MS) } : {}),
     body: requestBody,
   });
   const body = (await res.json().catch(() => ({}))) as {

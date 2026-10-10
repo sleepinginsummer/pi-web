@@ -211,3 +211,132 @@ test("live detail and state routes work without a persisted JSONL file", async (
     state: { isStreaming: true },
   });
 });
+
+test("重命名通过存活 wrapper 写入，不回退文件级 SessionManager", async (t) => {
+  // 文件级独立 SessionManager 追加重命名会让 wrapper 内存少一条记录，
+  // 运行中的会话随后会被判成“外部修改”。用不存在的文件路径保证回退路径必然失败。
+  const previousRegistry = globalThis.__piSessions;
+  const id = "live-rename-test";
+  const filePath = join(tmpdir(), `pi-web-live-rename-not-persisted-${process.pid}.jsonl`);
+  const appended = [];
+  globalThis.__piSessions = new Map([[id, {
+    isAlive: () => true,
+    sessionFile: filePath,
+    sessionId: id,
+    // 内存与磁盘一致才允许走 wrapper 写入。
+    diskFreshness: () => "current",
+    inner: { sessionManager: { getSessionName: () => undefined } },
+    appendSessionInfoName: (name) => appended.push(name),
+  }]]);
+  t.after(() => {
+    globalThis.__piSessions = previousRegistry;
+    invalidateSessionPathCache(id);
+  });
+  cacheSessionPath(id, filePath);
+
+  const response = await renameSession(
+    new Request(`http://localhost/api/sessions/${id}`, { method: "PATCH", body: JSON.stringify({ name: "活的会话" }) }),
+    { params: Promise.resolve({ id }) },
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(appended, ["活的会话"]);
+});
+
+test("wrapper 已落后磁盘时，显式重命名退回文件级写入", async (t) => {
+  // 落后于磁盘的 wrapper 内存里是过期内容：显式重命名必须仍然生效，
+  // 但只能写文件，不能把名字追加到过期内容后面，它会在下次读取时被淘汰重建。
+  const dir = await mkdtemp(join(tmpdir(), "pi-web-rename-stale-"));
+  const id = "stale-rename-test";
+  const filePath = join(dir, "stale.jsonl");
+  await writeFile(filePath, `${JSON.stringify({ type: "session", version: 3, id, timestamp: "2026-01-01T00:00:00.000Z", cwd: dir })}\n`);
+  const previousRegistry = globalThis.__piSessions;
+  const appendedToWrapper = [];
+  globalThis.__piSessions = new Map([[id, {
+    isAlive: () => true,
+    sessionFile: filePath,
+    sessionId: id,
+    diskFreshness: () => "changed",
+    inner: { sessionManager: { getSessionName: () => undefined } },
+    appendSessionInfoName: (name) => appendedToWrapper.push(name),
+  }]]);
+  t.after(async () => {
+    globalThis.__piSessions = previousRegistry;
+    invalidateSessionPathCache(id);
+    await rm(dir, { recursive: true, force: true });
+  });
+  cacheSessionPath(id, filePath);
+
+  const response = await renameSession(
+    new Request(`http://localhost/api/sessions/${id}`, { method: "PATCH", body: JSON.stringify({ name: "仍然生效" }) }),
+    { params: Promise.resolve({ id }) },
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(appendedToWrapper, [], "落后的 wrapper 不能被写入");
+  assert.match(await readFile(filePath, "utf8"), /仍然生效/);
+});
+
+test("删除父会话时，仍存活的分叉会话不再被判成外部修改", async (t) => {
+  // 级联改写用 writeFileSync 绕开 wrapper，改的是文件头。存活 wrapper 必须登记这次改写，
+  // 否则正在运行的分叉会话会把自己人写的文件判成外部修改并一直 409。
+  const dir = await mkdtemp(join(tmpdir(), "pi-web-delete-adopt-"));
+  const childPath = join(dir, "child.jsonl");
+  const parentPath = join(dir, "parent.jsonl");
+  const childId = "delete-adopt-child";
+  const parentId = "delete-adopt-parent";
+  const header = (id, parentSession) => JSON.stringify({
+    type: "session",
+    version: 3,
+    id,
+    timestamp: "2026-01-01T00:00:00.000Z",
+    cwd: dir,
+    ...(parentSession ? { parentSession } : {}),
+  });
+  const entry = {
+    type: "message",
+    id: "child-entry",
+    parentId: null,
+    timestamp: "2026-01-01T00:00:01.000Z",
+    message: { role: "user", content: "forked turn" },
+  };
+  await writeFile(parentPath, `${header(parentId)}\n`);
+  await writeFile(childPath, `${header(childId, parentPath)}\n${JSON.stringify(entry)}\n`);
+
+  const { AgentSessionWrapper } = await jiti.import("../../../lib/rpc-manager.ts");
+  const manager = SessionManager.open(childPath);
+  const wrapper = new AgentSessionWrapper({
+    sessionId: childId,
+    sessionFile: childPath,
+    isStreaming: false,
+    isBashRunning: false,
+    isCompacting: false,
+    sessionManager: manager,
+    agent: { state: {} },
+    dispose() {},
+  });
+  const previousRegistry = globalThis.__piSessions;
+  globalThis.__piSessions = new Map([[childId, wrapper]]);
+  const oldAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  cacheSessionPath(parentId, parentPath);
+  t.after(async () => {
+    globalThis.__piSessions = previousRegistry;
+    if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
+    invalidateSessionPathCache(parentId);
+    wrapper.destroy();
+    await rm(dir, { recursive: true, force: true });
+  });
+  assert.equal(wrapper.diskFreshness(), "current", "precondition: 改写前一致");
+
+  const response = await deleteSession(
+    new Request(`http://localhost/api/sessions/${parentId}`, { method: "DELETE" }),
+    { params: Promise.resolve({ id: parentId }) },
+  );
+
+  assert.equal(response.status, 200);
+  const childHeader = JSON.parse((await readFile(childPath, "utf8")).split("\n")[0]);
+  assert.equal("parentSession" in childHeader, false, "级联改写确实去掉了父会话");
+  assert.equal(wrapper.diskFreshness(), "current", "存活 wrapper 必须认识这次改写");
+});

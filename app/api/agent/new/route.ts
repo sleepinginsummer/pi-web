@@ -7,6 +7,7 @@ import { randomUUID } from "crypto";
 import { allowFileRoot } from "@/lib/file-access";
 import { invalidateSessionListCache, readSessionHeader, resolveSessionPath } from "@/lib/session-reader";
 import { getRpcSession, startRpcSession } from "@/lib/rpc-manager";
+import { getNewSessionOperationRegistry } from "@/lib/new-session-operation-registry";
 
 function parseThinkingLevel(value: unknown): ThinkingLevel | undefined {
   if (value === undefined) return undefined;
@@ -53,6 +54,23 @@ function materializationFailed(sessionId: string, error: unknown): NewSessionMat
   };
 }
 
+type MaterializationSession = Awaited<ReturnType<typeof startRpcSession>>["session"];
+
+/**
+ * 三个响应分支共用的运行时状态投影。新增字段只改这里，
+ * 免得 initialization-failed / ensure_session / 首条命令三条返回路径状态不一致。
+ */
+function materializationRuntimeState(session: MaterializationSession, state: AgentRuntimeState) {
+  return {
+    model: state.model ? { provider: state.model.provider, modelId: state.model.id } : null,
+    thinkingLevel: state.thinkingLevel,
+    shadowMindEnabled: state.shadowMindEnabled,
+    shadowMindAvailable: state.shadowMindAvailable,
+    extensionsInitializing: session.extensionsInitializing,
+    extensionsError: session.extensionsError,
+  };
+}
+
 // POST /api/agent/new  body: { cwd: string; type: string; message?: string; ... }
 // ensure_session 的 create 阶段仅交付 runtime 身份，供前端接通审批事件；
 // finalize-existing 完成初始化后返回模型/思考状态。其它调用继续派发首条命令。
@@ -82,7 +100,7 @@ export async function POST(req: Request) {
     }
 
     // Use a one-time key so startRpcSession's lock doesn't conflict with real session ids
-    const { operation = "create", sessionId, provider, modelId, toolNames, thinkingLevel, fastEnabled, shadowMindEnabled, ...promptCommand } = command as { operation?: unknown; sessionId?: unknown; provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: unknown; fastEnabled?: unknown; shadowMindEnabled?: unknown; [key: string]: unknown };
+    const { operation = "create", sessionId, operationId, provider, modelId, toolNames, thinkingLevel, fastEnabled, shadowMindEnabled, ...promptCommand } = command as { operation?: unknown; sessionId?: unknown; operationId?: unknown; provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: unknown; fastEnabled?: unknown; shadowMindEnabled?: unknown; [key: string]: unknown };
     if (operation !== "create" && operation !== "finalize-existing") {
       throw new Error(`Invalid new-session operation: ${String(operation)}`);
     }
@@ -107,6 +125,38 @@ export async function POST(req: Request) {
       ...(typeof fastEnabled === "boolean" ? { fastEnabled } : {}),
     };
     const requestedSessionId = typeof sessionId === "string" ? sessionId : undefined;
+    const requestedOperationId = typeof operationId === "string" && operationId !== "" ? operationId : undefined;
+
+    // 创建幂等：响应可能因超时/断连丢失，客户端用同一个 operationId 重试时必须拿回同一 runtime。
+    // 在途创建也由注册表拥有，并发请求不会并行建出两个 runtime。
+    const createsNewSession = operation === "create" && promptCommand.type === "ensure_session";
+    if (createsNewSession && requestedOperationId) {
+      const registry = getNewSessionOperationRegistry();
+      const delivered = registry.peekDelivered(requestedOperationId, cwd);
+      if (delivered && getRpcSession(delivered)?.isAlive()) {
+        console.info("[pi-web] 复用同一创建意图已交付的 runtime", { sessionId: delivered, cwd });
+        return NextResponse.json({
+          success: true,
+          kind: "runtime-created",
+          sessionId: delivered,
+        } satisfies NewSessionRuntimeCreated);
+      }
+      // 已交付但 wrapper 已死（例如被空闲回收）时先清条目，否则重试会拿回失效身份。
+      registry.forgetIfUnusable(requestedOperationId, cwd, (sessionId) => getRpcSession(sessionId)?.isAlive() === true);
+      const sessionId = await registry.getOrCreate(requestedOperationId, cwd, async () => {
+        const created = await resolveMaterializationSession(operation, requestedSessionId, cwd, startOptions);
+        allowFileRoot(cwd);
+        invalidateSessionListCache();
+        console.info("[pi-web] 新会话 runtime 已创建，等待前端接管初始化", { sessionId: created.realSessionId, cwd });
+        return created.realSessionId;
+      });
+      return NextResponse.json({
+        success: true,
+        kind: "runtime-created",
+        sessionId,
+      } satisfies NewSessionRuntimeCreated);
+    }
+
     let materialization: Awaited<ReturnType<typeof startRpcSession>>;
     try {
       materialization = await resolveMaterializationSession(operation, requestedSessionId, cwd, startOptions);
@@ -152,16 +202,15 @@ export async function POST(req: Request) {
     }
     const state = await session.send({ type: "get_state" }) as AgentRuntimeState;
 
+    const runtimeState = materializationRuntimeState(session, state);
+
     if (initializationError) {
       const response = {
         success: false,
         kind: "initialization-failed",
         sessionId: realSessionId,
         error: initializationError,
-        model: state.model ? { provider: state.model.provider, modelId: state.model.id } : null,
-        thinkingLevel: state.thinkingLevel,
-        shadowMindEnabled: state.shadowMindEnabled,
-        shadowMindAvailable: state.shadowMindAvailable,
+        ...runtimeState,
       } satisfies NewSessionMaterializationResult;
       return NextResponse.json(response, { status: 409 });
     }
@@ -171,12 +220,7 @@ export async function POST(req: Request) {
         kind: "ready",
         sessionId: realSessionId,
         data: null,
-        model: state.model
-          ? { provider: state.model.provider, modelId: state.model.id }
-          : null,
-        thinkingLevel: state.thinkingLevel,
-        shadowMindEnabled: state.shadowMindEnabled,
-        shadowMindAvailable: state.shadowMindAvailable,
+        ...runtimeState,
       } satisfies NewSessionMaterializationResult;
       return NextResponse.json(response);
     }
@@ -189,12 +233,7 @@ export async function POST(req: Request) {
       kind: "ready",
       sessionId: realSessionId,
       data: result,
-      model: state.model
-        ? { provider: state.model.provider, modelId: state.model.id }
-        : null,
-      thinkingLevel: state.thinkingLevel,
-      shadowMindEnabled: state.shadowMindEnabled,
-      shadowMindAvailable: state.shadowMindAvailable,
+      ...runtimeState,
     } satisfies NewSessionMaterializationResult;
     return NextResponse.json(response);
     } catch (error) {

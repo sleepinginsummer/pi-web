@@ -45,3 +45,22 @@ export function getRelativeFilePath(filePath: string, cwd?: string): string {
 export function joinFilePath(parent: string, child: string): string {
   return `${normalizeFilePathSlashes(parent).replace(/\/$/, "")}/${child}`;
 }
+
+/**
+ * `/api/files` 的统一 URL 契约：编码路径 + `type` 查询参数 + 可选的来源会话。
+ * 文件预览、下载、watch 连接都必须经这里构造，别在各组件各写一份。
+ */
+export function getFileApiUrl(
+  filePath: string,
+  type: "read" | "download" | "meta" | "preview" | "watch",
+  sourceSessionId?: string | null,
+  params: Record<string, string | number | undefined> = {},
+): string {
+  const encoded = encodeFilePathForApi(filePath);
+  const searchParams = new URLSearchParams({ type });
+  if (sourceSessionId) searchParams.set("sessionId", sourceSessionId);
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined) searchParams.set(key, String(value));
+  }
+  return `/api/files/${encoded}?${searchParams.toString()}`;
+}

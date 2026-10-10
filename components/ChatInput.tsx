@@ -48,6 +48,8 @@ interface Props {
   /** 仅包含文本输入和发送按钮，不显示会话级控件与外边距。 */
   compact?: boolean;
   creationSettingsLocked?: boolean;
+  /** runtime 已就绪但扩展绑定未完成：显式等待，不允许静默排队发送。 */
+  extensionsInitializing?: boolean;
   modelState: ModelSelectionViewState;
   modelActions: ModelSelectionViewActions;
   onCompact?: () => void;
@@ -342,7 +344,7 @@ export function ModelDataDiagnosticBanner({ diagnostics }: { diagnostics?: Model
   return <ModelNoticeBanner tone="warning" title={t("chat.modelDataWarning")} body={messages.join("\n")} />;
 }
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onAbort, onQueuedSubmit, isStreaming, creationSettingsLocked = false, modelState, modelActions,
+  onSend, onAbort, onQueuedSubmit, isStreaming, creationSettingsLocked = false, extensionsInitializing = false, modelState, modelActions,
   onCompact, onAbortCompaction, isCompacting, compactError, compactResult, toolPreset, onToolPresetChange,
   retryInfo, queuedMessages, inputHistory = [], onRecallQueue,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
@@ -788,6 +790,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const handleSend = useCallback(async () => {
     const msg = value.trim();
     if (!msg && !attachedImages.length && !textAttachment) return;
+    // 初始化未完成时服务端会让 prompt 排队等待，这里保持输入、明确等待而不是静默无响应。
+    if (extensionsInitializing) return;
     onAudioUnlock?.();
     const builtinAllowed = !isStreaming || offersBuiltinSlashCommandWhileStreaming(msg);
     if (builtinAllowed && !textAttachment && await runBuiltinCommand(msg)) return;
@@ -801,8 +805,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       { value, images: submittedImages, textAttachment, draftKey: draftKeyRef.current ?? null },
       () => onSend(messageWithTextAttachment, submittedImages.length ? submittedImages : undefined),
     );
-  }, [value, textAttachment, attachedImages, isStreaming, runBuiltinCommand, onSend, onAudioUnlock, submitOptimistically]);
+  }, [value, textAttachment, attachedImages, isStreaming, extensionsInitializing, runBuiltinCommand, onSend, onAudioUnlock, submitOptimistically]);
 
+  // 有内容才可发送；扩展绑定未完成时按钮保持不可用并显示等待状态。
+  const sendButtonDisabled = extensionsInitializing
+    || (!value.trim() && !attachedImages.length && !textAttachment);
   const slashInputEnd = Math.min(slashCursor ?? value.length, value.length);
   const slashInputPrefix = value.slice(0, slashInputEnd);
   const slash = compact ? null : findSlashQuery(slashInputPrefix);
@@ -1399,6 +1406,24 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             />
           );
         })()}
+        {extensionsInitializing && (
+          <div
+            role="status"
+            aria-live="polite"
+            style={{
+              marginBottom: 8,
+              padding: "7px 10px",
+              background: "var(--bg-panel)",
+              border: "1px solid var(--border)",
+              borderRadius: 6,
+              color: "var(--text-muted)",
+              fontSize: 12,
+              lineHeight: 1.5,
+            }}
+          >
+            {t("chat.sessionInitializing")}
+          </div>
+        )}
         {imageAttachmentError && (
           <div
             role="alert"
@@ -1778,23 +1803,24 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           ) : (
             <button
               onClick={handleSend}
-              disabled={!value.trim() && !attachedImages.length && !textAttachment}
+              disabled={sendButtonDisabled}
               title={t("chat.send")}
               aria-label={t("chat.send")}
+              aria-busy={extensionsInitializing}
               style={{
                 flexShrink: 0,
                 alignSelf: "flex-end",
                 display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
                 ...(isMobile ? { width: 36, height: 36, padding: 0 } : { padding: "7px 14px" }),
-                background: (value.trim() || attachedImages.length || textAttachment) ? "var(--accent)" : "var(--bg-panel)",
+                background: sendButtonDisabled ? "var(--bg-panel)" : "var(--accent)",
                 border: "none",
                 borderRadius: 8,
-                color: (value.trim() || attachedImages.length || textAttachment) ? "#fff" : "var(--text-dim)",
-                cursor: (value.trim() || attachedImages.length || textAttachment) ? "pointer" : "not-allowed",
+                color: sendButtonDisabled ? "var(--text-dim)" : "#fff",
+                cursor: sendButtonDisabled ? "not-allowed" : "pointer",
                 fontSize: 13,
                 fontWeight: 600,
                 letterSpacing: "-0.01em",
-                boxShadow: (value.trim() || attachedImages.length || textAttachment) ? "0 1px 3px rgba(37,99,235,0.25)" : "none",
+                boxShadow: sendButtonDisabled ? "none" : "0 1px 3px rgba(37,99,235,0.25)",
                 transition: "background 0.15s, box-shadow 0.15s",
               }}
             >

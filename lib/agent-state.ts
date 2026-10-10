@@ -23,6 +23,9 @@ export interface AgentRuntimeState {
   fastAvailable: boolean;
   shadowMindEnabled: boolean;
   shadowMindAvailable: boolean;
+  /** runtime 已就绪但扩展 session_start 仍在进行；发送会等待它结束。 */
+  extensionsInitializing?: boolean;
+  extensionsError?: string | null;
   extensionStatuses: ExtensionStatusItem[];
   extensionWidgets: ExtensionWidgetItem[];
 }
