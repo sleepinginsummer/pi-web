@@ -11,7 +11,7 @@ test("the raw document namespace serves a file without a query string", () => {
   // subresource loads; lib/request-security.test.mjs proves its value.
   assert.match(source, /import \{ RAW_FILE_PATH_SEGMENT[^}]*\} from "@\/lib\/request-security"/);
   assert.match(source, /segments\[0\] === RAW_FILE_PATH_SEGMENT/);
-  assert.match(source, /filePathFromApiSegments\(isRawDocument \? segments\.slice\(1\) : segments\)/);
+  assert.match(source, /filePathFromApiSegments\(isRawDocument \? rawPreviewFileSegments\(segments\) : segments\)/);
   assert.match(source, /const type = isRawDocument \? "raw" : parseFileRequestType\(rawType\)/);
 });
 

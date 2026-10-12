@@ -3,6 +3,7 @@ import {
   isApiRequestAllowed,
   isApiRequestHostAllowed,
 } from "@/lib/request-security";
+import { isPreviewAssetAuthenticated } from "@/lib/html-preview-auth";
 import { getSafeInternalPath } from "@/lib/web-auth-redirect";
 import { isWebPasswordEnabled } from "@/lib/web-auth";
 import {
@@ -69,7 +70,7 @@ export function proxy(request: NextRequest) {
   }
 
   if (isPublicPath(pathname)) return NextResponse.next();
-  if (authenticated) return NextResponse.next();
+  if (authenticated || isPreviewAssetAuthenticated(request, password)) return NextResponse.next();
   if (apiRequest) return unauthorizedApiResponse();
 
   const loginUrl = new URL("/login", request.url);

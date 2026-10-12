@@ -42,7 +42,7 @@ function parseSessionConfig(content: string): WebSessionConfig {
 let cachedSessionSecret: { configPath: string; secret: Buffer } | null = null;
 
 /** 只缓存成功读取的密钥；文件尚未创建时不缓存，确保首次登录仍可创建。 */
-function readWebSessionSecret(): Buffer | null {
+export function readWebSessionSecret(): Buffer | null {
   const configPath = getSessionConfigPath();
   if (cachedSessionSecret?.configPath === configPath) return cachedSessionSecret.secret;
 

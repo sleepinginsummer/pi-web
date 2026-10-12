@@ -33,6 +33,7 @@ import { parseFormDataWithinLimit, RequestBodyTooLargeError } from "@/lib/bounde
 import { filePathFromApiSegments, samePath } from "@/lib/paths";
 import { hasParentDirectorySegment } from "@/lib/path-security";
 import { readTextPreviewChunk } from "@/lib/text-preview";
+import { getPreviewDocumentRedirect, isRawPreviewCredentialAllowed, rawPreviewFileSegments } from "@/lib/html-preview-auth";
 
 const FILE_REQUEST_TYPES = ["list", "read", "download", "meta", "preview", "raw", "watch"] as const;
 type FileRequestType = typeof FILE_REQUEST_TYPES[number];
@@ -456,7 +457,10 @@ export async function GET(
   try {
     const { path: segments } = await params;
     const isRawDocument = segments[0] === RAW_FILE_PATH_SEGMENT;
-    const filePath = filePathFromApiSegments(isRawDocument ? segments.slice(1) : segments);
+    const filePath = filePathFromApiSegments(isRawDocument ? rawPreviewFileSegments(segments) : segments);
+    if (isRawDocument && !isRawPreviewCredentialAllowed(request)) {
+      return NextResponse.json({ error: "Invalid preview credential" }, { status: 403 });
+    }
     // Authorization collapses `..` lexically, but the filesystem applies it
     // after following links, so `link/../x` names a file beside the link's
     // target, outside the roots. URL parsing already drops real `..` segments;
@@ -503,6 +507,10 @@ export async function GET(
     if (type === "raw") {
       if (!stat?.isFile()) {
         return NextResponse.json({ error: "Not a file" }, { status: 400 });
+      }
+      const previewRedirect = getPreviewDocumentRedirect(request, filePath);
+      if (previewRedirect) {
+        return new Response(null, { status: 307, headers: { Location: previewRedirect, "Cache-Control": "no-store" } });
       }
       // Served inline with the file's own content type, so a previewed page is
       // a real document and reaches its sibling assets through the same route.
