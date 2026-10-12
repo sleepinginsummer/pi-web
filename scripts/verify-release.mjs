@@ -55,6 +55,17 @@ async function checkServer(packageRoot) {
   const origin = `http://127.0.0.1:${port}`;
   const agentDirectory = path.join(directory, "agent");
   await mkdir(agentDirectory);
+  const projectDirectory = path.join(directory, "project");
+  await mkdir(projectDirectory);
+  const sessionDirectory = path.join(agentDirectory, "sessions", "release-smoke");
+  await mkdir(sessionDirectory, { recursive: true });
+  const timestamp = new Date().toISOString();
+  // 模型目录接口沿用文件授权：以真实会话登记测试 cwd，不绕过生产权限边界。
+  const entries = [
+    { type: "session", version: 3, id: "release-smoke", timestamp, cwd: projectDirectory },
+    { type: "message", id: "smoke-user", parentId: null, timestamp, message: { role: "user", content: "release verification" } },
+  ];
+  await writeFile(path.join(sessionDirectory, "release-smoke.jsonl"), entries.map(entry => JSON.stringify(entry)).join("\n") + "\n", "utf8");
   const password = "release-smoke-test";
   const env = {
     ...process.env,
@@ -93,7 +104,7 @@ async function checkServer(packageRoot) {
   assert.equal(login.status, 200, await login.text());
   const cookie = login.headers.get("set-cookie")?.split(";", 1)[0];
   assert.ok(cookie);
-  for (const pathname of ["/", "/api/sessions", "/api/models"]) {
+  for (const pathname of ["/", "/api/sessions", `/api/models?cwd=${encodeURIComponent(projectDirectory)}`]) {
     const response = await fetch(`${origin}${pathname}`, { headers: { cookie }, signal: AbortSignal.timeout(30_000) });
     const body = await response.text();
     assert.equal(response.status, 200, `${pathname}：${body.slice(0, 500)}\n${serverLog}`);
