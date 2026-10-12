@@ -295,6 +295,10 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 - `demo-pages.yml` 在本 fork 只由 PR 与手动触发运行，已移除 push 触发：fork 未启用 GitHub Pages，push 触发会让 `actions/configure-pages` 必然失败。合并上游时不要恢复该 push 触发。
 - 上游 e2e 用例与它对应的产品改动必须成对合并。本 fork 重写了 `MarkdownBody`/`MermaidBlock`/`AppShell`/`run.mjs` 等文件，上一轮合并只带进了上游用例而丢掉了实现，CI 因此变红。三个已知配套点：`CodeHighlight.tsx` 与 `MermaidBlock.tsx` 的代码块背景必须用 `backgroundColor`（不能与 Prism 主题的 `background` 简写混用）；`AppShell` 根部必须挂 `useTheme()`，否则系统配色切换不生效；`extension-dialog.mjs` 的通知断言要按通知架可能同时保留同文案通知来写。
 
+### Fork Release npm 包
+- `.github/workflows/release-package.yml` 只在 `sleepinginsummer/pi-web` 发布，手动触发或 `v*-merge.*` 标签触发。版本须与两个 package-lock 版本一致，已有标签须指向本次提交，禁止覆盖旧 Release。构建后先核对 npm pack 文件清单，再通过 `scripts/verify-release.mjs` 在独立目录仅安装生产依赖并验证 PTY、登录、页面与 SDK API，最后发布 `.tgz`。
+- `scripts/macos-service.sh` 是安装包的 launchctl 管理入口，固定当前版本的真实路径启动，配置与日志放在 `~/.local/share/pi-web-runtime`。源码目录与运行目录分离；更新不得覆盖正在运行版本的 `.next` 或原生模块，停止只操作已知 label，不直接 kill 未知端口占用者。
+
 ### Exported session HTML
 - `/api/sessions/[id]/export` delegates to pi's export helper, then patches recursive tree helpers in the generated HTML to iterative versions so very deep linear sessions do not overflow the browser call stack.
 

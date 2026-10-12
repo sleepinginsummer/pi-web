@@ -1,0 +1,95 @@
+name: Release package
+
+on:
+  push:
+    tags:
+      - 'v*-merge.*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-package-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.repository == 'sleepinginsummer/pi-web'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - name: 核对版本与标签
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync, appendFileSync } from 'node:fs';
+          const { version } = JSON.parse(readFileSync('package.json', 'utf8'));
+          const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
+          if (!/^\d+\.\d+\.\d+-merge\.\d+$/.test(version)) throw new Error('只发布 fork 的 merge 版本');
+          if (lock.version !== version || lock.packages[''].version !== version) throw new Error('包与锁文件版本不一致');
+          const tag = `v${version}`;
+          if (process.env.EVENT_NAME === 'push' && process.env.REF_NAME !== tag) throw new Error('标签与包版本不一致');
+          appendFileSync(process.env.GITHUB_OUTPUT, `tag=${tag}\nversion=${version}\n`);
+          NODE
+      - run: npm ci
+      - run: npm run lint
+      - run: npx tsc --noEmit
+      - run: npm test
+      - run: npx playwright install --with-deps chromium
+      - run: node --experimental-strip-types --test e2e/html-preview-auth.test.mjs
+      - run: npm run build
+      - name: 打包预构建 npm 产物
+        id: pack
+        run: |
+          npm pack --pack-destination "$RUNNER_TEMP" --json > "$RUNNER_TEMP/pi-web-pack.json"
+          node --input-type=module <<'NODE'
+          import { readFileSync, appendFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          const [pack] = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'pi-web-pack.json'), 'utf8'));
+          const files = new Set(pack.files.map(file => file.path));
+          for (const required of ['.next/BUILD_ID', '.next/server/app/page.js', 'bin/pi-web.js', 'bin/prepare-terminal.js', 'scripts/patch-pi-sdk-extension-cache.mjs', 'lib/pi-sdk-extension-cache-patch.mjs']) {
+            if (!files.has(required)) throw new Error(`发布包缺少 ${required}`);
+          }
+          if (pack.files.some(file => file.path.startsWith('.next/cache/') || file.path.startsWith('.next/dev/'))) throw new Error('发布包混入构建缓存');
+          appendFileSync(process.env.GITHUB_OUTPUT, `tarball=${join(process.env.RUNNER_TEMP, pack.filename)}\n`);
+          NODE
+      - name: 验证独立安装与运行
+        env:
+          RELEASE_TARBALL: ${{ steps.pack.outputs.tarball }}
+        run: node scripts/verify-release.mjs "$RELEASE_TARBALL"
+      - name: 发布 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_TARBALL: ${{ steps.pack.outputs.tarball }}
+        run: |
+          # 已有标签必须属于本次提交；不能把新的包上传到旧标签上。
+          if git rev-parse --verify "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            test "$(git rev-list -n 1 "$RELEASE_TAG")" = "$GITHUB_SHA"
+          fi
+          node --input-type=module <<'NODE'
+          import { writeFileSync } from 'node:fs';
+          import { basename, join } from 'node:path';
+          const { RELEASE_VERSION: version, RELEASE_TAG: tag, RELEASE_TARBALL: tarball, GH_REPO: repo } = process.env;
+          const url = `https://github.com/${repo}/releases/download/${tag}/${basename(tarball)}`;
+          writeFileSync(join(process.env.RUNNER_TEMP, 'pi-web-release-notes.md'), `预构建版本：${version}\n\n安装到独立运行目录，无需在本机构建：\n\n\`\`\`bash\nnpm install --omit=dev '${url}'\n./node_modules/.bin/pi-web -H 0.0.0.0 -p 8081 --no-open\n\`\`\`\n\n需要 Node.js >=22.19.0。登录密码、允许域名与代理继续通过环境变量配置。\n`);
+          NODE
+          gh release create "$RELEASE_TAG" "$RELEASE_TARBALL" \
+            --target "$GITHUB_SHA" --title "$RELEASE_TAG" --draft --prerelease \
+            --notes-file "$RUNNER_TEMP/pi-web-release-notes.md"
+          gh release edit "$RELEASE_TAG" --draft=false

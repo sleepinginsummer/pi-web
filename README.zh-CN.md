@@ -43,6 +43,19 @@ PI_WEB_NO_OPEN=1 pi-web         # 适用于后台服务或开机自启
 设置 `PI_WEB_PASSWORD` 后，登录页会保护 Web 界面和全部 API，用户名固定为 `pi`；未设置或值为空时关闭认证。登录成功后使用 `HttpOnly` 会话 Cookie；勾选“保持登录 30 天”时持久保存，否则仅在当前浏览器会话中有效。签名密钥保存在权限仅限当前用户的 `~/.pi/agent/pi-web-session.json`。跨网络使用时应保持访问域名不变，因为浏览器按主机隔离 Cookie。Pi Web 可以调用高权限智能体，请勿直接暴露到互联网；远程访问应使用可信反向代理提供的 HTTPS 或可信 VPN。
 API 请求仅接受 loopback 名称、IP 字面量、当前监听主机名，以及 `PI_WEB_ALLOWED_HOSTS` 中以逗号分隔的精确主机名。可信反向代理使用不同的外部主机名时，请配置该变量。
 
+## 本 fork 的预构建 Release
+
+`sleepinginsummer/pi-web` 通过 `.github/workflows/release-package.yml` 发布包含 `.next` 的 npm `.tgz`。手动触发工作流或推送与包版本一致的 `v*-merge.*` 标签后，依次执行检查、构建、打包和独立安装验证，成功后才发布 Release。无需 npm registry 发布权限。
+
+```bash
+gh workflow run release-package.yml --repo sleepinginsummer/pi-web --ref main
+```
+
+从 [GitHub Release](https://github.com/sleepinginsummer/pi-web/releases) 复制 `.tgz` 附件地址，在独立运行目录使用 `npm install --omit=dev <附件地址>`，再运行 `./node_modules/.bin/pi-web -H 0.0.0.0 -p 8081 --no-open`。登录和代理配置继续由环境变量提供。
+
+macOS 安装包附带 `scripts/macos-service.sh start|stop|restart|status`，使用 `launchctl` 托管 8081 服务。默认配置文件为 `~/.local/share/pi-web-runtime/service.env`；必填 `PI_WEB_PASSWORD`，可选 `PI_WEB_ALLOWED_HOSTS` 与代理环境变量。每个版本安装到独立目录；脚本固定使用实际版本路径，避免更新覆盖正在读取的 chunk。
+
+
 ## HTTP 代理
 
 Pi Web 的服务端模型请求和 API 请求会读取标准的 `HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY` 环境变量。
