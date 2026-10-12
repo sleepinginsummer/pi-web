@@ -38,7 +38,7 @@ stop_service() {
 
 start_service() {
   [ -f "$PACKAGE_ROOT/.next/BUILD_ID" ] || { echo "安装包缺少构建产物。" >&2; return 1; }
-  [ -f "$SERVICE_CONFIG" ] || { echo "请先创建 $SERVICE_CONFIG。" >&2; return 1; }
+  [ -f "$SERVICE_CONFIG" ] || { echo "请先创建 ${SERVICE_CONFIG}。" >&2; return 1; }
   if launchctl list "$SERVICE_LABEL" >/dev/null 2>&1; then
     echo "pi-web 作业已存在；需要重新加载版本或配置时请使用 restart。" >&2
     return 1
@@ -78,14 +78,14 @@ start_service() {
     if [ -n "$service_pid" ] && curl --noproxy '*' -fsS -m 3 -o /dev/null \
       -H "Host: $health_host" "http://127.0.0.1:$SERVICE_PORT/login"; then
       printf '%s\n' "$service_pid" > "$RUNTIME_ROOT/prod.pid"
-      echo "pi-web 已启动，监听 PID：$service_pid，端口：$SERVICE_PORT"
+      echo "pi-web 已启动，监听 PID：${service_pid}，端口：${SERVICE_PORT}"
       "$node_binary" -p "require(process.argv[1]).version" "$PACKAGE_ROOT/package.json"
       echo "日志：$SERVICE_LOG"
       return 0
     fi
     sleep 1
   done
-  echo "服务健康检查失败，请查看 $SERVICE_LOG。" >&2
+  echo "服务健康检查失败，请查看 ${SERVICE_LOG}。" >&2
   tail -n 30 "$SERVICE_LOG" >&2
   return 1
 }
