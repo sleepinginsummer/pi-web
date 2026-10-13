@@ -1052,7 +1052,7 @@ function TextFileViewer({
 
   const { watching, bust } = useFileWatch({ filePath, sourceSessionId, enabled: watchEnabled });
 
-  // 版本号变化（连接建立或文件变更）时重新读取内容与 diff；
+  // 文件版本变化时重新读取内容与 diff；重连但版本未变时保留 iframe 的预览状态。
   // HTML 预览用同一个版本号刷新 iframe，不再需要单独的 revision 状态。
   const loadedBustRef = useRef(bust);
   useEffect(() => {

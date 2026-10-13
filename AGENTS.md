@@ -243,6 +243,7 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 - git prints POSIX-style absolute paths even on Windows, so every path read out of git goes through `toNativePath()` (`lib/paths.ts`) before it is compared or returned. Compare paths with `samePath()`, never `===` — raw equality made `isTopLevel` permanently false on Windows and hid the worktree switcher entirely. Branch names are not paths and must keep their forward slashes. Browser code cannot apply Node path rules, so `/api/worktrees` resolves `currentWorktreePath` server-side; the sidebar must use that identity for highlighting and removal fallback.
 
 ### HTML preview renders the file as a document
+- 文件监听的连接状态与文件版本独立：`meta` 和 `change` 共用 `getFileWatchVersion()` 的文件标识、大小及修改时间版本；`useFileWatch` 重连只核对版本，版本未变时不得递增 `bust` 或重置预览。隐藏/重开面板及页面回到前台应保留 HTML 输入、选择和滚动状态，暂停期间的同大小编辑、替换和删除仍需使旧预览失效。
 - `.html`/`.htm` open in Preview by default. The iframe's `src` is the document route `/api/files/raw/<absolute path>` (path segment, not `srcDoc` and not `?type=raw`) so the page's own relative references — sibling stylesheets, scripts, and images — resolve to sibling files. Subresource requests drop the query string, which is why the mode lives in the path.
 - That document stays under `sandbox="allow-scripts"` plus a `Content-Security-Policy: sandbox allow-scripts` response header, so page script always runs in an opaque origin and cannot reach Pi Web's session. Preview stays read-only: POST, `fetch`/XHR, and every other route must keep failing for it.
 - A sandboxed frame is an opaque origin, so the browser marks its requests `cross-site` and the origin guard in `lib/request-security.ts` rejects them. `isSandboxedPreviewAssetRequest()` is the single, deliberately narrow exception: GET + `Sec-Fetch-Dest` in {style, script, image, font, audio, video} + the `/api/files/raw/` prefix. Do not widen it, and do not add `allow-same-origin` to the preview iframe.
@@ -284,7 +285,7 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 - Browser autoplay policy means sound must be unlocked from a user gesture; `ChatInput` calls the unlock hook from interactive controls, and `ChatWindow` plays the tone from `onAgentEnd`.
 
 ### PWA 版本与 Service Worker 更新策略
-- 当前合并版本使用 `0.10.0-merge.28`；此后每次代码变更都必须将最后一位递增 1，并同步更新 `package.json` 与 `package-lock.json`。
+- 当前合并版本使用 `0.10.0-merge.29`；此后每次代码变更都必须将最后一位递增 1，并同步更新 `package.json` 与 `package-lock.json`。
 - 生产环境必须使用每次构建唯一的版本标识注册 `/sw.js?v=<build-version>`，静态缓存名称也必须包含同一个版本；不能只使用长期不变的 `package.json` 版本，否则代码变化后浏览器可能继续命中旧 chunk。
 - 新 Service Worker 安装完成后保持 `waiting`，由界面提示“发现新版本”；用户确认后发送 `SKIP_WAITING`，并在 `controllerchange` 后刷新页面。不要在 `install` 阶段无条件调用 `skipWaiting()`。
 - 激活新 Service Worker 时只清理 `pi-web-` 前缀下的旧版本缓存，不得清理其它站点数据或认证信息。`/sw.js`、页面导航和 API 请求必须绕过静态资源缓存。

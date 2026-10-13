@@ -33,6 +33,7 @@ import { parseFormDataWithinLimit, RequestBodyTooLargeError } from "@/lib/bounde
 import { filePathFromApiSegments, samePath } from "@/lib/paths";
 import { hasParentDirectorySegment } from "@/lib/path-security";
 import { readTextPreviewChunk } from "@/lib/text-preview";
+import { getFileWatchVersion } from "@/lib/file-watch-version";
 import { getPreviewDocumentRedirect, isRawPreviewCredentialAllowed, rawPreviewFileSegments } from "@/lib/html-preview-auth";
 
 const FILE_REQUEST_TYPES = ["list", "read", "download", "meta", "preview", "raw", "watch"] as const;
@@ -572,6 +573,7 @@ export async function GET(
       const documentMime = getDocumentMime(filePath);
       return NextResponse.json({
         size: stat.size,
+        version: getFileWatchVersion(stat),
         language: getLanguage(filePath),
         mime: imageMime || audioMime || videoMime || documentMime || "text/plain",
         previewKind: documentPreviewKind(filePath),
@@ -652,11 +654,11 @@ export async function GET(
                 lastCtimeMs = s.ctimeMs;
                 lastIno = s.ino;
                 lastSize = s.size;
-                send("change", { mtime: s.mtime.toISOString(), size: s.size });
+                send("change", { mtime: s.mtime.toISOString(), size: s.size, version: getFileWatchVersion(s) });
               } catch {
                 if (!lastExists) return;
                 lastExists = false;
-                send("change", { mtime: new Date().toISOString(), size: 0 });
+                send("change", { mtime: new Date().toISOString(), size: 0, version: null });
               }
             });
             watcher.on("error", () => {

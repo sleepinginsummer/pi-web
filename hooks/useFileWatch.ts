@@ -89,7 +89,7 @@ export const fileWatchBudget = new FileWatchBudget(FILE_WATCH_BUDGET);
 
 /**
  * 是否应该持有 watch 连接：调用方允许、页面可见、且拿到额度。
- * 后台标签页不该占着连接额度，回到前台会重新建立连接并重新读一次文件。
+ * 后台标签页不该占着连接额度，回到前台会重新建立连接并核对文件版本。
  */
 export function shouldHoldFileWatch(input: { enabled: boolean; hidden: boolean; acquired: boolean }): boolean {
   return input.enabled && !input.hidden && input.acquired;
@@ -100,7 +100,7 @@ export interface FileWatchOptions {
   sourceSessionId?: string | null;
   /** 调用方是否允许监听（预览类型不支持时为 false）。 */
   enabled?: boolean;
-  /** 连接建立或文件发生变更后触发，供预览清理自己的元数据（尺寸/时长等）。 */
+  /** 文件版本变化后触发，供预览清理自己的元数据（尺寸/时长等）。 */
   onReset?: () => void;
   /** 对新尺寸的额外校验，返回错误文本表示该文件不可预览。 */
   validateSize?: (size: number) => string | null;
@@ -140,6 +140,8 @@ export function useFileWatch({
   // 时把已持有连接的预览也推进一次重建（连接与额度通知不能互相驱动）。
   const [granted, setGranted] = useState(false);
   const syncRequestRef = useRef(0);
+  // 保留已呈现的文件版本，暂停/重连本身不能使预览失效。
+  const fileVersionRef = useRef<string | null | undefined>(undefined);
   const onResetRef = useRef(onReset);
   const validateSizeRef = useRef(validateSize);
   onResetRef.current = onReset;
@@ -168,6 +170,7 @@ export function useFileWatch({
   useEffect(() => {
     // 换文件或换来源会话：清掉上一位文件的预览元数据，别让新文件先显示旧尺寸/旧错误。
     syncRequestRef.current += 1;
+    fileVersionRef.current = undefined;
     setWatching(false);
     setBust(0);
     setSize(null);
@@ -204,13 +207,22 @@ export function useFileWatch({
     const requestId = ++syncRequestRef.current;
     fetch(getFileApiUrl(filePath, "meta", sourceSessionId))
       .then((response) => response.json())
-      .then((next: { size?: number; error?: string }) => {
+      .then((next: { size?: number; version?: string; error?: string }) => {
         if (requestId !== syncRequestRef.current) return;
         if (next.error) {
           setError(next.error);
+          // 暂停期间删除或失去读取权限时，也要使已展示的旧内容失效。
+          if (fileVersionRef.current !== null) {
+            fileVersionRef.current = null;
+            onResetRef.current?.();
+            setBust((value) => value + 1);
+          }
           return;
         }
         if (typeof next.size === "number" && !applySizeRef.current(next.size)) return;
+        if (typeof next.version !== "string") throw new Error("文件元数据缺少版本");
+        if (fileVersionRef.current === next.version) return;
+        fileVersionRef.current = next.version;
         onResetRef.current?.();
         setBust((value) => value + 1);
       })
@@ -226,20 +238,27 @@ export function useFileWatch({
   useEffect(() => {
     if (!granted || !enabled || visible === false) return;
     const es = createStreamSource(getFileApiUrl(filePath, "watch", sourceSessionId), 1);
-    es.addEventListener("connected", () => {
+    const syncConnectedMeta = () => {
       setWatching(true);
-      // 服务端在 watcher 就绪后才发 connected：这里补读一次，闭合快照与实时事件之间的空档。
+      // watcher 就绪后补读快照，闭合暂停期间的变更空档。
       syncMeta();
-    });
+    };
+    es.addEventListener("connected", syncConnectedMeta);
+    // 同源其它窗口仍持有上游时，broker 的重新挂接不会重发 connected。
+    es.onNeedsReplay = syncConnectedMeta;
     es.addEventListener("change", (event) => {
       syncRequestRef.current += 1;
-      onResetRef.current?.();
       try {
-        const data = JSON.parse((event as MessageEvent).data) as { size?: number };
+        const data = JSON.parse((event as MessageEvent).data) as { size?: number; version?: string | null };
         if (typeof data.size === "number" && !applySizeRef.current(data.size)) return;
+        if (data.version !== null && typeof data.version !== "string") throw new Error("文件变更事件缺少版本");
+        if (fileVersionRef.current === data.version) return;
+        fileVersionRef.current = data.version;
       } catch {
-        // 负载不可解析不影响刷新：版本号仍然递增，预览会重新读取文件。
+        // 保留不可解析事件的刷新语义，下次元数据快照重新建立版本基线。
+        fileVersionRef.current = undefined;
       }
+      onResetRef.current?.();
       setError(null);
       setBust((value) => value + 1);
     });

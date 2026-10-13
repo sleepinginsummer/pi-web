@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync, writeFileSync } from "node:fs";
 
 export const filePanelFixture = `<!doctype html><html><body style="margin:20px;min-height:2400px">
 <label>Notes <input id="notes"></label>
@@ -14,6 +15,11 @@ export async function checkFilePanel(page, filePath) {
   await page.getByTitle(filePath.replace(/\\/g, "/"), { exact: true }).click();
   const panel = page.locator("#file-panel");
   const iframe = panel.locator("iframe");
+  const nextMetaResponse = () => page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.searchParams.get("type") === "meta"
+      && decodeURIComponent(url.pathname).endsWith(filePath.replace(/\\/g, "/"));
+  });
   await iframe.waitFor();
   const frame = await (await iframe.elementHandle()).contentFrame();
   await frame.locator("#notes").fill("Keep this note");
@@ -59,10 +65,32 @@ export async function checkFilePanel(page, filePath) {
     await toggle.click();
     await panel.getByRole("button", { name: "Restore file panel width", exact: true }).click();
     await page.getByRole("button", { name: "Hide file panel", exact: true }).click();
+    const unchangedMeta = nextMetaResponse();
     await page.getByRole("button", { name: "Show file panel", exact: true }).click();
+    assert.equal((await unchangedMeta).status(), 200);
     assert.equal(await toggle.getAttribute("aria-pressed"), "false", "Reopening returns to the split layout");
     assert.equal(await width(), originalWidth);
     assert.equal(await frame.evaluate(() => window.previewInstance), instance);
+    assert.equal(await frame.evaluate(() => scrollY), 120);
+    assert.equal(await frame.locator("#notes").inputValue(), "Keep this note");
+    assert.equal(await frame.locator("#filter").inputValue(), "Pending");
+
+    // 隐藏期间同大小编辑文件：重开必须发现版本变化并加载新的预览。
+    const originalContent = readFileSync(filePath, "utf8");
+    await page.getByRole("button", { name: "Hide file panel", exact: true }).click();
+    try {
+      writeFileSync(filePath, originalContent.replace("Notes", "Draft"));
+      const changedMeta = nextMetaResponse();
+      await page.getByRole("button", { name: "Show file panel", exact: true }).click();
+      assert.equal((await changedMeta).status(), 200);
+      const updatedFrame = page.frameLocator("#file-panel iframe");
+      await updatedFrame.getByLabel("Draft").waitFor();
+      const reloaded = await (await iframe.elementHandle()).contentFrame();
+      assert.notEqual(await reloaded.evaluate(() => window.previewInstance), instance);
+      assert.equal(await updatedFrame.locator("#notes").inputValue(), "");
+    } finally {
+      writeFileSync(filePath, originalContent);
+    }
   }
   await (page.viewportSize().width <= 640 ? panel : page)
     .getByRole("button", { name: "Hide file panel", exact: true }).click();

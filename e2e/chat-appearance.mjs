@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
 
+// 常驻 SSE 不会进入 networkidle；用会话正文渲染完成判断页面就绪。
+async function reloadChat(page) {
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.locator(".markdown-code-block pre").waitFor();
+}
+
 export async function checkChatAppearanceReset(page) {
   const width = page.getByRole("slider", { name: "Chat content width", exact: true });
   const fontSize = page.getByRole("slider", { name: "Chat font size", exact: true });
@@ -21,7 +27,7 @@ export async function checkChatAppearanceReset(page) {
     appliedWidth: document.documentElement.style.getPropertyValue("--chat-content-max-width"),
     appliedFontSize: document.documentElement.style.getPropertyValue("--chat-content-font-size"),
   })), { width: "820", fontSize: "14", appliedWidth: "820px", appliedFontSize: "14px" });
-  await page.reload({ waitUntil: "networkidle" });
+  await reloadChat(page);
   const showSidebar = page.getByRole("button", { name: "Show sidebar", exact: true });
   if (await showSidebar.isVisible()) await showSidebar.click();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
@@ -74,8 +80,7 @@ export async function checkChatAppearance(page) {
   await closeSettings();
   assert.equal(await textarea.inputValue(), draft);
   assert.ok(await fittedHeight() < narrowHeight, "Widening must shrink the existing draft");
-  await page.reload({ waitUntil: "networkidle" });
-  await page.locator(".markdown-code-block pre").waitFor();
+  await reloadChat(page);
   assert.equal(await font(textarea), "18px");
   assert.equal(await font(page.locator(".markdown-user-message")), "18px");
   assert.equal(await font(page.locator(".markdown-code-block pre")), "16.5px");
