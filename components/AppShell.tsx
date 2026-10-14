@@ -459,20 +459,31 @@ export function AppShell() {
     });
   }, [closeTopPanel, isMobile]);
 
+  // 移动端右侧面板与侧栏会盖住聊天区，插入提及后回到输入框才看得到结果；桌面端并排显示，保持原状。
+  const revealChatAfterMention = useCallback(() => {
+    if (!isMobile) return;
+    closeFilePanel();
+    closeMobileSidebar();
+  }, [closeFilePanel, closeMobileSidebar, isMobile]);
+
   // Same @mention format as the chat input's @ autocomplete, so the agent's
   // read tool resolves it the same way (it strips the @ prefix).
   const handleAtMention = useCallback((relativePath: string, isDir: boolean) => {
     chatInputRef.current?.insertText(buildAtMentionText(relativePath, isDir));
-  }, []);
+    revealChatAfterMention();
+  }, [revealChatAfterMention]);
 
   const handleAtMentions = useCallback((relativePaths: string[]) => {
     const mentions = buildFileAtMentionsText(relativePaths);
-    if (mentions) chatInputRef.current?.insertText(mentions);
-  }, []);
+    if (!mentions) return;
+    chatInputRef.current?.insertText(mentions);
+    revealChatAfterMention();
+  }, [revealChatAfterMention]);
 
   const handleFileLineMention = useCallback((relativePath: string, startLine: number, endLine: number) => {
     chatInputRef.current?.insertText(buildFileLineMentionText(relativePath, startLine, endLine));
-  }, []);
+    revealChatAfterMention();
+  }, [revealChatAfterMention]);
 
   const [activeCwd, setActiveCwd] = useState<string | null>(null);
   const activeProjectRootRef = useRef<string | null>(null);
@@ -1164,6 +1175,7 @@ export function AppShell() {
               )}
               watchEnabled={rightPanelOpen}
               onMentionLines={rightPanelOpen ? handleFileLineMention : undefined}
+              onAtMention={handleAtMention}
               onOpenFile={(filePath, page) => handleOpenFile(
                 filePath,
                 getFileName(filePath),

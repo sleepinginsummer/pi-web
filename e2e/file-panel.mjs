@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
+import { basename } from "node:path";
 
 export const filePanelFixture = `<!doctype html><html><body style="margin:20px;min-height:2400px">
 <label>Notes <input id="notes"></label>
@@ -92,7 +93,20 @@ export async function checkFilePanel(page, filePath) {
       writeFileSync(filePath, originalContent);
     }
   }
-  await (page.viewportSize().width <= 640 ? panel : page)
-    .getByRole("button", { name: "Hide file panel", exact: true }).click();
+  // 预览工具栏的 @ 按钮必须真的把提及写进输入框（无选区时是整文件提及）。
+  const composer = page.locator(".chat-input-textarea");
+  const mobile = page.viewportSize().width <= 640;
+  const panelIsOpen = () => panel.evaluate((element) => element.classList.contains("right-panel-open"));
+  assert.equal(await composer.inputValue(), "", "Composer starts empty so the mention value is unambiguous");
+  assert.equal(await panelIsOpen(), true, "The mention button only exists while the panel is open");
+  await panel.getByRole("button", { name: "mention", exact: true }).click();
+  // 等 React 提交受控输入值再读。
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  assert.equal(await composer.inputValue(), `@${basename(filePath)} `, "The @ button inserts a whole-file mention");
+  // 移动端面板盖住聊天区，插入后必须回到输入框；桌面端并排显示，面板保持打开。
+  assert.equal(await panelIsOpen(), !mobile, mobile
+    ? "Mobile returns to the composer after mentioning"
+    : "Desktop keeps the split layout after mentioning");
+  if (!mobile) await page.getByRole("button", { name: "Hide file panel", exact: true }).click();
   console.log(`PASS: file panel width and preview state at ${page.viewportSize().width}px`);
 }
