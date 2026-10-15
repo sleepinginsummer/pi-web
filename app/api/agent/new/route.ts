@@ -191,7 +191,7 @@ export async function POST(req: Request) {
     allowFileRoot(cwd);
     invalidateSessionListCache();
 
-    // 默认开启无需调用可选扩展；显式关闭失败时保留并返回同一个 real session，供客户端接管重试。
+    // 新会话默认关闭 Shadow，禁用请求照常下发；失败时保留并返回同一个 real session，供客户端接管重试。
     let initializationError: string | undefined;
     if (shadowMindEnabled === false) {
       try {

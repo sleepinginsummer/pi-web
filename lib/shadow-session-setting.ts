@@ -54,7 +54,8 @@ export class ShadowSessionSetting {
   }
 
   async setEnabled(enabled: boolean): Promise<boolean> {
-    if (!this.available) throw new Error("当前会话未加载 Shadow Mind 扩展");
+    // 关闭是新会话的默认偏好：扩展缺失时没有可暂停的实例，照常落盘，等它可用后按 entry 恢复。
+    if (enabled && !this.available) throw new Error("当前会话未加载 Shadow Mind 扩展");
     this.desired = enabled;
     const requestRevision = this.revision + 1;
     this.revision = requestRevision;
@@ -74,10 +75,15 @@ export class ShadowSessionSetting {
   }
 
   private async applyDesired(): Promise<void> {
-    while (this.applied !== this.desired) {
-      const target = this.desired;
-      await this.invoke(target ? "resume" : "pause");
-      this.applied = target;
+    if (this.available) {
+      while (this.applied !== this.desired) {
+        const target = this.desired;
+        await this.invoke(target ? "resume" : "pause");
+        this.applied = target;
+      }
+    } else {
+      // 扩展缺失：没有可控制的 runtime，直接采用目标状态，默认关闭的新会话走这里。
+      this.applied = this.desired;
     }
     if (this.persistedRevision < this.revision) {
       const revision = this.revision;
@@ -86,10 +92,9 @@ export class ShadowSessionSetting {
         this.persisted = this.applied;
         this.persistedRevision = revision;
       } catch (error) {
-        // runtime 已切换但 entry 未落盘：执行反向命令，恢复到最后持久化状态。
+        // runtime 已切换但 entry 未落盘：恢复到最后持久化状态。
         try {
-          await this.invoke(this.persisted ? "resume" : "pause");
-          this.applied = this.persisted;
+          await this.rollbackToPersisted();
           if (this.revision === revision) this.desired = this.persisted;
         } catch (compensationError) {
           throw new AggregateError([error, compensationError], "Shadow Mind 状态持久化失败，且 runtime 补偿失败");
@@ -97,6 +102,12 @@ export class ShadowSessionSetting {
         throw error;
       }
     }
+  }
+
+  /** 把 runtime 恢复到最后一个已落盘状态；扩展缺失时没有 runtime，只回退内存值。 */
+  private async rollbackToPersisted(): Promise<void> {
+    if (this.available) await this.invoke(this.persisted ? "resume" : "pause");
+    this.applied = this.persisted;
   }
 
   private async invoke(action: "pause" | "resume"): Promise<void> {
