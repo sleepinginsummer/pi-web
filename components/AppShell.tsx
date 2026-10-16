@@ -38,7 +38,7 @@ import { openNotificationTarget } from "@/lib/notification-navigation";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { getFileName } from "@/lib/file-paths";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
-import { getInitialNavigation, withTabOpen } from "@/lib/initial-navigation";
+import { getInitialNavigation, linkedSessionId, withTabOpen } from "@/lib/initial-navigation";
 import { getTabOpen } from "@/lib/tab-session";
 import {
   getDefaultRightPanelWidth,
@@ -557,6 +557,9 @@ export function AppShell() {
     setActiveCwd(cwd);
     // Skip if cwd is null (initial mount).
     if (!cwd) return;
+    // URL 链接的会话已不存在时，这次采用的项目保持空白新会话，不恢复其上次打开的会话（#1168）。
+    const skipWorkspaceRestore = skipWorkspaceRestoreRef.current;
+    skipWorkspaceRestoreRef.current = false;
     const newProject = projectKey ?? projectRoot ?? cwd;
     syncWorkspaceKey(newProject);
     const currentProject = activeProjectRootRef.current
@@ -590,7 +593,7 @@ export function AppShell() {
     setAgentTabs([]);
     setActiveAgentTabId(null);
     if (keepPanelForTerminal) activatePanelTab(activeTerminalTabId);
-    restoreWorkspaceContext(newProject);
+    if (!skipWorkspaceRestore) restoreWorkspaceContext(newProject);
     router.replace(typeof window !== "undefined" ? window.location.pathname : "/", { scroll: false });
   }, [activatePanelTab, activeTerminalTabId, consumeCwdSyncSuppression, leaveWorkspace, newSessionCwd, restoreWorkspaceContext, rightPanelOpen, router, selectedSession, switchFileWorkspaceTabs, syncWorkspaceKey]);
 
@@ -629,7 +632,13 @@ export function AppShell() {
   }, []);
 
 
-  const handleInitialRestoreDone = completeInitialRestore;
+  // 侧栏在初始会话不在列表中时调用。只有该 id 来自 URL（而非本标签页的记忆）时才跳过工作区恢复。
+  const skipWorkspaceRestoreRef = useRef(false);
+  const initialLinkedSessionId = linkedSessionId(initialNavigation);
+  const handleInitialRestoreDone = useCallback(() => {
+    completeInitialRestore();
+    if (initialLinkedSessionId) skipWorkspaceRestoreRef.current = true;
+  }, [completeInitialRestore, initialLinkedSessionId]);
 
 
 

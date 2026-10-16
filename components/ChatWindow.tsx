@@ -280,7 +280,7 @@ function LiveProcessDetailsGroup({ hiddenCount, renderAll, renderRecent, t }: { 
 
 export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigationActive, session, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, newSessionCwd, newSessionWorktrees, pendingNewSessionControl, onPendingNewSessionEvent, notificationController, onAgentEnd, onSessionCreated, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onShadowMindControlChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenSettings, onContextUsageChange, onOpenFile, onFilesUploaded, onOpenSubagent, onToolEnd, onNewSessionCwdChange, onAskInNewChat, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed }: Props) {
   const { t } = useI18n();
-  const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
+  const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio, holdAudio } = useAudio();
   const {
     notificationEnabled, notificationPermission, showNotificationPrompt,
     onNotificationToggle, dismissNotificationPrompt, notifySession,
@@ -369,6 +369,11 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
     onComplete: onAgentEnd,
   });
   const sessionBusy = agentRunning || bashRunning;
+  // 运行期间保持提示音的 AudioContext 运行：手机锁屏时被挂起的 context 无法再启动（#1157）。
+  useEffect(() => {
+    if (!agentRunning) return;
+    return holdAudio();
+  }, [agentRunning, holdAudio]);
   const [quotedSelection, setQuotedSelection] = useState<{
     text: string;
     top: number;

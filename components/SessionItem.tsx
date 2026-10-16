@@ -6,6 +6,7 @@ import { useI18n } from "@/hooks/useI18n";
 import { useSessionItemMutations } from "@/hooks/useSessionItemMutations";
 import { useSwipeActions } from "@/hooks/useSwipeActions";
 import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
+import { isPlainActivation, sessionDeepLink } from "@/lib/session-links";
 import { parseSkillMessage } from "@/lib/skill-block";
 import type { SessionInfo } from "@/lib/types";
 
@@ -273,10 +274,24 @@ export function SessionItem({ session, status, mobile, actions, tree = {} }: Ses
     event.stopPropagation();
   }, [onRenamed, session.cwd, session.id, session.name, session.path]);
 
-  const handleRowClick = useCallback(() => {
+  // 带修饰键或中键的点击交给浏览器语义：在新标签页打开该会话（d9adb38），普通点击在当前页切换。
+  const openInNewTab = useCallback(() => {
+    window.open(new URL(sessionDeepLink(session.id), window.location.href).toString(), "_blank", "noopener");
+  }, [session.id]);
+  const handleRowClick = useCallback((event: MouseEvent<HTMLDivElement>) => {
     if (mutations.confirmDelete || mutations.renaming || swipe.consumeClick()) return;
+    if (!isMobile && !session.transient && !isPlainActivation(event)) {
+      event.preventDefault();
+      openInNewTab();
+      return;
+    }
     onClick();
-  }, [mutations.confirmDelete, mutations.renaming, onClick, swipe]);
+  }, [isMobile, mutations.confirmDelete, mutations.renaming, onClick, openInNewTab, session.transient, swipe]);
+  const handleRowAuxClick = useCallback((event: MouseEvent<HTMLDivElement>) => {
+    if (event.button !== 1 || isMobile || session.transient || mutations.confirmDelete || mutations.renaming) return;
+    event.preventDefault();
+    openInNewTab();
+  }, [isMobile, mutations.confirmDelete, mutations.renaming, openInNewTab, session.transient]);
 
   const stopAndTogglePin = (event: MouseEvent<HTMLButtonElement>) => {
     event.stopPropagation();
@@ -299,6 +314,7 @@ export function SessionItem({ session, status, mobile, actions, tree = {} }: Ses
         data-session-row
         {...swipe.pointerHandlers}
         onClick={handleRowClick}
+        onAuxClick={handleRowAuxClick}
         onContextMenu={isMobile || mutations.confirmDelete || mutations.renaming ? undefined : handleContextMenu}
         onMouseEnter={() => { if (!isMobile) setHovered(true); }}
         onMouseLeave={() => { if (!isMobile) setHovered(false); }}

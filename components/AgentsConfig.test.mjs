@@ -27,6 +27,16 @@ test("editor draft preserves named and empty selections independently of activat
   }
 });
 
+test("draft backfills MCP as off and keeps an explicit choice", () => {
+  const declaration = source.slice(source.indexOf("function editableProfile("), source.indexOf("function profileKey("));
+  const code = ts.transpileModule(declaration, { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText;
+  const editable = vm.runInNewContext(`${code}; editableProfile`);
+  assert.equal(editable({ name: "legacy", tools: [], loadSkills: false, loadExtensions: false }).mcp, "off");
+  for (const mcp of ["on", "off"]) {
+    assert.equal(editable({ name: "reviewer", tools: [], loadSkills: false, loadExtensions: false, mcp }).mcp, mcp);
+  }
+});
+
 test("draft backfills code mode for legacy profiles and keeps an explicit choice", () => {
   const declaration = source.slice(source.indexOf("function editableProfile("), source.indexOf("function profileKey("));
   const code = ts.transpileModule(declaration, { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText;

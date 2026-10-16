@@ -258,7 +258,7 @@ function layoutNodes(allNodes: NodeInfo[], minimapHeight: number): NodeLayout {
   };
 }
 
-export function ChatMinimap({
+export const ChatMinimap = memo(function ChatMinimap({
   messages,
   entryIds,
   streamingMessage,
@@ -915,7 +915,7 @@ export function ChatMinimap({
       )}
     </div>
   );
-}
+});
 
 // Hook to create a stable array of refs for messages
 export function useMessageRefs(count: number): RefObject<(HTMLDivElement | null)[]> {

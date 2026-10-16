@@ -93,7 +93,8 @@ function renderListItems(children: ReactNode, ordered: boolean, start = 1) {
   });
 }
 
-export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile, keepLineBreaks }: MarkdownBodyProps) {
+// 整体 memo：父组件因无关状态重渲染时，相同正文不再重新解析。
+export const MarkdownBody = memo(function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile, keepLineBreaks }: MarkdownBodyProps) {
   const normalizedMarkdown = useMemo(() => normalizeDisplayMath(children), [children]);
   // 回调和配置都通过 ref 读取，让 components 只随 cwd / 流式状态 / 是否有打开文件
   // 能力变化，块级 memo 才能在上游回调换身份时依然命中。
@@ -221,4 +222,4 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
       )}
     </div>
   );
-}
+});

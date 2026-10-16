@@ -310,9 +310,16 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
   - 新会话首条消息：fork 在发送途中切走会话时拒绝发送并通过 `setDraft` 保留草稿，上游 e7d0fda（切走后照常发送）未移植。
   - 通知：fork 的 NoticeShelf 收起时单行居中，上游 d850be1 不适用；终端二维码（#755）按 `splitNoticeText` 以 `.notice-shelf-art` 渲染。
   - 回合最终回答的拆分副本通过 `lib/turn-views.ts` 按原消息缓存（#1005），不要在渲染中重新 `withAssistantBlocks`。
+  - 流式 markdown（上游 a952ed5 `markdown-blocks`）：保留 fork 的 `streaming-markdown-blocks`。实测 2.1 万字符的回复，只要正文里有一个行内 HTML（如 `<kbd>`），上游切分就整体失效，每帧平均重解析约 1.1 万字符；fork 平均约 220 字符，且未闭合围栏走纯文本快路径。无 HTML 时两者相当。MarkdownBody 额外整体 memo。
+  - 流式渲染范围（上游 e8d91ef `StreamingStore`）：fork 仍用 reducer + 按帧合并的增量，每帧最多让 ChatWindow 重渲一次；上游把流式消息移出 React 状态，只有正在输出的回复重渲。两者可叠加，属于单独的性能重构，尚未移植。
+  - Prism 按需加载（上游 046bc67）：聊天代码块保留 fork 按语言拆分的 `lib/prism-languages.ts`；文件查看器仍用完整 Prism，因为服务端识别的语言多于按需加载表。代码块接入上游 `lib/highlight-queue.ts` 的高亮预算：同一任务内超出预算的代码块先纯文本显示，空闲时由新到旧补上高亮。
+  - HTML 大文件预览（上游 93b3aba）：fork 的预览走 `/api/files/raw/` 文档路由，不受 256 KB 分块限制，未移植。
+  - 删除项目全部会话（上游 c8182b1 `session-delete`、`/api/sessions/delete`）：fork 侧栏已有“移除项目并删除会话”，删除路径保留 fork 的回收站与级联改写登记，未合入。
 - 子代理查看采用上游 SubagentViewer：`AppShell` 的 `agentTabs` 与文件、终端标签并列，激活时与终端互斥地覆盖文件标签，关闭时按终端、子代理、文件的顺序选择下一个；切换项目时丢弃子代理标签。MessageView 的回调为 `onOpenSubagent(sessionId, label)`，不再跳转主会话。
 - 文件标签按项目暂存（上游 d69b33e）：`useFilePanel.switchWorkspace()` 在 `handleCwdChange` 的项目切换处调用，查看器状态按 `workspaceGeneration` 回写到所属项目；激活中的终端在切换后继续占用面板。
 - 侧栏的“等待输入”来自 `/api/agent/running` 的 `awaitingInputSessionIds`（运行中且有阻塞型扩展 UI 请求），`SessionItem` 用琥珀色呼吸圆点替换运行动画，其余仍按运行中处理。
+- 会话行在桌面端用 Ctrl/Cmd/Shift/Alt 点击或中键点击时，以 `lib/session-links.ts` 的 `?session=` 链接在新标签页打开；URL 链接的会话已不存在时，侧栏采用的项目保持空白新会话，不恢复其上次打开的会话（#1168）。
+- 运行期间 ChatWindow 通过 `useAudio().holdAudio()` 保持提示音的 AudioContext 运行，空闲时自动挂起（#1157）。
 - `display: false` 的自定义消息与 pi TUI 一致完全不渲染（ChatWindow 跳过且不计入过程详情，MessageView 入口兜底），不再显示“隐藏的扩展消息”卡片。
 - CLI 的 `version/status/stop/open` 来自上游；`pi-web update` 在 fork 中禁用，只打印 fork Release 与 `scripts/macos-service.sh` 的更新方式，绝不执行 `npm install -g @agegr/pi-web`。
 

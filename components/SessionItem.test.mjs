@@ -56,3 +56,11 @@ test("停在扩展对话框上的运行用琥珀色呼吸圆点替换运行动�
   // 仍是运行中的行：只替换指示器，其余运行态行为不变。
   assert.match(source, /isRunning && isAwaitingInput \? <AwaitingInputSessionIndicator \/> : isRunning \? <RunningSessionIndicator \/>/);
 });
+
+test("桌面端带修饰键或中键点击会话行时在新标签页打开", () => {
+  assert.match(source, /import \{ isPlainActivation, sessionDeepLink \} from "@\/lib\/session-links";/);
+  assert.match(source, /if \(!isMobile && !session\.transient && !isPlainActivation\(event\)\) \{\s*event\.preventDefault\(\);\s*openInNewTab\(\);/);
+  assert.match(source, /if \(event\.button !== 1 \|\| isMobile \|\| session\.transient/);
+  assert.match(source, /window\.open\(new URL\(sessionDeepLink\(session\.id\), window\.location\.href\)\.toString\(\), "_blank", "noopener"\)/);
+  assert.match(source, /onAuxClick=\{handleRowAuxClick\}/);
+});
