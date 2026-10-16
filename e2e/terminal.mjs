@@ -90,8 +90,12 @@ try {
     };
     const showPanel = () => page.getByRole("button", { name: "Show file panel", exact: true }).click();
     const hidePanel = async () => {
-      const button = page.locator("#file-panel").getByRole("button", { name: "Hide file panel", exact: true, includeHidden: true });
-      if (await button.getAttribute("aria-expanded") === "true") await button.click();
+      const panel = page.locator("#file-panel");
+      if (!await panel.evaluate((element) => element.classList.contains("right-panel-open"))) return;
+      // fork 桌面关闭按钮在顶部栏，移动端在面板内；移动端按钮没有 aria-expanded。
+      const closeScope = viewport.width <= 640 ? panel : page;
+      await closeScope.getByRole("button", { name: "Hide file panel", exact: true }).click();
+      await page.locator("#file-panel.right-panel-closed").waitFor({ state: "attached" });
     };
     try {
       await page.goto(`${base}/?session=terminal-a1`);
@@ -220,9 +224,12 @@ try {
       await run("export PR695_WORKSPACE=retained");
       await hidePanel();
       await showSidebar();
-      await page.getByRole("button").and(page.getByTitle(workspace, { exact: true })).first().click();
-      await page.getByRole("button").and(page.getByTitle(otherWorkspace, { exact: true })).click();
-      await page.getByText("Other workspace session", { exact: true }).waitFor();
+      // fork 的项目标题只负责折叠；显式选中另一项目的会话，才切换终端的工作目录。
+      const otherProject = page.getByRole("button").and(page.getByTitle(otherWorkspace, { exact: true }));
+      if (await otherProject.getAttribute("aria-expanded") !== "true") await otherProject.click();
+      await page.getByText("Other workspace session", { exact: true }).click();
+      await page.getByText("Other workspace session message", { exact: true }).waitFor();
+      await showSidebar();
       await page.getByRole("button", { name: "Open workspace terminal", exact: true }).click();
       await ready();
       const workspaceTabs = await page.evaluate(() => JSON.parse(sessionStorage.getItem("pi-web:terminal-tabs")).tabs);
@@ -236,7 +243,8 @@ try {
       for (const name of ["workspace-a", "workspace-b"]) {
         await page.getByRole("button", { name: `Terminate terminal ${name}`, exact: true }).click();
       }
-      await page.locator(".terminal-panel").waitFor({ state: "detached" });
+      // 两个异步关闭请求可能尚未提交，等待集合为空，避免单元素 waitFor 的 strict-mode 竞争。
+      await page.waitForFunction(() => document.querySelectorAll(".terminal-panel").length === 0);
       for (const terminalId of created) assert.equal((await fetch(`${base}/api/terminal/${terminalId}`)).status, 404);
       assert.deepEqual(errors, []);
       console.log(`PASS ${viewport.width}: real shell, files, sessions, refresh, reconnect, restart, exit, close during creation, workspace isolation`);

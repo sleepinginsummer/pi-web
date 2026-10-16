@@ -827,21 +827,25 @@ function BlockView({ block, searchTarget, toolResults, isStreaming, streamingDur
 }
 
 function TextBlock({ block, isStreaming, cwd, onOpenFile }: { block: TextContent; isStreaming?: boolean; cwd?: string; onOpenFile?: (filePath: string) => void }) {
-  const [text, setText] = useState(block.text);
+  // 普通文本始终读当前块；只有按需加载的完整正文进入 state，避免稳定块 key 冻结流式内容。
+  const [loaded, setLoaded] = useState<{ url: string; text: string } | null>(null);
+  const fullContentLoaded = loaded !== null && loaded.url === block.deferredUrl;
+  const text = fullContentLoaded ? loaded.text : block.text;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const load = () => {
-    if (!block.deferredUrl) return;
+    const url = block.deferredUrl;
+    if (!url) return;
     setLoading(true);
     setError(null);
-    void loadDeferredContent(block.deferredUrl).then((value) => {
+    void loadDeferredContent(url).then((value) => {
       if (typeof value !== "string") throw new Error("Invalid deferred content");
-      setText(value);
+      setLoaded({ url, text: value });
     }).catch((cause) => setError(String(cause))).finally(() => setLoading(false));
   };
   return <>
     <SafeMarkdownBody isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile}>{text}</SafeMarkdownBody>
-    {block.deferredUrl && text === block.text && (
+    {block.deferredUrl && !fullContentLoaded && (
       <button type="button" onClick={load} disabled={loading} style={{ padding: 0, border: 0, background: "none", color: "var(--accent)", cursor: loading ? "default" : "pointer", fontSize: 11 }}>
         {loading ? "loading..." : "view full content"}
       </button>

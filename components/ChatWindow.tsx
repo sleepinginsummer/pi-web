@@ -10,6 +10,8 @@ import { EXTENSION_DIALOG_BASE_WIDTH, fitExtensionDialogWidth } from "@/lib/exte
 import { formatTurnDuration, getTurnDurationMs } from "@/lib/turn-duration";
 import { dropMentionText, splitDroppedItems, uploadFiles, type DroppedItem } from "@/lib/file-upload-client";
 import { MessageView } from "./MessageView";
+import { StreamingReply } from "./StreamingReply";
+import { selectHasStreamingContent, selectIsStreaming, selectStreamingBlockCount, useStreamingSelector } from "@/hooks/useStreamingSelector";
 import { MarkdownBody } from "./MarkdownBody";
 import { AskInputFlyout } from "./AskInputFlyout";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
@@ -310,7 +312,7 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
 
 
   const {
-    loading, error, activeLeafId, messages, entryIds, messageKeys, historyCursor, streamState, hasEarlierMessages, loadingEarlierMessages, earlierTurnCount,
+    loading, error, activeLeafId, messages, entryIds, messageKeys, historyCursor, streamingStore, hasEarlierMessages, loadingEarlierMessages, earlierTurnCount,
     agentRunning, bashRunning, pendingBash, modelState, modelActions, toolPreset,
     retryInfo, contextUsage, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,
@@ -329,6 +331,10 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
     navigationKey, isNavigationActive, session, newSessionCwd, pendingNewSessionControl, onPendingNewSessionEvent, onSessionCreated, onSessionListRefresh, onSessionForked, onToolEnd,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onSessionStatsPanelOpen, onOpenSettings,
   });
+  const isStreaming = useStreamingSelector(streamingStore, selectIsStreaming);
+  const hasStreamingContent = useStreamingSelector(streamingStore, selectHasStreamingContent);
+  const streamingItemCount = useStreamingSelector(streamingStore, selectStreamingBlockCount);
+  const getStreamingMessage = useCallback(() => streamingStore.getState().streamingMessage, [streamingStore]);
   const displayExtensionWidgets = useMemo(
     () => withTodoWidget(extensionWidgets, todos),
     [extensionWidgets, todos],
@@ -344,7 +350,7 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
     scrollToLatest,
   } = useChatScrollFollow({
     agentRunning,
-    isStreaming: streamState.isStreaming,
+    isStreaming,
     loading,
     messageCount: messages.length,
     positionRequest: scrollPositionRequest,
@@ -936,7 +942,7 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
     setRenderWindow({ key: renderWindowKey, count: MAX_MOUNTED_HISTORY_GROUPS, offset: 0 });
   }, [renderWindowKey]);
 
-  const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
+  const isEmptyNew = isNew && messages.length === 0 && !isStreaming && !sessionBusy;
   // 新会话引导区：π Pi Web 正下方显示当前文件夹名
   const newSessionFolderName = (() => {
     if (!newSessionCwd) return null;
@@ -1208,7 +1214,7 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
                 const messageKey = messageKeys[idx] ?? idx;
                 let showTimestamp = msg.role === "assistant";
                 // 流式尾消息沿用现有处理，避免与流式气泡重复显示。
-                if (showTimestamp && streamState.isStreaming && idx === messages.length - 1) {
+                if (showTimestamp && isStreaming && idx === messages.length - 1) {
                   showTimestamp = false;
                 }
                 if (options.showTimestamp !== undefined) showTimestamp = options.showTimestamp;
@@ -1269,27 +1275,23 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
               const { groups, liveTailStartIndex } = buildMessageRenderGroups(messages, {
                 isAnchor: isMessageGroupAnchor,
                 findFinalAssistantIndex,
-                busy: sessionBusy || streamState.isStreaming,
+                busy: sessionBusy || isStreaming,
                 lastAnchorIndex: lastAnchorIdx,
               });
 
-              const streamingAssistant = streamState.isStreaming && streamState.streamingMessage?.role === "assistant"
-                ? streamState.streamingMessage as AssistantMessage
-                : null;
               const renderStreamingMessage = (visibleBlockOffset = 0): ReactNode => {
-                if (!streamingAssistant) return null;
+                if (!isStreaming || !hasStreamingContent) return null;
                 return (
-                  <div ref={lastRenderedMessageRef}>
-                    <MessageView
-                      message={streamingAssistant}
-                      isStreaming
-                      toolResults={toolResults}
-                      modelNames={modelState.names}
-                      cwd={messageCwd}
-                      onOpenFile={onOpenFile}
-                      visibleBlockOffset={visibleBlockOffset}
-                    />
-                  </div>
+                  <StreamingReply
+                    store={streamingStore}
+                    messageRef={lastRenderedMessageRef}
+                    toolResults={toolResults}
+                    modelNames={modelState.names}
+                    cwd={messageCwd}
+                    onOpenFile={onOpenFile}
+                    onOpenSubagent={onOpenSubagent}
+                    visibleBlockOffset={visibleBlockOffset}
+                  />
                 );
               };
 
@@ -1310,9 +1312,6 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
                       sources.push({ index, itemCount: 1 });
                     }
                   }
-                  const streamingItemCount = streamingAssistant
-                    ? getDisplayableAssistantBlocks(streamingAssistant, { isStreaming: true }).length
-                    : 0;
                   const recentWindow = buildRecentItemWindow(
                     [...sources.map((source) => source.itemCount), streamingItemCount],
                     LIVE_PROCESS_ITEM_LIMIT,
@@ -1439,7 +1438,7 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
                   messageOverride: finalAnswerMessage, writtenFiles,
                   // 没有过程详情时，本轮耗时显示在答复下方。
                   turnDurationMs: processViews.length === 0 ? turnDurationMs : undefined,
-                  recoverTruncation: end === messages.length && !streamState.isStreaming && !hasAssistantAnswer(finalAnswerMessage),
+                  recoverTruncation: end === messages.length && !isStreaming && !hasAssistantAnswer(finalAnswerMessage),
                 }));
                 for (let index = finalAssistantIdx + 1; index < end; index++) nodes.push(renderMessage(index));
                 return <Fragment key={`group-${messageKeys[start] ?? start}`}>{nodes}</Fragment>;
@@ -1478,7 +1477,7 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
               );
             })()}
 
-            {agentRunning && !streamState.streamingMessage?.content.length && (agentPhase || isCompacting) && (
+            {agentRunning && !hasStreamingContent && (agentPhase || isCompacting) && (
               <div className="break-words py-2 text-[13px] text-text-muted">
                 <span className="animate-[pulse_1.5s_infinite]">{isCompacting ? t("chat.compacting") : phaseLabel(agentPhase, t)}</span>
               </div>
@@ -1516,7 +1515,8 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
           <ChatMinimap
             messages={messages}
             entryIds={entryIds}
-            streamingMessage={streamState.streamingMessage}
+            getStreamingMessage={getStreamingMessage}
+            isStreaming={isStreaming}
             scrollContainer={scrollContainerRef}
             messageRefs={messageRefs}
             onNavigate={() => {

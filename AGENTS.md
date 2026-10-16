@@ -196,7 +196,7 @@ The `enabledModels` setting uses pi's `--models` syntax: minimatch globs against
 
 ### 运行中止与扩展延迟注册的 provider（上游 v0.11.0）
 - SDK 1.1 的 `agent_settled.aborted` 由 wrapper 记入 `lastRunAborted`，`prompt_done` 在被停止时带 `aborted: true`。客户端在 `useAgentSession` 中把它写入 `RunCompletion.aborted`，`useCompletionEffects` 对被停止的运行不播放提示音、不发通知（任一客户端的 Stop/Esc 都算），与本机手动停止的通知抑制并存。fork 不使用服务端 `onAgentRunComplete` 推送。
-- `lib/deferred-provider-models.ts` 记住扩展只在 `session_start` 注册的 provider 模型，`/api/models` 用它补全列表；`startRpcSession()` 遇到这类模型时以默认模型创建，绑定完成后再切换。切换必须在 `waitUntilReady()` 的后台回调里完成且仅在会话尚未运行时执行，不能在 create 阶段 `await`，否则新会话两阶段创建会被扩展审批阻塞。
+- `lib/deferred-provider-models.ts` 记住扩展只在 `session_start` 注册的 provider 模型，`/api/models` 用它补全列表；`startRpcSession()` 遇到这类模型时以默认模型创建，绑定完成后再切换。切换必须通过 `trackStartupModelSwitch()` 跟随 `whenExtensionsBound()` 的真实绑定生命周期，且仅在会话尚未运行时执行，不能在 create 阶段 `await`，否则新会话两阶段创建会被扩展审批阻塞。`waitUntilReady()` / 请求级等待的超时只拒绝当前调用，不能作为后台切模任务的失败。
 
 ### SSE reconnect on page refresh mid-stream
 On `ChatWindow` mount, `GET /api/agent/[id]` is called. If `state.isStreaming === true`, SSE is reconnected automatically. `thinkingLevel` and `isCompacting` are also synced from this response.
@@ -293,7 +293,7 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 - Browser autoplay policy means sound must be unlocked from a user gesture; `ChatInput` calls the unlock hook from interactive controls, and `ChatWindow` plays the tone from `onAgentEnd`.
 
 ### PWA 版本与 Service Worker 更新策略
-- 当前合并版本使用 `0.10.0-merge.36`；此后每次代码变更都必须将最后一位递增 1，并同步更新 `package.json` 与 `package-lock.json`。
+- 当前合并版本使用 `0.10.0-merge.38`；此后每次代码变更都必须将最后一位递增 1，并同步更新 `package.json` 与 `package-lock.json`。
 - 生产环境必须使用每次构建唯一的版本标识注册 `/sw.js?v=<build-version>`，静态缓存名称也必须包含同一个版本；不能只使用长期不变的 `package.json` 版本，否则代码变化后浏览器可能继续命中旧 chunk。
 - 新 Service Worker 安装完成后保持 `waiting`，由界面提示“发现新版本”；用户确认后发送 `SKIP_WAITING`，并在 `controllerchange` 后刷新页面。不要在 `install` 阶段无条件调用 `skipWaiting()`。
 - 激活新 Service Worker 时只清理 `pi-web-` 前缀下的旧版本缓存，不得清理其它站点数据或认证信息。`/sw.js`、页面导航和 API 请求必须绕过静态资源缓存。
@@ -315,7 +315,7 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
   - 通知：fork 的 NoticeShelf 收起时单行居中，上游 d850be1 不适用；终端二维码（#755）按 `splitNoticeText` 以 `.notice-shelf-art` 渲染。
   - 回合最终回答的拆分副本通过 `lib/turn-views.ts` 按原消息缓存（#1005），不要在渲染中重新 `withAssistantBlocks`。
   - 流式 markdown（上游 a952ed5 `markdown-blocks`）：保留 fork 的 `streaming-markdown-blocks`。实测 2.1 万字符的回复，只要正文里有一个行内 HTML（如 `<kbd>`），上游切分就整体失效，每帧平均重解析约 1.1 万字符；fork 平均约 220 字符，且未闭合围栏走纯文本快路径。无 HTML 时两者相当。MarkdownBody 额外整体 memo。
-  - 流式渲染范围（上游 e8d91ef `StreamingStore`）：fork 仍用 reducer + 按帧合并的增量，每帧最多让 ChatWindow 重渲一次；上游把流式消息移出 React 状态，只有正在输出的回复重渲。两者可叠加，属于单独的性能重构，尚未移植。
+  - 流式渲染范围（上游 e8d91ef `StreamingStore`）：已移植外部 store，继续使用 fork 按帧合并的增量；`StreamingReply` 单独订阅正文，ChatWindow 只订阅流式状态和块数，块增删时更新 fork 的运行中过程窗口。ChatInput/ChatMinimap 保持 memo，minimap 测量通过稳定 getter 读取当前回复。message_end 仍先 flush，再追加完成消息并清空 store；会话切换继续 reset 帧队列，旧 run 事件仍在原入口拒绝。`TextBlock` 直接渲染当前 `block.text`，仅按需加载的完整正文进入 state，稳定 key 不得冻结流式文字。
   - Prism 按需加载（上游 046bc67）：聊天代码块保留 fork 按语言拆分的 `lib/prism-languages.ts`；文件查看器仍用完整 Prism，因为服务端识别的语言多于按需加载表。代码块接入上游 `lib/highlight-queue.ts` 的高亮预算：同一任务内超出预算的代码块先纯文本显示，空闲时由新到旧补上高亮。
   - HTML 大文件预览（上游 93b3aba）：fork 的预览走 `/api/files/raw/` 文档路由，不受 256 KB 分块限制，未移植。
   - 删除项目全部会话（上游 c8182b1 `session-delete`、`/api/sessions/delete`）：fork 侧栏已有“移除项目并删除会话”，删除路径保留 fork 的回收站与级联改写登记，未合入。
@@ -327,5 +327,6 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 - `display: false` 的自定义消息与 pi TUI 一致完全不渲染（ChatWindow 跳过且不计入过程详情，MessageView 入口兜底），不再显示“隐藏的扩展消息”卡片。
 - CLI 的 `version/status/stop/open` 来自上游；`pi-web update` 在 fork 中禁用，只打印 fork Release 与 `scripts/macos-service.sh` 的更新方式，绝不执行 `npm install -g @agegr/pi-web`。
 - 消息 key（上游 #1184）：`lib/message-keys.ts` 的别名在 `useAgentSession.commitContextSnapshot()` 统一计算，ChatWindow 的消息、过程分组和分组 Fragment 都按 `messageKeys` 取 key，MessageView 的块按位置取 key。fork 读取器与上游有两处差异，测试已按 fork 行为调整：历史用户图片被换成按需加载的 URL，所以用户消息只比较文字和图片类型；压缩摘要按 SDK 上下文投影放在最前，运行中途压缩后本轮消息改用各自的 entry id。
-- 延迟 provider 的启动模型切换（#1240）在 fork 中仍在扩展绑定后于后台执行，但通过 `trackStartupModelSwitch()` 登记；`send()` 中需要等待扩展的命令（prompt/steer/follow_up 等）会先等它完成，测试用 `waitForStartupModelSwitch()` 等待。
-- 上游 v0.12.2 的回合耗时（#1222）、缓存与费用提示（#1265，设置 › 常规开关）、过程折叠摘要、长思考分段渲染（#1196）、代理切换器的用量和子代理标签开关、技能文档相对链接（`MarkdownBody` 的 `onNavigateLink` 经 ref 读取，保持块级 memo 命中）、终端主题和新主题已移植；StreamingStore 与上游侧栏相关的文档段落未合入。
+- 延迟 provider 的启动模型切换（#1240）在 fork 中仍在扩展绑定后于后台执行，通过 `trackStartupModelSwitch()` 登记可重试操作。`whenExtensionsBound()` 不带请求期限；单次 finalize/prompt 的等待超时只拒绝请求，后台审批、切模和目录发现继续执行，不得写入 `extensionsError`。真实切模失败才持久保留错误并阻止发送；显式 `finalize-existing` 重试复用同一个 runtime，且并发重试共享一次切换。手动偏好与启动切换在 wrapper 内串行提交：成功手动选模会解除错误并废弃旧启动目标，旧任务不得再覆盖模型或写回错误；失败的手动选择不取消初始化。仅调整强度时仍初始化目标模型，并在切模后恢复用户原始请求的强度，不能继承占位模型的限幅结果。
+- 生产 `npm start` / `start:lan` 与 macOS 服务统一通过 `bin/pi-web.js` 启动；必须在 Next 读取 prerender manifest 前轮换 preview 密钥，轮换失败拒绝启动，避免公开构建包中的 preview id 绕过 proxy 登录校验。
+- 上游 v0.12.2 的回合耗时（#1222）、缓存与费用提示（#1265，设置 › 常规开关）、过程折叠摘要、长思考分段渲染（#1196）、代理切换器的用量和子代理标签开关、技能文档相对链接（`MarkdownBody` 的 `onNavigateLink` 经 ref 读取，保持块级 memo 命中）、终端主题和新主题已移植；上游侧栏相关的文档段落未合入。

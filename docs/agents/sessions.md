@@ -7,6 +7,13 @@
 - The closing wrapper stays in `__piSessions` until disposed or replaced; its `onDestroy` removes the entry only while it still points at that wrapper, or a late cleanup would unregister the replacement. `registerRpcWrapper()` clears the callback of the entry it replaces (a pre-hot-reload wrapper still deletes by id).
 - Extensions get `PI_WEB_SHUTDOWN_DEADLINE_MS` (5 s; `0` or invalid keeps the default) for `session_shutdown`, then the wrapper logs once and disposes anyway: closing an MCP connection has no upper bound. Extension binding is awaited first, without a deadline.
 
+## 初始化等待与重试（`lib/rpc-manager.ts`）
+
+- 后台延迟切模和 provider 目录发现使用 `whenExtensionsBound()`，跟随实际审批/绑定 Promise，不继承请求期限。`waitUntilReady()`、`waitForStartupModelSwitch()` 的请求等待默认 20 秒，超时只拒绝本次调用，后台仍继续执行，`extensionsInitializing` 保持真实进度；只有实际绑定或切模失败才记录 `extensionsError`。
+- `trackStartupModelSwitch()` 保留初始化操作；显式 `finalize-existing` 可重做真实失败的目标模型切换，并发请求共享在途任务。请求超时后的重试加入原任务，不能创建第二个 runtime，也不能静默使用占位模型。测试通过真实 SDK 审批、客户端两阶段创建和路由验证“超时后批准，再重试 ready”以及 provider 恢复后的并发重试。
+
+- 启动模型/强度与手动偏好通过同一 wrapper 队列提交。成功手动选模废弃旧目标与旧错误回写，失败的手动选择不取消初始化；仅手动调整强度仍完成原目标模型初始化，并重新应用用户请求的强度（而非占位模型限幅后的等级）。模型与强度分别跟踪选择版本，避免旧任务越过较新的用户选择。回归覆盖审批后目标可用/缺失、执行中切换成功/失败、独立强度选择和手动选模失败。
+
 ## Fork never touches the running AgentSession
 Never fork through `AgentSession.fork()` / `AgentSessionRuntime.fork()`: they replace the session in place (`inner.sessionId` becomes the new id; the current run is aborted first), so a wrapper registered under the old id would serve the forked state and corrupt the `parentSession` chain.
 
@@ -103,9 +110,15 @@ The streaming reply's `t/s` counts estimated tokens from when its first ones sho
 - Such a message is keyed by its place after the last loaded entry (`live:<anchor>:<offset>`), which appends and older pages leave alone. `loadSession`'s replacing read hands those keys to the entry ids at the same places after the anchor (`carryMessageKeys()`; the hook keeps the aliases while their ids are loaded), each checked against the message it replaces: `userMessageKey()` for the prompt (sent with the browser's timestamp), `customType` for a custom message, `timestamp` for the rest. From the first mismatch on, or when the window no longer holds the anchor (a run past the first page), messages keep their id keys and remount as before. Fork, search and `data-entry-id` still read the real `entryIds`.
 - A kept message keeps its blocks too: `AssistantMessageView` keys a block by its index (`${entryId ?? "stream"}-<index>` re-keyed every block on that read), so open thinking, a tool card and its output's scroll survive it. `ThinkingBlock` drops what it loaded (`content`, `loading`, `error`) when its session, entry or block index changes, so a reused block never shows another entry's thinking; an open block the read turns `deferred` shows "Loading thinking..." until its full text arrives. The run's end still remounts the process messages as they move into Process details (another parent), and an answer that followed thinking in its message (its blocks move up as the thinking leaves); that is the grouping, not the read.
 
-## Streaming markdown renders block by block (`components/MarkdownBody.tsx`, `lib/markdown-blocks.ts`)
-- A streaming reply grows by a few characters per chunk, and one parse of the whole reply per chunk made a long reply quadratic: at 4x CPU throttling a 14k-character reply spent 8.8 s in react-markdown, its commits growing from 5 to 16 ms. While `isStreaming`, `MarkdownBody` cuts the text with `splitMarkdownBlocks()` and renders one `memo`'d `MarkdownBlock` per piece, so finished blocks keep their parse and only the last is parsed again. The pieces are siblings in the one `.markdown-body` div (react-markdown renders a fragment), so the DOM is the whole parse's, less the whitespace text nodes between blocks. A finished message is one block: its rendering is exactly what it was.
-- A cut goes only after a blank line, before a line at column 0 that is not a list item; never inside a code fence or a `$$` block, never after the first line with an HTML tag outside inline code (a `<details>` or an open `<b>` spans blank lines through rehype-raw), never in a document opening with front matter. Link reference definitions and footnotes do not reach earlier blocks while streaming. `lib/markdown-blocks.test.mjs` checks that every prefix of a mixed document parses the same split as whole; keep that test passing when changing the rules.
+## Streamed chunks re-render only the reply
+
+- `lib/streaming-message.ts` 的 `StreamingStore` 保存流式消息，`useAgentSession` 返回稳定 store；`useFrameBatchedStreamDispatch` 继续按浏览器帧合并增量。`ChatWindow` 只通过 `useStreamingSelector` 订阅是否流式、有无内容和可见块数，`components/StreamingReply.tsx` 单独订阅完整消息。普通正文增量不重渲窗口或输入框；块增删时仍更新 fork 的运行中过程折叠窗口。
+- store 同步通知订阅者，使 `message_end` 的 flush、追加完成消息、清空回复仍同批提交。会话身份变化重置帧队列，原有 run id 校验继续拒绝过期事件。`ChatInput` 和 `ChatMinimap` 保持 memo；minimap 通过稳定 getter 在测量时读取流式消息，滚动跟随继续使用 fork 的 `useChatScrollFollow`。
+- `components/ChatWindow.streaming.test.mjs` 执行真实 hook、窗口与输入框，用 React Profiler 验证 30 个增量至少产生 30 次回复提交（测试冻结独立的滚动/时钟计时器，只统计 SSE 引起的更新），而窗口和输入框均不新增渲染，同时核对 DOM 正文、顺序、flush 和会话切换。文本块稳定 key 下必须直接渲染当前 `block.text`，state 只保存按需加载的完整正文。
+
+## Streaming markdown renders block by block (`components/MarkdownBody.tsx`, `lib/streaming-markdown-blocks.ts`)
+- 保留 fork 的 `splitStreamingMarkdown()`：仅在安全的顶层空行切分，避开未闭合围栏、HTML 块和注释、数学块、列表/引用续行以及引用链接和脚注定义。冻结块使用 memo，只有尾部重新解析；未闭合代码围栏走纯文本快路径。行内 HTML 不会使整篇分块失效。
+- 流式结束后仍整篇渲染，最终 Markdown 输出保持完整语义。渲染回调通过 ref 读取，避免回调身份变化破坏冻结块 memo。修改切分规则须运行 `lib/streaming-markdown-blocks.test.mjs`。
 - `onNavigateLink` (Settings › Skills) hands a document reader its local links: an anchor with `role="link"` and no `href`, so no click, middle-click or "Open in new tab" loads the path on the app's own URL; an empty (sanitized) `href` and HTML anchor destinations render as in chat. It also switches to `markdownDocumentRehypePlugins`, which give headings github-slugger slugs as `data-heading-anchor` (never an id, so two readers cannot collide), set after sanitizing and before KaTeX writes each formula's text twice. Chat rendering is unchanged.
 
 ## Long thinking renders in pieces (`ThinkingBlock` in `components/MessageView.tsx`, `lib/message-display.ts`)

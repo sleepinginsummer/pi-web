@@ -182,6 +182,8 @@ export async function POST(req: Request) {
     }
 
     try {
+      // create 已交付真实身份，审批通过后必须完成目标模型切换，才可声明 ready。
+      await session.waitForStartupModelSwitch({ retry: operation === "finalize-existing" });
       if (operation === "finalize-existing" && toolNames) {
         await session.send({ type: "set_tools", toolNames });
       }

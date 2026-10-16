@@ -42,5 +42,6 @@ test("renders math in headings without disabling heading navigation", () => {
 
 test("流式尺寸变化不触发 Minimap 全量消息测量", () => {
   assert.match(source, /if \(!isStreaming\) measureNodes\(\);/);
-  assert.match(source, /const isStreaming = streamingMessage !== null/);
+  assert.match(source, /getStreamingMessage: \(\) => Partial<AgentMessage> \| null/);
+  assert.match(source, /isStreaming: boolean/);
 });

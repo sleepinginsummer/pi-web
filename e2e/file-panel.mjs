@@ -22,11 +22,13 @@ export async function checkFilePanel(page, filePath) {
       && decodeURIComponent(url.pathname).endsWith(filePath.replace(/\\/g, "/"));
   });
   await iframe.waitFor();
-  const frame = await (await iframe.elementHandle()).contentFrame();
+  // 初始化时语言识别可能替换 iframe；用可重新定位的 FrameLocator 等待真实预览，
+  // 后续仍核对 previewInstance，布局切换造成的意外重载不会被重定位掩盖。
+  const frame = page.frameLocator("#file-panel iframe");
   await frame.locator("#notes").fill("Keep this note");
   await frame.locator("#filter").selectOption({ label: "Pending" });
-  await frame.evaluate(() => scrollTo(0, 120));
-  const instance = await frame.evaluate(() => window.previewInstance);
+  await frame.locator("html").evaluate(() => scrollTo(0, 120));
+  const instance = await frame.locator("html").evaluate(() => window.previewInstance);
   const width = () => panel.evaluate(async el => {
     await new Promise(requestAnimationFrame);
     await Promise.all(el.getAnimations().map(animation => animation.finished.catch(() => {})));
@@ -54,8 +56,8 @@ export async function checkFilePanel(page, filePath) {
       assert.equal(await panel.getByRole("button", { name: "Restore file panel width", exact: true }).getAttribute("aria-pressed"), "true");
       assert.equal(Math.round(await width()), page.viewportSize().width);
       assert.equal(await page.locator("#session-sidebar").evaluate(el => el.inert), true);
-      assert.equal(await frame.evaluate(() => window.previewInstance), instance);
-      assert.equal(await frame.evaluate(() => scrollY), 120);
+      assert.equal(await frame.locator("html").evaluate(() => window.previewInstance), instance);
+      assert.equal(await frame.locator("html").evaluate(() => scrollY), 120);
       assert.equal(await frame.locator("#notes").inputValue(), "Keep this note");
       assert.equal(await frame.locator("#filter").inputValue(), "Pending");
       await panel.getByRole("button", { name: "Restore file panel width", exact: true }).press("Enter");
@@ -71,8 +73,8 @@ export async function checkFilePanel(page, filePath) {
     assert.equal((await unchangedMeta).status(), 200);
     assert.equal(await toggle.getAttribute("aria-pressed"), "false", "Reopening returns to the split layout");
     assert.equal(await width(), originalWidth);
-    assert.equal(await frame.evaluate(() => window.previewInstance), instance);
-    assert.equal(await frame.evaluate(() => scrollY), 120);
+    assert.equal(await frame.locator("html").evaluate(() => window.previewInstance), instance);
+    assert.equal(await frame.locator("html").evaluate(() => scrollY), 120);
     assert.equal(await frame.locator("#notes").inputValue(), "Keep this note");
     assert.equal(await frame.locator("#filter").inputValue(), "Pending");
 

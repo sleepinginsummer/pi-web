@@ -14,6 +14,7 @@ import { checkExtensionDialogSizing, checkExtensionDialogs, extensionSource } fr
 import { checkChatAppearance } from "./chat-appearance.mjs";
 import { checkCodeBackground } from "./code-background.mjs";
 import { checkModelDiscovery } from "./model-discovery.mjs";
+import { checkModelContext } from "./model-context.mjs";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const mode = process.env.E2E_SERVER_MODE || "dev";
@@ -143,8 +144,6 @@ try {
     message("reply", "root", "assistant", "E2E wrapper reply"),
   ]);
 
-  const projectNavigation = createProjectNavigationFixtures({ agentDir, sessionDir, timestamp });
-
   const probe = createServer();
   probe.listen(0, "127.0.0.1");
   await once(probe, "listening");
@@ -185,7 +184,7 @@ try {
     const response = await fetch(`${base}/api/sessions`, { signal: AbortSignal.timeout(5000) }).catch(() => null);
     if (response?.ok) {
       const { sessions } = await response.json();
-      assert.deepEqual(sessions.map((session) => session.id).sort(), [LONG, BRANCH, RICH, COMPACTED, APPEND, CODE_BACKGROUND, projectNavigation.id].sort());
+      assert.deepEqual(sessions.map((session) => session.id).sort(), [LONG, BRANCH, RICH, COMPACTED, APPEND, CODE_BACKGROUND].sort());
       break;
     }
     assert.ok(Date.now() < deadline, "Server readiness timed out; see server.log");
@@ -238,6 +237,13 @@ try {
     console.log("PASS: external session-file appends are visible on the UI context path");
   }
 
+  if (mode === "dev") {
+    // Turbopack 冷编译在外置盘上可超过客户端 10s 的状态读取期限（实测 14.7s）。
+    // 先编译页面与只读状态路由，再验证浏览器行为；生产模式仍从冷页面开始，错误收集不放宽。
+    const compiledPage = await fetch(base, { signal: AbortSignal.timeout(60_000) });
+    assert.equal(compiledPage.status, 200);
+    await api(`/api/sessions/${LONG}/state`);
+  }
   browser = await chromium.launch();
   for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
     context = await browser.newContext({ viewport, locale: "en-US" });
@@ -277,10 +283,24 @@ try {
       await page.mouse.move(rect.x + rect.width / 2, rect.y + rect.height / 2);
       const preview = page.locator("[data-minimap-preview-box]");
       const turn = preview.locator("[data-minimap-preview-index]").filter({ hasText: text(4998) });
-      const result = {
-        number: await turn.locator("span[aria-hidden='true']").first().textContent(),
-        earlier: await preview.locator("[data-minimap-preview-earlier]").textContent(),
-      };
+      // 哨兵可额外预取一页；核对同一 DOM 快照中的实际历史边界，不能假设只有手动触发的两页。
+      await page.waitForFunction(() => {
+        const preview = document.querySelector("[data-minimap-preview-box]");
+        const earlier = preview?.querySelector("[data-minimap-preview-earlier]")?.textContent;
+        const ids = [...document.querySelectorAll("[data-chat-scroll-container] [data-entry-id]")]
+          .map((element) => element.dataset.entryId).filter((id) => /^e\d+$/.test(id)).map((id) => Number(id.slice(1)));
+        return ids.length > 0 && earlier === `Earlier turns not loaded: ${Math.min(...ids) / 2}. Click to load`;
+      });
+      const result = await turn.evaluate((element) => {
+        const preview = element.closest("[data-minimap-preview-box]");
+        const ids = [...document.querySelectorAll("[data-chat-scroll-container] [data-entry-id]")]
+          .map((entry) => entry.dataset.entryId).filter((id) => /^e\d+$/.test(id)).map((id) => Number(id.slice(1)));
+        return {
+          number: element.querySelector("span[aria-hidden='true']").textContent,
+          earlier: preview.querySelector("[data-minimap-preview-earlier]").textContent,
+          firstRendered: Math.min(...ids),
+        };
+      });
       await page.screenshot({ path: join(artifacts, screenshot) });
       await page.mouse.move(0, 0);
       await preview.waitFor({ state: "detached" });
@@ -341,10 +361,9 @@ try {
     assert.deepEqual(rendered,
       Array.from({ length: 5000 - firstRendered }, (_, i) => text(firstRendered + i)), "Missing, reordered, or duplicate chat messages");
     if (viewport.width > 600) {
-      assert.deepEqual(await readMinimapTurn("minimap-turns-paged.png"), {
-        number: "2500",
-        earlier: `Earlier turns not loaded: ${oldest / 2}. Click to load`,
-      }, "Loading older pages must not renumber minimap turns");
+      const pagedTurn = await readMinimapTurn("minimap-turns-paged.png");
+      assert.equal(pagedTurn.number, "2500", "Loading older pages must not renumber minimap turns");
+      assert.equal(pagedTurn.earlier, `Earlier turns not loaded: ${pagedTurn.firstRendered / 2}. Click to load`);
     }
     await page.screenshot({ path: join(artifacts, `history-${viewport.width}.png`) });
 
@@ -536,9 +555,10 @@ try {
     await checkFilePanel(page, previewFile);
     await checkExtensionDialogs(page, artifacts, viewport.width);
     await checkExtensionDialogSizing(page, viewport.width);
+    // 扩展场景会留下完成通知；设置场景从干净页面开始，避免移动端通知遮住侧栏按钮。
+    await page.goto(`${base}/?session=${RICH}`, { waitUntil: "domcontentloaded" });
+    await page.locator(".markdown-code-block pre").waitFor();
     if (viewport.width > 600) {
-      await page.goto(`${base}/?session=${RICH}`, { waitUntil: "domcontentloaded" });
-      await page.locator(".markdown-code-block pre").waitFor();
       await checkChatAppearance(page);
       await page.setViewportSize(viewport);
       // Returning from the mobile breakpoint restores the desktop sidebar preference in an effect.
@@ -556,7 +576,14 @@ try {
       const hideSidebar = page.getByRole("button", { name: "Hide sidebar", exact: true });
       const showSidebar = page.getByRole("button", { name: "Show sidebar", exact: true });
       await hideSidebar.or(showSidebar).waitFor({ state: "visible" });
-      if (await showSidebar.isVisible()) await showSidebar.click();
+      // 恢复 effect 仍可能落在可见性检查与 click 之间；只在目标状态已达成时接受按钮消失。
+      for (let attempt = 0; attempt < 4 && !await hideSidebar.isVisible(); attempt++) {
+        try {
+          await showSidebar.click({ timeout: 1000 });
+        } catch (error) {
+          if (!await hideSidebar.isVisible()) throw error;
+        }
+      }
       await hideSidebar.waitFor({ state: "visible" });
       await checkModelDiscovery(page);
     }

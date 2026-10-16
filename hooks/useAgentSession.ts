@@ -63,8 +63,7 @@ import { ShadowLifecycleCoordinator } from "@/lib/shadow-lifecycle";
 import { useShadowSessionSetting } from "@/hooks/useShadowSessionSetting";
 import type { ChatScrollPosition, ChatScrollPositionRequest } from "@/lib/chat-scroll-position";
 import {
-  INITIAL_STREAMING_STATE,
-  streamReducer,
+  createStreamingStore,
   type ClientAssistantMessageEvent,
 } from "@/lib/streaming-message";
 import { getToolExecutionProgress } from "@/lib/tool-execution-progress";
@@ -593,10 +592,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }>({ sid: null, oldestEntryId: null, hasMore: false, turnsBefore: 0, loading: false });
   // 卸载时从 ref 读取最终已分页窗口，避免 mount effect 的闭包捕获首帧状态。
   const viewSnapshotRef = useRef({ leafId: activeLeafId, page: historyPage, model: contextModel, thinkingLevel: "off", totalActiveMs: 0 });
-  const [streamState, dispatch] = useReducer(streamReducer, INITIAL_STREAMING_STATE);
+  // 仅正文订阅者处理增量，hook 自身不再因每帧文本更新而重渲。
+  const [streamingStore] = useState(createStreamingStore);
+  const dispatch = streamingStore.dispatch;
   const dispatchStreamBatch = useCallback((events: ClientAssistantMessageEvent[]) => {
     dispatch({ type: "delta_batch", events });
-  }, []);
+  }, [dispatch]);
   const streamScopeKey = session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : null);
   const {
     enqueue: enqueueStreamDelta,
@@ -1841,7 +1842,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setAgentPhase(phase);
     dispatch({ type: "start" });
     return promptRunIdRef.current;
-  }, [beginRun, resetStreamDeltas]);
+  }, [beginRun, dispatch, resetStreamDeltas]);
 
   const finishPromptWithoutStream = useCallback(async (sid: string | null = sessionIdRef.current, runId = promptRunIdRef.current) => {
     // completion 控制器负责当前轮校验与重复 settled 拒绝。
@@ -1865,7 +1866,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (sessionIdRef.current === sid) requestScrollPosition("running-end");
       });
     }
-  }, [flushStreamDeltas, loadSession, onSessionListRefresh, requestScrollPosition, scheduleEventStreamClose, settleRun]);
+  }, [dispatch, flushStreamDeltas, loadSession, onSessionListRefresh, requestScrollPosition, scheduleEventStreamClose, settleRun]);
 
   const readAgentSnapshot = useCallback(async (sid: string): Promise<AgentRuntimeSnapshot | null> => {
     try {
@@ -2062,6 +2063,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (!agentRunningRef.current) break;
         const msg = event.message as AgentMessage | undefined;
         if (msg?.role === "user") break;
+        const needsPhaseReset = streamingStore.getState().streamingMessage === null;
         const assistantMessageEvent = event.assistantMessageEvent as ClientAssistantMessageEvent | undefined;
         if (assistantMessageEvent) {
           enqueueStreamDelta(assistantMessageEvent);
@@ -2070,7 +2072,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           resetStreamDeltas();
           dispatch({ type: "snapshot", message: normalizeAssistantMessage(msg) });
         }
-        setAgentPhase(null);
+        // message_start 已清掉阶段；只有兼容缺少 start 的首个快照才需要补清，
+        // 避免每个 chunk 都派发同一个 null（React 仍可能额外执行一次父组件）。
+        if (needsPhaseReset) setAgentPhase(null);
         break;
       }
       case "message_end": {
@@ -2284,7 +2288,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
     }
-  }, [addNotice, cancelEventStreamGrace, clearAskQuestionnaire, consumeShadowEntry, enqueueStreamDelta, enterMainRun, flushStreamDeltas, handleExtensionUiRequest, isNew, loadCompactedSession, loadSession, newSessionCwd, onPendingNewSessionEvent, onSessionListRefresh, onToolEnd, reconcileAgentState, refreshContextUsage, resetStreamDeltas, scheduleContextRefresh, scheduleEventStreamClose]);
+  }, [addNotice, cancelEventStreamGrace, clearAskQuestionnaire, consumeShadowEntry, dispatch, enqueueStreamDelta, enterMainRun, flushStreamDeltas, handleExtensionUiRequest, isNew, loadCompactedSession, loadSession, newSessionCwd, onPendingNewSessionEvent, onSessionListRefresh, onToolEnd, reconcileAgentState, refreshContextUsage, resetStreamDeltas, scheduleContextRefresh, scheduleEventStreamClose, streamingStore]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
@@ -2429,7 +2433,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       dispatch({ type: "end" });
       return false;
     }
-  }, [addNotice, closeEvents, editEntryId, ensureEventsConnected, ensureNewSession, enterMainRun, isNavigationActive, isNew, navigationKey, newSessionCwd, newSessionModel, pendingControlKind, promoteNewSession, reconcileAgentState, requestScrollPosition, resetStreamDeltas, session, setEdit]);
+  }, [addNotice, closeEvents, dispatch, editEntryId, ensureEventsConnected, ensureNewSession, enterMainRun, isNavigationActive, isNew, navigationKey, newSessionCwd, newSessionModel, pendingControlKind, promoteNewSession, reconcileAgentState, requestScrollPosition, resetStreamDeltas, session, setEdit]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
     if (agentRunningRef.current || bashRunningRef.current) return;
@@ -3124,7 +3128,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // 保持同一对象引用，下游 memo 组件（ChatInput/MessageView）才能跳过渲染。
   return useMemo(() => ({
     // State
-    data: details, loading, error, activeLeafId, messages, entryIds, messageKeys, streamState,
+    data: details, loading, error, activeLeafId, messages, entryIds, messageKeys, streamingStore,
     historyCursor: historyPage.sid === sessionIdRef.current ? historyPage.oldestEntryId : null,
     hasEarlierMessages: historyPage.sid === sessionIdRef.current && historyPage.hasMore,
     loadingEarlierMessages: historyPage.sid === sessionIdRef.current && historyPage.loading,
@@ -3153,7 +3157,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // Subscriptions
     handleAgentEventRef,
   }), [
-    details, loading, error, activeLeafId, messages, entryIds, messageKeys, streamState, historyPage,
+    details, loading, error, activeLeafId, messages, entryIds, messageKeys, streamingStore, historyPage,
     agentRunning, modelViewState, modelViewActions, toolPreset,
     retryInfo, contextUsage, systemPrompt, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,

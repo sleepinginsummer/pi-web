@@ -90,11 +90,10 @@ function getRotationWarning(reason) {
           ? "its prerender manifest could not be read"
           : "its prerender manifest has an unexpected format";
   return [
-    `Warning: could not rotate pi-web's preview-mode secrets because ${detail}.`,
-    "This instance keeps the published preview id, so a client that knows it can",
-    "bypass the proxy's authentication and Host/Origin checks via the",
-    "x-prerender-revalidate header. Run from a writable install, or restrict",
-    "network access to this instance.",
+    `Cannot start pi-web: could not rotate preview-mode secrets because ${detail}.`,
+    "The published preview id would allow bypassing the proxy's authentication",
+    "and Host/Origin checks via the x-prerender-revalidate header.",
+    "Run from a writable install with a valid prerender manifest.",
   ].join("\n");
 }
 

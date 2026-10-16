@@ -101,7 +101,9 @@ function startServer({ port, hostname, openBrowser }) {
   // (via the x-prerender-revalidate header). Must happen before `next start`.
   const rotation = rotatePreviewSecrets(nextDir);
   if (!rotation.ok) {
-    console.warn(getRotationWarning(rotation.reason));
+    // 轮换失败时不能带着公开构建包内的密钥启动，否则 Next 会跳过登录代理。
+    console.error(getRotationWarning(rotation.reason));
+    process.exit(1);
   }
 
   if (!loopbackHostnames.has(hostname)) {

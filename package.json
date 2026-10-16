@@ -1,6 +1,6 @@
 {
   "name": "@agegr/pi-web",
-  "version": "0.10.0-merge.36",
+  "version": "0.10.0-merge.39",
   "description": "Web UI for the pi coding agent",
   "homepage": "https://github.com/agegr/pi-web#readme",
   "repository": {
@@ -41,8 +41,8 @@
     "dev": "next dev -H 127.0.0.1 -p 30141",
     "dev:lan": "next dev -H 0.0.0.0 -p 30141",
     "build": "next build --webpack",
-    "start": "next start -H 127.0.0.1 -p 30141",
-    "start:lan": "next start -H 0.0.0.0 -p 30141",
+    "start": "node bin/pi-web.js -H 127.0.0.1 -p 30141 --no-open",
+    "start:lan": "node bin/pi-web.js -H 0.0.0.0 -p 30141 --no-open",
     "lint": "eslint .",
     "test:terminal": "node e2e/terminal.mjs",
     "test:e2e": "node e2e/run.mjs",

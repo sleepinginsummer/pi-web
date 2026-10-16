@@ -16,7 +16,9 @@ import styles from "./ChatMinimap.module.css";
 interface Props {
   messages: AgentMessage[];
   entryIds: string[];
-  streamingMessage: Partial<AgentMessage> | null;
+  /** 在节流测量时读取正文，不随每个 chunk 更新 props。 */
+  getStreamingMessage: () => Partial<AgentMessage> | null;
+  isStreaming: boolean;
   scrollContainer: RefObject<HTMLDivElement | null>;
   messageRefs: RefObject<(HTMLDivElement | null)[]>;
   onNavigate?: () => void;
@@ -261,7 +263,8 @@ function layoutNodes(allNodes: NodeInfo[], minimapHeight: number): NodeLayout {
 export const ChatMinimap = memo(function ChatMinimap({
   messages,
   entryIds,
-  streamingMessage,
+  getStreamingMessage,
+  isStreaming,
   scrollContainer,
   messageRefs,
   onNavigate,
@@ -296,16 +299,11 @@ export const ChatMinimap = memo(function ChatMinimap({
     headingIndex?: number;
   } | null>(null);
 
-  const allMessages = useMemo(
-    () => (streamingMessage ? [...messages, streamingMessage] : messages) as (AgentMessage | Partial<AgentMessage>)[],
-    [messages, streamingMessage],
-  );
-  const allMessagesRef = useRef(allMessages);
-  allMessagesRef.current = allMessages;
-  // 测量在节流定时器里读取，必须拿到与 allMessagesRef 同一次渲染的值。
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+  // 测量在节流定时器里读取，轮次偏移与已提交消息保持一致。
   const turnsBeforeRef = useRef(turnsBefore);
   turnsBeforeRef.current = turnsBefore;
-  const isStreaming = streamingMessage !== null;
 
   const nodeLayout = useMemo(
     () => layoutNodes(allNodes, minimapHeight),
@@ -370,7 +368,11 @@ export const ChatMinimap = memo(function ChatMinimap({
       let refIndex = 0;
       let currentTurn: TurnInfo | null = null;
 
-      for (const [messageIndex, message] of allMessagesRef.current.entries()) {
+      const streamingMessage = getStreamingMessage();
+      const allMessages: (AgentMessage | Partial<AgentMessage>)[] = streamingMessage
+        ? [...messagesRef.current, streamingMessage]
+        : messagesRef.current;
+      for (const [messageIndex, message] of allMessages.entries()) {
         const isAnchor = isMessageGroupAnchor(message);
         if (!isAnchor && message.role !== "assistant") continue;
         const element = refs?.[refIndex];
@@ -444,7 +446,7 @@ export const ChatMinimap = memo(function ChatMinimap({
         scrollEl.scrollTo({ top: Math.max(0, targetTop - targetOffset), behavior: "smooth" });
       }
     }, 150);
-  }, [entryIds, lockActiveNode, messageRefs, scrollContainer, syncActiveNode]);
+  }, [entryIds, getStreamingMessage, lockActiveNode, messageRefs, scrollContainer, syncActiveNode]);
 
   useEffect(() => {
     const el = scrollContainer.current;

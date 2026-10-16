@@ -153,3 +153,28 @@ export function streamReducer(
       return state;
   }
 }
+
+/** 流式正文独立于 React 状态；同步通知使 message_end 的追加和结束仍能同批提交。 */
+export interface StreamingStore {
+  getState(): StreamingState;
+  dispatch(action: StreamAction): void;
+  subscribe(listener: () => void): () => void;
+}
+
+export function createStreamingStore(): StreamingStore {
+  let state = INITIAL_STREAMING_STATE;
+  const listeners = new Set<() => void>();
+  return {
+    getState: () => state,
+    dispatch(action) {
+      const next = streamReducer(state, action);
+      if (next === state) return;
+      state = next;
+      for (const listener of listeners) listener();
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
+  };
+}

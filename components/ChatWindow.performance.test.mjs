@@ -31,7 +31,7 @@ test("助手消息显示时间，流式尾消息隐藏时间并允许分段覆�
     source.indexOf("              const renderGroup ="),
   );
   assert.match(renderMessageSource, /let showTimestamp = msg\.role === "assistant";/);
-  assert.match(renderMessageSource, /if \(showTimestamp && streamState\.isStreaming && idx === messages\.length - 1\) \{\s*showTimestamp = false;/);
+  assert.match(renderMessageSource, /if \(showTimestamp && isStreaming && idx === messages\.length - 1\) \{\s*showTimestamp = false;/);
   assert.match(renderMessageSource, /if \(options\.showTimestamp !== undefined\) showTimestamp = options\.showTimestamp;/);
   assert.match(renderMessageSource, /showTimestamp=\{showTimestamp\}/);
 });

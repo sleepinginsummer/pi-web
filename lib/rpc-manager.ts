@@ -151,6 +151,14 @@ type ExtensionBindingOptions = {
   forceEmptySystemPrompt?: boolean;
 };
 
+type StartupModelPreferences = {
+  provider: string;
+  modelId: string;
+  thinkingLevel?: ThinkingLevel;
+  modelRevision: number;
+  thinkingRevision: number;
+};
+
 type AgentSessionWrapperOptions = {
   persistedSessionFile?: boolean;
   exactSystemPrompt?: () => string;
@@ -210,7 +218,7 @@ const SESSION_IDLE_TIMEOUT_MS = resolveSessionIdleTimeoutMs();
 const DEFAULT_EXTENSION_BINDING_WAIT_TIMEOUT_MS = 20_000;
 
 /**
- * 解析扩展绑定的等待上限。绑定慢不能无限拖住首个 get_state/prompt，
+ * 解析初始化请求的等待上限。审批慢不能无限拖住 finalize/prompt，
  * 超时只放弃这一次等待，绑定仍在后台继续；0 表示不限时（旧行为）。
  */
 export function resolveExtensionBindingWaitTimeoutMs(
@@ -415,6 +423,12 @@ export class AgentSessionWrapper {
   private extensionsBound = false;
   private extensionBindingPromise: Promise<void> | null = null;
   private startupModelSwitch: Promise<void> | null = null;
+  private startupModelPreferences: StartupModelPreferences | null = null;
+  private startupModelSwitchError: unknown = null;
+  private modelPreferenceQueue: Promise<void> = Promise.resolve();
+  private modelChoiceRevision = 0;
+  private thinkingChoiceRevision = 0;
+  private manualThinkingLevel: string | null = null;
   private extensionBindingError: unknown = null;
   private forceEmptySystemPrompt = false;
   private readonly mcpHost?: Pick<McpHost, "prepareForPrompt" | "dispose">;
@@ -617,14 +631,14 @@ export class AgentSessionWrapper {
    * 绑定失败后也为 false，由 extensionsError 表达。
    */
   get extensionsInitializing(): boolean {
-    return this.extensionBindingPromise !== null && !this.extensionsBound && this.extensionBindingError === null;
+    return this.startupModelSwitch !== null
+      || (this.extensionBindingPromise !== null && !this.extensionsBound && this.extensionBindingError === null);
   }
 
   get extensionsError(): string | null {
-    if (this.extensionBindingError === null) return null;
-    return this.extensionBindingError instanceof Error
-      ? this.extensionBindingError.message
-      : String(this.extensionBindingError);
+    const error = this.startupModelSwitchError ?? this.extensionBindingError;
+    if (error === null) return null;
+    return error instanceof Error ? error.message : String(error);
   }
 
   hasSuppressedCompletionNotifications(): boolean {
@@ -810,19 +824,97 @@ export class AgentSessionWrapper {
     await this.waitForExtensionsBound();
   }
 
-  /**
-   * 新会话的延迟模型切换在扩展绑定后于后台进行（不阻塞 create 阶段）。登记后，需要等待扩展的
-   * 命令（prompt 等）会先等它完成，避免首条消息仍落在占位模型上。
-   */
-  trackStartupModelSwitch(task: Promise<void>): void {
-    const tracked = task.catch(() => undefined).finally(() => {
-      if (this.startupModelSwitch === tracked) this.startupModelSwitch = null;
+  /** 后台工作跟随真实绑定生命周期；调用方的等待超时不能终止审批或绑定。 */
+  async whenExtensionsBound(): Promise<void> {
+    await this.extensionBindingPromise;
+    if (this.extensionBindingError !== null) throw this.extensionBindingFailure(this.extensionBindingError);
+  }
+
+  /** 登记启动偏好；手动模型和思考选择分别拥有版本，不能让旧后台任务覆盖新选择。 */
+  trackStartupModelSwitch(preferences: { provider: string; modelId: string; thinkingLevel?: ThinkingLevel }): void {
+    this.startupModelPreferences = {
+      ...preferences,
+      modelRevision: this.modelChoiceRevision,
+      thinkingRevision: this.thinkingChoiceRevision,
+    };
+    this.startStartupModelSwitch();
+  }
+
+  private startStartupModelSwitch(): void {
+    if (this.startupModelSwitch || !this.startupModelPreferences) return;
+    const preferences = this.startupModelPreferences;
+    this.startupModelSwitchError = null;
+    const tracked = this.whenExtensionsBound().then(() => this.enqueueModelPreference(async () => {
+      if (!this.isAlive() || preferences.modelRevision !== this.modelChoiceRevision) return;
+      if (this.isRunning()) throw new Error(`Cannot initialize ${preferences.provider}/${preferences.modelId} while the session is running`);
+      await this.selectRuntimeModel(preferences.provider, preferences.modelId);
+      // 模型仍按启动目标恢复；较新的手动强度要在模型应用其默认强度后重新应用。
+      const level = preferences.thinkingRevision === this.thinkingChoiceRevision
+        ? preferences.thinkingLevel
+        : this.manualThinkingLevel;
+      if (level) this.applyThinkingLevel(level);
+    })).catch((error: unknown) => {
+      // 手动选模已成功时，旧任务即使随后失败，也不能把错误写回当前有效选择。
+      if (!this.isAlive() || preferences.modelRevision !== this.modelChoiceRevision) return;
+      this.startupModelSwitchError = error;
+      console.error("[pi-web] startup model initialization failed:", error instanceof Error ? error.message : error);
+      this.emit({ type: "extensions_error", errorMessage: error instanceof Error ? error.message : String(error) });
+    }).finally(() => {
+      if (this.startupModelSwitch === tracked) {
+        this.startupModelSwitch = null;
+        if (this.startupModelSwitchError === null) this.emit({ type: "extensions_bound" });
+      }
     });
     this.startupModelSwitch = tracked;
   }
 
-  async waitForStartupModelSwitch(): Promise<void> {
-    await this.startupModelSwitch;
+  /** 偏好按提交顺序执行；返回原任务抛出错误，队列尾只负责在失败后继续接收操作。 */
+  private enqueueModelPreference<T>(operation: () => Promise<T>): Promise<T> {
+    const task = this.modelPreferenceQueue.then(operation);
+    this.modelPreferenceQueue = task.then(() => undefined, () => undefined);
+    return task;
+  }
+
+  private assertModelPreferenceWritable(): void {
+    if (!this.isAlive()) throw new Error("Session is closed");
+    if (this.diskFreshness() !== "current") throw new SessionFileConflictError();
+    this.resetIdleTimer();
+  }
+
+  private async selectRuntimeModel(provider: string, modelId: string): Promise<{ id: string; provider: string }> {
+    let model = this.inner.modelRuntime.getModel(provider, modelId);
+    if (!model) {
+      await this.inner.modelRuntime.refresh({ allowNetwork: false });
+      model = this.inner.modelRuntime.getModel(provider, modelId);
+    }
+    if (!model) {
+      throw this.chatOnly && findDeferredModel(this.inner.modelRuntime as ModelRuntime, provider, modelId)
+        ? chatOnlyExtensionModelError(provider, modelId)
+        : new Error(`Model not found: ${provider}/${modelId}`);
+    }
+    this.assertModelPreferenceWritable();
+    await this.fastSessionSetting.selectModel(model);
+    updateCachedDefaultModel(this.cwd, { provider: model.provider, modelId: model.id });
+    invalidateSessionListCache();
+    return { id: model.id, provider: model.provider };
+  }
+
+  private applyThinkingLevel(level: string): void {
+    this.assertModelPreferenceWritable();
+    this.inner.setThinkingLevel(level);
+    // 保留 DeepSeek 的 xhigh→max 兼容映射，不接受 SDK 对 xhigh→high 的限幅。
+    if (level === "xhigh" && (this.inner.model as { compat?: { thinkingFormat?: string } } | null)?.compat?.thinkingFormat === "deepseek" && this.inner.agent?.state) {
+      this.inner.agent.state.thinkingLevel = "xhigh";
+    }
+    invalidateSessionListCache();
+  }
+
+  async waitForStartupModelSwitch(options: { retry?: boolean } = {}): Promise<void> {
+    if (options.retry && this.startupModelSwitchError !== null) this.startStartupModelSwitch();
+    const task = this.startupModelSwitch;
+    // 超时只拒绝本次请求，后台任务继续等待真实审批，不能写入持久初始化错误。
+    if (task) await this.waitForInitialization(task, "模型初始化");
+    if (this.startupModelSwitchError !== null) throw this.extensionBindingFailure(this.startupModelSwitchError);
   }
 
   /**
@@ -915,37 +1007,38 @@ export class AgentSessionWrapper {
   }
 
   /**
-   * 等待扩展绑定，但有上限：绑定慢不能无限拖住首个 get_state/prompt。
-   * 超时只结束这一次等待，绑定仍在后台继续，完成后会发 extensions_bound。
+   * 等待扩展绑定，但只限制本次命令请求；真实绑定生命周期不受影响。
+   * 绑定完成仍会发 extensions_bound，允许后续请求继续使用同一个 runtime。
    */
   private async waitForExtensionsBound(): Promise<void> {
-    const binding = this.extensionBindingPromise;
-    if (binding) {
-      const timeoutMs = EXTENSION_BINDING_WAIT_TIMEOUT_MS;
-      if (timeoutMs === 0) {
-        try {
-          await binding;
-        } catch (err) {
-          throw this.extensionBindingFailure(err);
-        }
-      } else {
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        const expired = new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(() => {
-            reject(new Error(`扩展初始化超过 ${Math.round(timeoutMs / 1000)}s 仍未完成，可在会话里等待它完成或重新加载会话`));
-          }, timeoutMs);
-        });
-        try {
-          // race 也订阅了 binding，绑定随后失败不会变成未处理拒绝。
-          await Promise.race([binding, expired]);
-        } catch (err) {
-          throw this.extensionBindingFailure(err);
-        } finally {
-          if (timer) clearTimeout(timer);
-        }
+    await this.waitForInitialization(this.whenExtensionsBound(), "扩展初始化");
+  }
+
+  /** 请求级期限只作用于等待，不改变任务的生命周期或失败状态。 */
+  private async waitForInitialization(task: Promise<void>, label: string): Promise<void> {
+    const timeoutMs = EXTENSION_BINDING_WAIT_TIMEOUT_MS;
+    if (timeoutMs === 0) {
+      try {
+        await task;
+      } catch (error) {
+        throw this.extensionBindingFailure(error);
       }
+      return;
     }
-    if (this.extensionBindingError) throw this.extensionBindingFailure(this.extensionBindingError);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(`${label}超过 ${Math.round(timeoutMs / 1000)}s 仍未完成，可等待它完成后重试`));
+      }, timeoutMs);
+    });
+    try {
+      // race 已订阅原任务；请求超时后任务若再失败，也不会变成未处理拒绝。
+      await Promise.race([task, expired]);
+    } catch (error) {
+      throw this.extensionBindingFailure(error);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   private extensionBindingFailure(error: unknown): Error {
@@ -1183,7 +1276,7 @@ export class AgentSessionWrapper {
     if (this.shouldWaitForExtensions(type)) {
       await this.waitForExtensionsBound();
       // set_model / set_thinking_level 不在等待列表中，切换任务自身的命令不会在这里互等。
-      await this.startupModelSwitch;
+      await this.waitForStartupModelSwitch();
     }
     // 扩展初始化可能跨越外部写入；实际 dispatch 前再次校验。
     if (!canRunWithExternalSessionChange(type) && this.diskFreshness() !== "current") {
@@ -1403,20 +1496,14 @@ export class AgentSessionWrapper {
 
       case "set_model": {
         const { provider, modelId } = command as { provider: string; modelId: string };
-        let model = this.inner.modelRuntime.getModel(provider, modelId);
-        if (!model) {
-          await this.inner.modelRuntime.refresh({ allowNetwork: false });
-          model = this.inner.modelRuntime.getModel(provider, modelId);
-        }
-        if (!model) {
-          throw this.chatOnly && findDeferredModel(this.inner.modelRuntime as ModelRuntime, provider, modelId)
-            ? chatOnlyExtensionModelError(provider, modelId)
-            : new Error(`Model not found: ${provider}/${modelId}`);
-        }
-        await this.fastSessionSetting.selectModel(model);
-        updateCachedDefaultModel(this.cwd, { provider: model.provider, modelId: model.id });
-        invalidateSessionListCache();
-        return { id: model.id, provider: model.provider };
+        return this.enqueueModelPreference(async () => {
+          const selected = await this.selectRuntimeModel(provider, modelId);
+          // 只有成功的手动选择才废弃启动目标；失败不能取消原本仍可完成的初始化。
+          this.modelChoiceRevision += 1;
+          this.startupModelPreferences = null;
+          this.startupModelSwitchError = null;
+          return selected;
+        });
       }
 
       case "fork": {
@@ -1488,15 +1575,12 @@ export class AgentSessionWrapper {
 
       case "set_thinking_level": {
         const level = command.level as string;
-        this.inner.setThinkingLevel(level);
-        // setThinkingLevel clamps xhigh→high for models where supportsXhigh()===false.
-        // If the model has DeepSeek thinking compat (reasoningEffortMap maps xhigh→max),
-        // force the state back so the compat layer can use it correctly.
-        if (level === "xhigh" && (this.inner.model as { compat?: { thinkingFormat?: string } } | null)?.compat?.thinkingFormat === "deepseek" && this.inner.agent?.state) {
-          this.inner.agent.state.thinkingLevel = "xhigh";
-        }
-        invalidateSessionListCache();
-        return null;
+        return this.enqueueModelPreference(async () => {
+          this.applyThinkingLevel(level);
+          this.thinkingChoiceRevision += 1;
+          this.manualThinkingLevel = level;
+          return null;
+        });
       }
 
       case "set_shadow_mind_enabled": {
@@ -3272,22 +3356,18 @@ export async function startRpcSession(
     if (realSessionFile) cacheSessionPath(realSessionId, realSessionFile);
 
     if (!chatOnly) {
-      // 不在此等待扩展绑定：新会话 create 阶段不能被扩展审批阻塞。绑定完成后、
-      // 会话尚未开始运行时，再切到扩展在 session_start 才注册的 provider 模型。
-      wrapper.trackStartupModelSwitch(wrapper.waitUntilReady()
-        .then(async () => {
-          if (deferredModel && !wrapper.isRunning()) {
-            try {
-              await wrapper.send({ type: "set_model", provider: deferredModel.provider, modelId: deferredModel.id });
-              // set_model 会套用该模型的 modelThinkingLevels 或默认值；恢复 pi 启动时给它的思考强度（#1240）。
-              if (deferredThinkingLevel) await wrapper.send({ type: "set_thinking_level", level: deferredThinkingLevel });
-            } catch (error) {
-              console.error(`[pi-web] could not switch to ${deferredModel.provider}/${deferredModel.id}:`, error instanceof Error ? error.message : error);
-            }
-          }
-          // Bound extensions may have registered providers a later model listing will not see.
-          await rememberProviderModels(inner.modelRuntime as ModelRuntime);
-        }));
+      // create 不等待扩展审批。只有确实需要延迟切模的会话才登记启动模型门槛；
+      // 目录发现属于独立后台工作，失败不能把已经选定正确模型的会话锁死。
+      if (deferredModel) {
+        wrapper.trackStartupModelSwitch({
+          provider: deferredModel.provider,
+          modelId: deferredModel.id,
+          ...(deferredThinkingLevel ? { thinkingLevel: deferredThinkingLevel } : {}),
+        });
+      }
+      void wrapper.whenExtensionsBound().then(() => rememberProviderModels(inner.modelRuntime as ModelRuntime)).catch((error: unknown) => {
+        console.warn("[pi-web] provider catalog discovery failed:", error instanceof Error ? error.message : error);
+      });
     }
 
     console.info("[pi-web] RPC session startup", {
