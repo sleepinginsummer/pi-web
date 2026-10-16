@@ -18,8 +18,8 @@ export function useRunCompletion() {
     controllerRef.current?.beginRun(runId);
   }, []);
 
-  const settleRun = useCallback((runId: number, sessionId: string | null): boolean => {
-    const nextCompletion = controllerRef.current?.settleRun(runId, sessionId) ?? null;
+  const settleRun = useCallback((runId: number, sessionId: string | null, aborted = false): boolean => {
+    const nextCompletion = controllerRef.current?.settleRun(runId, sessionId, aborted) ?? null;
     if (!nextCompletion) return false;
     setCompletion(nextCompletion);
     return true;

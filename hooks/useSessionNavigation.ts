@@ -27,6 +27,9 @@ interface UseSessionNavigationOptions {
 export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelect, onRefresh, resetSessionViews }: UseSessionNavigationOptions) {
   const router = useRouter();
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
+  // DELETE 可能在用户切走后才完成；回调需读取最新选择，而非点击删除时捕获的旧值。
+  const selectedSessionRef = useRef(selectedSession);
+  selectedSessionRef.current = selectedSession;
   const [newSessionCwd, setNewSessionCwd] = useState<string | null>(null);
   const [pendingNewSessions, setPendingNewSessions] = useState<Map<string, PendingNewSessionControl>>(() => new Map());
   const [sessionKey, setSessionKey] = useState(0);
@@ -170,15 +173,16 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
     invalidateNotificationNavigation();
     onRefresh();
     clearTabOpenSession(sessionId);
-    if (selectedSession?.id !== sessionId) return;
+    const active = selectedSessionRef.current;
+    if (active?.id !== sessionId) return;
     activeSessionIdRef.current = null;
     setSelectedSession(null);
-    setNewSessionCwd(selectedSession.cwd ?? null);
-    if (selectedSession.cwd) setTabOpenNewSession(selectedSession.cwd);
+    setNewSessionCwd(active.cwd ?? null);
+    if (active.cwd) setTabOpenNewSession(active.cwd);
     bumpSessionKey();
     resetSessionViews();
     router.replace("/", { scroll: false });
-  }, [bumpSessionKey, invalidateNotificationNavigation, invalidateWorkspaceRestore, onRefresh, resetSessionViews, router, selectedSession]);
+  }, [bumpSessionKey, invalidateNotificationNavigation, invalidateWorkspaceRestore, onRefresh, resetSessionViews, router]);
 
   const dispatchPending = useCallback((cwd: string, event: PendingNewSessionEvent) => {
     setPendingNewSessions((current) => {

@@ -135,8 +135,8 @@ hooks/
 - `globalThis` survives Next.js hot-reload; plain module-level Map does not
 - Idle timeout: 10 minutes. Concurrent `startRpcSession()` calls share a single start Promise (`globalThis.__piStartLocks`)
 - Do not cache or share complete `AgentSessionServices`: its settings manager, resource loader, and extension runtime are mutable and cwd/session-bound. Cold startup cost is measured in the `services` stage; optimize concrete immutable discovery inputs only, never by reusing services or executing extension factories in a throwaway warmup.
-- Pi SDK 1.0.0 仍使用单 cwd 的扩展模块缓存；`scripts/patch-pi-sdk-extension-cache.mjs` 的版本锁定补丁保留最近八个 cwd 的工厂模块，每个会话继续创建独立 runtime。升级 SDK 时必须复核 `extensions/loader` 并更新或移除补丁，源结构或版本不符时须拒绝安装。
-- 保留 Pi SDK 1.0.0 原生的上下文阈值检查与自动压缩；升级 SDK 时须复核其压缩时机与完整上下文投影，不得重新引入已移除的 pi-web 运行中压缩补丁。
+- Pi SDK 1.0.0–1.2.0 仍使用单 cwd 的扩展模块缓存（三个版本的缓存段逐字一致）；`scripts/patch-pi-sdk-extension-cache.mjs` 只接受 `REVIEWED_SDK_VERSIONS` 中已复核的版本，补丁保留最近八个 cwd 的工厂模块，每个会话继续创建独立 runtime。升级 SDK 时必须复核 `extensions/loader` 并更新版本集合或移除补丁，源结构或版本不符时须拒绝安装。
+- 保留 Pi SDK 原生的上下文阈值检查与自动压缩（1.0.0–1.2.0 触发条件与调用点一致，1.2.0 只是摘要输入不再包含 thinking）；升级 SDK 时须复核其压缩时机与完整上下文投影，不得重新引入已移除的 pi-web 运行中压缩补丁。
 
 ### Session first-paint loading
 - Existing sessions load `/api/sessions/[id]/context` first and commit messages immediately. 切回已结束的会话时，只有 `/context` 验证文件版本与活动 leaf 均一致，才恢复有上限的页面内历史快照；不一致就丢弃。 `/details` (file path + projected branch tree) and `/state` use independent abort controllers and load afterward; details failures must not hide a valid context or runtime snapshot.
@@ -190,6 +190,10 @@ The `enabledModels` setting uses pi's `--models` syntax: minimatch globs against
 - 这类冲突的 409 统一带 `code: "session_external_write"`（`lib/session-external-write.ts` 是唯一契约来源，agent 命令路由、`/context`、`/details` 和强制刷新共用）。客户端把它当可恢复状态：`lib/session-load-client.ts` 自动重试一次，仍失败则由 `useAgentSession` 保留已有消息并给提示，只有无内容可保留时才回退整窗错误页。
 - `lib/session-message-persistence.ts` 在主会话和内置子代理的 SDK 保存入口，按 JSONL 序列化规则复制最终工具结果。插件返回结果后再修改嵌套字段（例如 hashline 批次中止标记）不得污染已保存的内存历史；不能通过忽略 `details` 或放宽完整文件比较来规避 409。
 
+### 运行中止与扩展延迟注册的 provider（上游 v0.11.0）
+- SDK 1.1 的 `agent_settled.aborted` 由 wrapper 记入 `lastRunAborted`，`prompt_done` 在被停止时带 `aborted: true`。客户端在 `useAgentSession` 中把它写入 `RunCompletion.aborted`，`useCompletionEffects` 对被停止的运行不播放提示音、不发通知（任一客户端的 Stop/Esc 都算），与本机手动停止的通知抑制并存。fork 不使用服务端 `onAgentRunComplete` 推送。
+- `lib/deferred-provider-models.ts` 记住扩展只在 `session_start` 注册的 provider 模型，`/api/models` 用它补全列表；`startRpcSession()` 遇到这类模型时以默认模型创建，绑定完成后再切换。切换必须在 `waitUntilReady()` 的后台回调里完成且仅在会话尚未运行时执行，不能在 create 阶段 `await`，否则新会话两阶段创建会被扩展审批阻塞。
+
 ### SSE reconnect on page refresh mid-stream
 On `ChatWindow` mount, `GET /api/agent/[id]` is called. If `state.isStreaming === true`, SSE is reconnected automatically. `thinkingLevel` and `isCompacting` are also synced from this response.
 
@@ -197,7 +201,7 @@ Active `ask_user_question` tool starts are retained by `AgentSessionWrapper` for
 
 ### 排队消息附件与移回
 - `lib/queued-messages.ts` 是队列 SSE、运行状态和 `clear_queue` 的统一契约，每条消息包含文字和完整 base64 图片；输入框显示图片数量，移回时同时恢复文字、图片及已有草稿。
-- `lib/agent-message-queue.ts` 将 Pi 1.0.0 的内部 `steeringQueue.messages` / `followUpQueue.messages` 只读依赖隔离在单一边界，结构不兼容时在清空前报错。SDK 的纯文本 getter 和单批 `peekQueuedMessages()` 不能用于移回；以真实队列为准，避免重复移回已 drain 的消息。升级 SDK 必须复核此适配器并运行其集成测试。
+- `lib/agent-message-queue.ts` 将 Pi agent-core（1.0.0–1.2.0 的 `agent.js` 逐字一致）的内部 `steeringQueue.messages` / `followUpQueue.messages` 只读依赖隔离在单一边界，结构不兼容时在清空前报错。SDK 的纯文本 getter 和单批 `peekQueuedMessages()` 不能用于移回；以真实队列为准，避免重复移回已 drain 的消息。升级 SDK 必须复核此适配器并运行其集成测试。
 - SDK 在真实入队之前广播 `queue_update`，wrapper 延迟到 microtask 读取完整队列；用户 `message_start` 也同步实际队列，覆盖纯图片消息无法被 SDK 文字匹配移除的情况。
 
 ### Compaction SSE events
@@ -285,7 +289,7 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 - Browser autoplay policy means sound must be unlocked from a user gesture; `ChatInput` calls the unlock hook from interactive controls, and `ChatWindow` plays the tone from `onAgentEnd`.
 
 ### PWA 版本与 Service Worker 更新策略
-- 当前合并版本使用 `0.10.0-merge.31`；此后每次代码变更都必须将最后一位递增 1，并同步更新 `package.json` 与 `package-lock.json`。
+- 当前合并版本使用 `0.10.0-merge.32`；此后每次代码变更都必须将最后一位递增 1，并同步更新 `package.json` 与 `package-lock.json`。
 - 生产环境必须使用每次构建唯一的版本标识注册 `/sw.js?v=<build-version>`，静态缓存名称也必须包含同一个版本；不能只使用长期不变的 `package.json` 版本，否则代码变化后浏览器可能继续命中旧 chunk。
 - 新 Service Worker 安装完成后保持 `waiting`，由界面提示“发现新版本”；用户确认后发送 `SKIP_WAITING`，并在 `controllerchange` 后刷新页面。不要在 `install` 阶段无条件调用 `skipWaiting()`。
 - 激活新 Service Worker 时只清理 `pi-web-` 前缀下的旧版本缓存，不得清理其它站点数据或认证信息。`/sw.js`、页面导航和 API 请求必须绕过静态资源缓存。
@@ -296,6 +300,10 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 - `demo-pages.yml` 在本 fork 只由 PR 与手动触发运行，已移除 push 触发：fork 未启用 GitHub Pages，push 触发会让 `actions/configure-pages` 必然失败。合并上游时不要恢复该 push 触发。
 - 上游 e2e 用例与它对应的产品改动必须成对合并。本 fork 重写了 `MarkdownBody`/`MermaidBlock`/`AppShell`/`run.mjs` 等文件，上一轮合并只带进了上游用例而丢掉了实现，CI 因此变红。三个已知配套点：`CodeHighlight.tsx` 与 `MermaidBlock.tsx` 的代码块背景必须用 `backgroundColor`（不能与 Prism 主题的 `background` 简写混用）；`AppShell` 根部必须挂 `useTheme()`，否则系统配色切换不生效；`extension-dialog.mjs` 的通知断言要按通知架可能同时保留同文案通知来写。
 - 同一类合并丢失还发生在提及链路上：`AppShell` 给 `FileViewer` 传的 `onAtMention={handleAtMention}` 是整文件提及（无选区时的 `@` 按钮）的唯一入口，`handleAtMention`/`handleAtMentions`/`handleFileLineMention` 三个回调还需在移动端回到输入框。`e2e/file-panel.mjs` 断言这条链路的输入框取值与面板开关，合并 `AppShell` 后必须保持通过。
+
+### 上游合并取舍（v0.11.0 起）
+- 侧栏保留 fork 实现（ProjectSection、sidebar-preferences 同步、回收站、会话搜索）。上游 v0.11.0 的侧栏重设计（`session-ui-state`、分组/归档/项目置顶、行菜单 Fork、新会话项目栏 `NewSessionContextBar`/`ProjectWorktreePicker`）及依赖它的后续功能均未合入，合并时对这些新文件按删除处理，需要时单独移植。
+- fork 早期以 squash 方式整合上游，合并基线之前的上游改动可能从未进入 fork，三方合并会把它们当作“fork 已删除”静默丢弃。合并时对基线已有、fork 缺失的上游功能要逐个确认，例如本次补回的 Service Worker 导航/静态资源 8s 首字节超时（上游 #879）。
 
 ### Fork Release npm 包
 - `.github/workflows/release-package.yml` 只在 `sleepinginsummer/pi-web` 发布，手动触发或 `v*-merge.*` 标签触发。版本须与两个 package-lock 版本一致，已有标签须指向本次提交，禁止覆盖旧 Release。构建后先核对 npm pack 文件清单，再通过 `scripts/verify-release.mjs` 在独立目录仅安装生产依赖并验证 PTY、登录、页面与 SDK API，最后发布 `.tgz`。

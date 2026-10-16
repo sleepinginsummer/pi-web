@@ -32,6 +32,11 @@ export function useCompletionEffects({
   useEffect(() => {
     if (!completion || handledRunIdRef.current === completion.runId) return;
     handledRunIdRef.current = completion.runId;
+    // 被停止的运行没有完成任务，与 pi 自身的状态报告一致：不提示。
+    if (completion.aborted) {
+      onComplete?.();
+      return;
+    }
 
     if (soundEnabled) playDoneSound();
     const notificationSuppressed = completion.sessionId

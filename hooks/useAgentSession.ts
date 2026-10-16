@@ -563,6 +563,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // 控制类 UI 的授权是另一个投影（runtimeSessionId），两者不要混用。
   const attachSessionId = pendingSessionView.transportSessionId;
   const { completion, beginRun, settleRun } = useRunCompletion();
+  // 服务端 agent_settled/prompt_done 的 aborted：任一客户端停止的运行都不算完成。
+  const lastRunAbortedRef = useRef(false);
 
   const [contextModel, setContextModel] = useState<SessionContextSnapshot["model"]>(null);
   const [contextVersion, setContextVersion] = useState<string | null>(null);
@@ -1819,6 +1821,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       resetStreamDeltas();
       const runId = promptRunIdRef.current + 1;
       promptRunIdRef.current = runId;
+      lastRunAbortedRef.current = false;
       beginRun(runId);
       agentRunningRef.current = true;
     }
@@ -1830,7 +1833,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const finishPromptWithoutStream = useCallback(async (sid: string | null = sessionIdRef.current, runId = promptRunIdRef.current) => {
     // completion 控制器负责当前轮校验与重复 settled 拒绝。
-    if (!settleRun(runId, sid)) return;
+    if (!settleRun(runId, sid, lastRunAbortedRef.current)) return;
 
     // 服务端确认 idle 后立即发布完成事件；消息重载不能阻塞声音和系统通知。
     agentRunningRef.current = false;
@@ -1969,6 +1972,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         cancelEventStreamGrace();
         // 新一轮运行开始：重置流式消息计数（message_end 的 updater 会重新累计）。
         lastStreamedMessageCountRef.current = 0;
+        lastRunAbortedRef.current = false;
         enterMainRun({ kind: "waiting_model" });
         break;
       case "entry_appended": {
@@ -2003,6 +2007,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       case "agent_settled":
       case "prompt_done":
+        if (event.type === "agent_settled") lastRunAbortedRef.current = event.aborted === true;
+        else if (event.aborted === true) lastRunAbortedRef.current = true;
         if (!agentRunningRef.current || !sessionIdRef.current) break;
         void reconcileAgentState(sessionIdRef.current, promptRunIdRef.current);
         break;

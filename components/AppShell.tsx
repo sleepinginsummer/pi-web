@@ -13,6 +13,7 @@ import { ProjectTrustDialog } from "./ProjectTrustDialog";
 import { AppTopBar } from "./AppTopBar";
 import { TerminalPanel } from "./TerminalPanel";
 import { newTerminalTab, restoreTerminalTabs, TERMINAL_TABS_KEY, type TerminalTab } from "./terminal-tab-state";
+import { useFontPreferences } from "@/hooks/useFontPreferences";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useTheme } from "@/hooks/useTheme";
@@ -66,6 +67,8 @@ export function AppShell() {
   // 主题订阅必须挂在应用根部并全程存活：只有 useTheme 被挂载时才会监听系统配色变化，
   // 否则跟随系统的页面在系统切换深浅色后不会更新 data-theme，代码块等背景会停留在旧主题。
   useTheme();
+  // 未打开设置与输入框时也要恢复自定义字体。
+  useFontPreferences();
   const [initialCwdStatus, setInitialCwdStatus] = useState<"idle" | "validating" | "ready" | "error">(
     () => initialNavigation.requestedCwd ? "validating" : "idle",
   );

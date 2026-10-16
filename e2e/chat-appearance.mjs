@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { checkFontPreferences } from "./font-preferences.mjs";
 
 // 常驻 SSE 不会进入 networkidle；用会话正文渲染完成判断页面就绪。
 async function reloadChat(page) {
@@ -89,6 +90,7 @@ export async function checkChatAppearance(page) {
   assert.equal(await width.inputValue(), "2000");
   assert.equal(await fontSize.inputValue(), "18");
   await checkChatAppearanceReset(page);
+  await checkFontPreferences(page);
   for (const viewport of [{ width: 1280, height: 600 }, { width: 320, height: 568 }]) {
     await page.setViewportSize(viewport);
     await page.locator(".settings-general").evaluate((el) => { el.scrollTop = el.scrollHeight; });

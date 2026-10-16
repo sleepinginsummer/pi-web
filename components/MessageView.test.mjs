@@ -9,7 +9,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { MessageView, ThinkingBlock, getTokenEstimateText, getToolCallInputText, replaceUserMessageText } = await jiti.import("./MessageView.tsx");
+const { MessageView, ThinkingBlock, formatToolDuration, getTokenEstimateText, getToolCallInputText, replaceUserMessageText } = await jiti.import("./MessageView.tsx");
 const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
 const { splitFinalAssistantBlocks } = await jiti.import("../lib/message-display.ts");
 const { clearExpandedToolCalls, setToolCallExpanded } = await jiti.import("../lib/tool-call-expansion.ts");
@@ -208,6 +208,23 @@ test("renders subagents as standard tool calls with only an extra session button
     onOpenSession() {},
   });
   assert.doesNotMatch(ordinaryHtml, /Open sub-agent session/);
+});
+
+test("a tool card shows the run time pi recorded, else the timestamps' difference, never a tiny one", () => {
+  const block = { type: "toolCall", toolCallId: "call-duration-1", toolName: "bash", arguments: { command: "make" } };
+  const message = { role: "assistant", provider: "anthropic", model: "claude-test", content: [block], timestamp: 1_000_000, durationMs: 4_000 };
+  const header = (result) => renderMessage(message, { toolResults: new Map([[block.toolCallId, result]]) });
+  const result = { role: "toolResult", toolCallId: block.toolCallId, toolName: "bash", content: [], isError: false };
+  // pi 1.1 records the execution itself; the timestamps would count the model's 4 s of generation too.
+  assert.match(header({ ...result, timestamp: 1_006_400, durationMs: 2_400 }), />2\.4s</);
+  // A result saved before pi recorded durations falls back to the timestamps.
+  assert.match(header({ ...result, timestamp: 1_006_400 }), />6\.4s</);
+  assert.doesNotMatch(header({ ...result, timestamp: 1_006_400, durationMs: 40 }), />\d+\.\ds</);
+
+  assert.equal(formatToolDuration(400), "0.4s");
+  assert.equal(formatToolDuration(59_940), "59.9s");
+  assert.equal(formatToolDuration(185_000), "3m 5s");
+  assert.equal(formatToolDuration(3_725_000), "1h 2m 5s");
 });
 
 const COMPLETE_SKILL_EXPANSION = `<skill name="review" location="/skills/review/SKILL.md">
@@ -757,4 +774,21 @@ test("keeps the registered name where no result names the server and tool", (t) 
     details: { calls: [{ id: "call-codemode-mcp/1", name: "mcp__docs_v2__search_pages", args: "{}", status: "ok" }] },
   });
   assert.match(textOf(html), /mcp__docs_v2__search_pages\{\}/);
+});
+
+test("a tool card shows the run time pi recorded, else the timestamps' difference, never a tiny one", () => {
+  const block = { type: "toolCall", toolCallId: "call-duration-1", toolName: "bash", arguments: { command: "make" } };
+  const message = { role: "assistant", provider: "anthropic", model: "claude-test", content: [block], timestamp: 1_000_000, durationMs: 4_000 };
+  const header = (result) => renderMessage(message, { toolResults: new Map([[block.toolCallId, result]]) });
+  const result = { role: "toolResult", toolCallId: block.toolCallId, toolName: "bash", content: [], isError: false };
+  // pi 1.1 records the execution itself; the timestamps would count the model's 4 s of generation too.
+  assert.match(header({ ...result, timestamp: 1_006_400, durationMs: 2_400 }), />2\.4s</);
+  // A result saved before pi recorded durations falls back to the timestamps.
+  assert.match(header({ ...result, timestamp: 1_006_400 }), />6\.4s</);
+  assert.doesNotMatch(header({ ...result, timestamp: 1_006_400, durationMs: 40 }), />\d+\.\ds</);
+
+  assert.equal(formatToolDuration(400), "0.4s");
+  assert.equal(formatToolDuration(59_940), "59.9s");
+  assert.equal(formatToolDuration(185_000), "3m 5s");
+  assert.equal(formatToolDuration(3_725_000), "1h 2m 5s");
 });

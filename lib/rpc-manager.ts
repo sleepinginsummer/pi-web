@@ -1,5 +1,5 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { createAgentSessionFromServices, createAgentSessionServices, getAgentDir, initTheme, SessionManager, SettingsManager, Theme } from "@earendil-works/pi-coding-agent";
+import { createAgentSessionFromServices, createAgentSessionServices, getAgentDir, initTheme, SessionManager, SettingsManager, Theme, type ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { randomUUID } from "crypto";
 import { existsSync, realpathSync, writeFileSync } from "fs";
@@ -19,6 +19,7 @@ import { restoreShadowSessionSettingSafely, ShadowSessionSetting } from "./shado
 import { parseShadowMindToggleCommand, SHADOW_MIND_SESSION_STATE } from "./shadow-session-protocol";
 import { createClonedSession, createForkedSession } from "./session-fork";
 import { generateTitleForSessionFile } from "./session-file-title";
+import { findDeferredModel, rememberProviderModels } from "./deferred-provider-models";
 import {
   createProjectCommandBashExtension,
   createProjectCommandBashOperations,
@@ -388,6 +389,8 @@ export class AgentSessionWrapper {
   private extensionWidgetsResetting = false;
   private promptRunning = false;
   private sessionReplacement: "fork" | "clone" | null = null;
+  // Whether the last run ended because it was stopped (pi 1.1's `agent_settled.aborted`), not finished.
+  private lastRunAborted = false;
   private promptAdmissionTail: Promise<void> = Promise.resolve();
   private extensionsBound = false;
   private extensionBindingPromise: Promise<void> | null = null;
@@ -606,6 +609,8 @@ export class AgentSessionWrapper {
       ) {
         this.persistPendingSession();
       }
+      if (event.type === "agent_start") this.lastRunAborted = false;
+      if (event.type === "agent_settled") this.lastRunAborted = event.aborted === true;
       if (event.type === "agent_end") {
         invalidateSessionListCache();
         // Every tool call of the run has finished; nothing is left to replay.
@@ -697,6 +702,25 @@ export class AgentSessionWrapper {
         if (id.startsWith(nestedPrefix)) this.activeToolEvents.delete(id);
       }
     }
+  }
+
+  /**
+   * SDK 1.1 的 getContextUsage() 在压缩后的分支里遇到缺少 `usage` 的 assistant 消息
+   * （旧版本或外部工具写入的会话）会抛 TypeError。用量只是展示信息，读取失败按未知处理，
+   * 不能让 get_state 整体失败。
+   */
+  private readContextUsage(): ReturnType<AgentSessionLike["getContextUsage"]> {
+    try {
+      return this.inner.getContextUsage();
+    } catch (error) {
+      console.warn("[pi-web] context usage unavailable:", error instanceof Error ? error.message : error);
+      return undefined;
+    }
+  }
+
+  /** `prompt_done`, saying `aborted` when the prompt's run was stopped rather than finished. */
+  private promptDoneEvent(): AgentEvent {
+    return { type: "prompt_done", ...(this.lastRunAborted ? { aborted: true } : {}) };
   }
 
   setForceEmptySystemPrompt(force: boolean): void {
@@ -1077,6 +1101,8 @@ export class AgentSessionWrapper {
               preflightAccepted = true;
               if (preflightSettled) return;
               preflightSettled = true;
+              // A new prompt, not one queued into a run: what an earlier run's Stop said is over.
+              if (!streamingBehavior) this.lastRunAborted = false;
               resolve();
             };
             rejectPreflight = (error) => {
@@ -1152,7 +1178,7 @@ export class AgentSessionWrapper {
             // the internal callback. This waits for the run, but never acks early.
             acceptPreflight();
             finishPrompt();
-            if (!streamingBehavior) this.emit({ type: "prompt_done" });
+            if (!streamingBehavior) this.emit(this.promptDoneEvent());
           }, (error) => {
             rejectPreflight(error);
             finishPrompt();
@@ -1164,7 +1190,7 @@ export class AgentSessionWrapper {
                 type: "prompt_error",
                 errorMessage: error instanceof Error ? error.message : String(error),
               });
-              if (!streamingBehavior) this.emit({ type: "prompt_done" });
+              if (!streamingBehavior) this.emit(this.promptDoneEvent());
             }
           }).catch((error) => {
             console.error(
@@ -1204,7 +1230,7 @@ export class AgentSessionWrapper {
 
       case "get_state": {
         const model = this.inner.model;
-        const contextUsage = this.inner.getContextUsage();
+        const contextUsage = this.readContextUsage();
         const queuedMessages = readAgentMessageQueue(this.inner.agent);
         return {
           sessionId: this.inner.sessionId,
@@ -2876,6 +2902,11 @@ export async function startRpcSession(
       services.settingsManager.getEnabledModels(),
     );
     startupTimings.modelScope = elapsedMs(stageStartedAt);
+    // A provider an extension registers only at session_start (lib/deferred-provider-models.ts)
+    // has no model in this runtime yet: build on the default, switch once extensions are bound.
+    const deferredInitialModel = initialModel && !services.modelRuntime.getModel(initialModel.provider, initialModel.modelId)
+      ? findDeferredModel(services.modelRuntime, initialModel.provider, initialModel.modelId)
+      : undefined;
     const defaultProvider = services.settingsManager.getDefaultProvider();
     const defaultModelId = services.settingsManager.getDefaultModel();
     // 系统消息描述运行时提示词，不代表对话已经开始；已有会话优先恢复分支记录的模型。
@@ -2885,7 +2916,7 @@ export async function startRpcSession(
     const restoredModel = savedModel
       ? services.modelRuntime.getModel(savedModel.provider, savedModel.modelId)
       : undefined;
-    const effectiveInitialModel = initialModel && (
+    const effectiveInitialModel = initialModel && !deferredInitialModel && (
       !allowInitialModelFallback
       || scope.visible.some((model) => model.provider === initialModel.provider && model.id === initialModel.modelId)
     ) ? initialModel : undefined;
@@ -2901,6 +2932,11 @@ export async function startRpcSession(
     const startupModel = restoredModel && services.modelRuntime.hasConfiguredAuth(restoredModel.provider)
       ? restoredModel
       : initial?.model;
+    const deferredModel = hasExistingMessages
+      ? savedModel && !restoredModel
+        ? findDeferredModel(services.modelRuntime, savedModel.provider, savedModel.modelId)
+        : undefined
+      : deferredInitialModel;
     startupStage = "sessionCreate";
     stageStartedAt = performance.now();
     const { session: inner } = await createAgentSessionFromServices({
@@ -2978,6 +3014,24 @@ export async function startRpcSession(
     const realSessionId = inner.sessionId as string;
     const realSessionFile = inner.sessionFile as string | undefined;
     if (realSessionFile) cacheSessionPath(realSessionId, realSessionFile);
+
+    if (!chatOnly) {
+      // 不在此等待扩展绑定：新会话 create 阶段不能被扩展审批阻塞。绑定完成后、
+      // 会话尚未开始运行时，再切到扩展在 session_start 才注册的 provider 模型。
+      void wrapper.waitUntilReady()
+        .then(async () => {
+          if (deferredModel && !wrapper.isRunning()) {
+            try {
+              await wrapper.send({ type: "set_model", provider: deferredModel.provider, modelId: deferredModel.id });
+            } catch (error) {
+              console.error(`[pi-web] could not switch to ${deferredModel.provider}/${deferredModel.id}:`, error instanceof Error ? error.message : error);
+            }
+          }
+          // Bound extensions may have registered providers a later model listing will not see.
+          await rememberProviderModels(inner.modelRuntime as ModelRuntime);
+        })
+        .catch(() => undefined);
+    }
 
     console.info("[pi-web] RPC session startup", {
       sessionId: realSessionId,
