@@ -18,6 +18,10 @@ Lint: `npm run lint`
 - Do not use `next dev --webpack` as a fallback. This repository's development graph can fail on `undici` imports such as `node:console`; development is expected to use Turbopack.
 - Next.js may append a generated `BEGIN:nextjs-agent-rules` block to `AGENTS.md` when `next dev` starts. Treat that as generated tooling output, verify it with `git status`, and do not include it in an unrelated feature commit.
 
+### Upgrading pi
+
+pi's packages depend on each other with `^` ranges, and the published pi-web's dependencies resolve afresh on install (no lockfile ships). Install every `@earendil-works/*` package the tree holds, the SDK's own dependencies included (`pi-codemode`, `pi-mcp`, `pi-telemetry`, …), with `npm install --save-exact`, so npm reuses those exact versions for the SDK's ranges. `lib/pi-packages.test.mjs` fails on any pi package that is not pinned that way; pi-web 0.12.0 pinned four, and installs after pi 1.2.0 paired pi-coding-agent 1.1.0 with pi-codemode 1.2.0. 升级时还要同时更新 `scripts/patch-pi-sdk-extension-cache.mjs` 的 `REVIEWED_SDK_VERSIONS`（先核对 `extensions/loader` 缓存段）并复核 `lib/agent-message-queue.ts` 依赖的 agent-core 队列结构。
+
 ---
 
 ## Architecture
