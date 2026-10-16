@@ -1,10 +1,12 @@
 import { NextResponse } from "next/server";
-import { buildSessionContext, resolveSessionPath } from "@/lib/session-reader";
+import { buildSessionContext, openSessionManager, readSessionHeader, resolveSessionPath } from "@/lib/session-reader";
 import { readSessionBrowseSnapshot, sessionVersionEtag } from "@/lib/session-browse-snapshot";
 import { computeSessionTotalActiveMs } from "@/lib/session-timing";
 import { getRpcSession } from "@/lib/rpc-manager";
 import { readIndexedContextPage, readIndexedSessionDetails } from "@/lib/session-content-index";
 import { sessionExternalWritePayload } from "@/lib/session-external-write";
+import { attachTranscriptNotices, readSessionTranscriptNotices, readShowCacheMissNotices } from "@/lib/transcript-notices-server";
+import type { SessionEntry } from "@/lib/types";
 
 export async function GET(
   req: Request,
@@ -73,7 +75,7 @@ export async function GET(
     // only (excludeLeaf) so prepending the page does not duplicate `before`.
     const entries = live?.entries ?? indexed!.entries;
     const contextLeafId = live ? before ?? activeLeafId : entries.at(-1)?.id ?? null;
-    const context = buildSessionContext(entries, contextLeafId, {
+    let context = buildSessionContext(entries, contextLeafId, {
       deferThinking,
       deferToolResultImages,
       tail,
@@ -83,7 +85,18 @@ export async function GET(
     });
     // 索引路径只读到当前页，页内向上数不到更早的轮次；改用索引的完整祖先链（#791）。
     if (indexed && context.hasMore && context.oldestEntryId) context.turnsBefore = indexed.turnsBefore(context.oldestEntryId);
-    const contextMs = performance.now() - contextStartedAt;
+    // pi 的 showCacheMissNotices（默认关闭）开启时才附带缓存/费用通知（#1265）。它们要对比整条分支上的
+    // 前后用量，索引路径只读了当前页，所以此时额外读取完整会话；关闭时索引路径不受影响。
+    const noticesCwd = live ? liveRpc!.cwd : (filePath ? readSessionHeader(filePath)?.cwd ?? "" : "");
+    if (noticesCwd && readShowCacheMissNotices(noticesCwd)) {
+      const fullEntries = live?.entries ?? openSessionManager(filePath!).getEntries();
+      context = attachTranscriptNotices(context, readSessionTranscriptNotices({
+        entries: fullEntries as unknown as SessionEntry[],
+        cwd: noticesCwd,
+        leafId: activeLeafId,
+        models: liveRpc?.inner.modelRuntime,
+      }));
+    }    const contextMs = performance.now() - contextStartedAt;
     const payload = JSON.stringify({
       context,
       leafId: activeLeafId,

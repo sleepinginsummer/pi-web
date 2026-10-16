@@ -5,6 +5,7 @@ import {
 } from "@/lib/models-config-commit";
 import { forceRefreshModelCatalog } from "@/lib/model-catalog-refresh";
 import { ModelsConfigReadError } from "@/lib/models-config-store";
+import { ContextWindowError, normalizeContextWindowOverrides } from "@/lib/model-context";
 
 export const dynamic = "force-dynamic";
 
@@ -22,7 +23,8 @@ export async function GET() {
 export async function PUT(req: Request) {
   try {
     const body = await req.json() as Record<string, unknown>;
-    await commitModelsConfigWithCapabilities(body);
+    // 托管模型的上下文窗口覆盖值先校验并规整为整数，再进入成对加锁提交。
+    await commitModelsConfigWithCapabilities(normalizeContextWindowOverrides(body));
     const providers = body.providers && typeof body.providers === "object" && !Array.isArray(body.providers)
       ? Object.keys(body.providers)
       : [];
@@ -34,6 +36,9 @@ export async function PUT(req: Request) {
       return NextResponse.json({ success: true, catalogRefreshed: false });
     }
   } catch (error) {
+    if (error instanceof ContextWindowError) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
     if (error instanceof ModelsConfigReadError) {
       return NextResponse.json({ error: error.message }, { status: 409 });
     }

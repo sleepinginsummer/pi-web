@@ -26,6 +26,8 @@ export interface ModelLike {
   api?: string;
   compat?: object;
   samplingParams?: Record<string, unknown>;
+  /** Dollars per million tokens. */
+  cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
 }
 
 export interface ToolInfo {

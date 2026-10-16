@@ -1,6 +1,6 @@
 # Pi Web
 
-[English](./README.md) | [日本語](./README.ja.md)
+[English](../README.md) | [日本語](./README.ja.md) | [Русский](./README.ru.md)
 
 [pi 编程智能体](https://github.com/badlogic/pi-mono) 的本地网页界面。它会读取本机的 pi 会话文件，在浏览器里提供会话管理、实时对话、模型配置、技能管理和项目文件预览。
 
@@ -91,12 +91,11 @@ npx @agegr/pi-web@latest
 
 ## 注意事项
 
-- **数据目录**：默认读取 `~/.pi/agent/sessions` 下的会话文件。可通过环境变量 `PI_CODING_AGENT_DIR` 指定其他 pi agent 目录。
-- **会话文件**：路径形如 `~/.pi/agent/sessions/<编码后的工作目录>/<时间戳>_<uuid>.jsonl`。
-- **模型配置**：Models 面板读写 pi agent 目录下的 `models.json`，模型列表和默认模型由 pi 的配置解析得到。
-- **文件访问**：文件浏览和预览面向当前选择的项目目录，以及会话中已出现过的工作目录。
-- **Git worktree**：什么时候显示切换器、新建目录在哪里、删除会影响什么，见 [Pi Web 里的 Worktree](./docs/worktrees.zh-CN.md)。
-- **Fork 与会话内分支不同**：Fork 会创建新的 `.jsonl` 文件；“Edit from here” 是同一会话文件里的分支。
+- **智能体数据**：Pi Web 默认读取 `~/.pi/agent` 下的 pi 数据，包括 `sessions/<编码后的工作目录>/<时间戳>_<uuid>.jsonl` 中的会话文件。可通过 `PI_CODING_AGENT_DIR` 指定其他 pi agent 目录。
+- **文件系统访问**：Pi Web 必须能读取智能体数据目录及会话记录中的工作目录。与现有 pi 会话共用数据时，请让 Pi Web 运行在与 pi 相同的文件系统环境中。
+- **共享配置**：模型面板使用 pi 的模型、设置和凭据存储，因此两种界面都能看到相关更改。
+- **文件访问边界**：文件浏览器仅能访问在 Pi Web 中选择过的工作目录，以及它已识别的项目或会话根目录；它不是通用的文件系统浏览器。
+- **Git worktree**：切换器何时显示、如何创建 worktree，以及删除会产生什么影响，见 [Pi Web 里的 Worktree](./worktrees.zh-CN.md)。
 
 ## 开发
 
@@ -116,49 +115,14 @@ npm run lint
 
 开发时不要运行 `next build` / `npm run build`，它会写入 `.next/`，容易影响正在运行的 dev server。发布流程再执行构建。
 
-## 项目结构
+开始做新功能之前，请先阅读[参与贡献](./CONTRIBUTING.zh-CN.md)，了解哪些改动在范围内以及提交 PR 前的检查项。
+
+贡献者文档：[国际化](./i18n.md)和[发布流程](./release.md)。
 
 ```
-app/
-  api/
-    agent/          # 创建/驱动 AgentSession，提供 SSE 事件流
-    auth/           # 密码会话、OAuth 和 API key 管理
-    cwd/browse/     # 服务端目录浏览
-    cwd/validate/   # 自定义工作目录校验
-    default-cwd/    # 获取 pi 默认工作目录
-    files/          # 文件列表、读取、预览、watch
-    home/           # 当前用户 home 目录
-    models/         # 可用模型、默认模型、thinking levels
-    models-config/  # 读写 models.json、测试模型
-    sessions/       # 会话读取、重命名、删除、上下文、HTML 导出
-    skills/         # skills 列表、搜索、安装、启停
-components/
-  AppShell.tsx        # 主布局、URL 状态、顶部面板、文件标签
-  SessionSidebar.tsx  # 项目选择、会话树、Explorer
-  DirectoryPicker.tsx # 支持浏览和路径输入的工作目录选择器
-  ChatWindow.tsx      # 消息区、SSE、拖拽图片、minimap
-  ChatInput.tsx       # 输入栏、模型/工具/thinking/compact/slash controls
-  MessageView.tsx     # 消息、thinking、tool call/result 渲染
-  ModelsConfig.tsx    # 模型和认证配置面板
-  SkillsConfig.tsx    # 技能管理面板
-  FileExplorer.tsx    # 文件树
-  FileViewer.tsx      # 源码、diff、图片、音频、PDF、DOCX 预览
-lib/
-  directory-browser.ts # 目录规范化和安全枚举工具
-  http-dispatcher.ts  # 服务端 fetch 的 HTTP(S) 代理配置
-  rpc-manager.ts      # AgentSessionWrapper 生命周期和全局 registry
-  session-reader.ts   # 解析 .jsonl 会话文件和分支上下文
-  normalize.ts        # 规范化 toolCall 字段名
-  file-access.ts      # 文件读取安全边界
-  file-paths.ts       # 文件路径编码/相对路径工具
-  markdown.ts         # Markdown/Mermaid/KaTeX 插件配置
-  pi-types.ts         # pi 相关类型
-hooks/
-  useAgentSession.ts  # 会话加载、发送命令、SSE 状态机
-  useAudio.ts         # 完成提示音
-  useDragDrop.ts      # 图片拖拽
-  useTheme.ts         # 主题切换
-bin/
-  pi-web.js           # npm CLI 入口
-instrumentation.ts    # 初始化服务端 HTTP dispatcher
-```
+
+架构说明和详细文件地图见 [AGENTS.md](../AGENTS.md)。
+
+## 许可证
+
+[MIT](../LICENSE)

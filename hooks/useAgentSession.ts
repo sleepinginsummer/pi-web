@@ -43,10 +43,12 @@ export type { QueuedMessages } from "@/lib/queued-messages";
 import { getDraft, setDraft, type ChatDraft } from "@/lib/draft-store";
 import { getToolNamesForPreset, type ToolEntry } from "@/lib/tool-presets";
 import type { SessionStatsInfo } from "@/lib/pi-types";
+import { carryMessageKeys, messageRenderKeys } from "@/lib/message-keys";
 import { isNestedToolExecutionEvent, isSystemMessageEvent } from "@/lib/agent-event-wire";
 import { CODEMODE_TOOL_NAME, getCodemodeProgress } from "@/lib/codemode-view";
 import { bareMcpOpensSettings } from "@/lib/mcp-command";
 import type { SettingsSection } from "@/lib/settings-navigation";
+import { withTranscriptNotices, type TranscriptNotice } from "@/lib/transcript-notices";
 import {
   fetchRuntimeState,
   fetchSessionContext,
@@ -578,6 +580,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [entryIds, setEntryIds] = useState<string[]>([]);
   const messagesRef = useRef(messages);
   const entryIdsRef = useRef(entryIds);
+  // 运行中追加的消息没有 entry id；重读文件时把它们的 key 交给同位置的 entry（lib/message-keys.ts），避免整轮消息重挂载。
+  const [messageKeyAliases, setMessageKeyAliases] = useState<ReadonlyMap<string, string>>(() => new Map());
   messagesRef.current = messages;
   entryIdsRef.current = entryIds;
   const [historyPage, setHistoryPage] = useState<{
@@ -975,6 +979,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // 首屏、导航和 backfill 属于显式定位；后台 entry 刷新必须保持用户滚动位置。
       requestScrollPosition("initial");
     }
+    const previousView = { messages: messagesRef.current, entryIds: entryIdsRef.current };
+    const nextView = { messages: snapshot.messages, entryIds: snapshot.entryIds };
+    setMessageKeyAliases((aliases) => carryMessageKeys({ ...previousView, aliases }, nextView));
     setMessages(snapshot.messages);
     setEntryIds(snapshot.entryIds);
     messagesRef.current = snapshot.messages;
@@ -2115,8 +2122,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             return next;
           });
         } else if (completed) {
+          // pi's showCacheMissNotices (#1265): the wrapper sends them beside the message.
+          const notices = Array.isArray(event.transcriptNotices) ? event.transcriptNotices as TranscriptNotice[] : undefined;
           setMessages((prev) => {
-            const next = [...prev, normalizeAssistantMessage(completed)];
+            const next = [...prev, withTranscriptNotices(normalizeAssistantMessage(completed), notices)];
             lastStreamedMessageCountRef.current = next.length;
             return next;
           });
@@ -3071,6 +3080,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setSessionStatsOverride(null);
   }, [messages.length, contextUsage?.tokens, contextUsage?.percent, contextUsage?.contextWindow]);
 
+  const messageKeys = useMemo(
+    () => messageRenderKeys(entryIds, messages.length, messageKeyAliases),
+    [entryIds, messages.length, messageKeyAliases],
+  );
 
   const modelViewState = useMemo<ModelSelectionViewState>(() => {
     const modelKey = displayModel
@@ -3111,7 +3124,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // 保持同一对象引用，下游 memo 组件（ChatInput/MessageView）才能跳过渲染。
   return useMemo(() => ({
     // State
-    data: details, loading, error, activeLeafId, messages, entryIds, streamState,
+    data: details, loading, error, activeLeafId, messages, entryIds, messageKeys, streamState,
     historyCursor: historyPage.sid === sessionIdRef.current ? historyPage.oldestEntryId : null,
     hasEarlierMessages: historyPage.sid === sessionIdRef.current && historyPage.hasMore,
     loadingEarlierMessages: historyPage.sid === sessionIdRef.current && historyPage.loading,
@@ -3140,7 +3153,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // Subscriptions
     handleAgentEventRef,
   }), [
-    details, loading, error, activeLeafId, messages, entryIds, streamState, historyPage,
+    details, loading, error, activeLeafId, messages, entryIds, messageKeys, streamState, historyPage,
     agentRunning, modelViewState, modelViewActions, toolPreset,
     retryInfo, contextUsage, systemPrompt, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,

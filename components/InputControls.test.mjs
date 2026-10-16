@@ -10,7 +10,7 @@ const jiti = createJiti(import.meta.url, {
 });
 const { InputControls } = await jiti.import("./InputControls.tsx");
 const { InputControlsMenu } = await jiti.import("./InputControlsMenu.tsx");
-const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+const { I18nProvider } = await jiti.import("@/hooks/useI18n");
 
 const modelState = {
   names: {},

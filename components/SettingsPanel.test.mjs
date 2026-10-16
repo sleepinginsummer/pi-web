@@ -173,9 +173,9 @@ test("groups fonts, chat font size and width in one section, chat behavior in an
   }
   assert.match(chatSection, /className="settings-chat-options"/);
   assert.doesNotMatch(chatSection, /settings-chat-content/);
-  assert.equal((chatSection.match(/className="settings-chat-option(?: |")/g) ?? []).length, 3);
-  assert.equal((chatSection.match(/<ConfigSwitch/g) ?? []).length, 2);
-  for (const key of ["thinkingExpandedDefault", "quoteSelection", "enterSendMode", "enterSendModeEnter", "enterSendModeCtrlEnter"]) {
+  assert.equal((chatSection.match(/className="settings-chat-option(?: |")/g) ?? []).length, 4);
+  assert.equal((chatSection.match(/<ConfigSwitch/g) ?? []).length, 3);
+  for (const key of ["thinkingExpandedDefault", "quoteSelection", "enterSendMode", "enterSendModeEnter", "enterSendModeCtrlEnter", "cacheMissNotices"]) {
     assert.match(chatSection, new RegExp(`t\\("settings\\.${key}"\\)`));
   }
   assert.doesNotMatch(panelSource, /ThinkingIcon|settings-thinking-/);

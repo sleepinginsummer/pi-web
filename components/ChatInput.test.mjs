@@ -14,8 +14,8 @@ const jiti = createJiti(import.meta.url, {
 });
 const { ChatInput, ModelDataDiagnosticBanner, RUN_END_CLICK_GUARD_MS, isRunEndStrayClick, ModelErrorBanner, ModelScopeWarningBanner, modelSupportsImageInput, canClearBuiltinCommandInput, canRunBuiltinSlashCommandWhileStreaming, isExactSlashCommand, offersBuiltinSlashCommandWhileStreaming, replaceTextareaRange, submitsSlashCommandOnEnter } = await jiti.import("./ChatInput.tsx");
 const { filterModelOptions } = await jiti.import("./ModelPicker.tsx");
-const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
-const { clearDraft, setDraft } = await jiti.import("../lib/draft-store.ts");
+const { I18nProvider } = await jiti.import("@/hooks/useI18n");
+const { clearDraft, setDraft } = await jiti.import("@/lib/draft-store");
 
 const emptyModelState = {
   names: {}, list: [], error: null, scopeWarnings: [], dataDiagnostics: [],

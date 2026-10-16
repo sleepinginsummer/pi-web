@@ -293,7 +293,7 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 - Browser autoplay policy means sound must be unlocked from a user gesture; `ChatInput` calls the unlock hook from interactive controls, and `ChatWindow` plays the tone from `onAgentEnd`.
 
 ### PWA 版本与 Service Worker 更新策略
-- 当前合并版本使用 `0.10.0-merge.33`；此后每次代码变更都必须将最后一位递增 1，并同步更新 `package.json` 与 `package-lock.json`。
+- 当前合并版本使用 `0.10.0-merge.36`；此后每次代码变更都必须将最后一位递增 1，并同步更新 `package.json` 与 `package-lock.json`。
 - 生产环境必须使用每次构建唯一的版本标识注册 `/sw.js?v=<build-version>`，静态缓存名称也必须包含同一个版本；不能只使用长期不变的 `package.json` 版本，否则代码变化后浏览器可能继续命中旧 chunk。
 - 新 Service Worker 安装完成后保持 `waiting`，由界面提示“发现新版本”；用户确认后发送 `SKIP_WAITING`，并在 `controllerchange` 后刷新页面。不要在 `install` 阶段无条件调用 `skipWaiting()`。
 - 激活新 Service Worker 时只清理 `pi-web-` 前缀下的旧版本缓存，不得清理其它站点数据或认证信息。`/sw.js`、页面导航和 API 请求必须绕过静态资源缓存。
@@ -309,7 +309,7 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 - 侧栏保留 fork 实现（ProjectSection、sidebar-preferences 同步、回收站、会话搜索）。上游 v0.11.0 的侧栏重设计（`session-ui-state`、分组/归档/项目置顶、行菜单 Fork、新会话项目栏 `NewSessionContextBar`/`ProjectWorktreePicker`）及依赖它的后续功能均未合入，合并时对这些新文件按删除处理，需要时单独移植。
 - fork 早期以 squash 方式整合上游，合并基线之前的上游改动可能从未进入 fork，三方合并会把它们当作“fork 已删除”静默丢弃。合并时对基线已有、fork 缺失的上游功能要逐个确认，例如本次补回的 Service Worker 导航/静态资源 8s 首字节超时（上游 #879）。
 - 上游与 fork 都实现过的功能，按以下结论合并，后续合并不要重新引入另一套：
-  - 会话目录变化：保留 fork 的 recursive `fs.watch` 增量 stat，并叠加上游 #1100 的文件名成员检查（`checkSessionMembership()` 由 `getSessionListVersion()` 触发，每秒最多一次，只读目录）。watcher 只负责性能，外部进程新建/删除会话由成员检查更新版本号；全量对账时记录成员基线。
+  - 会话目录变化：`lib/session-list-scanner.ts` 采用上游 v0.12.2 版本（尾部续读 #1259、成员检查 #1100、延后写索引）。fork 原有的 recursive `fs.watch` 增量 stat 从未被启用（`trustWatcher` 无调用方），已随之移除，`session-reader.ts` 不再导出 `invalidateSessionDirectorySnapshot`。
   - 旧消息分页：fork 的 `loadEarlierMessages` 在同一次 `setHistoryPage` 中提交游标和 `loading`，并拒绝重复 entryId，上游 d474ce2 的重复前插问题不存在，未移植。
   - 新会话首条消息：fork 在发送途中切走会话时拒绝发送并通过 `setDraft` 保留草稿，上游 e7d0fda（切走后照常发送）未移植。
   - 通知：fork 的 NoticeShelf 收起时单行居中，上游 d850be1 不适用；终端二维码（#755）按 `splitNoticeText` 以 `.notice-shelf-art` 渲染。
@@ -326,48 +326,6 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 - 运行期间 ChatWindow 通过 `useAudio().holdAudio()` 保持提示音的 AudioContext 运行，空闲时自动挂起（#1157）。
 - `display: false` 的自定义消息与 pi TUI 一致完全不渲染（ChatWindow 跳过且不计入过程详情，MessageView 入口兜底），不再显示“隐藏的扩展消息”卡片。
 - CLI 的 `version/status/stop/open` 来自上游；`pi-web update` 在 fork 中禁用，只打印 fork Release 与 `scripts/macos-service.sh` 的更新方式，绝不执行 `npm install -g @agegr/pi-web`。
-
-
-### Fork Release npm 包
-- `.github/workflows/release-package.yml` 只在 `sleepinginsummer/pi-web` 发布，手动触发或 `v*-merge.*` 标签触发。版本须与两个 package-lock 版本一致，已有标签须指向本次提交，禁止覆盖旧 Release。构建后先核对 npm pack 文件清单，再通过 `scripts/verify-release.mjs` 在独立目录仅安装生产依赖并验证 PTY、登录、页面与 SDK API，最后发布 `.tgz`。
-- `scripts/macos-service.sh` 是安装包的 launchctl 管理入口，固定当前版本的真实路径启动，配置与日志放在 `~/.local/share/pi-web-runtime`。源码目录与运行目录分离；更新不得覆盖正在运行版本的 `.next` 或原生模块，停止只操作已知 label，不直接 kill 未知端口占用者。
-
-### Exported session HTML
-- `/api/sessions/[id]/export` delegates to pi's export helper, then patches recursive tree helpers in the generated HTML to iterative versions so very deep linear sessions do not overflow the browser call stack.
-
-## Pi Session File Format
-
-Location: `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`
-
-```jsonl
-{"type":"session","version":3,"id":"<uuid>","timestamp":"...","cwd":"/path","parentSession":"/abs/path/to/parent.jsonl"}
-{"type":"model_change","id":"<8hex>","parentId":null,"provider":"zenmux","modelId":"claude-sonnet-4-6","timestamp":"..."}
-{"type":"message","id":"<8hex>","parentId":"<8hex>","message":{"role":"user","content":"..."}}
-{"type":"message","id":"<8hex>","parentId":"<8hex>","message":{"role":"assistant","content":[...],...}}
-{"type":"message","id":"<8hex>","parentId":"<8hex>","message":{"role":"toolResult","toolCallId":"...","content":[...]}}
-{"type":"compaction","id":"<8hex>","parentId":"<8hex>","summary":"...","firstKeptEntryId":"<8hex>","tokensBefore":N}
-{"type":"session_info","id":"...","parentId":"...","name":"user-defined name"}
-```
-
-`entryIds[]` in `SessionContext` is a parallel array to `messages[]` — maps each displayed message back to its `.jsonl` entry id, used for fork and navigate_tree calls.
-
----
-
-## CSS Variables (`app/globals.css`)
-
-```
---bg --bg-panel --bg-hover --bg-selected --border
---text --text-muted --text-dim
---accent --user-bg --tool-bg
---font-mono
-```
-
-<!-- BEGIN:nextjs-agent-rules -->
-
-# This is NOT the Next.js you know
-
-This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
-
-This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
-
-<!-- END:nextjs-agent-rules -->
+- 消息 key（上游 #1184）：`lib/message-keys.ts` 的别名在 `useAgentSession.commitContextSnapshot()` 统一计算，ChatWindow 的消息、过程分组和分组 Fragment 都按 `messageKeys` 取 key，MessageView 的块按位置取 key。fork 读取器与上游有两处差异，测试已按 fork 行为调整：历史用户图片被换成按需加载的 URL，所以用户消息只比较文字和图片类型；压缩摘要按 SDK 上下文投影放在最前，运行中途压缩后本轮消息改用各自的 entry id。
+- 延迟 provider 的启动模型切换（#1240）在 fork 中仍在扩展绑定后于后台执行，但通过 `trackStartupModelSwitch()` 登记；`send()` 中需要等待扩展的命令（prompt/steer/follow_up 等）会先等它完成，测试用 `waitForStartupModelSwitch()` 等待。
+- 上游 v0.12.2 的回合耗时（#1222）、缓存与费用提示（#1265，设置 › 常规开关）、过程折叠摘要、长思考分段渲染（#1196）、代理切换器的用量和子代理标签开关、技能文档相对链接（`MarkdownBody` 的 `onNavigateLink` 经 ref 读取，保持块级 memo 命中）、终端主题和新主题已移植；StreamingStore 与上游侧栏相关的文档段落未合入。

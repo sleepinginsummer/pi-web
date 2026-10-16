@@ -17,6 +17,8 @@ interface AppTopPanelsProps {
   locale: string;
   onCopySessionField: (field: SessionCopyField, value: string) => void;
   onSelectSession: (session: SessionInfo) => void;
+  onToggleSubagentTab: (sessionId: string, label: string) => void;
+  openSubagentTabIds: ReadonlySet<string>;
   position: TopPanelPosition | null;
   runningSessionIds: ReadonlySet<string>;
   selectedSessionId: string | null;
@@ -40,6 +42,8 @@ export function AppTopPanels({
   locale,
   onCopySessionField,
   onSelectSession,
+  onToggleSubagentTab,
+  openSubagentTabIds,
   position,
   runningSessionIds,
   selectedSessionId,
@@ -67,6 +71,8 @@ export function AppTopPanels({
           selectedSessionId={selectedSessionId}
           runningSessionIds={runningSessionIds}
           onSelectSession={onSelectSession}
+          openSubagentTabIds={openSubagentTabIds}
+          onToggleSubagentTab={onToggleSubagentTab}
         />
       )}
       {activePanel === "session" && (

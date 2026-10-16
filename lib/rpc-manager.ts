@@ -19,7 +19,7 @@ import { restoreShadowSessionSettingSafely, ShadowSessionSetting } from "./shado
 import { parseShadowMindToggleCommand, SHADOW_MIND_SESSION_STATE } from "./shadow-session-protocol";
 import { createClonedSession, createForkedSession } from "./session-fork";
 import { generateTitleForSessionFile } from "./session-file-title";
-import { findDeferredModel, rememberProviderModels } from "./deferred-provider-models";
+import { findDeferredModel, findDeferredStartupModel, rememberProviderModels } from "./deferred-provider-models";
 import { isBlockingExtensionUiRequest } from "./extension-ui-queue";
 import {
   createProjectCommandBashExtension,
@@ -56,6 +56,7 @@ import {
   SUBAGENT_CONTROL_TOOL_NAMES,
 } from "./subagents";
 import { createSubagentController } from "./subagent-runtime";
+import { invalidateModelRuntimeWithExtensions } from "./model-runtime";
 import { isBuiltInSubagentsEnabled } from "./subagent-settings";
 import { resolveShellTools } from "./powershell-settings";
 import { CHAT_ONLY_RESOURCE_LOADER_OPTIONS, contextFilesSystemPrompt } from "./chat-only";
@@ -66,6 +67,7 @@ import { mcpPromptPreparation, type McpCommandCandidate } from "./mcp-command";
 import { createReadOnlyMcpPolicyExtension, createSubagentMcpPolicyExtension } from "./mcp-read-only-policy";
 import { createSubagentSkillsBinding } from "./subagent-skills";
 import { isNestedToolExecutionEvent } from "./agent-event-wire";
+import { collectLiveAssistantNotices, readShowCacheMissNotices, withSessionPrices } from "./transcript-notices-server";
 import {
   appendClearedSessionToolSelection,
   appendSessionToolSelection,
@@ -269,6 +271,8 @@ function elapsedMs(startedAt: number): number {
 
 const CODING_TOOL_NAMES = ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"];
 const THINKING_LEVEL_NAMES = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+// The SDK's DEFAULT_THINKING_LEVEL (dist/core/defaults.js), which it does not export.
+const SDK_DEFAULT_THINKING_LEVEL: ThinkingLevel = "medium";
 
 // Extensions require a complete Theme, while the web UI applies its own styling.
 class PlainTextTheme extends Theme {
@@ -410,6 +414,7 @@ export class AgentSessionWrapper {
   private promptAdmissionTail: Promise<void> = Promise.resolve();
   private extensionsBound = false;
   private extensionBindingPromise: Promise<void> | null = null;
+  private startupModelSwitch: Promise<void> | null = null;
   private extensionBindingError: unknown = null;
   private forceEmptySystemPrompt = false;
   private readonly mcpHost?: Pick<McpHost, "prepareForPrompt" | "dispose">;
@@ -662,14 +667,44 @@ export class AgentSessionWrapper {
         // 会话第一轮结束后自动生成标题（文件级独立 services，不与主 agent 争用 transport）
         this.maybeAutoTitleSession();
       }
+      // A name from setSessionName(), an extension's included: a title generated
+      // in the background lands after the run's agent_end, a command's with no
+      // run at all, and the sidebar would keep the old one (#1237).
+      if (event.type === "session_info_changed") invalidateSessionListCache();
       this.trackActiveToolEvent(event);
       if (IDLE_RESET_EVENT_TYPES.has(event.type)) this.resetIdleTimer();
-      this.emit(event);
+      this.emit(event.type === "message_end" ? this.withTranscriptNotices(event) : event);
       if (RUNNING_STATE_EVENT_TYPES.has(event.type)) notifyRunningChange();
     });
     this.resetIdleTimer();
     notifyRunningChange();
   }
+
+  /**
+   * An assistant `message_end` with the notices pi's TUI shows under
+   * `showCacheMissNotices` (#1265), as `transcriptNotices` beside the message.
+   * The message itself is left alone: pi writes that object to the file.
+   */
+  private withTranscriptNotices(event: AgentEvent): AgentEvent {
+    const message = event.message as { role?: unknown } | undefined;
+    if (this.listeners.size === 0 || message?.role !== "assistant") return event;
+    try {
+      const manager = this.inner.sessionManager;
+      if (!readShowCacheMissNotices(manager.getCwd())) return event;
+      const entries = manager.getEntries() as unknown as SessionEntry[];
+      const notices = collectLiveAssistantNotices(
+        entries,
+        manager.getBranch() as unknown as SessionEntry[],
+        message,
+        withSessionPrices(entries, this.inner.modelRuntime),
+      );
+      return notices.length > 0 ? { ...event, transcriptNotices: notices } : event;
+    } catch (error) {
+      console.warn("[pi-web] transcript notices failed:", error instanceof Error ? error.message : error);
+      return event;
+    }
+  }
+
 
   /**
    * 工具中断自动恢复：agent_settled（本轮彻底结束）时，若最后一条 assistant 发出过
@@ -773,6 +808,21 @@ export class AgentSessionWrapper {
 
   async waitUntilReady(): Promise<void> {
     await this.waitForExtensionsBound();
+  }
+
+  /**
+   * 新会话的延迟模型切换在扩展绑定后于后台进行（不阻塞 create 阶段）。登记后，需要等待扩展的
+   * 命令（prompt 等）会先等它完成，避免首条消息仍落在占位模型上。
+   */
+  trackStartupModelSwitch(task: Promise<void>): void {
+    const tracked = task.catch(() => undefined).finally(() => {
+      if (this.startupModelSwitch === tracked) this.startupModelSwitch = null;
+    });
+    this.startupModelSwitch = tracked;
+  }
+
+  async waitForStartupModelSwitch(): Promise<void> {
+    await this.startupModelSwitch;
   }
 
   /**
@@ -1130,7 +1180,11 @@ export class AgentSessionWrapper {
   async send(command: Record<string, unknown>): Promise<unknown> {
     this.resetIdleTimer();
     const type = command.type as string;
-    if (this.shouldWaitForExtensions(type)) await this.waitForExtensionsBound();
+    if (this.shouldWaitForExtensions(type)) {
+      await this.waitForExtensionsBound();
+      // set_model / set_thinking_level 不在等待列表中，切换任务自身的命令不会在这里互等。
+      await this.startupModelSwitch;
+    }
     // 扩展初始化可能跨越外部写入；实际 dispatch 前再次校验。
     if (!canRunWithExternalSessionChange(type) && this.diskFreshness() !== "current") {
       throw new SessionFileConflictError();
@@ -1586,6 +1640,8 @@ export class AgentSessionWrapper {
         await this.restoreShadowSessionSetting();
         await this.fastSessionSetting.restoreAfterRuntimeReset();
         invalidateModelsCache(this.cwd);
+        // /reload 会让编辑过的扩展生效；provider 列表使用的 runtime 一并失效。
+        invalidateModelRuntimeWithExtensions();
         return { success: true };
       }
 
@@ -2402,7 +2458,9 @@ export class AgentSessionWrapper {
           },
         });
         await this.fastSessionSetting.restoreAfterRuntimeReset();
-          },
+        // 与 reload 命令一致：provider 列表使用的 runtime 一并失效。
+        invalidateModelRuntimeWithExtensions();
+      },
     };
   }
 
@@ -3053,10 +3111,8 @@ export async function startRpcSession(
 
     startupStage = "modelScope";
     stageStartedAt = performance.now();
-    const scope = await resolveVisibleModels(
-      services.modelRuntime,
-      services.settingsManager.getEnabledModels(),
-    );
+    const enabledModels = services.settingsManager.getEnabledModels();
+    const scope = await resolveVisibleModels(services.modelRuntime, enabledModels);
     startupTimings.modelScope = elapsedMs(stageStartedAt);
     // A provider an extension registers only at session_start (lib/deferred-provider-models.ts)
     // has no model in this runtime yet: build on the default, switch once extensions are bound.
@@ -3070,6 +3126,9 @@ export async function startRpcSession(
     const defaultProvider = services.settingsManager.getDefaultProvider();
     const defaultModelId = services.settingsManager.getDefaultModel();
     // 系统消息描述运行时提示词，不代表对话已经开始；已有会话优先恢复分支记录的模型。
+    const defaultModel = defaultProvider && defaultModelId
+      ? { provider: defaultProvider, modelId: defaultModelId }
+      : undefined;
     const branch = sessionManager.getBranch();
     const hasExistingMessages = branch.some((entry) => entry.type === "message" && entry.message.role !== "system");
     const savedModel = hasExistingMessages ? getLatestModelChange(branch as unknown as SessionEntry[]) : null;
@@ -3084,19 +3143,46 @@ export async function startRpcSession(
       ? { scopedModels: [...scope.scopedModels] }
       : selectInitialModelScope(scope, {
         ...(effectiveInitialModel ? { requestedModel: effectiveInitialModel } : {}),
-        ...(defaultProvider && defaultModelId
-          ? { defaultModel: { provider: defaultProvider, modelId: defaultModelId } }
-          : {}),
+        ...(defaultModel ? { defaultModel } : {}),
         ...(thinkingLevel ? { thinkingLevel } : {}),
       });
     const startupModel = restoredModel && services.modelRuntime.hasConfiguredAuth(restoredModel.provider)
       ? restoredModel
       : initial?.model;
+    // A registered default the session starts on is in scope with deferred models counted too
+    // (globs and exact entries only gain matches), unless the scope fell back to every model.
+    const startsOnDefault = Boolean(initial?.model && defaultModel
+      && initial.model.provider === defaultModel.provider && initial.model.id === defaultModel.modelId
+      && (scope.scopedModels.length > 0 || !enabledModels?.some((pattern) => pattern.trim())));
+    // pi's pick with deferred providers counted in, as /api/models shows it (#1240): a deferred
+    // model asked for gets its enabledModels pin; with no usable model asked for, the browser shows
+    // that pick and sends none, so a deferred pick is switched to as well.
+    const deferredStartup = !hasExistingMessages && !chatOnly && (deferredInitialModel || (!effectiveInitialModel && !startsOnDefault))
+      ? await findDeferredStartupModel(services.modelRuntime, enabledModels, deferredInitialModel
+        ? { requestedModel: { provider: deferredInitialModel.provider, modelId: deferredInitialModel.id } }
+        : defaultModel ? { defaultModel } : {})
+      : undefined;
     const deferredModel = hasExistingMessages
       ? savedModel && !restoredModel
         ? findDeferredModel(services.modelRuntime, savedModel.provider, savedModel.modelId)
         : undefined
-      : deferredInitialModel;
+      : deferredInitialModel ?? deferredStartup?.model;
+    // set_model applies the model's modelThinkingLevels entry, else defaultThinkingLevel, else keeps
+    // the current level: the stand-in model's (clamped, or its own pin). Apply what pi's
+    // createAgentSession gives this model at startup instead: a resumed session's last saved level,
+    // else the default; a new one's requested level, else the model's enabledModels pin, its
+    // modelThinkingLevels entry, else the default.
+    const deferredThinkingLevel = !deferredModel
+      ? undefined
+      : hasExistingMessages
+        ? (branch.findLast((entry) => entry.type === "thinking_level_change")?.thinkingLevel as ThinkingLevel | undefined)
+          ?? services.settingsManager.getDefaultThinkingLevel()
+          ?? SDK_DEFAULT_THINKING_LEVEL
+        : thinkingLevel
+          ?? deferredStartup?.thinkingLevelPin
+          ?? services.settingsManager.getModelThinkingLevel(deferredModel.provider, deferredModel.id)
+          ?? services.settingsManager.getDefaultThinkingLevel()
+          ?? SDK_DEFAULT_THINKING_LEVEL;
     // The extension's model a Chat-only session wanted (saved, chosen or default); a prompt names
     // it when the session ended up with no model at all.
     const chatOnlyExtensionModel = chatOnly
@@ -3188,19 +3274,20 @@ export async function startRpcSession(
     if (!chatOnly) {
       // 不在此等待扩展绑定：新会话 create 阶段不能被扩展审批阻塞。绑定完成后、
       // 会话尚未开始运行时，再切到扩展在 session_start 才注册的 provider 模型。
-      void wrapper.waitUntilReady()
+      wrapper.trackStartupModelSwitch(wrapper.waitUntilReady()
         .then(async () => {
           if (deferredModel && !wrapper.isRunning()) {
             try {
               await wrapper.send({ type: "set_model", provider: deferredModel.provider, modelId: deferredModel.id });
+              // set_model 会套用该模型的 modelThinkingLevels 或默认值；恢复 pi 启动时给它的思考强度（#1240）。
+              if (deferredThinkingLevel) await wrapper.send({ type: "set_thinking_level", level: deferredThinkingLevel });
             } catch (error) {
               console.error(`[pi-web] could not switch to ${deferredModel.provider}/${deferredModel.id}:`, error instanceof Error ? error.message : error);
             }
           }
           // Bound extensions may have registered providers a later model listing will not see.
           await rememberProviderModels(inner.modelRuntime as ModelRuntime);
-        })
-        .catch(() => undefined);
+        }));
     }
 
     console.info("[pi-web] RPC session startup", {

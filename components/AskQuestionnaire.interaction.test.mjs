@@ -19,7 +19,7 @@ const jiti = createJiti(import.meta.url, {
   tsconfigPaths: true,
 });
 const { AskQuestionnaire } = await jiti.import("./AskQuestionnaire.tsx");
-const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+const { I18nProvider } = await jiti.import("@/hooks/useI18n");
 
 afterEach(cleanup);
 

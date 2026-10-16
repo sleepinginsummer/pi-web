@@ -10,6 +10,7 @@ import type { AgentMessage, ImageContent, SessionEntry, SessionHeader, SessionIn
 import type { SessionEntry as PiSessionEntry } from "@earendil-works/pi-coding-agent";
 import { normalizeToolCalls } from "./normalize";
 import { getThinkingPreview } from "./message-display";
+import { withoutMessageSignatures } from "./message-signatures";
 import { countTurnsBefore } from "./session-turns";
 import { projectIdentityKey } from "./project-identity";
 import { sessionPathKey } from "./session-path";
@@ -17,7 +18,7 @@ import { skillExpansionToCommand } from "./slash-display";
 import { MAX_TOOL_RESULT_IMAGE_BYTES, TOOL_RESULT_IMAGE_MIMES } from "./tool-result-images";
 import { resolveProject, type ProjectInfo } from "./worktree";
 import { readSubagentRun, SUBAGENT_META_TYPE } from "./subagents";
-import { checkSessionMembership, invalidateSessionDirectorySnapshot, listSessionsIncremental, type ScannedSessionInfo } from "./session-list-scanner";
+import { checkSessionMembership, listSessionsIncremental, type ScannedSessionInfo } from "./session-list-scanner";
 
 export { getAgentDir };
 
@@ -355,7 +356,7 @@ declare global {
 }
 
 const SESSION_LIST_CACHE_TTL_MS = 30_000;
-const SESSION_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
+export const SESSION_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 
 function defaultSessionsDir(): string {
   return join(getAgentDir(), "sessions");
@@ -443,7 +444,6 @@ function findSessionIdByPath(filePath: string): string | undefined {
 
 export function invalidateSessionListCache(): void {
   globalThis.__piSessionListGeneration = (globalThis.__piSessionListGeneration ?? 0) + 1;
-  invalidateSessionDirectorySnapshot();
   // 旧快照仍可用于仅需侧栏元数据的查询；代数变更要求完整读取重新构建。
 }
 
@@ -1046,9 +1046,10 @@ function entryToUiMessage(
       // Transcript system messages carry the prompt and tool loadout (Pi >= 0.86).
       // They are provider input, not conversation, so they never render.
       if (entry.message.role === "system") return null;
+      const displayMessage = withoutMessageSignatures(entry.message);
       let message = options.deferToolResultImages
-        ? deferHistoricalBase64Images(normalizeToolCalls(entry.message), options.sessionId, entry.id)
-        : normalizeToolCalls(entry.message);
+        ? deferHistoricalBase64Images(normalizeToolCalls(displayMessage), options.sessionId, entry.id)
+        : normalizeToolCalls(displayMessage);
       if (options.deferToolResultImages) message = deferHistoricalLargeContent(message, options.sessionId, entry.id);
       const legacyContent = message.role === "assistant" ? (message as { content: unknown }).content : undefined;
       if (typeof legacyContent === "string") {

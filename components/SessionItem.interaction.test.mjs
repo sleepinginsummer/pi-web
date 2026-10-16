@@ -16,7 +16,7 @@ Object.defineProperties(globalThis, {
 const { cleanup, fireEvent, render } = await import("@testing-library/react");
 const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
 const { SessionItem } = await jiti.import("./SessionItem.tsx");
-const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+const { I18nProvider } = await jiti.import("@/hooks/useI18n");
 
 afterEach(cleanup);
 

@@ -4,7 +4,7 @@ import { Children, cloneElement, createContext, isValidElement, memo, useCallbac
 import ReactMarkdown, { type Components, type ExtraProps, type Options as ReactMarkdownOptions } from "react-markdown";
 import { parsePdfPageFragment, resolveLocalFileHref, shouldOpenLocalFileInApp } from "@/lib/file-links";
 import { encodeFilePathForApi } from "@/lib/file-paths";
-import { markdownAppUrlTransform, markdownRehypePlugins, markdownRemarkPlugins, markdownUrlTransform, markdownUserRemarkPlugins, normalizeDisplayMath } from "@/lib/markdown";
+import { isExternalMarkdownHref, markdownAppUrlTransform, markdownDocumentRehypePlugins, markdownRehypePlugins, markdownRemarkPlugins, markdownUrlTransform, markdownUserRemarkPlugins, normalizeDisplayMath } from "@/lib/markdown";
 import { splitStreamingMarkdown } from "@/lib/streaming-markdown-blocks";
 import { ImagePreview } from "./ImagePreview";
 import { MermaidBlock, CodeBlock } from "./MermaidBlock";
@@ -43,6 +43,8 @@ interface MarkdownBodyProps {
   isStreaming?: boolean;
   cwd?: string;
   onOpenFile?: (filePath: string, page?: number) => void;
+  /** A document reader's own links: relative paths and `#headings` stay in the reader. */
+  onNavigateLink?: (href: string) => void;
   /** Render every line ending as a line break, for text the user typed. */
   keepLineBreaks?: boolean;
 }
@@ -94,7 +96,7 @@ function renderListItems(children: ReactNode, ordered: boolean, start = 1) {
 }
 
 // 整体 memo：父组件因无关状态重渲染时，相同正文不再重新解析。
-export const MarkdownBody = memo(function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile, keepLineBreaks }: MarkdownBodyProps) {
+export const MarkdownBody = memo(function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile, onNavigateLink, keepLineBreaks }: MarkdownBodyProps) {
   const normalizedMarkdown = useMemo(() => normalizeDisplayMath(children), [children]);
   // 回调和配置都通过 ref 读取，让 components 只随 cwd / 流式状态 / 是否有打开文件
   // 能力变化，块级 memo 才能在上游回调换身份时依然命中。
@@ -104,6 +106,9 @@ export const MarkdownBody = memo(function MarkdownBody({ children, className, is
   const openFile = useCallback((filePath: string, page?: number) => {
     onOpenFileRef.current?.(filePath, page);
   }, []);
+  const onNavigateLinkRef = useRef(onNavigateLink);
+  onNavigateLinkRef.current = onNavigateLink;
+  const hasOnNavigateLink = Boolean(onNavigateLink);
   // Stable renderer identities keep stateful blocks mounted across message hover updates.
   const components = useMemo<Components>(() => ({
     code({ className, children, ...props }) {
@@ -141,6 +146,18 @@ export const MarkdownBody = memo(function MarkdownBody({ children, className, is
     a({ href, children, ...props }) {
       // `node` is react-markdown metadata, not a DOM attribute.
       delete props.node;
+      const navigateLink = hasOnNavigateLink && href && !isExternalMarkdownHref(href) ? href : null;
+      if (navigateLink) {
+        // 不设置 href：中键或「在新标签页打开」会把相对路径加载到应用自身 URL 上。
+        const navigate = () => onNavigateLinkRef.current?.(navigateLink);
+        return (
+          <MarkdownLinkContext.Provider value={true}>
+            <a {...props} role="link" tabIndex={0} onClick={navigate} onKeyDown={(event) => { if (event.key === "Enter") navigate(); }}>
+              {children}
+            </a>
+          </MarkdownLinkContext.Provider>
+        );
+      }
       const filePath = hasOnOpenFile ? resolveLocalFileHref(href, cwd) : null;
       if (!filePath || !hasOnOpenFile) {
         return (
@@ -172,21 +189,25 @@ export const MarkdownBody = memo(function MarkdownBody({ children, className, is
       return <MarkdownImage cwd={cwd} {...props} />;
     },
     table({ children }) {
+      // The frame draws the border; the scroller inside it fades its scrolled
+      // edges, which on the bordered box would fade the border too.
       return (
-        <div className="markdown-table-wrap">
-          <table>{children}</table>
+        <div className="markdown-table-frame">
+          <div className="markdown-table-wrap">
+            <table>{children}</table>
+          </div>
         </div>
       );
     },
-  }), [cwd, hasOnOpenFile, isStreaming, openFile]);
+  }), [cwd, hasOnNavigateLink, hasOnOpenFile, isStreaming, openFile]);
 
   const renderConfig = useMemo<MarkdownRenderConfig>(() => ({
     remarkPlugins: keepLineBreaks ? markdownUserRemarkPlugins : markdownRemarkPlugins,
-    rehypePlugins: markdownRehypePlugins,
+    rehypePlugins: hasOnNavigateLink ? markdownDocumentRehypePlugins : markdownRehypePlugins,
     // 没有文件打开回调时仍需保留 obsidian://、vscode:// 等桌面应用链接。
     urlTransform: hasOnOpenFile ? markdownUrlTransform : markdownAppUrlTransform,
     components,
-  }), [components, hasOnOpenFile, keepLineBreaks]);
+  }), [components, hasOnNavigateLink, hasOnOpenFile, keepLineBreaks]);
   // 流式期间把累积文本切成可缓存前缀块，每帧只重新解析仍在增长的尾部。
   const streamingSplit = useMemo(
     () => (isStreaming ? splitStreamingMarkdown(normalizedMarkdown) : null),

@@ -7,6 +7,7 @@ import { normalizeCustomPanelLines, parseAnsiLine } from "@/lib/ansi";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
 import { collapsesProcessDetails, countToolCallBlocks, hasAssistantAnswer, getDisplayableAssistantBlocks, isHiddenCustomMessage, isMessageGroupAnchor, splitFinalAssistantBlocks } from "@/lib/message-display";
 import { EXTENSION_DIALOG_BASE_WIDTH, fitExtensionDialogWidth } from "@/lib/extension-dialog-fit";
+import { formatTurnDuration, getTurnDurationMs } from "@/lib/turn-duration";
 import { dropMentionText, splitDroppedItems, uploadFiles, type DroppedItem } from "@/lib/file-upload-client";
 import { MessageView } from "./MessageView";
 import { MarkdownBody } from "./MarkdownBody";
@@ -33,6 +34,8 @@ import type { ShadowSessionControl } from "@/lib/shadow-session-control";
 import type { SessionListRefreshRequest } from "@/lib/session-list-refresh-coordinator";
 import { findChatScrollAnchor, type ChatReadingPosition } from "@/lib/chat-scroll-position";
 import type { SettingsSection } from "@/lib/settings-navigation";
+import { getTranscriptNotices, summarizeCacheMisses, type CacheMissSummary } from "@/lib/transcript-notices";
+import { cacheMissSummaryText, TRANSCRIPT_NOTICE_WARNING_COLOR, TranscriptNoticeLines } from "@/components/TranscriptNotices";
 import {
   captureScrollDistance,
   getNextVisibleCount,
@@ -194,23 +197,29 @@ function getAssistantNotificationPreview(messages: AgentMessage[]): string {
   }
   return "";
 }
-function ProcessDetailsGroup({ messageCount, toolCallCount, defaultExpanded = false, reveal = false, renderChildren, t }: { messageCount: number; toolCallCount: number; defaultExpanded?: boolean; reveal?: boolean; renderChildren: () => ReactNode; t: (key: string, params?: Record<string, string | number>) => string }) {
+function ProcessDetailsGroup({ messageCount, toolCallCount, durationMs, cacheMisses, defaultExpanded = false, reveal = false, renderChildren, t }: { messageCount: number; toolCallCount: number; durationMs?: number; cacheMisses?: CacheMissSummary; defaultExpanded?: boolean; reveal?: boolean; renderChildren: () => ReactNode; t: (key: string, params?: Record<string, string | number>) => string }) {
   const [expanded, setExpanded] = useState(defaultExpanded);
   const contentVisible = expanded || reveal;
-  const parts = [t("chat.processDetails"), `${messageCount} ${t(messageCount === 1 ? "chat.message" : "chat.messages")}`];
+  // 折叠箭头已表达可展开，「过程详情」文字只保留在无障碍名称中。
+  const parts = [`${messageCount} ${t(messageCount === 1 ? "chat.message" : "chat.messages")}`];
   if (toolCallCount > 0) parts.push(`${toolCallCount} ${t(toolCallCount === 1 ? "chat.toolCall" : "chat.toolCalls")}`);
+  if (durationMs !== undefined) parts.push(t("chat.turnDuration", { time: formatTurnDuration(durationMs) }));
+  // Folded, the cache misses inside are added up here (#1265); open, each shows under its step.
+  const cacheMissText = cacheMisses && !(expanded || reveal) ? cacheMissSummaryText(t, cacheMisses) : undefined;
 
   return (
     <div style={{ marginBottom: 14 }}>
       <button
         type="button"
         aria-expanded={contentVisible}
+        aria-label={[t("chat.processDetails"), ...parts, ...(cacheMissText ? [cacheMissText] : [])].join(" · ")}
         onClick={() => setExpanded((v) => !v)}
         style={{
           display: "flex",
           alignItems: "center",
           gap: 8,
           width: "auto",
+          maxWidth: "100%",
           minHeight: 24,
           padding: "2px 0",
           border: "none",
@@ -227,6 +236,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, defaultExpanded = fa
         </svg>
         <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {parts.join(" · ")}
+          {cacheMissText && <span style={{ color: TRANSCRIPT_NOTICE_WARNING_COLOR }}>{` · ${cacheMissText}`}</span>}
         </span>
       </button>
       {contentVisible && (
@@ -300,7 +310,7 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
 
 
   const {
-    loading, error, activeLeafId, messages, entryIds, historyCursor, streamState, hasEarlierMessages, loadingEarlierMessages, earlierTurnCount,
+    loading, error, activeLeafId, messages, entryIds, messageKeys, historyCursor, streamState, hasEarlierMessages, loadingEarlierMessages, earlierTurnCount,
     agentRunning, bashRunning, pendingBash, modelState, modelActions, toolPreset,
     retryInfo, contextUsage, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,
@@ -1186,13 +1196,16 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
                 if (idx === lastAnchorIdx) { (lastUserMsgRef as { current: HTMLDivElement | null }).current = el; }
               };
 
-              const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; writtenFiles?: WrittenFile[]; visibleBlockOffset?: number; recoverTruncation?: boolean } = {}): ReactNode => {
+              const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; writtenFiles?: WrittenFile[]; visibleBlockOffset?: number; recoverTruncation?: boolean; turnDurationMs?: number; withNotices?: boolean } = {}): ReactNode => {
                 const msg = options.messageOverride ?? messages[idx];
                 if (isHiddenCustomMessage(msg)) return null;
+                // pi's showCacheMissNotices (#1265): read from the stored message, not a turn view's copy.
+                const notices = options.withNotices === false ? [] : getTranscriptNotices(messages[idx]);
                 const isVisible = isMessageGroupAnchor(msg) || msg.role === "assistant";
                 const currentRefIdx = visibleRefIndexByMessage.get(idx);
                 const keyPrefix = options.keyPrefix ?? "message";
-                const messageKey = entryIds[idx] ?? idx;
+                // 不能只用 entry id：本轮发送或流式产生的消息要等重读文件后才有 id（#1184）。
+                const messageKey = messageKeys[idx] ?? idx;
                 let showTimestamp = msg.role === "assistant";
                 // 流式尾消息沿用现有处理，避免与流式气泡重复显示。
                 if (showTimestamp && streamState.isStreaming && idx === messages.length - 1) {
@@ -1222,11 +1235,13 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
                     sessionId={session?.id ?? sessionIdRef.current ?? undefined}
                     writtenFiles={options.writtenFiles}
                     visibleBlockOffset={options.visibleBlockOffset}
+                    turnDurationMs={options.turnDurationMs}
                     onCompact={options.recoverTruncation ? handleCompact : undefined}
                     isCompacting={options.recoverTruncation ? isCompacting : undefined}
                     compactError={options.recoverTruncation ? compactError : undefined}
                   />
                 );
+                const noticeLines = notices.length > 0 ? <TranscriptNoticeLines key={`${keyPrefix}-notices-${messageKey}`} notices={notices} /> : null;
                 if (idx === lastAnchorIdx && (!isVisible || currentRefIdx === undefined)) {
                   return (
                     <div key={`${keyPrefix}-${messageKey}`} data-entry-id={entryIds[idx]} ref={(el) => {
@@ -1234,16 +1249,19 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
                       if (idx === lastRenderedMessageIdx) lastRenderedMessageRef.current = el;
                     }}>
                       {view}
+                      {noticeLines}
                     </div>
                   );
                 }
-                if (!isVisible || currentRefIdx === undefined) return view;
+                // 有无提示都保持同一结构，重读后新出现的提示行不会让消息重挂载。
+                if (!isVisible || currentRefIdx === undefined) return <Fragment key={`${keyPrefix}-${messageKey}`}>{view}{noticeLines}</Fragment>;
                 return (
                   <div key={`${keyPrefix}-${messageKey}`} data-entry-id={entryIds[idx]} ref={options.attachRef === false ? undefined : (el) => {
                     attachVisibleRef(idx, currentRefIdx)(el);
                     if (idx === lastRenderedMessageIdx) lastRenderedMessageRef.current = el;
                   }}>
                     {view}
+                    {noticeLines}
                   </div>
                 );
               };
@@ -1322,26 +1340,30 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
                   );
                   nodes.push(
                     <LiveProcessDetailsGroup
-                      key={`live-process-group-${start}`}
+                      key={`live-process-group-${messageKeys[start] ?? start}`}
                       hiddenCount={recentWindow.hiddenCount}
                       renderAll={renderAll}
                       renderRecent={renderRecent}
                       t={t}
                     />,
                   );
-                  return <Fragment key={`group-${start}`}>{nodes}</Fragment>;
+                  return <Fragment key={`group-${messageKeys[start] ?? start}`}>{nodes}</Fragment>;
                 }
                 if (finalAssistantIdx === -1) {
                   for (let index = start; index < end; index++) nodes.push(renderMessage(index));
-                  return <Fragment key={`group-${start}`}>{nodes}</Fragment>;
+                  return <Fragment key={`group-${messageKeys[start] ?? start}`}>{nodes}</Fragment>;
                 }
 
                 if (hasAnchor) nodes.push(renderMessage(start));
+                // 没有锚点的片段没有起始时间；刚发送的气泡使用浏览器时钟，要等运行后重读到带 entry id 的文件条目才计时。
+                const turnDurationMs = hasAnchor && entryIds[start] ? getTurnDurationMs(messages, start, end) : undefined;
                 // 按原消息缓存拆分副本，MessageView 的 memo 才能在每次聊天更新时命中（#1005）。
                 const finalViews = getFinalAnswerViews(finalAnswerViewCache, messages[finalAssistantIdx] as AssistantMessage);
                 const finalAnswerMessage = finalViews.answer;
 
                 const processViews: ReactNode[] = [];
+                // processViews also holds the notice lines of steps that show nothing else.
+                let processMessageCount = 0;
                 let processToolCount = 0;
                 let processRefIdx: number | undefined;
                 let revealProcess = false;
@@ -1351,15 +1373,23 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
                     // Not counted either: a turn whose only extra is a hidden message has no process details.
                     if (isHiddenCustomMessage(processMessage)) continue;
                     revealProcess ||= Boolean(pendingSearchScroll && pendingSearchScroll.entryId === entryIds[processIdx]);
+                    processMessageCount += 1;
                     processViews.push(renderMessage(processIdx, { attachRef: false, keyPrefix: "process" }));
                     continue;
                   }
                   if (processMessage.role !== "assistant") continue;
                   const message = processIdx === finalAssistantIdx ? finalViews.process : processMessage;
+                  // The final message's notices go under its answer when it has one.
+                  const withNotices = processIdx !== finalAssistantIdx || !finalAnswerMessage;
                   const blocks = getDisplayableAssistantBlocks(message);
-                  if (blocks.length === 0) continue;
+                  if (blocks.length === 0) {
+                    const notices = withNotices ? getTranscriptNotices(processMessage) : [];
+                    if (notices.length > 0) processViews.push(<TranscriptNoticeLines key={`process-notices-${messageKeys[processIdx]}`} notices={notices} />);
+                    continue;
+                  }
                   processRefIdx ??= visibleRefIndexByMessage.get(processIdx);
                   processToolCount += countToolCallBlocks(blocks);
+                  processMessageCount += 1;
                   revealProcess ||= Boolean(
                     pendingSearchScroll
                     && entryIds[processIdx] === pendingSearchScroll.entryId
@@ -1374,21 +1404,27 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
                     messageOverride: message,
                     // 同一条消息拆成过程和答复时，只在答复处显示时间。
                     showTimestamp: processIdx !== finalAssistantIdx || !finalAnswerMessage,
+                    withNotices,
                   }));
                 }
 
-                if (processViews.length > 0) {
+                // 只有提示行（其余步骤不显示内容）时不折叠。
+                if (processMessageCount === 0) nodes.push(...processViews);
+                else if (processViews.length > 0) {
                   // 只有错误或截断提示不算回答：工具调用前写的正文在过程详情里，必须保持可见（#906）。
                   const answered = collapsesProcessDetails(finalAnswerMessage);
+                  const processCacheMisses = summarizeCacheMisses(messages.slice(processStart, finalAnswerMessage ? finalAssistantIdx : finalAssistantIdx + 1));
                   nodes.push(
                     <div
-                      key={`process-group-${entryIds[start] ?? start}`}
+                      key={`process-group-${messageKeys[start] ?? start}`}
                       ref={processRefIdx === undefined ? undefined : (el) => { messageRefs.current[processRefIdx] = el; }}
                     >
                       <ProcessDetailsGroup
                         key={answered ? "answered" : "unanswered"}
-                        messageCount={processViews.length}
+                        messageCount={processMessageCount}
                         toolCallCount={processToolCount}
+                        durationMs={turnDurationMs}
+                        cacheMisses={processCacheMisses}
                         defaultExpanded={!answered}
                         reveal={revealProcess}
                         t={t}
@@ -1401,10 +1437,12 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
                 const writtenFiles = turnWrittenFiles ? keepWrittenFiles(finalViews, turnWrittenFiles) : undefined;
                 if (finalAnswerMessage) nodes.push(renderMessage(finalAssistantIdx, {
                   messageOverride: finalAnswerMessage, writtenFiles,
+                  // 没有过程详情时，本轮耗时显示在答复下方。
+                  turnDurationMs: processViews.length === 0 ? turnDurationMs : undefined,
                   recoverTruncation: end === messages.length && !streamState.isStreaming && !hasAssistantAnswer(finalAnswerMessage),
                 }));
                 for (let index = finalAssistantIdx + 1; index < end; index++) nodes.push(renderMessage(index));
-                return <Fragment key={`group-${start}`}>{nodes}</Fragment>;
+                return <Fragment key={`group-${messageKeys[start] ?? start}`}>{nodes}</Fragment>;
               };
 
               const boundedVisibleCount = Math.min(visibleCount, MAX_MOUNTED_HISTORY_GROUPS);
