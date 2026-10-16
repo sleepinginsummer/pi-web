@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { writePrivateFileAtomicSync } from "./atomic-file";
 import { projectTreeForResponse } from "./project-tree";
+import { isTurnAnchorEntry } from "./session-turns";
 import type { SessionContext, SessionEntry, SessionTreeNode } from "./types";
 
 interface IndexedRecord {
@@ -12,6 +13,7 @@ interface IndexedRecord {
   type: string;
   offset: number;
   length: number;
+  /** 这条记录开启新的一轮（与聊天分组、minimap 编号相同的规则）。 */
   anchor: boolean;
   previewRole?: "user" | "assistant";
   previewText?: string;
@@ -28,7 +30,8 @@ interface FileIdentity {
 }
 
 interface PersistedSessionContentIndex {
-  format: 1;
+  // 2：anchor 改为与 isMessageGroupAnchor 一致的轮次锚点，旧索引需重建。
+  format: 2;
   filePath: string;
   identity: FileIdentity;
   indexedBytes: number;
@@ -119,7 +122,7 @@ function loadPersisted(filePath: string): PersistedSessionContentIndex | null {
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as PersistedSessionContentIndex;
     if (
-      parsed.format !== 1
+      parsed.format !== 2
       || parsed.filePath !== filePath
       || !isRecord(parsed.identity)
       || !Number.isSafeInteger(parsed.indexedBytes)
@@ -179,7 +182,7 @@ function toIndexedRecord(entry: Record<string, unknown>, offset: number, length:
     type: entry.type,
     offset,
     length,
-    anchor: entry.type === "compaction" || (entry.type === "message" && message?.role === "user"),
+    anchor: isTurnAnchorEntry(entry),
     ...previewOf(entry),
     ...(entry.type === "thinking_level_change" && typeof entry.thinkingLevel === "string" ? { thinkingLevel: entry.thinkingLevel } : {}),
     ...(model ? { model } : {}),
@@ -221,7 +224,7 @@ function buildProjectedTree(records: IndexedRecord[]): SessionTreeNode[] {
 
 function blankIndex(filePath: string, identity: FileIdentity): PersistedSessionContentIndex {
   return {
-    format: 1,
+    format: 2,
     filePath,
     identity,
     indexedBytes: 0,
@@ -343,6 +346,8 @@ export async function readIndexedSessionEntry(filePath: string, entryId: string)
 export interface IndexedContextPage {
   entries: SessionEntry[];
   leafId: string | null;
+  /** 某条记录之上的轮次数，按索引中的完整祖先链计算。 */
+  turnsBefore: (entryId: string) => number;
   settings: Pick<SessionContext, "thinkingLevel" | "model">;
   totalActiveMs: number;
   version: string;
@@ -381,6 +386,17 @@ export async function readIndexedContextPage(
   return {
     entries: readRecords(filePath, selected),
     leafId: activeLeafId,
+    // 页内只有当前页的记录，向上数轮次必须走索引里的全部祖先（#791）。
+    turnsBefore: (entryId: string) => {
+      let turns = 0;
+      const oldest = byId.get(entryId);
+      let cursor = oldest?.parentId ? byId.get(oldest.parentId) : undefined;
+      while (cursor) {
+        if (cursor.anchor) turns += 1;
+        cursor = cursor.parentId ? byId.get(cursor.parentId) : undefined;
+      }
+      return turns;
+    },
     settings: { thinkingLevel: thinkingLevel ?? "off", model: model ?? null },
     totalActiveMs: index.totalActiveMs,
     version: index.version,

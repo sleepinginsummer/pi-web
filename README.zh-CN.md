@@ -55,6 +55,8 @@ gh workflow run release-package.yml --repo sleepinginsummer/pi-web --ref main
 
 macOS 安装包附带 `scripts/macos-service.sh start|stop|restart|status`，使用 `launchctl` 托管 8081 服务。默认配置文件为 `~/.local/share/pi-web-runtime/service.env`；必填 `PI_WEB_PASSWORD`，可选 `PI_WEB_ALLOWED_HOSTS` 与代理环境变量。每个版本安装到独立目录；脚本固定使用实际版本路径，避免更新覆盖正在读取的 chunk。
 
+安装包同样提供 `pi-web version|status|stop|open` 子命令；`pi-web update` 在本 fork 中已禁用（npm 上的 `@agegr/pi-web` 是上游包），只会提示从上面的 Release 安装新版本并用 `scripts/macos-service.sh restart` 切换。
+
 
 ## HTTP 代理
 

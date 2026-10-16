@@ -14,3 +14,9 @@ test("pauses polling while the document is hidden", () => {
   assert.match(source, /document\.addEventListener\("visibilitychange", handleVisibilityChange\)/);
   assert.match(source, /controller\?\.abort\(\)/);
 });
+
+test("reads the sessions parked on an extension dialog from the same poll", () => {
+  assert.match(source, /setAwaitingInputSessionIds\(\(current\) => stabilizeStringSet\(current, awaitingIds\)\)/);
+  assert.match(source, /commitSnapshot\(data\.runningSessionIds \?\? \[\], data\.awaitingInputSessionIds \?\? \[\]\)/);
+  assert.match(source, /return \{ runningSessionIds, awaitingInputSessionIds, sessionListVersion \}/);
+});

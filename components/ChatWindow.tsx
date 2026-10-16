@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage, WorktreeInfo } from "@/lib/types";
 import { normalizeCustomPanelLines, parseAnsiLine } from "@/lib/ansi";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
-import { countToolCallBlocks, getAssistantErrorMessage, hasAssistantAnswer, isAssistantTruncated, getDisplayableAssistantBlocks, isMessageGroupAnchor, splitFinalAssistantBlocks } from "@/lib/message-display";
+import { collapsesProcessDetails, countToolCallBlocks, hasAssistantAnswer, getDisplayableAssistantBlocks, isHiddenCustomMessage, isMessageGroupAnchor, splitFinalAssistantBlocks } from "@/lib/message-display";
 import { EXTENSION_DIALOG_BASE_WIDTH, fitExtensionDialogWidth } from "@/lib/extension-dialog-fit";
 import { dropMentionText, splitDroppedItems, uploadFiles, type DroppedItem } from "@/lib/file-upload-client";
 import { MessageView } from "./MessageView";
@@ -45,6 +45,7 @@ import { buildMessageRenderGroups, buildRecentItemWindow, type MessageRenderGrou
 import { withTodoWidget } from "@/lib/todo-widget";
 import type { ToolEntry } from "@/lib/tool-presets";
 import { extractTurnWrittenFiles, type WrittenFile } from "@/lib/turn-written-files";
+import { getFinalAnswerViews, keepWrittenFiles, type FinalAnswerViews } from "@/lib/turn-views";
 import { getFileName } from "@/lib/file-paths";
 import { NoticeShelf } from "./NoticeShelf";
 import { buildQuotedSelection } from "@/lib/quoted-selection";
@@ -83,7 +84,9 @@ interface Props {
   onOpenFile?: (filePath: string, page?: number) => void;
   onNewSessionCwdChange?: (cwd: string) => void;
   onFilesUploaded?: () => void;
-  onOpenSession?: (sessionId: string) => void;
+  onOpenSubagent?: (sessionId: string, label: string) => void;
+  /** 顶层工具调用结束，用于运行期间刷新文件树。 */
+  onToolEnd?: (toolName: string) => void;
   onAskInNewChat?: (prompt: string, sourceSessionId: string, sourceEntryId: string) => Promise<void>;
   quoteSelectionEnabled?: boolean;
   initialPrompt?: string;
@@ -191,16 +194,6 @@ function getAssistantNotificationPreview(messages: AgentMessage[]): string {
   }
   return "";
 }
-function withAssistantBlocks(
-  message: AssistantMessage,
-  content: AssistantContentBlock[],
-  options: { omitUsage?: boolean } = {},
-): AssistantMessage {
-  const next = { ...message, content };
-  if (options.omitUsage) next.usage = undefined;
-  return next;
-}
-
 function ProcessDetailsGroup({ messageCount, toolCallCount, defaultExpanded = false, reveal = false, renderChildren, t }: { messageCount: number; toolCallCount: number; defaultExpanded?: boolean; reveal?: boolean; renderChildren: () => ReactNode; t: (key: string, params?: Record<string, string | number>) => string }) {
   const [expanded, setExpanded] = useState(defaultExpanded);
   const contentVisible = expanded || reveal;
@@ -285,7 +278,7 @@ function LiveProcessDetailsGroup({ hiddenCount, renderAll, renderRecent, t }: { 
   );
 }
 
-export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigationActive, session, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, newSessionCwd, newSessionWorktrees, pendingNewSessionControl, onPendingNewSessionEvent, notificationController, onAgentEnd, onSessionCreated, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onShadowMindControlChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenSettings, onContextUsageChange, onOpenFile, onFilesUploaded, onOpenSession, onNewSessionCwdChange, onAskInNewChat, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed }: Props) {
+export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigationActive, session, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, newSessionCwd, newSessionWorktrees, pendingNewSessionControl, onPendingNewSessionEvent, notificationController, onAgentEnd, onSessionCreated, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onShadowMindControlChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenSettings, onContextUsageChange, onOpenFile, onFilesUploaded, onOpenSubagent, onToolEnd, onNewSessionCwdChange, onAskInNewChat, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed }: Props) {
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
   const {
@@ -307,7 +300,7 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
 
 
   const {
-    loading, error, activeLeafId, messages, entryIds, historyCursor, streamState, hasEarlierMessages, loadingEarlierMessages,
+    loading, error, activeLeafId, messages, entryIds, historyCursor, streamState, hasEarlierMessages, loadingEarlierMessages, earlierTurnCount,
     agentRunning, bashRunning, pendingBash, modelState, modelActions, toolPreset,
     retryInfo, contextUsage, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,
@@ -318,12 +311,12 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
     activeToolResults, editEntryId, handleEditContent, cancelEdit, addNotice,
     sessionIdRef,
     handleSend, handleAbort, handleFork, loadEarlierMessages,
-    handleCompact, handleQueuedSubmit, handleAbortCompaction,
+    handleCompact, handleQueuedSubmit, handleAbortCompaction, dismissCompactError,
     handleRecallQueue,
     handleBuiltinSlashCommand,
     handleShadowMindToggle, handleToolPresetChange, loadSlashCommands,
   } = useAgentSession({
-    navigationKey, isNavigationActive, session, newSessionCwd, pendingNewSessionControl, onPendingNewSessionEvent, onSessionCreated, onSessionListRefresh, onSessionForked,
+    navigationKey, isNavigationActive, session, newSessionCwd, pendingNewSessionControl, onPendingNewSessionEvent, onSessionCreated, onSessionListRefresh, onSessionForked, onToolEnd,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onSessionStatsPanelOpen, onOpenSettings,
   });
   const displayExtensionWidgets = useMemo(
@@ -558,7 +551,9 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
   const [renderWindow, setRenderWindow] = useState({ key: renderWindowKey, count: VISIBLE_PAGE_SIZE, offset: 0 });
   // key 不匹配时当前 render 立即回落到 50，避免 effect 执行前先挂载上一会话的数百节点。
   const visibleCount = renderWindow.key === renderWindowKey ? renderWindow.count : VISIBLE_PAGE_SIZE;
-  const sentinelRef = useRef<HTMLDivElement>(null);
+  // 用 state 而不是 ref：哨兵可能在其他依赖都不变时出现（结束的回合重新分组成更多行），
+  // 此时也必须挂上 observer（#896）。
+  const [sentinel, setSentinel] = useState<HTMLDivElement | null>(null);
   const endSentinelRef = useRef<HTMLDivElement>(null);
   const historyGroupWindowRef = useRef({ start: 0, end: 0, total: 0, entryGroups: new Map<string, number>() });
   const messageContentRef = useRef<HTMLDivElement | null>(null);
@@ -707,7 +702,6 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
   // IntersectionObserver on the sentinel div at the top of the message list.
   // When it becomes visible, load the next page of older messages.
   useEffect(() => {
-    const sentinel = sentinelRef.current;
     const container = scrollContainerRef.current;
     if (!sentinel || !container || pendingScrollRestore) return;
     const observer = new IntersectionObserver(
@@ -738,7 +732,7 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [hasEarlierMessages, loadEarlierMessages, loadingEarlierMessages, messages.length, pendingScrollRestore, renderWindow.offset, renderWindowKey, scrollContainerRef, visibleCount]);
+  }, [hasEarlierMessages, loadEarlierMessages, loadingEarlierMessages, messages.length, pendingScrollRestore, renderWindow.offset, renderWindowKey, scrollContainerRef, sentinel, visibleCount]);
 
   useEffect(() => {
     const sentinel = endSentinelRef.current;
@@ -805,7 +799,8 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
 
   // Images attach to the prompt. Other files go through the file explorer's
   // upload into the working directory, never replacing a file already there,
-  // and come back as @mentions.
+  // and come back as @mentions. The composer's attach button takes the same
+  // path, for phones that cannot drop files.
   const uploadDroppedFiles = useCallback(async (files: File[]) => {
     const cwd = session?.cwd ?? newSessionCwd;
     if (!cwd) {
@@ -842,6 +837,10 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
     }
     if (files.length > 0) void uploadDroppedFiles(files);
   }, [addNotice, chatInputRef, t, uploadDroppedFiles]);
+
+  const onAttachFiles = useCallback((files: File[]) => {
+    onDrop(files.map((file) => ({ kind: "file", file })));
+  }, [onDrop]);
 
   const { isDragOver, handleDragEnter, handleDragOver, handleDragLeave, handleDrop } = useDragDrop(onDrop);
 
@@ -903,6 +902,8 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
 
     return { toolResults, visibleRefIndexByMessage, visibleCount, writtenFilesByFinalAssistant };
   }, [activeToolResults, messageCwd, messages]);
+  // 回合最终回答拆分出的副本按原消息缓存，消息对象本身不会被修改（见 getFinalAnswerViews）。
+  const finalAnswerViewCache = useMemo(() => new WeakMap<AssistantMessage, FinalAnswerViews>(), []);
   const inputHistory = useMemo(() => {
     const seen = new Set<string>();
     const history: string[] = [];
@@ -944,6 +945,7 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
       onAbortCompaction={handleAbortCompaction}
       isCompacting={isCompacting}
       compactError={compactError}
+      onDismissCompactError={dismissCompactError}
       compactResult={compactResult}
       toolPreset={toolPreset}
       onToolPresetChange={session || isNew ? handleToolPresetChange : undefined}
@@ -963,6 +965,7 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
       onNotificationToggle={onNotificationToggle}
       draftKey={session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : undefined)}
       cwd={session?.cwd ?? newSessionCwd}
+      onAttachFiles={onAttachFiles}
       newSessionWorktrees={!session ? newSessionWorktrees : undefined}
       newSessionCwd={!session ? newSessionCwd : undefined}
       onNewSessionCwdChange={onNewSessionCwdChange}
@@ -1180,6 +1183,7 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
 
               const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; writtenFiles?: WrittenFile[]; visibleBlockOffset?: number; recoverTruncation?: boolean } = {}): ReactNode => {
                 const msg = options.messageOverride ?? messages[idx];
+                if (isHiddenCustomMessage(msg)) return null;
                 const isVisible = isMessageGroupAnchor(msg) || msg.role === "assistant";
                 const currentRefIdx = visibleRefIndexByMessage.get(idx);
                 const keyPrefix = options.keyPrefix ?? "message";
@@ -1198,7 +1202,7 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
                     modelNames={modelState.names}
                     cwd={messageCwd}
                     onOpenFile={onOpenFile}
-                    onOpenSession={onOpenSession}
+                    onOpenSubagent={onOpenSubagent}
                     entryId={entryIds[idx]}
                     searchBlockIndex={pendingSearchScroll && entryIds[idx] === pendingSearchScroll.entryId
                       ? pendingSearchScroll.blockIndex
@@ -1328,14 +1332,9 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
                 }
 
                 if (hasAnchor) nodes.push(renderMessage(start));
-                const finalAssistant = messages[finalAssistantIdx] as AssistantMessage;
-                const finalSplit = splitFinalAssistantBlocks(finalAssistant);
-                const finalAnswerMessage = finalSplit.answerBlocks.length > 0 || getAssistantErrorMessage(finalAssistant) || isAssistantTruncated(finalAssistant)
-                  ? withAssistantBlocks(finalAssistant, finalSplit.answerBlocks)
-                  : null;
-                const finalProcessEnd = finalAssistant.content.indexOf(finalSplit.answerBlocks[0]);
-                // 保留原始前缀，确保延迟思考内容仍使用持久化的 block 索引。
-                const finalProcessBlocks = finalAssistant.content.slice(0, finalProcessEnd < 0 ? undefined : finalProcessEnd);
+                // 按原消息缓存拆分副本，MessageView 的 memo 才能在每次聊天更新时命中（#1005）。
+                const finalViews = getFinalAnswerViews(finalAnswerViewCache, messages[finalAssistantIdx] as AssistantMessage);
+                const finalAnswerMessage = finalViews.answer;
 
                 const processViews: ReactNode[] = [];
                 let processToolCount = 0;
@@ -1344,14 +1343,14 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
                 for (let processIdx = processStart; processIdx <= finalAssistantIdx; processIdx++) {
                   const processMessage = messages[processIdx];
                   if (processMessage.role === "custom") {
+                    // Not counted either: a turn whose only extra is a hidden message has no process details.
+                    if (isHiddenCustomMessage(processMessage)) continue;
                     revealProcess ||= Boolean(pendingSearchScroll && pendingSearchScroll.entryId === entryIds[processIdx]);
                     processViews.push(renderMessage(processIdx, { attachRef: false, keyPrefix: "process" }));
                     continue;
                   }
                   if (processMessage.role !== "assistant") continue;
-                  const message = processIdx === finalAssistantIdx
-                    ? withAssistantBlocks(processMessage, finalProcessBlocks, { omitUsage: Boolean(finalAnswerMessage) })
-                    : processMessage;
+                  const message = processIdx === finalAssistantIdx ? finalViews.process : processMessage;
                   const blocks = getDisplayableAssistantBlocks(message);
                   if (blocks.length === 0) continue;
                   processRefIdx ??= visibleRefIndexByMessage.get(processIdx);
@@ -1374,16 +1373,18 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
                 }
 
                 if (processViews.length > 0) {
+                  // 只有错误或截断提示不算回答：工具调用前写的正文在过程详情里，必须保持可见（#906）。
+                  const answered = collapsesProcessDetails(finalAnswerMessage);
                   nodes.push(
                     <div
                       key={`process-group-${entryIds[start] ?? start}`}
                       ref={processRefIdx === undefined ? undefined : (el) => { messageRefs.current[processRefIdx] = el; }}
                     >
                       <ProcessDetailsGroup
-                        key={finalAnswerMessage ? "answered" : "unanswered"}
+                        key={answered ? "answered" : "unanswered"}
                         messageCount={processViews.length}
                         toolCallCount={processToolCount}
-                        defaultExpanded={!finalAnswerMessage}
+                        defaultExpanded={!answered}
                         reveal={revealProcess}
                         t={t}
                         renderChildren={() => <>{processViews}</>}
@@ -1391,7 +1392,8 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
                     </div>,
                   );
                 }
-                const writtenFiles = writtenFilesByFinalAssistant.get(finalAssistantIdx);
+                const turnWrittenFiles = writtenFilesByFinalAssistant.get(finalAssistantIdx);
+                const writtenFiles = turnWrittenFiles ? keepWrittenFiles(finalViews, turnWrittenFiles) : undefined;
                 if (finalAnswerMessage) nodes.push(renderMessage(finalAssistantIdx, {
                   messageOverride: finalAnswerMessage, writtenFiles,
                   recoverTruncation: end === messages.length && !streamState.isStreaming && !hasAssistantAnswer(finalAnswerMessage),
@@ -1422,7 +1424,7 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
               return (
                 <>
                   {hasMore && (
-                     <div ref={sentinelRef} className="py-3 text-center text-xs text-text-muted">
+                     <div ref={setSentinel} className="py-3 text-center text-xs text-text-muted">
                        {loadingEarlierMessages ? t("i18n.loading") : t("chat.loadEarlier", { count: boundedStartIndex })}
                     </div>
                   )}
@@ -1480,6 +1482,7 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
               pauseFollowing();
             }}
             onRevealHistory={revealHistoryForMinimap}
+            turnsBefore={earlierTurnCount}
           />
         )}
       </div>

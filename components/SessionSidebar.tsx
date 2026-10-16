@@ -126,6 +126,8 @@ interface Props {
   refreshKey?: number;
   onSessionDeleted?: (sessionId: string) => void;
   runningSessionIds: ReadonlySet<string>;
+  /** 运行中但停在扩展对话框上、等待用户输入的会话。 */
+  awaitingInputSessionIds?: ReadonlySet<string>;
   runningSessionTransitions: RunningSessionTransitionEvent;
   locateSessionRequest?: { sessionId: string; revision: number } | null;
   selectedCwd?: string | null;
@@ -280,7 +282,9 @@ function PiWebTitle() {
     </button>
   );
 }
-export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, runningSessionIds, runningSessionTransitions, locateSessionRequest, selectedCwd: selectedCwdProp, onCwdChange, worktreeState = null, onOpenFile, onOpenTerminal, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onSessionsChange }: Props) {
+const EMPTY_SESSION_ID_SET: ReadonlySet<string> = new Set();
+
+export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, runningSessionIds, awaitingInputSessionIds = EMPTY_SESSION_ID_SET, runningSessionTransitions, locateSessionRequest, selectedCwd: selectedCwdProp, onCwdChange, worktreeState = null, onOpenFile, onOpenTerminal, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onSessionsChange }: Props) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
   const {
@@ -951,6 +955,7 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
           const treeProps: SessionTreeSharedProps = {
             selectedSessionId,
             runningSessionIds,
+            awaitingInputSessionIds,
             unreadSessionIds,
             pinnedSessionIds: pinnedIds,
             locateSessionRequest,

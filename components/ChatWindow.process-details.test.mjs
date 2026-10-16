@@ -23,8 +23,9 @@ test("历史页从轮次中途开始时仍将前缀处理消息分为一组", ()
 
 test("无最终答复的结束轮次默认展开处理过程", () => {
   assert.match(source, /const \[expanded, setExpanded\] = useState\(defaultExpanded\)/);
-  assert.match(source, /<ProcessDetailsGroup[\s\S]*?defaultExpanded=\{!finalAnswerMessage\}/);
-  assert.match(source, /key=\{finalAnswerMessage \? "answered" : "unanswered"\}/);
+  assert.match(source, /<ProcessDetailsGroup[\s\S]*?defaultExpanded=\{!answered\}/);
+  assert.match(source, /const answered = collapsesProcessDetails\(finalAnswerMessage\);/);
+  assert.match(source, /key=\{answered \? "answered" : "unanswered"\}/);
 });
 
 test("运行中的处理过程只挂载最近三项并可按需展开", () => {

@@ -8,10 +8,13 @@ const RUNNING_SESSIONS_POLL_MS = 2500;
 /** 轮询运行会话，并在服务端集合未变化时保持 Set 引用稳定。 */
 export function useRunningSessions() {
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
+  // 运行中但停在扩展阻塞对话框上的会话（select/confirm/input/editor/自定义面板），侧栏显示为等待输入。
+  const [awaitingInputSessionIds, setAwaitingInputSessionIds] = useState<Set<string>>(() => new Set());
   const [sessionListVersion, setSessionListVersion] = useState<number | null>(null);
 
-  const commitSnapshot = useCallback((ids: string[]) => {
+  const commitSnapshot = useCallback((ids: string[], awaitingIds: string[]) => {
     setRunningSessionIds((current) => stabilizeStringSet(current, ids));
+    setAwaitingInputSessionIds((current) => stabilizeStringSet(current, awaitingIds));
   }, []);
 
 
@@ -42,9 +45,13 @@ export function useRunningSessions() {
           signal: current.signal,
         });
         if (!response.ok) return;
-        const data = await response.json() as { runningSessionIds?: string[]; sessionListVersion?: number };
+        const data = await response.json() as {
+          runningSessionIds?: string[];
+          awaitingInputSessionIds?: string[];
+          sessionListVersion?: number;
+        };
         if (stopped || controller !== current) return;
-        commitSnapshot(data.runningSessionIds ?? []);
+        commitSnapshot(data.runningSessionIds ?? [], data.awaitingInputSessionIds ?? []);
         if (typeof data.sessionListVersion === "number") setSessionListVersion(data.sessionListVersion);
       } catch {
         // 保留最后一次成功状态；下一个可见页轮询会重试。
@@ -74,5 +81,5 @@ export function useRunningSessions() {
     };
   }, [commitSnapshot]);
 
-  return { runningSessionIds, sessionListVersion };
+  return { runningSessionIds, awaitingInputSessionIds, sessionListVersion };
 }

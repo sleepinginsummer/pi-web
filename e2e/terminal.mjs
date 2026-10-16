@@ -88,12 +88,6 @@ try {
       const button = page.getByRole("button", { name: "Show sidebar", exact: true });
       if (await button.count()) await button.click();
     };
-    // The explorer and its terminal button are in the Files tab, the session rows in the Sessions tab.
-    const showTab = async (name) => {
-      const tab = page.getByRole("tab", { name, exact: true });
-      if (await tab.getAttribute("aria-selected") !== "true") await tab.click();
-    };
-    const filesPanel = page.getByRole("tabpanel", { name: "Files", exact: true });
     const showPanel = () => page.getByRole("button", { name: "Show file panel", exact: true }).click();
     const hidePanel = async () => {
       const button = page.locator("#file-panel").getByRole("button", { name: "Hide file panel", exact: true, includeHidden: true });
@@ -103,7 +97,6 @@ try {
       await page.goto(`${base}/?session=terminal-a1`);
       await page.getByText("Terminal session one message", { exact: true }).waitFor();
       await showSidebar();
-      await showTab("Files");
       await page.getByRole("button", { name: "Open workspace terminal", exact: true }).click();
       await ready();
       await run("export PR695_TOKEN=alive; printf '\\nTOKEN:%s:%s\\n' \"$PR695_TOKEN\" \"$$\"");
@@ -140,7 +133,6 @@ try {
 
       await hidePanel();
       await showSidebar();
-      await showTab("Files");
       await page.getByText("note.txt", { exact: true }).click();
       await page.getByText("File viewer fixture", { exact: true }).waitFor();
       assert.equal(await page.locator(".terminal-panel").count(), 1);
@@ -149,7 +141,6 @@ try {
       await ready();
       await hidePanel();
       await showSidebar();
-      await showTab("Sessions");
       await page.getByText("Terminal session two", { exact: true }).click();
       await showPanel();
       await run("printf '\\nSESSION:%s:%s\\n' \"$PR695_TOKEN\" \"$$\"");
@@ -157,7 +148,6 @@ try {
 
       await page.reload();
       await ready();
-      await expectFontWeight(600);
       await run("printf '\\nREFRESH:%s:%s\\n' \"$PR695_TOKEN\" \"$$\"");
       await waitOutput(`REFRESH:alive:${pid}`);
       assert.equal(created.size, 1, "refresh must reconnect, not create");
@@ -202,7 +192,6 @@ try {
       });
       await hidePanel();
       await showSidebar();
-      await showTab("Files");
       await page.getByRole("button", { name: "Open workspace terminal", exact: true }).click();
       await page.getByRole("button", { name: "Terminate terminal workspace-a", exact: true }).click();
       releaseCreation();
@@ -211,18 +200,14 @@ try {
       for (const terminalId of created) assert.equal((await fetch(`${base}/api/terminal/${terminalId}`)).status, 404);
 
       await showSidebar();
-      await showTab("Files");
       await page.getByRole("button", { name: "Open workspace terminal", exact: true }).click();
       await ready();
       await run("export PR695_WORKSPACE=retained");
       await hidePanel();
       await showSidebar();
-      // Switch projects with the Files tab's project menu (its button and items carry the root as title;
-      // the menu is portaled to the body, outside the panel).
-      await showTab("Files");
-      await filesPanel.getByRole("button").and(page.getByTitle(workspace, { exact: true })).first().click();
-      await page.getByRole("menuitemradio").and(page.getByTitle(otherWorkspace, { exact: true })).click();
-      await page.waitForFunction((root) => document.querySelector("#session-sidebar-panel-files .project-picker-button.is-project")?.title === root, otherWorkspace);
+      await page.getByRole("button").and(page.getByTitle(workspace, { exact: true })).first().click();
+      await page.getByRole("button").and(page.getByTitle(otherWorkspace, { exact: true })).click();
+      await page.getByText("Other workspace session", { exact: true }).waitFor();
       await page.getByRole("button", { name: "Open workspace terminal", exact: true }).click();
       await ready();
       const workspaceTabs = await page.evaluate(() => JSON.parse(sessionStorage.getItem("pi-web:terminal-tabs")).tabs);

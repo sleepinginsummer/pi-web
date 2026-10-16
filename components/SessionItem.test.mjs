@@ -47,3 +47,12 @@ test("未读标记保持静态，仅运行状态使用循环动画", () => {
   assert.match(runningIndicatorSource, /repeatCount="indefinite"/);
   assert.doesNotMatch(unreadIndicatorSource, /<animate|repeatCount=/);
 });
+
+test("停在扩展对话框上的运行用琥珀色呼吸圆点替换运行动画", () => {
+  const awaitingSource = source.slice(source.indexOf("function AwaitingInputSessionIndicator()"), source.indexOf("function UnreadSessionIndicator()"));
+  assert.match(awaitingSource, /title=\{t\("sidebar\.awaitingInput"\)\}/);
+  assert.match(awaitingSource, /color: "#d97706"/);
+  assert.match(awaitingSource, /<animate attributeName="opacity"[^>]*dur="1\.6s"[^>]*repeatCount="indefinite"/);
+  // 仍是运行中的行：只替换指示器，其余运行态行为不变。
+  assert.match(source, /isRunning && isAwaitingInput \? <AwaitingInputSessionIndicator \/> : isRunning \? <RunningSessionIndicator \/>/);
+});

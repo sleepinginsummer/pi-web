@@ -7,6 +7,8 @@ export interface SessionContextSnapshot {
   entryIds: string[];
   oldestEntryId: string | null;
   hasMore: boolean;
+  /** 当前页之上的轮次数，minimap 从会话第一轮开始编号（#791）。 */
+  turnsBefore: number;
   thinkingLevel: string;
   model: { provider: string; modelId: string } | null;
   totalActiveMs?: number;
@@ -235,7 +237,13 @@ export async function fetchSessionContext(
     if (typeof payload.context.hasMore !== "boolean") throw new Error("服务端会话上下文缺少有效的 hasMore");
     const result: LoadedContextResult = {
       kind: "loaded",
-      snapshot: { ...payload.context, entryIds, totalActiveMs: payload.totalActiveMs, version },
+      snapshot: {
+        ...payload.context,
+        entryIds,
+        turnsBefore: typeof payload.context.turnsBefore === "number" ? payload.context.turnsBefore : 0,
+        totalActiveMs: payload.totalActiveMs,
+        version,
+      },
       leafId: payload.leafId,
       cached: false,
     };

@@ -265,6 +265,30 @@ try {
     await latestUser.waitFor({ state: "attached" });
     const sentinel = page.getByText(/^Scroll up to load earlier messages \(\d+ hidden\)$/);
     await sentinel.waitFor({ state: "attached" });
+    // minimap 从会话第一轮开始编号，而不是从已加载的页开始（#791）：
+    // e0..e4949 共 2475 条用户消息，询问 text(4998) 的是第 2500 轮。
+    const readMinimapTurn = async (screenshot) => {
+      const node = page.locator("[data-minimap-node-index='0']");
+      await node.waitFor();
+      const rect = await node.boundingBox();
+      assert.ok(rect);
+      await page.mouse.move(rect.x + rect.width / 2, rect.y + rect.height / 2);
+      const preview = page.locator("[data-minimap-preview-box]");
+      const turn = preview.locator("[data-minimap-preview-index]").filter({ hasText: text(4998) });
+      const result = {
+        number: await turn.locator("span[aria-hidden='true']").first().textContent(),
+        earlier: await preview.locator("[data-minimap-preview-earlier]").textContent(),
+      };
+      await page.screenshot({ path: join(artifacts, screenshot) });
+      await page.mouse.move(0, 0);
+      await preview.waitFor({ state: "detached" });
+      return result;
+    };
+    if (viewport.width > 600) {
+      const firstPage = await readMinimapTurn("minimap-turns-first-page.png");
+      assert.equal(firstPage.number, "2500", "Minimap turns are numbered from the session's first turn");
+      assert.match(firstPage.earlier, /^Earlier turns not loaded: \d+\. Click to load$/);
+    }
     const triggerOlderPage = async () => {
       const responsePromise = page.waitForResponse(isOlderContextResponse);
       for (let attempt = 0; attempt < 40; attempt++) {
@@ -314,6 +338,12 @@ try {
       "Rendered history may include an older contiguous prefix restored from the client cache");
     assert.deepEqual(rendered,
       Array.from({ length: 5000 - firstRendered }, (_, i) => text(firstRendered + i)), "Missing, reordered, or duplicate chat messages");
+    if (viewport.width > 600) {
+      assert.deepEqual(await readMinimapTurn("minimap-turns-paged.png"), {
+        number: "2500",
+        earlier: `Earlier turns not loaded: ${oldest / 2}. Click to load`,
+      }, "Loading older pages must not renumber minimap turns");
+    }
     await page.screenshot({ path: join(artifacts, `history-${viewport.width}.png`) });
 
     await page.goto(`${base}/?session=${BRANCH}`, { waitUntil: "domcontentloaded" });

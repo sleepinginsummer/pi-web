@@ -7,7 +7,6 @@ const NAVIGATION_TIMEOUT_MS = 8000;
 const ASSET_TIMEOUT_MS = 8000;
 const PRECACHE_URLS = [
   OFFLINE_URL,
-  "/manifest.webmanifest",
   "/icons/icon-192.png",
   "/icons/icon-512.png",
   "/icons/apple-touch-icon.png",
@@ -103,6 +102,10 @@ self.addEventListener("fetch", (event) => {
 
   // Session data and live agent traffic must always come from the local server.
   if (url.pathname.startsWith("/api/") || url.pathname === "/sw.js") return;
+
+  // The manifest is runtime configuration. Bypass even entries left in an old
+  // cache, including requests with a query string or navigation mode.
+  if (url.pathname === "/manifest.webmanifest") return;
 
   if (request.mode === "navigate") {
     event.respondWith(

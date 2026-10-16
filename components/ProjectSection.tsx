@@ -151,6 +151,7 @@ function ProjectHeader({
 export interface SessionTreeSharedProps {
   selectedSessionId: string | null;
   runningSessionIds: ReadonlySet<string>;
+  awaitingInputSessionIds?: ReadonlySet<string>;
   unreadSessionIds: Set<string>;
   pinnedSessionIds: Set<string>;
   locateSessionRequest?: { sessionId: string; revision: number } | null;
@@ -309,7 +310,7 @@ function SessionTreeRow({
   collapsed: boolean;
   onToggleCollapse: () => void;
 }) {
-  const { selectedSessionId, runningSessionIds, unreadSessionIds, pinnedSessionIds, isMobile, openSwipeSessionId, onOpenSwipeSessionChange, onSelectSession, onRenamed, onMoveSession, onTogglePinned, onSessionDeleted } = treeProps;
+  const { selectedSessionId, runningSessionIds, awaitingInputSessionIds, unreadSessionIds, pinnedSessionIds, isMobile, openSwipeSessionId, onOpenSwipeSessionChange, onSelectSession, onRenamed, onMoveSession, onTogglePinned, onSessionDeleted } = treeProps;
   const hasChildren = node.children.length > 0;
   return (
     <div
@@ -336,6 +337,7 @@ function SessionTreeRow({
         status={{
           isSelected: node.session.id === selectedSessionId,
           isRunning: runningSessionIds.has(node.session.id),
+          isAwaitingInput: awaitingInputSessionIds?.has(node.session.id) ?? false,
           isUnread: unreadSessionIds.has(node.session.id),
           isPinned: pinnedSessionIds.has(node.session.id),
         }}

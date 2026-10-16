@@ -10,12 +10,13 @@ import type { AgentMessage, ImageContent, SessionEntry, SessionHeader, SessionIn
 import type { SessionEntry as PiSessionEntry } from "@earendil-works/pi-coding-agent";
 import { normalizeToolCalls } from "./normalize";
 import { getThinkingPreview } from "./message-display";
+import { countTurnsBefore } from "./session-turns";
 import { projectIdentityKey } from "./project-identity";
 import { sessionPathKey } from "./session-path";
 import { MAX_TOOL_RESULT_IMAGE_BYTES, TOOL_RESULT_IMAGE_MIMES } from "./tool-result-images";
 import { resolveProject, type ProjectInfo } from "./worktree";
 import { readSubagentRun, SUBAGENT_META_TYPE } from "./subagents";
-import { invalidateSessionDirectorySnapshot, listSessionsIncremental, type ScannedSessionInfo } from "./session-list-scanner";
+import { checkSessionMembership, invalidateSessionDirectorySnapshot, listSessionsIncremental, type ScannedSessionInfo } from "./session-list-scanner";
 
 export { getAgentDir };
 
@@ -418,6 +419,9 @@ export function invalidateSessionListCache(): void {
 }
 
 export function getSessionListVersion(): number {
+  // Session files another process (the pi CLI) creates or deletes bump no
+  // version. Every poll of the version may start a filename check instead.
+  void checkSessionMembership(defaultSessionsDir(), invalidateSessionListCache);
   return globalThis.__piSessionListGeneration ?? 0;
 }
 
@@ -784,12 +788,15 @@ export function buildSessionContext(
   const oldestReturnedEntry = sliced.find((entry) => returnedEntryIds.has(entry.id));
   const oldestCursorEntry = oldestReturnedEntry ?? sliced[0];
   const hasMore = Boolean(tail && tail > 0 && oldestCursorEntry?.parentId);
+  // 当前页之上的轮次数：minimap 从会话第一轮开始编号，加载更早页时编号不变（#791）。
+  const turnsBefore = hasMore && oldestCursorEntry ? countTurnsBefore(entries, oldestCursorEntry) : 0;
 
   return {
     messages,
     entryIds,
     oldestEntryId: oldestCursorEntry?.id ?? null,
     hasMore,
+    turnsBefore,
     ...(options.effectiveSettings ?? getSessionSettings(entries, leafId)),
   };
 }

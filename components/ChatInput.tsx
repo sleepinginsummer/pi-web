@@ -23,6 +23,7 @@ import { FileMentionPalette, HistoryPalette, SlashPalette } from "./InputPalette
 import { buildSlashCommandLayout, getSlashDescription, SLASH_SOURCE_ORDER, type SlashCommandPaletteItem } from "@/lib/slash-command-palette";
 import { getMarkdownListContinuation } from "@/lib/markdown-list-continuation";
 import { isBareMcpCommand, isBuiltinMcpCommand } from "@/lib/mcp-command";
+import { DismissButton } from "./DismissButton";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useEnterSendMode } from "@/hooks/useEnterSendMode";
 import { useI18n } from "@/hooks/useI18n";
@@ -57,6 +58,7 @@ interface Props {
   onAbortCompaction?: () => void;
   isCompacting?: boolean;
   compactError?: string | null;
+  onDismissCompactError?: () => void;
   compactResult?: CompactResultInfo | null;
   toolPreset?: ToolPreset;
   onToolPresetChange?: (preset: ToolPreset) => void;
@@ -81,6 +83,8 @@ interface Props {
   newSessionWorktrees?: WorktreeInfo[];
   newSessionCwd?: string | null;
   onNewSessionCwdChange?: (cwd: string) => void;
+  /** Files picked with the attach button, handled like files dropped onto the chat. Without it the button takes images only. */
+  onAttachFiles?: (files: File[]) => void;
 }
 
 export interface ChatInputHandle {
@@ -197,6 +201,8 @@ export function submitsSlashCommandOnEnter(message: string, command: SlashComman
   }
   return isBuiltinMcpCommand(command) && isBareMcpCommand(message);
 }
+
+export { isRunEndStrayClick, RUN_END_CLICK_GUARD_MS } from "@/lib/run-end-click";
 
 export function canClearBuiltinCommandInput(message: string, imageCount: number, submittedMessage: string): boolean {
   return imageCount === 0 && message.trim() === submittedMessage;
@@ -391,7 +397,7 @@ export function ModelDataDiagnosticBanner({ diagnostics }: { diagnostics?: Model
 }
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onAbort, onQueuedSubmit, isStreaming, creationSettingsLocked = false, extensionsInitializing = false, modelState, modelActions,
-  onCompact, onAbortCompaction, isCompacting, compactError, compactResult, toolPreset, onToolPresetChange,
+  onCompact, onAbortCompaction, isCompacting, compactError, onDismissCompactError, compactResult, toolPreset, onToolPresetChange,
   retryInfo, queuedMessages, inputHistory = [], onRecallQueue,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   onBuiltinCommand,
@@ -401,6 +407,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   newSessionWorktrees,
   newSessionCwd,
   onNewSessionCwdChange,
+  onAttachFiles,
   compact = false,
 }: Props, ref) {
   const { t } = useI18n();
@@ -644,6 +651,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       pendingImageCountRef.current -= acceptedImageFiles.length;
     }
   }, [compact, t]);
+
+  const handleFilePick = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
+    // 清空 value，下次仍可选择同一文件。
+    e.target.value = "";
+    // 交给 ChatWindow 时与拖入聊天的文件同一路径：图片附加到消息，其他文件上传到工作目录并 @ 提及。
+    if (onAttachFiles) onAttachFiles(files);
+    else void processImageFiles(files);
+  }, [onAttachFiles, processImageFiles]);
 
   const removeImage = useCallback((index: number) => {
     setAttachedImages((prev) => {
@@ -1395,12 +1411,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         paddingRight: compact ? 0 : isMobile ? 16 : 52, // desktop: 16px base + 36px for ChatMinimap alignment
       }}
     >
-      {/* Hidden file input — 视觉隐藏而非 display:none：安卓 WebView/部分浏览器对 display:none 的 file input 用 JS click() 不会弹出选择器 */}
+      {/* Hidden file input — 视觉隐藏而非 display:none：安卓 WebView/部分浏览器对 display:none 的 file input 用 JS click() 不会弹出选择器。不设 capture，手机仍可选相册和相机。 */}
       {!compact && <input
         id="chat-attach-input"
         ref={fileInputRef}
         type="file"
-        accept="image/*"
+        accept={onAttachFiles ? undefined : "image/*"}
         multiple
         style={{
           position: "absolute",
@@ -1411,11 +1427,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           clipPath: "inset(50%)",
           whiteSpace: "nowrap",
         }}
-        onChange={(e) => {
-          const files = Array.from(e.target.files ?? []);
-          processImageFiles(files);
-          e.target.value = "";
-        }}
+        onChange={handleFilePick}
       />}
       <div style={{ maxWidth: "var(--chat-content-max-width, 820px)", margin: "0 auto" }}>
         {!compact && <ModelErrorBanner error={modelError} />}
@@ -1598,8 +1610,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           <div
             role="alert"
             style={{
+              display: "flex",
+              alignItems: "flex-start",
+              gap: 6,
               marginBottom: 8,
-              padding: "7px 10px",
+              padding: onDismissCompactError ? "3px 3px 3px 10px" : "7px 10px",
               background: "rgba(239,68,68,0.07)",
               border: "1px solid rgba(239,68,68,0.3)",
               borderRadius: 6,
@@ -1607,11 +1622,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               fontFamily: "var(--font-mono)",
               fontSize: 12,
               lineHeight: 1.5,
-              whiteSpace: "pre-wrap",
-              overflowWrap: "anywhere",
             }}
           >
-            {compactError}
+            <span style={{ minWidth: 0, flex: 1, padding: onDismissCompactError ? "4px 0" : 0, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{compactError}</span>
+            {onDismissCompactError && <DismissButton onClick={onDismissCompactError} title={t("chat.dismissCompactError")} />}
           </div>
         )}
         {/* 文本附件以轻量条目展示，避免把原文重新放入 textarea。 */}
@@ -1883,7 +1897,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             {/* 图片附件按钮：用 <label htmlFor> 原生触发，避免 JS click() 在移动端被浏览器拦截 */}
             <label
               htmlFor="chat-attach-input"
-              title={t("chat.attachImage")}
+              title={t(onAttachFiles ? "chat.attachFiles" : "chat.attachImage")}
               style={{
                 flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
                 width: 32, height: 32, padding: 0,

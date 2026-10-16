@@ -8,6 +8,7 @@ import { THINKING_LEVEL_OPTIONS, type ThinkingLevelOption } from "@/lib/thinking
 import { Zap } from "lucide-react";
 import type { ToolPreset } from "@/lib/tool-presets";
 import { TOOL_PRESET_VALUES } from "@/lib/tool-presets";
+import { useRunEndStrayClick } from "@/lib/run-end-click";
 const TOOL_PRESET_LABELS = ["off", ...TOOL_PRESET_VALUES.filter((preset) => preset !== "none")] as const;
 type ToolPresetLabel = typeof TOOL_PRESET_LABELS[number];
 
@@ -174,9 +175,10 @@ interface ToolPresetControlProps {
   isMobile: boolean;
   toolPreset?: ToolPreset;
   onChange?: (preset: ToolPreset) => void;
+  isStrayClick: (event: { detail: number }) => boolean;
 }
 
-const ToolPresetControl = memo(function ToolPresetControl({ isMobile, toolPreset, onChange }: ToolPresetControlProps) {
+const ToolPresetControl = memo(function ToolPresetControl({ isMobile, toolPreset, onChange, isStrayClick }: ToolPresetControlProps) {
   const { t } = useI18n();
   const [toolDropdownOpen, setToolDropdownOpen] = useState(false);
   const toolDropdownRef = useRef<HTMLDivElement>(null);
@@ -194,7 +196,7 @@ const ToolPresetControl = memo(function ToolPresetControl({ isMobile, toolPreset
   return (
               <div ref={toolDropdownRef} style={{ position: "relative" }}>
                 <button
-                  onClick={() => setToolDropdownOpen((open) => !open)}
+                  onClick={(event) => { if (!isStrayClick(event)) setToolDropdownOpen((open) => !open); }}
                    title={t("chat.changeToolPreset") + `: ${toolPresetLabel}`}
                    aria-label={t("chat.changeToolPreset")}
                   style={{
@@ -276,20 +278,21 @@ interface RunControlsProps {
   isMobile: boolean;
   isStreaming: boolean;
   showLabel: boolean;
+  isStrayClick: (event: { detail: number }) => boolean;
   onCompact?: () => void;
   onAbortCompaction?: () => void;
   isCompacting?: boolean;
   onAbort: () => void;
 }
 
-const RunControls = memo(function RunControls({ isMobile, isStreaming, showLabel, onCompact, onAbortCompaction, isCompacting, onAbort }: RunControlsProps) {
+const RunControls = memo(function RunControls({ isMobile, isStreaming, showLabel, onCompact, onAbortCompaction, isCompacting, onAbort, isStrayClick }: RunControlsProps) {
   const { t } = useI18n();
   return (
     <>
             {(!isStreaming || isCompacting) && onCompact && (
               <div>
                 <button
-                  onClick={isCompacting ? onAbortCompaction : onCompact}
+                  onClick={isCompacting ? onAbortCompaction : (event) => { if (!isStrayClick(event)) onCompact?.(); }}
                   style={{
                     display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
                     padding: isMobile ? "0 6px" : "8px 12px",
@@ -492,6 +495,8 @@ export const InputControls = memo(function InputControls({
   notificationEnabled, notificationPermission, onNotificationToggle,
 }: InputControlsProps) {
   const { t } = useI18n();
+  // Stop 在运行结束时被 Compact/工具按钮替换，结束后的短时间内的点击视为误触。
+  const isStrayClick = useRunEndStrayClick(isStreaming);
   const [controlsMenuOpen, setControlsMenuOpen] = useState(false);
   const controlsMenuRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -567,7 +572,7 @@ export const InputControls = memo(function InputControls({
                 <>
                   <ThinkingControl isMobile={isMobile} modelState={modelState} isStreaming={isStreaming} onChange={onThinkingLevelChange} />
                   {!isStreaming && <FastModeControl isMobile={isMobile} modelState={modelState} onChange={modelActions.changeFastEnabled} />}
-                  {!isStreaming && <ToolPresetControl isMobile={isMobile} toolPreset={toolPreset} onChange={onToolPresetChange} />}
+                  {!isStreaming && <ToolPresetControl isMobile={isMobile} toolPreset={toolPreset} onChange={onToolPresetChange} isStrayClick={isStrayClick} />}
                 </>
               ) : null}
               runControls={(
@@ -579,6 +584,7 @@ export const InputControls = memo(function InputControls({
                   onAbortCompaction={onAbortCompaction}
                   isCompacting={isCompacting}
                   onAbort={onAbort}
+                  isStrayClick={isStrayClick}
                 />
               )}
               preferenceControls={(

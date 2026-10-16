@@ -8,6 +8,7 @@ import {
   mergeSessionLists,
 } from "@/lib/session-reader";
 import {
+  getAwaitingInputRpcSessionIds,
   getCompletionNotificationSuppressedRpcSessionIds,
   getRpcSessionInfos,
   getRunningRpcSessionIds,
@@ -75,6 +76,7 @@ export async function GET(req: Request) {
       sessionDirectoryVersion: revision.version,
       sessionListVersion,
       runningSessionIds: getRunningRpcSessionIds(),
+      awaitingInputSessionIds: getAwaitingInputRpcSessionIds(),
       completionNotificationSuppressedSessionIds: getCompletionNotificationSuppressedRpcSessionIds(),
     };
     // 摘要与完整列表不能共享增量版本：同一个 id 的摘要会被完整详情补齐。

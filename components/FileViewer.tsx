@@ -22,8 +22,10 @@ import {
 import { encodeFilePathForApi, getFileApiUrl, getFileDirectory, getFileName, getRelativeFilePath } from "@/lib/file-paths";
 import { parsePdfPageFragment, resolveLocalFileHref, shouldOpenLocalFileInApp } from "@/lib/file-links";
 import { parseFrontmatter } from "@/lib/frontmatter";
-import { markdownPreviewRehypePlugins, markdownPreviewRemarkPlugins, markdownUrlTransform, normalizeDisplayMath } from "@/lib/markdown";
+import { isExternalMarkdownHref, markdownAppUrlTransform, markdownPreviewRehypePlugins, markdownPreviewRemarkPlugins, markdownUrlTransform, normalizeDisplayMath } from "@/lib/markdown";
 import { CodeBlock, MermaidBlock } from "./MermaidBlock";
+import { DelimitedTable } from "./DelimitedTable";
+import { isDelimitedTablePath } from "@/lib/delimited-table";
 import { FrontmatterCard } from "./FrontmatterCard";
 import { RevealFileButton } from "./RevealFileButton";
 import { parseUnifiedPatch } from "@/lib/patch";
@@ -1081,12 +1083,14 @@ function TextFileViewer({
     void fetchGitDiff(filePath);
   }, [fetchGitDiff, filePath, gitRefreshKey]);
 
+  const isDelimitedTable = isDelimitedTablePath(filePath);
   const language = data?.language ?? "text";
   const isHtml = language === "html";
   const isMarkdown = language === "markdown";
   // The HTML preview streams the file into an iframe, so a truncated source read
-  // never limits it; the markdown preview still renders the loaded text.
-  const hasPreview = isHtml || (isMarkdown && !data?.truncated);
+  // never limits it; the markdown preview still renders the loaded text. A CSV/TSV
+  // table shows a loaded prefix too, without its cut last record.
+  const hasPreview = isDelimitedTable || isHtml || (isMarkdown && !data?.truncated);
   const htmlPreviewSrc = getRawDocumentUrl(filePath, sourceSessionId, bust);
 
   useEffect(() => {
@@ -1485,7 +1489,7 @@ function TextFileViewer({
             <ReactMarkdown
               remarkPlugins={markdownPreviewRemarkPlugins}
               rehypePlugins={markdownPreviewRehypePlugins}
-              urlTransform={onOpenFile ? markdownUrlTransform : undefined}
+              urlTransform={onOpenFile ? markdownUrlTransform : markdownAppUrlTransform}
               components={{
                 code({ className, children, ...props }) {
                   const lang = className?.replace("language-", "").toLowerCase() ?? "";
@@ -1514,7 +1518,10 @@ function TextFileViewer({
                     ? resolveLocalFileHref(href, markdownDirectory, cwd ?? markdownDirectory)
                     : null;
                   if (!linkedFile || !onOpenFile) {
-                    return <a href={href} {...props}>{children}</a>;
+                    // Like chat links: a web or app link must not replace Pi Web.
+                    return isExternalMarkdownHref(href)
+                      ? <a href={href} {...props} target="_blank" rel="noopener noreferrer">{children}</a>
+                      : <a href={href} {...props}>{children}</a>;
                   }
 
                   const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
@@ -1542,6 +1549,13 @@ function TextFileViewer({
               {markdownPreview}
             </ReactMarkdown>
           </div>
+        ) : isDelimitedTable && effectiveDisplayMode === "preview" ? (
+          <DelimitedTable
+            content={content}
+            filePath={filePath}
+            complete={!data?.truncated}
+            scrollRef={contentRef}
+          />
         ) : useLightweightSource ? (
           <div
             className="file-source-view is-lightweight"

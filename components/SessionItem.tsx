@@ -21,6 +21,8 @@ type ActionTone = "pin" | "accent" | "danger";
 interface SessionItemStatus {
   isSelected: boolean;
   isRunning?: boolean;
+  /** 运行停在扩展对话框上，需要用户作答；仍属于运行中。 */
+  isAwaitingInput?: boolean;
   isUnread?: boolean;
   isPinned?: boolean;
 }
@@ -136,6 +138,21 @@ function RunningSessionIndicator() {
   );
 }
 
+/** 与运行中指示器同位置同尺寸，只换颜色和含义：琥珀色呼吸圆点表示“需要你”。 */
+function AwaitingInputSessionIndicator() {
+  const { t } = useI18n();
+  return (
+    <span title={t("sidebar.awaitingInput")} aria-label={t("sidebar.awaitingInput")} style={{ width: 14, height: 14, display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0, color: "#d97706" }}>
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+        <circle cx="7" cy="7" r="3" fill="currentColor">
+          <animate attributeName="opacity" values="1;0.35;1" dur="1.6s" repeatCount="indefinite" />
+        </circle>
+        <circle cx="7" cy="7" r="5" stroke="currentColor" strokeWidth="1.2" opacity="0.3" />
+      </svg>
+    </span>
+  );
+}
+
 function UnreadSessionIndicator() {
   const { t } = useI18n();
   return (
@@ -186,7 +203,7 @@ function SessionRowContent({ session, view, actions }: {
   session: SessionInfo;
   view: {
     title: string;
-    status: Required<Pick<SessionItemStatus, "isSelected" | "isPinned">> & Pick<SessionItemStatus, "isRunning" | "isUnread">;
+    status: Required<Pick<SessionItemStatus, "isSelected" | "isPinned">> & Pick<SessionItemStatus, "isRunning" | "isAwaitingInput" | "isUnread">;
     isMobile: boolean;
     hovered: boolean;
     tree: Required<Pick<SessionItemTreeState, "depth" | "hasChildren" | "collapsed">>;
@@ -199,7 +216,7 @@ function SessionRowContent({ session, view, actions }: {
   };
 }) {
   const { title, status, isMobile, hovered, tree } = view;
-  const { isSelected, isRunning, isUnread, isPinned } = status;
+  const { isSelected, isRunning, isAwaitingInput, isUnread, isPinned } = status;
   const { depth, hasChildren, collapsed } = tree;
   const { onToggleCollapse, onTogglePinned, onRename, onDelete } = actions;
   const { t } = useI18n();
@@ -212,7 +229,7 @@ function SessionRowContent({ session, view, actions }: {
         <div title={title} style={{ display: "flex", alignItems: "center", gap: 5, minWidth: 0, color: "var(--text)", fontSize: 12, fontWeight: isSelected ? 500 : 400, lineHeight: 1.4 }}><span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{title}</span></div>
         <div style={{ marginTop: 2, display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
           <div style={{ display: "flex", flex: 1, alignItems: "center", gap: 8, minWidth: 0, overflow: "hidden", color: "var(--text-dim)", fontSize: 11, whiteSpace: "nowrap" }}>
-            {isRunning ? <RunningSessionIndicator /> : isUnread ? <UnreadSessionIndicator /> : <span title={session.modified}>{formatRelativeTime(session.modified)}</span>}
+            {isRunning && isAwaitingInput ? <AwaitingInputSessionIndicator /> : isRunning ? <RunningSessionIndicator /> : isUnread ? <UnreadSessionIndicator /> : <span title={session.modified}>{formatRelativeTime(session.modified)}</span>}
             <span>{t("sidebar.messagesCount", { count: session.messageCount })}</span>
             {session.currentBranch && (
               <span title={`${session.isWorktree ? "Worktree" : "当前分支"}: ${session.currentBranch}\n${session.cwd}`} style={{ display: "flex", alignItems: "center", gap: 3, color: "var(--accent)", minWidth: 0, overflow: "hidden" }}>
@@ -239,7 +256,7 @@ function SessionRowContent({ session, view, actions }: {
 }
 
 export function SessionItem({ session, status, mobile, actions, tree = {} }: SessionItemProps) {
-  const { isSelected, isRunning, isUnread, isPinned = false } = status;
+  const { isSelected, isRunning, isAwaitingInput, isUnread, isPinned = false } = status;
   const { enabled: isMobile, swipeOpen, onSwipeOpenChange } = mobile;
   const { onClick, onRenamed, onDeleted, onTogglePinned } = actions;
   const { depth = 0, hasChildren = false, collapsed = false, onToggleCollapse } = tree;
@@ -297,7 +314,7 @@ export function SessionItem({ session, status, mobile, actions, tree = {} }: Ses
             session={session}
             view={{
               title,
-              status: { isSelected, isRunning, isUnread, isPinned },
+              status: { isSelected, isRunning, isAwaitingInput, isUnread, isPinned },
               isMobile,
               hovered,
               tree: { depth, hasChildren, collapsed },

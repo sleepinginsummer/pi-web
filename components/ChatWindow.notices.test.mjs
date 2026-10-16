@@ -138,3 +138,17 @@ test("copy failure shows no success feedback and still suppresses the long-press
   assert.equal(button.textContent?.includes("Copied"), false);
   assert.equal(button.textContent?.includes(notice.message), true);
 });
+
+test("terminal QR codes in a notice keep every space and one monospace grid (#755)", () => {
+  const qr = "█▀▀▀▀▀█ ▄ █▀▀▀▀▀█\n█ ███ █  ▀█ ███ █";
+  const { container } = render(React.createElement(NoticeShelf, {
+    notices: [{ id: "qr", message: `Scan to sign in:\n${qr}\nthen return here`, type: "info" }],
+    closeLabel: "Close",
+    copiedLabel: "Copied",
+    onDismiss() {},
+  }));
+  const art = container.querySelector(".notice-shelf-art");
+  assert.ok(art, "the block-character lines render as terminal art");
+  assert.equal(art.textContent, qr);
+  assert.match(container.querySelector(".notice-shelf-message").textContent, /^Scan to sign in:\n[\s\S]*\nthen return here$/);
+});

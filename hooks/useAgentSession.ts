@@ -346,6 +346,8 @@ export interface UseAgentSessionOptions {
   // 新会话首次落盘或一轮运行结束后刷新侧栏列表。
   onSessionListRefresh?: (request: SessionListRefreshRequest) => void;
   onSessionForked?: (newSessionId: string) => void;
+  /** 顶层工具调用结束；除只读工具外，它可能改动了文件（#1144）。 */
+  onToolEnd?: (toolName: string) => void;
   modelsRefreshKey?: number;
   chatInputRef?: React.RefObject<ChatInputHandle | null>;
   onBranchDataChange?: (tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void, locked: boolean) => void;
@@ -550,7 +552,7 @@ type SlashCommandsResponse = {
 
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
-    navigationKey, isNavigationActive, session, newSessionCwd, pendingNewSessionControl, onPendingNewSessionEvent, onSessionCreated, onSessionListRefresh, onSessionForked,
+    navigationKey, isNavigationActive, session, newSessionCwd, pendingNewSessionControl, onPendingNewSessionEvent, onSessionCreated, onSessionListRefresh, onSessionForked, onToolEnd,
     modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onSessionStatsPanelOpen, onOpenSettings,
   } = opts;
 
@@ -582,8 +584,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     sid: string | null;
     oldestEntryId: string | null;
     hasMore: boolean;
+    turnsBefore: number;
     loading: boolean;
-  }>({ sid: null, oldestEntryId: null, hasMore: false, loading: false });
+  }>({ sid: null, oldestEntryId: null, hasMore: false, turnsBefore: 0, loading: false });
   // 卸载时从 ref 读取最终已分页窗口，避免 mount effect 的闭包捕获首帧状态。
   const viewSnapshotRef = useRef({ leafId: activeLeafId, page: historyPage, model: contextModel, thinkingLevel: "off", totalActiveMs: 0 });
   const [streamState, dispatch] = useReducer(streamReducer, INITIAL_STREAMING_STATE);
@@ -980,6 +983,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       sid,
       oldestEntryId: snapshot.oldestEntryId,
       hasMore: snapshot.hasMore,
+      turnsBefore: snapshot.turnsBefore,
       loading: false,
     });
     setCurrentModelOverride((current) => modelSwitchPendingRef.current ? current : null);
@@ -1043,6 +1047,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         sid,
         oldestEntryId: result.snapshot.oldestEntryId,
         hasMore: result.snapshot.hasMore,
+        turnsBefore: result.snapshot.turnsBefore,
         loading: false,
       });
       return true;
@@ -1127,7 +1132,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               setEntryIds([]);
               messagesRef.current = [];
               entryIdsRef.current = [];
-              setHistoryPage({ sid, oldestEntryId: null, hasMore: false, loading: false });
+              setHistoryPage({ sid, oldestEntryId: null, hasMore: false, turnsBefore: 0, loading: false });
               setError(null);
             }
             setLoading(false);
@@ -1138,7 +1143,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             && saved.entryIds.length >= loaded.snapshot.entryIds.length) {
             // 版本及活动 leaf 均一致才保留已分页的大窗口；其它元数据以服务端为准。
             const wider = { ...loaded.snapshot, messages: saved.messages, entryIds: saved.entryIds,
-              oldestEntryId: saved.oldestEntryId, hasMore: saved.hasMore };
+              oldestEntryId: saved.oldestEntryId, hasMore: saved.hasMore, turnsBefore: saved.turnsBefore };
             return commitContextSnapshot(sid, wider, loaded.leafId, { preserveScroll: true }) ? loaded : null;
           }
           if (saved) deleteSessionViewSnapshot(sid);
@@ -1966,6 +1971,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           cancelEventStreamGrace();
           if (!agentRunningRef.current) enterMainRun({ kind: "waiting_model" });
         }
+        // Opening the stream is what resumes an idle-reaped session, so the
+        // mount's state read may have found no runtime and no usage to show.
+        if (sessionIdRef.current) void refreshContextUsage(sessionIdRef.current);
         break;
       }
       case "agent_start":
@@ -1973,6 +1981,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // 新一轮运行开始：重置流式消息计数（message_end 的 updater 会重新累计）。
         lastStreamedMessageCountRef.current = 0;
         lastRunAbortedRef.current = false;
+        // 重试的等待在其运行开始时就结束了（与 pi TUI 一致）：成功的 auto_retry_end
+        // 要等重试的第一条完整回复才到，期间可能流式输出好几分钟（#988）。
+        setRetryInfo(null);
         enterMainRun({ kind: "waiting_model" });
         break;
       case "entry_appended": {
@@ -2187,6 +2198,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "tool_execution_end": {
         if (isNestedToolExecutionEvent(event)) break;
         const id = event.toolCallId as string;
+        onToolEnd?.(event.toolName as string);
         setActiveToolResults((previous) => {
           if (!previous.has(id)) return previous;
           const next = new Map(previous);
@@ -2263,7 +2275,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
     }
-  }, [addNotice, cancelEventStreamGrace, clearAskQuestionnaire, consumeShadowEntry, enqueueStreamDelta, enterMainRun, flushStreamDeltas, handleExtensionUiRequest, isNew, loadCompactedSession, loadSession, newSessionCwd, onPendingNewSessionEvent, onSessionListRefresh, reconcileAgentState, refreshContextUsage, resetStreamDeltas, scheduleContextRefresh, scheduleEventStreamClose]);
+  }, [addNotice, cancelEventStreamGrace, clearAskQuestionnaire, consumeShadowEntry, enqueueStreamDelta, enterMainRun, flushStreamDeltas, handleExtensionUiRequest, isNew, loadCompactedSession, loadSession, newSessionCwd, onPendingNewSessionEvent, onSessionListRefresh, onToolEnd, reconcileAgentState, refreshContextUsage, resetStreamDeltas, scheduleContextRefresh, scheduleEventStreamClose]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
@@ -2603,6 +2615,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setIsCompacting(false);
     }
   }, [isCompacting, loadCompactedSession]);
+
+  // The banner otherwise stays until the next compaction, e.g. "Nothing to compact".
+  const dismissCompactError = useCallback(() => setCompactError(null), []);
 
   const loadModels = useCallback(async (signal?: AbortSignal) => {
     const preferredThinking = await modelSelectionActions.load({
@@ -2968,7 +2983,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           && page.sid === sid && messagesRef.current.length === entryIdsRef.current.length) {
           setSessionViewSnapshot({ sessionId: sid, revision: contextVersionRef.current,
             messages: messagesRef.current, entryIds: entryIdsRef.current, leafId,
-            oldestEntryId: page.oldestEntryId, hasMore: page.hasMore,
+            oldestEntryId: page.oldestEntryId, hasMore: page.hasMore, turnsBefore: page.turnsBefore,
             thinkingLevel, model, totalActiveMs, loadedEntryIds: entryIdsRef.current });
         }
         if (agentRunningRef.current || bashRunningRef.current) deleteSessionViewSnapshot(sid);
@@ -3100,6 +3115,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     historyCursor: historyPage.sid === sessionIdRef.current ? historyPage.oldestEntryId : null,
     hasEarlierMessages: historyPage.sid === sessionIdRef.current && historyPage.hasMore,
     loadingEarlierMessages: historyPage.sid === sessionIdRef.current && historyPage.loading,
+    earlierTurnCount: historyPage.sid === sessionIdRef.current ? historyPage.turnsBefore : 0,
     agentRunning, modelState: modelViewState, modelActions: modelViewActions, toolPreset,
     retryInfo, contextUsage, systemPrompt, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,
@@ -3112,7 +3128,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     sessionIdRef, eventSourceRef,
     // Actions
     handleSend, handleAbort, handleFork, loadEarlierMessages,
-    handleCompact, handleQueuedSubmit, handleAbortCompaction,
+    handleCompact, handleQueuedSubmit, handleAbortCompaction, dismissCompactError,
     handleRecallQueue,
     handleBuiltinSlashCommand,
     handleShadowMindToggle, handleToolPresetChange, loadTools, loadSlashCommands, setActiveLeafId, setMessages,
@@ -3135,7 +3151,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     activeToolResults, editEntryId, handleEditContent, cancelEdit, addNotice, shadowReportStatuses,
     sessionIdRef, eventSourceRef,
     handleSend, handleAbort, handleFork, loadEarlierMessages,
-    handleCompact, handleQueuedSubmit, handleAbortCompaction,
+    handleCompact, handleQueuedSubmit, handleAbortCompaction, dismissCompactError,
     handleRecallQueue,
     handleBuiltinSlashCommand,
     handleShadowMindToggle, handleToolPresetChange, loadTools, loadSlashCommands, setActiveLeafId, setMessages,

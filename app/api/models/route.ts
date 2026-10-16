@@ -1,3 +1,4 @@
+import { existsSync } from "fs";
 import { stat } from "fs/promises";
 import { resolve } from "path";
 import { createAgentSessionServices, getAgentDir, type SettingsManager } from "@earendil-works/pi-coding-agent";
@@ -6,6 +7,7 @@ import type { ModelEntry, ModelsData, SelectedModel, ThinkingLevelMap } from "@/
 import { loadModelsWithCache, withModelRuntimeError, withSafeModelLoadFailure } from "@/lib/models-cache";
 import type { ThinkingLevel } from "@/lib/thinking-levels";
 import {
+  orderSelectorModels,
   resolveVisibleModels,
   restrictVisibleModelsToConfiguredCatalog,
   selectInitialModelScope,
@@ -15,19 +17,9 @@ import { projectTrustReloadOptions } from "@/lib/project-trust";
 import { isFastModeAvailable } from "@/lib/fast-mode";
 import { readModelsConfigSnapshot } from "@/lib/models-config-commit";
 import { rememberProviderModels, withDeferredProviderModels } from "@/lib/deferred-provider-models";
+import { inferRemovedWorktree } from "@/lib/worktree";
 
 export const dynamic = "force-dynamic";
-
-const modelNameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
-
-function compareModelEntries(
-  a: ModelEntry,
-  b: ModelEntry
-): number {
-  return modelNameCollator.compare(a.name || a.id, b.name || b.id)
-    || modelNameCollator.compare(a.provider, b.provider)
-    || modelNameCollator.compare(a.id, b.id);
-}
 
 async function loadModels(
   cwd: string,
@@ -63,13 +55,13 @@ async function loadModels(
     modelsConfig,
   );
   const { visible, thinkingLevelPins, warnings } = scope;
-  modelList = visible.map((m) => ({
+  modelList = orderSelectorModels(scope).map((m) => ({
     id: m.id,
     name: m.name,
     provider: m.provider,
     fastAvailable: isFastModeAvailable(m, fastModels),
     input: m.input,
-  })).sort(compareModelEntries);
+  }));
   for (const m of visible) {
     const key = `${m.provider}:${m.id}`;
     nameMap.set(key, m.name);
@@ -130,8 +122,16 @@ const EMPTY_MODELS: ModelsData = {
 };
 
 export async function GET(req: Request) {
-  const requestedCwd = new URL(req.url).searchParams.get("cwd") || process.cwd();
-  const cwd = resolve(requestedCwd);
+  const requestedCwd = resolve(new URL(req.url).searchParams.get("cwd") || process.cwd());
+  // A subagent run isolated in a worktree has that worktree removed when the run
+  // finishes, yet its session file still records the worktree as its cwd. Fall back
+  // to the main repo it branched from, so opening a finished subagent resolves the
+  // same models a non-isolated one would. The roots check below runs on the folder
+  // actually answered from, so the fallback reaches no project that was not allowed
+  // by name already.
+  const cwd = existsSync(requestedCwd)
+    ? requestedCwd
+    : inferRemovedWorktree(requestedCwd)?.projectRoot ?? requestedCwd;
 
   let cwdStat;
   try {

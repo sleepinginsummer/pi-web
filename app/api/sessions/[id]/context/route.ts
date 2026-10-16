@@ -81,6 +81,8 @@ export async function GET(
       sessionId: id,
       ...(indexed ? { effectiveSettings: indexed.settings } : {}),
     });
+    // 索引路径只读到当前页，页内向上数不到更早的轮次；改用索引的完整祖先链（#791）。
+    if (indexed && context.hasMore && context.oldestEntryId) context.turnsBefore = indexed.turnsBefore(context.oldestEntryId);
     const contextMs = performance.now() - contextStartedAt;
     const payload = JSON.stringify({
       context,

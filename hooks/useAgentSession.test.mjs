@@ -500,7 +500,7 @@ test("keeps the compaction control reachable while a turn is auto-compacting", (
   // the control behind `!isStreaming` left only the generic stop button, which aborts the
   // whole prompt instead of the compaction.
   const controlBlock = inputControlsSource.slice(
-    inputControlsSource.indexOf("onClick={isCompacting ? onAbortCompaction : onCompact}") - 200,
+    inputControlsSource.indexOf("onClick={isCompacting ? onAbortCompaction : (event) => { if (!isStrayClick(event)) onCompact?.(); }}") - 200,
     inputControlsSource.indexOf('aria-label={isCompacting ? t("chat.stopCompaction")'),
   );
 

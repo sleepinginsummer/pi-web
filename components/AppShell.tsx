@@ -12,6 +12,7 @@ import { SettingsPanel, SettingsSectionIcon } from "./SettingsPanel";
 import { ProjectTrustDialog } from "./ProjectTrustDialog";
 import { AppTopBar } from "./AppTopBar";
 import { TerminalPanel } from "./TerminalPanel";
+import { SubagentViewer } from "./SubagentViewer";
 import { newTerminalTab, restoreTerminalTabs, TERMINAL_TABS_KEY, type TerminalTab } from "./terminal-tab-state";
 import { useFontPreferences } from "@/hooks/useFontPreferences";
 import { useI18n } from "@/hooks/useI18n";
@@ -56,7 +57,11 @@ import { AppTopPanels } from "./AppTopPanels";
 import { getLastSettingsSection, settingsSectionRequiresProject, type SettingsSection } from "@/lib/settings-navigation";
 import { getSessionFamily } from "@/lib/session-family";
 import type { SessionInfo } from "@/lib/types";
-import type { ToolEntry } from "@/lib/tool-presets";
+import { PRESET_READ_ONLY, type ToolEntry } from "@/lib/tool-presets";
+
+// pi 内置工具中从不改动文件的那些；其他工具都可能写文件（#1144）。
+const READ_ONLY_TOOL_NAMES = new Set<string>(PRESET_READ_ONLY);
+const TOOL_END_REFRESH_MS = 1000;
 
 export function AppShell() {
   const router = useRouter();
@@ -95,6 +100,9 @@ export function AppShell() {
   const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([]);
   const [activeTerminalTabId, setActiveTerminalTabId] = useState<string | null>(null);
   const [terminalsRestored, setTerminalsRestored] = useState(false);
+  // 子代理标签与文件、终端标签并列；激活时覆盖文件标签，切换项目时随旧项目一起丢弃。
+  const [agentTabs, setAgentTabs] = useState<{ sessionId: string; label: string }[]>([]);
+  const [activeAgentTabId, setActiveAgentTabId] = useState<string | null>(null);
   const closeMobileSidebar = useCallback(() => setSidebarOpen(false), []);
 
   useEffect(() => {
@@ -124,8 +132,10 @@ export function AppShell() {
     openFile: openFileTab,
     saveViewerState: saveFileViewerStateForTab,
     selectTab: selectFileTab,
+    switchWorkspace: switchFileWorkspaceTabs,
     tabs: fileTabs,
     toggle: toggleFilePanelState,
+    workspaceGeneration: fileWorkspaceGeneration,
   } = useFilePanel({ isMobile, onMobileOpen: closeMobileSidebar });
   const handleOpenFile = useCallback((
     filePath: string,
@@ -133,34 +143,47 @@ export function AppShell() {
     options?: { sourceSessionId?: string | null; modeHint?: "diff"; page?: number },
   ) => {
     setActiveTerminalTabId(null);
+    setActiveAgentTabId(null);
     openFileTab(filePath, fileName, options);
   }, [openFileTab]);
-  const clearFilePanel = useCallback(() => {
-    clearFileTabs();
-    if (terminalTabs.length > 0) openFilePanel();
-  }, [clearFileTabs, openFilePanel, terminalTabs.length]);
   const toggleFilePanel = useCallback(() => {
-    if (fileTabs.length > 0 || terminalTabs.length > 0) toggleFilePanelState();
-  }, [fileTabs.length, terminalTabs.length, toggleFilePanelState]);
+    if (fileTabs.length > 0 || terminalTabs.length > 0 || agentTabs.length > 0) toggleFilePanelState();
+  }, [agentTabs.length, fileTabs.length, terminalTabs.length, toggleFilePanelState]);
   const panelTabs: Tab[] = [...fileTabs, ...terminalTabs.map((tab) => ({
     id: tab.id,
     label: getFileName(tab.cwd) || tab.cwd,
     filePath: tab.cwd,
     kind: "terminal" as const,
     closing: Boolean(tab.closing),
+  })), ...agentTabs.map((tab) => ({
+    id: `agent:${tab.sessionId}`,
+    label: tab.label,
+    filePath: tab.sessionId,
+    kind: "agent" as const,
   }))];
-  const activePanelTabId = activeTerminalTabId ?? activeFileTabId;
+  const activePanelTabId = activeTerminalTabId ?? activeAgentTabId ?? activeFileTabId;
+  const activeAgentTab = activeTerminalTabId === null && activeAgentTabId
+    ? agentTabs.find((tab) => `agent:${tab.sessionId}` === activeAgentTabId) ?? null
+    : null;
   const handleSelectPanelTab = useCallback((tabId: string) => {
     if (terminalTabs.some((tab) => tab.id === tabId)) {
       setActiveTerminalTabId(tabId);
+      setActiveAgentTabId(null);
       activatePanelTab(tabId);
       return;
     }
+    if (tabId.startsWith("agent:")) {
+      setActiveTerminalTabId(null);
+      setActiveAgentTabId(tabId);
+      openFilePanel();
+      return;
+    }
     setActiveTerminalTabId(null);
+    setActiveAgentTabId(null);
     selectFileTab(tabId);
-  }, [activatePanelTab, selectFileTab, terminalTabs]);
-  const handleFileViewerStateChange = useCallback((tabId: string, viewerRevision: number, viewerState: import("@/lib/file-viewer-state").FileViewerState) => {
-    saveFileViewerStateForTab(tabId, viewerRevision, viewerState);
+  }, [activatePanelTab, openFilePanel, selectFileTab, terminalTabs]);
+  const handleFileViewerStateChange = useCallback((generation: number, tabId: string, viewerRevision: number, viewerState: import("@/lib/file-viewer-state").FileViewerState) => {
+    saveFileViewerStateForTab(generation, tabId, viewerRevision, viewerState);
   }, [saveFileViewerStateForTab]);
 
   useEffect(() => {
@@ -424,7 +447,7 @@ export function AppShell() {
   const handleSearchTargetHandled = useCallback((target: { sessionId: string; entryId: string }) => {
     setSearchTarget((current) => current?.sessionId === target.sessionId && current.entryId === target.entryId ? null : current);
   }, []);
-  const { runningSessionIds, sessionListVersion } = useRunningSessions();
+  const { runningSessionIds, awaitingInputSessionIds, sessionListVersion } = useRunningSessions();
   const runningSessionTransitions = useRunningSessionTransitions(runningSessionIds, selectedSession?.id ?? null);
   useBackgroundCompletionNotifications(
     runningSessionTransitions,
@@ -560,10 +583,16 @@ export function AppShell() {
     // Close any session that belongs to a different project — it no longer
     // matches the selected project directory.
     leaveWorkspace(cwd);
-    clearFilePanel();
+    // 保持项目隔离，但暂存离开项目的文件标签，切回时恢复（d69b33e）。
+    // 子代理标签属于旧项目的会话，直接丢弃；终端跨项目保留，激活中的终端继续占用面板。
+    const keepPanelForTerminal = activeTerminalTabId !== null && rightPanelOpen;
+    switchFileWorkspaceTabs(currentProject, newProject);
+    setAgentTabs([]);
+    setActiveAgentTabId(null);
+    if (keepPanelForTerminal) activatePanelTab(activeTerminalTabId);
     restoreWorkspaceContext(newProject);
     router.replace(typeof window !== "undefined" ? window.location.pathname : "/", { scroll: false });
-  }, [clearFilePanel, consumeCwdSyncSuppression, leaveWorkspace, newSessionCwd, restoreWorkspaceContext, router, selectedSession, syncWorkspaceKey]);
+  }, [activatePanelTab, activeTerminalTabId, consumeCwdSyncSuppression, leaveWorkspace, newSessionCwd, restoreWorkspaceContext, rightPanelOpen, router, selectedSession, switchFileWorkspaceTabs, syncWorkspaceKey]);
 
   // Global keyboard shortcuts (handles Esc, Ctrl+Alt+N etc.)
   useGlobalKeyboardShortcuts({
@@ -586,26 +615,24 @@ export function AppShell() {
     setExplorerRefreshKey((k) => k + 1);
   }, []);
 
+  // 运行中写入的文件随时出现在文件树里，而不只在结束时（#1144）：只读工具以外的工具结束后，每秒最多刷新一次。
+  const toolEndRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handleToolEnd = useCallback((toolName: string) => {
+    if (READ_ONLY_TOOL_NAMES.has(toolName) || toolEndRefreshTimerRef.current) return;
+    toolEndRefreshTimerRef.current = setTimeout(() => {
+      toolEndRefreshTimerRef.current = null;
+      setExplorerRefreshKey((k) => k + 1);
+    }, TOOL_END_REFRESH_MS);
+  }, []);
+  useEffect(() => () => {
+    if (toolEndRefreshTimerRef.current) clearTimeout(toolEndRefreshTimerRef.current);
+  }, []);
+
 
   const handleInitialRestoreDone = completeInitialRestore;
 
 
 
-  const handleOpenSession = useCallback(async (sessionId: string) => {
-    const catalogued = sessionCatalog.find((item) => item.id === sessionId);
-    if (catalogued && !catalogued.transient) {
-      handleSelectSession(catalogued);
-      return;
-    }
-    try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, { cache: "no-store" });
-      const data = await response.json() as { info?: SessionInfo; error?: string };
-      if (!response.ok || !data.info) throw new Error(data.error ?? `HTTP ${response.status}`);
-      handleSelectSession(data.info);
-    } catch (error) {
-      console.error("打开关联会话失败", error);
-    }
-  }, [handleSelectSession, sessionCatalog]);
 
   const handleOpenLinkedFile = useCallback((filePath: string, page?: number) => {
     handleOpenFile(filePath, getFileName(filePath), { sourceSessionId: selectedSession?.id ?? null, page });
@@ -616,9 +643,19 @@ export function AppShell() {
     const tab = existing ?? newTerminalTab(cwd);
     if (!existing) setTerminalTabs((tabs) => [...tabs, tab]);
     setActiveTerminalTabId(tab.id);
+    setActiveAgentTabId(null);
     activatePanelTab(tab.id);
     if (isMobile) setSidebarOpen(false);
   }, [activatePanelTab, terminalTabs, isMobile]);
+
+  // Subagent work opens in a right-panel tab instead of hijacking the main chat.
+  const handleOpenSubagentTab = useCallback((sessionId: string, label: string) => {
+    setAgentTabs((prev) => prev.some((tab) => tab.sessionId === sessionId) ? prev : [...prev, { sessionId, label }]);
+    setActiveTerminalTabId(null);
+    setActiveAgentTabId(`agent:${sessionId}`);
+    openFilePanel();
+    if (isMobile) setSidebarOpen(false);
+  }, [isMobile, openFilePanel]);
 
   const handleTerminalClosed = (tab: TerminalTab) => {
     const replacement = tab.closing === "restart" ? newTerminalTab(tab.cwd) : null;
@@ -628,6 +665,7 @@ export function AppShell() {
       const nextTerminalId = replacement?.id ?? remaining.at(-1)?.id ?? null;
       setActiveTerminalTabId(nextTerminalId);
       if (nextTerminalId) activatePanelTab(nextTerminalId);
+      else if (agentTabs.length > 0) setActiveAgentTabId(`agent:${agentTabs.at(-1)!.sessionId}`);
       else if (fileTabs.length === 0) closeFilePanel();
     }
   };
@@ -637,22 +675,50 @@ export function AppShell() {
       setTerminalTabs((tabs) => tabs.map((tab) => tab.id === tabId && !tab.closing ? { ...tab, closing: "close" } : tab));
       return;
     }
-    const closingActiveFile = activeTerminalTabId === null && activeFileTabId === tabId;
+    if (tabId.startsWith("agent:")) {
+      const remainingAgents = agentTabs.filter((tab) => `agent:${tab.sessionId}` !== tabId);
+      setAgentTabs(remainingAgents);
+      if (activeAgentTabId !== tabId) return;
+      const nextAgent = remainingAgents.at(-1);
+      if (nextAgent) {
+        setActiveAgentTabId(`agent:${nextAgent.sessionId}`);
+      } else {
+        setActiveAgentTabId(null);
+        const nextTerminalId = terminalTabs.at(-1)?.id ?? null;
+        if (nextTerminalId) {
+          setActiveTerminalTabId(nextTerminalId);
+          activatePanelTab(nextTerminalId);
+        } else if (fileTabs.length === 0) {
+          closeFilePanel();
+        }
+      }
+      return;
+    }
+    const closingActiveFile = activeTerminalTabId === null && activeAgentTabId === null && activeFileTabId === tabId;
     const remainingFiles = fileTabs.filter((tab) => tab.id !== tabId);
     closeFileTab(tabId);
-    if (closingActiveFile && remainingFiles.length === 0 && terminalTabs.length > 0) {
-      const nextTerminalId = terminalTabs.at(-1)!.id;
-      setActiveTerminalTabId(nextTerminalId);
-      activatePanelTab(nextTerminalId);
+    if (closingActiveFile && remainingFiles.length === 0) {
+      const nextTerminalId = terminalTabs.at(-1)?.id ?? null;
+      const nextAgent = agentTabs.at(-1);
+      if (nextTerminalId) {
+        setActiveTerminalTabId(nextTerminalId);
+        activatePanelTab(nextTerminalId);
+      } else if (nextAgent) {
+        setActiveAgentTabId(`agent:${nextAgent.sessionId}`);
+        openFilePanel();
+      }
     }
-  }, [activatePanelTab, activeFileTabId, activeTerminalTabId, closeFileTab, fileTabs, terminalTabs]);
+  }, [activatePanelTab, activeAgentTabId, activeFileTabId, activeTerminalTabId, agentTabs, closeFileTab, closeFilePanel, fileTabs, openFilePanel, terminalTabs]);
 
   const handleCloseAllFileTabs = useCallback(() => {
-    const nextTerminalId = activeTerminalTabId ?? terminalTabs.at(-1)?.id ?? null;
+    const nextTerminalId = activeTerminalTabId ?? (activeAgentTabId ? null : terminalTabs.at(-1)?.id ?? null);
+    const nextAgentId = nextTerminalId ? null : activeAgentTabId ?? (agentTabs.at(-1) ? `agent:${agentTabs.at(-1)!.sessionId}` : null);
     clearFileTabs();
     setActiveTerminalTabId(nextTerminalId);
+    setActiveAgentTabId(nextAgentId);
     if (nextTerminalId) activatePanelTab(nextTerminalId);
-  }, [activatePanelTab, activeTerminalTabId, clearFileTabs, terminalTabs]);
+    else if (nextAgentId) openFilePanel();
+  }, [activatePanelTab, activeAgentTabId, activeTerminalTabId, agentTabs, clearFileTabs, openFilePanel, terminalTabs]);
 
   const handleViewFullHistory = useCallback(() => {
     if (!selectedSession) return;
@@ -719,6 +785,7 @@ export function AppShell() {
         refreshKey={refreshKey + (sessionListVersion ?? 0)}
         onSessionDeleted={handleSessionDeleted}
         runningSessionIds={runningSessionIds}
+        awaitingInputSessionIds={awaitingInputSessionIds}
         runningSessionTransitions={runningSessionTransitions}
         locateSessionRequest={notificationSessionLocateRequest}
         selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? null}
@@ -1033,7 +1100,8 @@ export function AppShell() {
               onContextUsageChange={handleContextUsageChange}
               onOpenFile={handleOpenLinkedFile}
               onFilesUploaded={handleExplorerRefresh}
-              onOpenSession={handleOpenSession}
+              onOpenSubagent={handleOpenSubagentTab}
+              onToolEnd={handleToolEnd}
               onAskInNewChat={handleAskInNewChat}
               quoteSelectionEnabled={quoteSelectionEnabled}
               initialPrompt={pendingQuotePrompt && pendingQuotePrompt.sessionId === selectedSession?.id ? pendingQuotePrompt.text : undefined}
@@ -1161,9 +1229,9 @@ export function AppShell() {
 
         {/* Only the active viewer is mounted. Lightweight per-tab state is restored on activation. */}
         <div style={{ flex: 1, minHeight: 0, overflow: "hidden", paddingBottom: "env(safe-area-inset-bottom)" }}>
-          {!activeTerminalTabId && activeFileTab?.filePath ? (
+          {!activeTerminalTabId && !activeAgentTab && activeFileTab?.filePath ? (
             <FileViewer
-              key={`${activeFileTab.id}:${activeFileTab.viewerRevision ?? 0}`}
+              key={`${fileWorkspaceGeneration}:${activeFileTab.id}:${activeFileTab.viewerRevision ?? 0}`}
               filePath={activeFileTab.filePath}
               cwd={activeCwd ?? undefined}
               sourceSessionId={activeFileTab.sourceSessionId}
@@ -1172,6 +1240,7 @@ export function AppShell() {
               initialPage={activeFileTab.page}
               initialState={activeFileTab.viewerState}
               onStateChange={(viewerState) => handleFileViewerStateChange(
+                fileWorkspaceGeneration,
                 activeFileTab.id,
                 activeFileTab.viewerRevision ?? 0,
                 viewerState,
@@ -1185,7 +1254,7 @@ export function AppShell() {
                 { sourceSessionId: activeFileTab.sourceSessionId, page },
               )}
             />
-          ) : !activeTerminalTabId ? (
+          ) : !activeTerminalTabId && !activeAgentTab ? (
             <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 12 }}>
                {translate("files.noneOpen")}
             </div>
@@ -1201,6 +1270,15 @@ export function AppShell() {
               />
             </div>
           ))}
+          {activeAgentTab && (
+            <SubagentViewer
+              key={activeAgentTab.sessionId}
+              sessionId={activeAgentTab.sessionId}
+              fallbackLabel={activeAgentTab.label}
+              running={runningSessionIds.has(activeAgentTab.sessionId)}
+              onOpenFile={handleOpenLinkedFile}
+            />
+          )}
         </div>
       </div>
     </div>

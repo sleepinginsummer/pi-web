@@ -67,6 +67,17 @@ test("opens non-file markdown links in a safe new tab", () => {
   assert.doesNotMatch(html, /\snode=/);
 });
 
+test("opens desktop app links like other external links (#1108)", () => {
+  for (const props of [{}, { onOpenFile: undefined }]) {
+    const html = renderMarkdown("[note](obsidian://open?vault=notes)", props);
+
+    assert.match(
+      html,
+      /<a (?=[^>]*href="obsidian:\/\/open\?vault=notes")(?=[^>]*target="_blank")(?=[^>]*rel="noopener noreferrer")[^>]*>note<\/a>/,
+    );
+  }
+});
+
 test("keeps local file markdown links in the app", () => {
   const relativeHtml = renderMarkdown("[file](components/MarkdownBody.tsx)");
   const fileUrlHtml = renderMarkdown("[report](file:///home/me/project/report.html)");
@@ -94,7 +105,7 @@ test("keeps single-tilde CJK numeric ranges literal instead of striking them", (
 test("renders list markers as selectable text so copied lists keep their formatting", () => {
   const html = renderMarkdown("3. first\n4. second\n   - nested");
 
-  assert.match(html, /<ol start="3">/);
+  assert.match(html, /<ol start="3" style="--ol-marker-digits:2">/);
   assert.match(html, /<span class="markdown-list-marker" aria-hidden="true">3\. <\/span>/);
   assert.match(html, /<span class="markdown-list-marker" aria-hidden="true">4\. <\/span>/);
   assert.match(html, /<span class="markdown-list-marker" aria-hidden="true">• <\/span>/);
@@ -365,4 +376,11 @@ test("keeps a block that opens a raw-text tag as it renders without line breaks"
   assert.match(renderMarkdown("normal <kbd>Ctrl</kbd>\nline two", { keepLineBreaks: true }), /<\/kbd><br\/>line two/);
   const list = renderMarkdown("- item <textarea>\n  more\n- two\n  lines", { keepLineBreaks: true });
   assert.match(withoutListMarkers(list), /<li>two<br\/>lines<\/li>/);
+});
+
+test("ordered list padding grows with its widest number so two-digit markers are not clipped", () => {
+  const html = renderMarkdown(Array.from({ length: 12 }, (_, index) => `${index + 1}. item`).join("\n"));
+  assert.match(html, /<ol style="--ol-marker-digits:2">/);
+  const wide = renderMarkdown("98. a\n99. b\n100. c");
+  assert.match(wide, /<ol start="98" style="--ol-marker-digits:3">/);
 });

@@ -289,7 +289,7 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 - Browser autoplay policy means sound must be unlocked from a user gesture; `ChatInput` calls the unlock hook from interactive controls, and `ChatWindow` plays the tone from `onAgentEnd`.
 
 ### PWA 版本与 Service Worker 更新策略
-- 当前合并版本使用 `0.10.0-merge.32`；此后每次代码变更都必须将最后一位递增 1，并同步更新 `package.json` 与 `package-lock.json`。
+- 当前合并版本使用 `0.10.0-merge.33`；此后每次代码变更都必须将最后一位递增 1，并同步更新 `package.json` 与 `package-lock.json`。
 - 生产环境必须使用每次构建唯一的版本标识注册 `/sw.js?v=<build-version>`，静态缓存名称也必须包含同一个版本；不能只使用长期不变的 `package.json` 版本，否则代码变化后浏览器可能继续命中旧 chunk。
 - 新 Service Worker 安装完成后保持 `waiting`，由界面提示“发现新版本”；用户确认后发送 `SKIP_WAITING`，并在 `controllerchange` 后刷新页面。不要在 `install` 阶段无条件调用 `skipWaiting()`。
 - 激活新 Service Worker 时只清理 `pi-web-` 前缀下的旧版本缓存，不得清理其它站点数据或认证信息。`/sw.js`、页面导航和 API 请求必须绕过静态资源缓存。
@@ -304,6 +304,18 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 ### 上游合并取舍（v0.11.0 起）
 - 侧栏保留 fork 实现（ProjectSection、sidebar-preferences 同步、回收站、会话搜索）。上游 v0.11.0 的侧栏重设计（`session-ui-state`、分组/归档/项目置顶、行菜单 Fork、新会话项目栏 `NewSessionContextBar`/`ProjectWorktreePicker`）及依赖它的后续功能均未合入，合并时对这些新文件按删除处理，需要时单独移植。
 - fork 早期以 squash 方式整合上游，合并基线之前的上游改动可能从未进入 fork，三方合并会把它们当作“fork 已删除”静默丢弃。合并时对基线已有、fork 缺失的上游功能要逐个确认，例如本次补回的 Service Worker 导航/静态资源 8s 首字节超时（上游 #879）。
+- 上游与 fork 都实现过的功能，按以下结论合并，后续合并不要重新引入另一套：
+  - 会话目录变化：保留 fork 的 recursive `fs.watch` 增量 stat，并叠加上游 #1100 的文件名成员检查（`checkSessionMembership()` 由 `getSessionListVersion()` 触发，每秒最多一次，只读目录）。watcher 只负责性能，外部进程新建/删除会话由成员检查更新版本号；全量对账时记录成员基线。
+  - 旧消息分页：fork 的 `loadEarlierMessages` 在同一次 `setHistoryPage` 中提交游标和 `loading`，并拒绝重复 entryId，上游 d474ce2 的重复前插问题不存在，未移植。
+  - 新会话首条消息：fork 在发送途中切走会话时拒绝发送并通过 `setDraft` 保留草稿，上游 e7d0fda（切走后照常发送）未移植。
+  - 通知：fork 的 NoticeShelf 收起时单行居中，上游 d850be1 不适用；终端二维码（#755）按 `splitNoticeText` 以 `.notice-shelf-art` 渲染。
+  - 回合最终回答的拆分副本通过 `lib/turn-views.ts` 按原消息缓存（#1005），不要在渲染中重新 `withAssistantBlocks`。
+- 子代理查看采用上游 SubagentViewer：`AppShell` 的 `agentTabs` 与文件、终端标签并列，激活时与终端互斥地覆盖文件标签，关闭时按终端、子代理、文件的顺序选择下一个；切换项目时丢弃子代理标签。MessageView 的回调为 `onOpenSubagent(sessionId, label)`，不再跳转主会话。
+- 文件标签按项目暂存（上游 d69b33e）：`useFilePanel.switchWorkspace()` 在 `handleCwdChange` 的项目切换处调用，查看器状态按 `workspaceGeneration` 回写到所属项目；激活中的终端在切换后继续占用面板。
+- 侧栏的“等待输入”来自 `/api/agent/running` 的 `awaitingInputSessionIds`（运行中且有阻塞型扩展 UI 请求），`SessionItem` 用琥珀色呼吸圆点替换运行动画，其余仍按运行中处理。
+- `display: false` 的自定义消息与 pi TUI 一致完全不渲染（ChatWindow 跳过且不计入过程详情，MessageView 入口兜底），不再显示“隐藏的扩展消息”卡片。
+- CLI 的 `version/status/stop/open` 来自上游；`pi-web update` 在 fork 中禁用，只打印 fork Release 与 `scripts/macos-service.sh` 的更新方式，绝不执行 `npm install -g @agegr/pi-web`。
+
 
 ### Fork Release npm 包
 - `.github/workflows/release-package.yml` 只在 `sleepinginsummer/pi-web` 发布，手动触发或 `v*-merge.*` 标签触发。版本须与两个 package-lock 版本一致，已有标签须指向本次提交，禁止覆盖旧 Release。构建后先核对 npm pack 文件清单，再通过 `scripts/verify-release.mjs` 在独立目录仅安装生产依赖并验证 PTY、登录、页面与 SDK API，最后发布 `.tgz`。

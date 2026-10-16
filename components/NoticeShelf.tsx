@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { copyText } from "@/lib/clipboard";
+import { splitNoticeText } from "@/lib/notice-text";
 
 export interface NoticeShelfItem {
   id: string;
@@ -99,7 +100,12 @@ export function NoticeShelf({
           >
             <span className="notice-shelf-dot" style={{ background: color }} />
             <span className="notice-shelf-message">
-              {copiedNoticeId === notice.id ? copiedLabel : notice.message}
+              {copiedNoticeId === notice.id ? copiedLabel : splitNoticeText(notice.message).map((part, partIndex) => (
+                // 终端二维码或进度条（#755）：保留全部空格、行间无缝隙，并使用自带方块字符的等宽字体。
+                part.kind === "art"
+                  ? <span key={partIndex} className="notice-shelf-art">{part.text}</span>
+                  : part.text
+              ))}
             </span>
           </button>
         );

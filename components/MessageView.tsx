@@ -11,7 +11,7 @@ import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { CustomMessageView } from "./CustomMessageView";
 import { CopyActionIcon, MessageActions, createForkAction, type MessageAction } from "./MessageActions";
 import { formatMessageTime as formatTime, getMessageImages, getMessageText, MessageImage } from "./MessageContentPrimitives";
-import { getAssistantErrorMessage, getThinkingPreview, hasAssistantAnswer, isAssistantTruncated, isDisplayableAssistantBlock } from "@/lib/message-display";
+import { getAssistantErrorMessage, getThinkingPreview, hasAssistantAnswer, isAssistantTruncated, isDisplayableAssistantBlock, isHiddenCustomMessage } from "@/lib/message-display";
 import { parseUnifiedPatch, type SplitDiffCell, type SplitDiffFile } from "@/lib/patch";
 import { isApplyPatchToolName, isEditToolName, isWriteToolName } from "@/lib/tool-names";
 import { parseApplyPatchInput, applyPatchPreviewToFiles, applyPatchResultHasFailures, extractApplyPatchPaths, getApplyPatchInputText } from "@/lib/apply-patch";
@@ -25,6 +25,7 @@ import type { SubagentToolDetails } from "@/lib/subagent-extension";
 import { CODEMODE_TOOL_NAME, codemodeCalls, codemodeScript, codemodeScriptPreview, stripCodemodeHeader } from "@/lib/codemode-view";
 import { CodemodeCallList } from "./CodemodeToolView";
 import { mcpToolLabel, prettyMcpResultText } from "@/lib/mcp-tool-display";
+import { streamRateKey, streamRateStart, streamTokensPerSecond, type StreamRateStart } from "@/lib/stream-token-rate";
 import type {
   AgentMessage,
   UserMessage,
@@ -196,7 +197,7 @@ interface Props {
   modelNames?: Record<string, string>;
   cwd?: string;
   onOpenFile?: (filePath: string) => void;
-  onOpenSession?: (sessionId: string) => void;
+  onOpenSubagent?: (sessionId: string, label: string) => void;
   entryId?: string;
   searchBlockIndex?: number;
   onFork?: (entryId: string, draft?: ChatDraft) => void;
@@ -227,12 +228,14 @@ function haveSameRelevantToolResults(
   return true;
 }
 
-export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, onOpenSession, entryId, searchBlockIndex, onFork, forking, onEditContent, onCancelEdit, isEditing, showTimestamp, prevTimestamp, sessionId, writtenFiles, visibleBlockOffset, onCompact, isCompacting, compactError }: Props) {
+export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, onOpenSubagent, entryId, searchBlockIndex, onFork, forking, onEditContent, onCancelEdit, isEditing, showTimestamp, prevTimestamp, sessionId, writtenFiles, visibleBlockOffset, onCompact, isCompacting, compactError }: Props) {
+  // display:false 的自定义消息只给模型看，pi TUI 不渲染（#1043）。
+  if (isHiddenCustomMessage(message)) return null;
   if (message.role === "user") {
     return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} onEditContent={onEditContent} onCancelEdit={onCancelEdit} isEditing={isEditing} />;
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} onOpenSession={onOpenSession} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} searchBlockIndex={searchBlockIndex} onFork={onFork} forking={forking} writtenFiles={writtenFiles} visibleBlockOffset={visibleBlockOffset} onCompact={onCompact} isCompacting={isCompacting} compactError={compactError} />;
+    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} onOpenSubagent={onOpenSubagent} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} searchBlockIndex={searchBlockIndex} onFork={onFork} forking={forking} writtenFiles={writtenFiles} visibleBlockOffset={visibleBlockOffset} onCompact={onCompact} isCompacting={isCompacting} compactError={compactError} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
@@ -255,7 +258,7 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     && prev.modelNames === next.modelNames
     && prev.cwd === next.cwd
     && prev.onOpenFile === next.onOpenFile
-    && prev.onOpenSession === next.onOpenSession
+    && prev.onOpenSubagent === next.onOpenSubagent
     && prev.entryId === next.entryId
     && prev.searchBlockIndex === next.searchBlockIndex
     && prev.onFork === next.onFork
@@ -459,7 +462,7 @@ function AssistantMessageView({
   modelNames,
   cwd,
   onOpenFile,
-  onOpenSession,
+  onOpenSubagent,
   showTimestamp,
   prevTimestamp,
   sessionId,
@@ -479,7 +482,7 @@ function AssistantMessageView({
   modelNames?: Record<string, string>;
   cwd?: string;
   onOpenFile?: (filePath: string) => void;
-  onOpenSession?: (sessionId: string) => void;
+  onOpenSubagent?: (sessionId: string, label: string) => void;
   showTimestamp?: boolean;
   prevTimestamp?: number;
   sessionId?: string;
@@ -506,7 +509,10 @@ function AssistantMessageView({
   const unansweredTruncation = truncated && !hasAssistantAnswer(message);
   const [hovered, setHovered] = useState(false);
   const [copied, setCopied] = useState(false);
-  const streamStartRef = useRef<number | null>(null);
+  const streamStartRef = useRef<StreamRateStart | null>(null);
+  const rateKey = streamRateKey(message);
+  const streamRateKeyRef = useRef(rateKey);
+  streamRateKeyRef.current = rateKey;
   const [tps, setTps] = useState<number | null>(null);
   const blockItemsRef = useRef(allBlockItems);
   blockItemsRef.current = allBlockItems;
@@ -618,9 +624,9 @@ function AssistantMessageView({
 
       const tokens = estimatedTokensRef.current;
       if (tokens === 0) return;
-      if (streamStartRef.current === null) streamStartRef.current = now;
-      const elapsed = (now - streamStartRef.current) / 1000;
-      if (elapsed > 0.5) setTps(tokens / elapsed);
+      streamStartRef.current ??= streamRateStart(streamRateKeyRef.current, tokens, now);
+      const rate = streamTokensPerSecond(streamStartRef.current, tokens, now);
+      if (rate !== null) setTps(rate);
     };
     const id = setInterval(tick, 300);
     return () => clearInterval(id);
@@ -698,7 +704,7 @@ function AssistantMessageView({
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {blockItems.map(({ block, originalIndex }) => (
-          <BlockView key={`${entryId ?? "stream"}-${originalIndex}`} block={block} searchTarget={originalIndex === searchBlockIndex} toolResults={toolResults} isStreaming={isStreaming} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} onOpenSession={onOpenSession} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} />
+          <BlockView key={`${entryId ?? "stream"}-${originalIndex}`} block={block} searchTarget={originalIndex === searchBlockIndex} toolResults={toolResults} isStreaming={isStreaming} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} onOpenSubagent={onOpenSubagent} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} />
         ))}
       </div>
 
@@ -788,7 +794,7 @@ function AssistantMessageView({
   );
 }
 
-function BlockView({ block, searchTarget, toolResults, isStreaming, streamingDuration, toolCallDurations, cwd, onOpenFile, onOpenSession, sessionId, entryId, blockIndex }: { block: AssistantContentBlock; searchTarget?: boolean; toolResults?: Map<string, ToolResultMessage>; isStreaming?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; onOpenSession?: (sessionId: string) => void; sessionId?: string; entryId?: string; blockIndex: number }) {
+function BlockView({ block, searchTarget, toolResults, isStreaming, streamingDuration, toolCallDurations, cwd, onOpenFile, onOpenSubagent, sessionId, entryId, blockIndex }: { block: AssistantContentBlock; searchTarget?: boolean; toolResults?: Map<string, ToolResultMessage>; isStreaming?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; onOpenSubagent?: (sessionId: string, label: string) => void; sessionId?: string; entryId?: string; blockIndex: number }) {
   if (block.type === "text") {
     return <div data-search-target={searchTarget || undefined}><TextBlock block={block as TextContent} isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile} /></div>;
   }
@@ -802,7 +808,7 @@ function BlockView({ block, searchTarget, toolResults, isStreaming, streamingDur
     const tc = block as ToolCallContent;
     const result = toolResults?.get(tc.toolCallId);
     const duration = toolCallDurations?.get(tc.toolCallId);
-    return <ToolCallBlock block={tc} result={result} duration={duration} onOpenSession={onOpenSession} />;
+    return <ToolCallBlock block={tc} result={result} duration={duration} onOpenSubagent={onOpenSubagent} />;
   }
   return null;
 }
@@ -975,7 +981,7 @@ export function formatToolDuration(ms: number): string {
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m ${remainder}s`;
 }
 
-function ToolCallBlock({ block, result, duration, onOpenSession }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number; onOpenSession?: (sessionId: string) => void }) {
+function ToolCallBlock({ block, result, duration, onOpenSubagent }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number; onOpenSubagent?: (sessionId: string, label: string) => void }) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(() => isToolCallExpanded(block.toolCallId));
   const [deferredInput, setDeferredInput] = useState<unknown>(null);
@@ -1084,15 +1090,15 @@ function ToolCallBlock({ block, result, duration, onOpenSession }: { block: Tool
             <polyline points="2 3.5 5 6.5 8 3.5" />
           </svg>
         </button>
-        {subagent && onOpenSession && (
+        {subagent && onOpenSubagent && (
           <button
             type="button"
-            onClick={() => onOpenSession(subagent.sessionId)}
-            title={t("subagent.open")}
-            aria-label={t("subagent.open")}
+            onClick={() => onOpenSubagent(subagent.sessionId, subagent.description || subagent.profile)}
+            title={t("subagent.openTab")}
+            aria-label={t("subagent.openTab")}
             style={{ width: 32, display: "grid", placeItems: "center", border: "none", borderLeft: "1px solid var(--border)", background: "none", color: "var(--text-muted)", cursor: "pointer", flexShrink: 0 }}
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M15 3h6v6" /><path d="M10 14 21 3" /><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /></svg>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="5" y="7" width="14" height="11" rx="2" /><path d="M9 11h.01M15 11h.01M9 15h6M12 7V4M10 4h4" /></svg>
           </button>
         )}
       </div>
@@ -1483,9 +1489,11 @@ function PairedResult({ text, textBlocks, images, isEmpty, isError }: {
 
 function CompactionMessageView({ message }: { message: CustomMessage }) {
   const { t } = useI18n();
+  // Collapsed by default, as in pi's TUI: a summary can run to pages.
+  const [expanded, setExpanded] = useState(false);
   const summary = getMessageText(message.content);
-  const parsedSummary = useMemo(() => parseCompactionSummary(summary), [summary]);
   const time = formatTime(message.timestamp);
+  const tokensBefore = (message.details as { tokensBefore?: unknown } | undefined)?.tokensBefore;
 
   return (
     <div style={{ marginBottom: 16 }}>
@@ -1515,20 +1523,61 @@ function CompactionMessageView({ message }: { message: CustomMessage }) {
         </div>
 
         <div style={{ padding: "11px 13px 12px" }}>
-          <div style={{ color: "var(--text)", fontSize: "calc(15px + var(--chat-font-size-offset, 0px))", fontWeight: 700, lineHeight: 1.35 }}>
-             {t("i18n.conversationCompacted")}
-          </div>
-          <div style={{ marginTop: 3, marginBottom: 10, color: "var(--text)", fontSize: "calc(14px + var(--chat-font-size-offset, 0px))", lineHeight: 1.5 }}>
-             {t("i18n.compactionDescription")}
-          </div>
-          {parsedSummary.body ? (
-            <MarkdownBody className="markdown-compaction-message">{parsedSummary.body}</MarkdownBody>
-          ) : (
-             <span style={{ color: "var(--text-dim)", fontSize: 12 }}>{t("i18n.noSummary")}</span>
-          )}
-          <CompactionFileMetadata readFiles={parsedSummary.readFiles} modifiedFiles={parsedSummary.modifiedFiles} />
+          <button
+            type="button"
+            aria-expanded={expanded}
+            title={expanded ? t("i18n.collapse") : t("i18n.expand")}
+            onClick={() => setExpanded((v) => !v)}
+            style={{
+              display: "flex",
+              alignItems: "flex-start",
+              gap: 8,
+              width: "100%",
+              padding: 0,
+              border: "none",
+              background: "transparent",
+              color: "var(--text)",
+              cursor: "pointer",
+              font: "inherit",
+              textAlign: "left",
+            }}
+          >
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0, marginTop: 4, color: "var(--text-muted)", transform: expanded ? "rotate(90deg)" : "none", transition: "transform 0.15s" }}>
+              <polyline points="4 2.5 7.5 6 4 9.5" />
+            </svg>
+            <span style={{ minWidth: 0 }}>
+              <span style={{ display: "block", fontSize: "calc(15px + var(--chat-font-size-offset, 0px))", fontWeight: 700, lineHeight: 1.35 }}>
+                {t("i18n.conversationCompacted")}
+              </span>
+              {typeof tokensBefore === "number" && Number.isFinite(tokensBefore) && (
+                <span style={{ display: "block", marginTop: 3, color: "var(--text-muted)", fontSize: "calc(13px + var(--chat-font-size-offset, 0px))", lineHeight: 1.5 }}>
+                  {t("i18n.compactedFromTokens", { tokens: tokensBefore.toLocaleString() })}
+                </span>
+              )}
+            </span>
+          </button>
+          {expanded && <CompactionSummaryDetails summary={summary} />}
         </div>
       </div>
+    </div>
+  );
+}
+
+export function CompactionSummaryDetails({ summary }: { summary: string }) {
+  const { t } = useI18n();
+  const parsedSummary = useMemo(() => parseCompactionSummary(summary), [summary]);
+
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div style={{ marginBottom: 10, color: "var(--text)", fontSize: "calc(14px + var(--chat-font-size-offset, 0px))", lineHeight: 1.5 }}>
+         {t("i18n.compactionDescription")}
+      </div>
+      {parsedSummary.body ? (
+        <MarkdownBody className="markdown-compaction-message">{parsedSummary.body}</MarkdownBody>
+      ) : (
+         <span style={{ color: "var(--text-dim)", fontSize: 12 }}>{t("i18n.noSummary")}</span>
+      )}
+      <CompactionFileMetadata readFiles={parsedSummary.readFiles} modifiedFiles={parsedSummary.modifiedFiles} />
     </div>
   );
 }

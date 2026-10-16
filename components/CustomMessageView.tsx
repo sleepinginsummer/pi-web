@@ -16,8 +16,8 @@ interface Props {
 /** 渲染扩展自定义消息，并在该边界内适配扩展专属展示协议。 */
 export function CustomMessageView({ message, cwd, onOpenFile }: Props) {
   const { t } = useI18n();
-  const isHiddenDisplay = message.display === false;
-  const [contentExpanded, setContentExpanded] = useState(!isHiddenDisplay);
+  // 与 pi TUI 一致，展示的自定义消息默认展开；display:false 的消息在上层直接跳过。
+  const [contentExpanded, setContentExpanded] = useState(true);
   const [detailsExpanded, setDetailsExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
   const rawText = getMessageText(message.content);
@@ -30,11 +30,10 @@ export function CustomMessageView({ message, cwd, onOpenFile }: Props) {
   const contentView: CustomMessageContentView = contentExpanded
     ? { mode: "expanded", text, images, cwd, onOpenFile }
     : { mode: "collapsed", preview: text ? previewText(text) : null, onExpand: () => setContentExpanded(true) };
-  const toggle = isHiddenDisplay
-    ? { mode: "content" as const, expanded: contentExpanded, onToggle: () => setContentExpanded((value) => !value) }
-    : hasDetails
-      ? { mode: "details" as const, expanded: detailsExpanded, onToggle: () => setDetailsExpanded((value) => !value) }
-      : null;
+  // 标题栏负责折叠正文；底部按钮只管 details，否则没有 details 的消息将无法折叠。
+  const toggle = hasDetails
+    ? { mode: "details" as const, expanded: detailsExpanded, onToggle: () => setDetailsExpanded((value) => !value) }
+    : null;
   const actionsView: CustomMessageActionsView = {
     copy: text || detailsText
       ? {
@@ -56,18 +55,18 @@ export function CustomMessageView({ message, cwd, onOpenFile }: Props) {
         border: "1px solid var(--border)",
         borderRadius: 8,
         overflow: "hidden",
-        background: isHiddenDisplay ? "var(--bg-subtle)" : "var(--bg)",
-        opacity: isHiddenDisplay && !contentExpanded ? 0.82 : 1,
+        background: "var(--bg)",
       }}>
         <CustomMessageHeader
           title={title}
           time={formatMessageTime(message.timestamp)}
-          hidden={isHiddenDisplay}
+          expanded={contentExpanded}
+          onToggle={() => setContentExpanded((value) => !value)}
         />
         <CustomMessageContent view={contentView} />
         <CustomMessageActions view={actionsView} />
         <CustomMessageDetails
-          visible={hasDetails && ((isHiddenDisplay && contentExpanded) || (!isHiddenDisplay && detailsExpanded))}
+          visible={hasDetails && detailsExpanded}
           text={detailsText}
         />
       </div>
@@ -75,25 +74,42 @@ export function CustomMessageView({ message, cwd, onOpenFile }: Props) {
   );
 }
 
-function CustomMessageHeader({ title, time, hidden }: { title: string; time: string | null; hidden: boolean }) {
+function CustomMessageHeader({ title, time, expanded, onToggle }: {
+  title: string;
+  time: string | null;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
   const { t } = useI18n();
   return (
-    <div style={{
-      display: "flex",
-      alignItems: "center",
-      gap: 8,
-      padding: "7px 10px",
-      borderBottom: "1px solid var(--border)",
-      background: "var(--bg-panel)",
-      color: "var(--text-muted)",
-      fontSize: 12,
-    }}>
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-expanded={expanded}
+      title={expanded ? t("i18n.collapse") : t("i18n.expand")}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        width: "100%",
+        padding: "7px 10px",
+        border: "none",
+        borderBottom: "1px solid var(--border)",
+        background: "var(--bg-panel)",
+        color: "var(--text-muted)",
+        cursor: "pointer",
+        fontSize: 12,
+        textAlign: "left",
+      }}
+    >
       <span style={{ minWidth: 0, overflowWrap: "anywhere", color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 650 }}>
         {title}
       </span>
-      {hidden && <span style={{ color: "var(--text-dim)", fontSize: 11 }}>{t("i18n.hiddenExtensionMessage")}</span>}
       {time && <span style={{ marginLeft: "auto", flexShrink: 0, color: "var(--text-dim)", fontSize: 10 }}>{time}</span>}
-    </div>
+      <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--text-dim)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0, marginLeft: time ? 0 : "auto", transform: expanded ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}>
+        <polyline points="2 3.5 5 6.5 8 3.5" />
+      </svg>
+    </button>
   );
 }
 
@@ -136,7 +152,7 @@ function CustomMessageContent({ view }: { view: CustomMessageContentView }) {
 
 type CustomMessageActionsView = {
   copy: { copied: boolean; onCopy: () => void } | null;
-  toggle: { mode: "content" | "details"; expanded: boolean; onToggle: () => void } | null;
+  toggle: { mode: "details"; expanded: boolean; onToggle: () => void } | null;
 };
 
 function CustomMessageActions({ view }: { view: CustomMessageActionsView }) {
@@ -172,9 +188,7 @@ function CustomMessageActions({ view }: { view: CustomMessageActionsView }) {
           cursor: "pointer",
           fontSize: 11,
         }}>
-          {view.toggle.mode === "content"
-            ? (view.toggle.expanded ? t("i18n.collapse") : t("i18n.expand"))
-            : (view.toggle.expanded ? t("i18n.hideDetails") : t("i18n.showDetails"))}
+          {view.toggle.expanded ? t("i18n.hideDetails") : t("i18n.showDetails")}
         </button>
       )}
     </div>

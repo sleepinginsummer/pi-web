@@ -12,7 +12,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { ChatInput, ModelDataDiagnosticBanner, ModelErrorBanner, ModelScopeWarningBanner, modelSupportsImageInput, canClearBuiltinCommandInput, canRunBuiltinSlashCommandWhileStreaming, isExactSlashCommand, offersBuiltinSlashCommandWhileStreaming, replaceTextareaRange, submitsSlashCommandOnEnter } = await jiti.import("./ChatInput.tsx");
+const { ChatInput, ModelDataDiagnosticBanner, RUN_END_CLICK_GUARD_MS, isRunEndStrayClick, ModelErrorBanner, ModelScopeWarningBanner, modelSupportsImageInput, canClearBuiltinCommandInput, canRunBuiltinSlashCommandWhileStreaming, isExactSlashCommand, offersBuiltinSlashCommandWhileStreaming, replaceTextareaRange, submitsSlashCommandOnEnter } = await jiti.import("./ChatInput.tsx");
 const { filterModelOptions } = await jiti.import("./ModelPicker.tsx");
 const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
 const { clearDraft, setDraft } = await jiti.import("../lib/draft-store.ts");
@@ -240,6 +240,25 @@ test("shows the follow-up shortcut in the button tooltip", () => {
   assert.match(html, /title="Queue this message after the agent finishes \(Alt\/Option\+Enter\)"/);
   assert.match(html, /aria-keyshortcuts="Alt\+Enter"/);
 });
+
+test("ignores a pointer click that reaches Stop's slot just as the run ends", () => {
+  assert.equal(isRunEndStrayClick(1, 0), true);
+  assert.equal(isRunEndStrayClick(2, RUN_END_CLICK_GUARD_MS - 1), true);
+  assert.equal(isRunEndStrayClick(1, RUN_END_CLICK_GUARD_MS), false);
+  assert.equal(isRunEndStrayClick(1, Number.POSITIVE_INFINITY), false, "no run has ended yet");
+  assert.equal(isRunEndStrayClick(0, 0), false, "Enter/Space on a focused button is never a stray click");
+  assert.ok(RUN_END_CLICK_GUARD_MS <= 700, "a deliberate click after a run must not wait noticeably");
+
+  // Stop 与 Compact 共用声音开关左侧的位置，双击 Stop 的第二击会在运行结束后落到 Compact 上（#1131）。
+  const hook = readFileSync(new URL("../lib/run-end-click.ts", import.meta.url), "utf8");
+  const controls = readFileSync(new URL("./InputControls.tsx", import.meta.url), "utf8");
+  assert.match(hook, /useLayoutEffect\(\(\) => \{\s*if \(!isStreaming\) return;\s*return \(\) => \{ runEndedAtRef\.current = performance\.now\(\); \};\s*\}, \[isStreaming\]\);/);
+  assert.match(controls, /const isStrayClick = useRunEndStrayClick\(isStreaming\);/);
+  assert.match(controls, /onClick=\{isCompacting \? onAbortCompaction : \(event\) => \{ if \(!isStrayClick\(event\)\) onCompact\?\.\(\); \}\}/);
+  assert.match(controls, /onClick=\{\(event\) => \{ if \(!isStrayClick\(event\)\) setToolDropdownOpen\(\(open\) => !open\); \}\}/);
+  assert.match(controls, /onClick=\{onAbort\}/, "Stop itself is never delayed");
+});
+
 test("renders the upstream model error", () => {
   const html = renderToStaticMarkup(
     React.createElement(
@@ -324,7 +343,24 @@ test("renders the compact composer with the standard Send button and no session 
   assert.match(html, /<textarea/);
   assert.match(html, />Send<\/button>/);
   assert.equal((html.match(/<button\b/g) ?? []).length, 1);
-  assert.doesNotMatch(html, /type="file"|Attach image|Change tool preset/);
+  assert.doesNotMatch(html, /type="file"|Attach files|Change tool preset/);
+});
+
+test("the attach button takes any file when the chat handles them, and images only otherwise (#1101)", () => {
+  const render = (props) => renderToStaticMarkup(
+    React.createElement(I18nProvider, null, React.createElement(ChatInput, {
+      onSend() {}, onAbort() {}, isStreaming: false, modelState: emptyModelState, modelActions: emptyModelActions, ...props,
+    })),
+  );
+  const fileInput = (html) => html.match(/<input[^>]*type="file"[^>]*>/)?.[0] ?? "";
+
+  const html = render({ onAttachFiles() {} });
+  assert.match(html, /title="Attach files"/);
+  assert.match(fileInput(html), /multiple=""/);
+  // No accept list and no capture: phones offer files, the photo library and the camera.
+  assert.doesNotMatch(fileInput(html), /accept=|capture=/);
+
+  assert.match(fileInput(render({})), /accept="image\/\*"/);
 });
 
 test("filters model options by name and id", () => {
@@ -665,4 +701,30 @@ test("移回入口恢复完整图片预览并保留现有附件和草稿", async
   assert.equal(persisted.key, "test-session");
   assert.equal(persisted.draft.images.length, 2);
   assert.equal(persisted.draft.textAttachment, "TXT 附件");
+});
+
+test("a compact error can be dismissed when the composer is given a handler", () => {
+  const render = (props) => renderToStaticMarkup(
+    React.createElement(I18nProvider, null,
+      React.createElement(ChatInput, {
+        onSend() {},
+        onAbort() {},
+        onCompact() {},
+        isStreaming: false,
+        modelState: emptyModelState,
+        modelActions: emptyModelActions,
+        compactError: "Nothing to compact (session too small)",
+        ...props,
+      })),
+  );
+
+  assert.match(render({ onDismissCompactError() {} }), /aria-label="Dismiss compaction error"/);
+  assert.doesNotMatch(render({}), /Dismiss compaction error/);
+});
+
+test("the attach button hands every picked file to the chat, or only images without a handler", () => {
+  const source = readFileSync(new URL("./ChatInput.tsx", import.meta.url), "utf8");
+  assert.match(source, /accept=\{onAttachFiles \? undefined : "image\/\*"\}/);
+  assert.match(source, /onChange=\{handleFilePick\}/);
+  assert.match(source, /if \(onAttachFiles\) onAttachFiles\(files\);\s*else void processImageFiles\(files\);/);
 });

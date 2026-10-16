@@ -4,7 +4,7 @@ import { Children, cloneElement, createContext, isValidElement, memo, useCallbac
 import ReactMarkdown, { type Components, type ExtraProps, type Options as ReactMarkdownOptions } from "react-markdown";
 import { parsePdfPageFragment, resolveLocalFileHref, shouldOpenLocalFileInApp } from "@/lib/file-links";
 import { encodeFilePathForApi } from "@/lib/file-paths";
-import { markdownRehypePlugins, markdownRemarkPlugins, markdownUrlTransform, markdownUserRemarkPlugins, normalizeDisplayMath } from "@/lib/markdown";
+import { markdownAppUrlTransform, markdownRehypePlugins, markdownRemarkPlugins, markdownUrlTransform, markdownUserRemarkPlugins, normalizeDisplayMath } from "@/lib/markdown";
 import { splitStreamingMarkdown } from "@/lib/streaming-markdown-blocks";
 import { ImagePreview } from "./ImagePreview";
 import { MermaidBlock, CodeBlock } from "./MermaidBlock";
@@ -122,10 +122,16 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
     pre({ children }) {
       return <>{children}</>;
     },
-    ol({ children, start, ...props }) {
-      delete props.node;
+    ol({ children, start, style, node, ...props }) {
       const firstNumber = typeof start === "number" ? start : 1;
-      return <ol start={start} {...props}>{renderListItems(children, true, firstNumber)}</ol>;
+      // 序号画在左内边距里，"10." 以上会被 .markdown-body 的 overflow-x 裁掉，内边距随最大序号位数增长。
+      const items = node?.children.filter((child) => child.type === "element" && child.tagName === "li").length ?? 0;
+      const digits = String(Math.abs(firstNumber + Math.max(items, 1) - 1)).length;
+      return (
+        <ol start={start} style={{ ...style, ["--ol-marker-digits" as string]: Math.max(digits, 2) }} {...props}>
+          {renderListItems(children, true, firstNumber)}
+        </ol>
+      );
     },
     ul({ children, ...props }) {
       delete props.node;
@@ -176,7 +182,8 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
   const renderConfig = useMemo<MarkdownRenderConfig>(() => ({
     remarkPlugins: keepLineBreaks ? markdownUserRemarkPlugins : markdownRemarkPlugins,
     rehypePlugins: markdownRehypePlugins,
-    urlTransform: hasOnOpenFile ? markdownUrlTransform : undefined,
+    // 没有文件打开回调时仍需保留 obsidian://、vscode:// 等桌面应用链接。
+    urlTransform: hasOnOpenFile ? markdownUrlTransform : markdownAppUrlTransform,
     components,
   }), [components, hasOnOpenFile, keepLineBreaks]);
   // 流式期间把累积文本切成可缓存前缀块，每帧只重新解析仍在增长的尾部。
