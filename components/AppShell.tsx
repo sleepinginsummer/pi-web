@@ -13,6 +13,8 @@ import { ProjectTrustDialog } from "./ProjectTrustDialog";
 import { AppTopBar } from "./AppTopBar";
 import { TerminalPanel } from "./TerminalPanel";
 import { SubagentViewer } from "./SubagentViewer";
+import { DevServerViewer } from "./DevServerViewer";
+import { agentOverlayTabId, serverOverlayTabId, type OverlayTab } from "./overlay-tabs";
 import { newTerminalTab, restoreTerminalTabs, TERMINAL_TABS_KEY, type TerminalTab } from "./terminal-tab-state";
 import { useFontPreferences } from "@/hooks/useFontPreferences";
 import { useI18n } from "@/hooks/useI18n";
@@ -100,9 +102,9 @@ export function AppShell() {
   const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([]);
   const [activeTerminalTabId, setActiveTerminalTabId] = useState<string | null>(null);
   const [terminalsRestored, setTerminalsRestored] = useState(false);
-  // 子代理标签与文件、终端标签并列；激活时覆盖文件标签，切换项目时随旧项目一起丢弃。
-  const [agentTabs, setAgentTabs] = useState<{ sessionId: string; label: string }[]>([]);
-  const [activeAgentTabId, setActiveAgentTabId] = useState<string | null>(null);
+  // 子代理与开发服务器预览标签与文件、终端标签并列；激活时覆盖文件标签，切换项目时随旧项目一起丢弃。
+  const [overlayTabs, setOverlayTabs] = useState<OverlayTab[]>([]);
+  const [activeOverlayTabId, setActiveOverlayTabId] = useState<string | null>(null);
   const closeMobileSidebar = useCallback(() => setSidebarOpen(false), []);
 
   useEffect(() => {
@@ -143,45 +145,45 @@ export function AppShell() {
     options?: { sourceSessionId?: string | null; modeHint?: "diff"; page?: number },
   ) => {
     setActiveTerminalTabId(null);
-    setActiveAgentTabId(null);
+    setActiveOverlayTabId(null);
     openFileTab(filePath, fileName, options);
   }, [openFileTab]);
   const toggleFilePanel = useCallback(() => {
-    if (fileTabs.length > 0 || terminalTabs.length > 0 || agentTabs.length > 0) toggleFilePanelState();
-  }, [agentTabs.length, fileTabs.length, terminalTabs.length, toggleFilePanelState]);
+    if (fileTabs.length > 0 || terminalTabs.length > 0 || overlayTabs.length > 0) toggleFilePanelState();
+  }, [overlayTabs.length, fileTabs.length, terminalTabs.length, toggleFilePanelState]);
   const panelTabs: Tab[] = [...fileTabs, ...terminalTabs.map((tab) => ({
     id: tab.id,
     label: getFileName(tab.cwd) || tab.cwd,
     filePath: tab.cwd,
     kind: "terminal" as const,
     closing: Boolean(tab.closing),
-  })), ...agentTabs.map((tab) => ({
-    id: `agent:${tab.sessionId}`,
+  })), ...overlayTabs.map((tab) => ({
+    id: tab.id,
     label: tab.label,
-    filePath: tab.sessionId,
-    kind: "agent" as const,
+    filePath: tab.kind === "agent" ? tab.sessionId : tab.serverId,
+    kind: tab.kind,
   }))];
-  const activePanelTabId = activeTerminalTabId ?? activeAgentTabId ?? activeFileTabId;
-  const activeAgentTab = activeTerminalTabId === null && activeAgentTabId
-    ? agentTabs.find((tab) => `agent:${tab.sessionId}` === activeAgentTabId) ?? null
+  const activePanelTabId = activeTerminalTabId ?? activeOverlayTabId ?? activeFileTabId;
+  const activeOverlayTab = activeTerminalTabId === null && activeOverlayTabId
+    ? overlayTabs.find((tab) => tab.id === activeOverlayTabId) ?? null
     : null;
   const handleSelectPanelTab = useCallback((tabId: string) => {
     if (terminalTabs.some((tab) => tab.id === tabId)) {
       setActiveTerminalTabId(tabId);
-      setActiveAgentTabId(null);
+      setActiveOverlayTabId(null);
       activatePanelTab(tabId);
       return;
     }
-    if (tabId.startsWith("agent:")) {
+    if (overlayTabs.some((tab) => tab.id === tabId)) {
       setActiveTerminalTabId(null);
-      setActiveAgentTabId(tabId);
+      setActiveOverlayTabId(tabId);
       openFilePanel();
       return;
     }
     setActiveTerminalTabId(null);
-    setActiveAgentTabId(null);
+    setActiveOverlayTabId(null);
     selectFileTab(tabId);
-  }, [activatePanelTab, openFilePanel, selectFileTab, terminalTabs]);
+  }, [activatePanelTab, openFilePanel, overlayTabs, selectFileTab, terminalTabs]);
   const handleFileViewerStateChange = useCallback((generation: number, tabId: string, viewerRevision: number, viewerState: import("@/lib/file-viewer-state").FileViewerState) => {
     saveFileViewerStateForTab(generation, tabId, viewerRevision, viewerState);
   }, [saveFileViewerStateForTab]);
@@ -590,8 +592,8 @@ export function AppShell() {
     // 子代理标签属于旧项目的会话，直接丢弃；终端跨项目保留，激活中的终端继续占用面板。
     const keepPanelForTerminal = activeTerminalTabId !== null && rightPanelOpen;
     switchFileWorkspaceTabs(currentProject, newProject);
-    setAgentTabs([]);
-    setActiveAgentTabId(null);
+    setOverlayTabs([]);
+    setActiveOverlayTabId(null);
     if (keepPanelForTerminal) activatePanelTab(activeTerminalTabId);
     if (!skipWorkspaceRestore) restoreWorkspaceContext(newProject);
     router.replace(typeof window !== "undefined" ? window.location.pathname : "/", { scroll: false });
@@ -652,16 +654,27 @@ export function AppShell() {
     const tab = existing ?? newTerminalTab(cwd);
     if (!existing) setTerminalTabs((tabs) => [...tabs, tab]);
     setActiveTerminalTabId(tab.id);
-    setActiveAgentTabId(null);
+    setActiveOverlayTabId(null);
     activatePanelTab(tab.id);
     if (isMobile) setSidebarOpen(false);
   }, [activatePanelTab, terminalTabs, isMobile]);
 
   // Subagent work opens in a right-panel tab instead of hijacking the main chat.
   const handleOpenSubagentTab = useCallback((sessionId: string, label: string) => {
-    setAgentTabs((prev) => prev.some((tab) => tab.sessionId === sessionId) ? prev : [...prev, { sessionId, label }]);
+    const id = agentOverlayTabId(sessionId);
+    setOverlayTabs((prev) => prev.some((tab) => tab.id === id) ? prev : [...prev, { id, kind: "agent", sessionId, label }]);
     setActiveTerminalTabId(null);
-    setActiveAgentTabId(`agent:${sessionId}`);
+    setActiveOverlayTabId(id);
+    openFilePanel();
+    if (isMobile) setSidebarOpen(false);
+  }, [isMobile, openFilePanel]);
+
+  // A dev server's preview opens beside files and terminals, like a subagent.
+  const handleOpenServerPreview = useCallback((serverId: string, label: string) => {
+    const id = serverOverlayTabId(serverId);
+    setOverlayTabs((prev) => prev.some((tab) => tab.id === id) ? prev : [...prev, { id, kind: "server", serverId, label }]);
+    setActiveTerminalTabId(null);
+    setActiveOverlayTabId(id);
     openFilePanel();
     if (isMobile) setSidebarOpen(false);
   }, [isMobile, openFilePanel]);
@@ -671,12 +684,12 @@ export function AppShell() {
   // The switcher stays open beside the panel, except on phones, where the
   // panel covers the chat.
   const openSubagentTabIds = useMemo(
-    () => new Set(rightPanelOpen ? agentTabs.map((tab) => tab.sessionId) : []),
-    [agentTabs, rightPanelOpen],
+    () => new Set(rightPanelOpen ? overlayTabs.flatMap((tab) => tab.kind === "agent" ? [tab.sessionId] : []) : []),
+    [overlayTabs, rightPanelOpen],
   );
   const handleToggleSubagentTab = (sessionId: string, label: string) => {
     if (openSubagentTabIds.has(sessionId)) {
-      handleClosePanelTab(`agent:${sessionId}`);
+      handleClosePanelTab(agentOverlayTabId(sessionId));
       return;
     }
     if (isMobile) closeTopPanel();
@@ -691,7 +704,7 @@ export function AppShell() {
       const nextTerminalId = replacement?.id ?? remaining.at(-1)?.id ?? null;
       setActiveTerminalTabId(nextTerminalId);
       if (nextTerminalId) activatePanelTab(nextTerminalId);
-      else if (agentTabs.length > 0) setActiveAgentTabId(`agent:${agentTabs.at(-1)!.sessionId}`);
+      else if (overlayTabs.length > 0) setActiveOverlayTabId(overlayTabs.at(-1)!.id);
       else if (fileTabs.length === 0) closeFilePanel();
     }
   };
@@ -701,15 +714,15 @@ export function AppShell() {
       setTerminalTabs((tabs) => tabs.map((tab) => tab.id === tabId && !tab.closing ? { ...tab, closing: "close" } : tab));
       return;
     }
-    if (tabId.startsWith("agent:")) {
-      const remainingAgents = agentTabs.filter((tab) => `agent:${tab.sessionId}` !== tabId);
-      setAgentTabs(remainingAgents);
-      if (activeAgentTabId !== tabId) return;
-      const nextAgent = remainingAgents.at(-1);
-      if (nextAgent) {
-        setActiveAgentTabId(`agent:${nextAgent.sessionId}`);
+    if (overlayTabs.some((tab) => tab.id === tabId)) {
+      const remainingOverlays = overlayTabs.filter((tab) => tab.id !== tabId);
+      setOverlayTabs(remainingOverlays);
+      if (activeOverlayTabId !== tabId) return;
+      const nextOverlay = remainingOverlays.at(-1);
+      if (nextOverlay) {
+        setActiveOverlayTabId(nextOverlay.id);
       } else {
-        setActiveAgentTabId(null);
+        setActiveOverlayTabId(null);
         const nextTerminalId = terminalTabs.at(-1)?.id ?? null;
         if (nextTerminalId) {
           setActiveTerminalTabId(nextTerminalId);
@@ -720,31 +733,31 @@ export function AppShell() {
       }
       return;
     }
-    const closingActiveFile = activeTerminalTabId === null && activeAgentTabId === null && activeFileTabId === tabId;
+    const closingActiveFile = activeTerminalTabId === null && activeOverlayTabId === null && activeFileTabId === tabId;
     const remainingFiles = fileTabs.filter((tab) => tab.id !== tabId);
     closeFileTab(tabId);
     if (closingActiveFile && remainingFiles.length === 0) {
       const nextTerminalId = terminalTabs.at(-1)?.id ?? null;
-      const nextAgent = agentTabs.at(-1);
+      const nextOverlay = overlayTabs.at(-1);
       if (nextTerminalId) {
         setActiveTerminalTabId(nextTerminalId);
         activatePanelTab(nextTerminalId);
-      } else if (nextAgent) {
-        setActiveAgentTabId(`agent:${nextAgent.sessionId}`);
+      } else if (nextOverlay) {
+        setActiveOverlayTabId(nextOverlay.id);
         openFilePanel();
       }
     }
-  }, [activatePanelTab, activeAgentTabId, activeFileTabId, activeTerminalTabId, agentTabs, closeFileTab, closeFilePanel, fileTabs, openFilePanel, terminalTabs]);
+  }, [activatePanelTab, activeOverlayTabId, activeFileTabId, activeTerminalTabId, overlayTabs, closeFileTab, closeFilePanel, fileTabs, openFilePanel, terminalTabs]);
 
   const handleCloseAllFileTabs = useCallback(() => {
-    const nextTerminalId = activeTerminalTabId ?? (activeAgentTabId ? null : terminalTabs.at(-1)?.id ?? null);
-    const nextAgentId = nextTerminalId ? null : activeAgentTabId ?? (agentTabs.at(-1) ? `agent:${agentTabs.at(-1)!.sessionId}` : null);
+    const nextTerminalId = activeTerminalTabId ?? (activeOverlayTabId ? null : terminalTabs.at(-1)?.id ?? null);
+    const nextAgentId = nextTerminalId ? null : activeOverlayTabId ?? overlayTabs.at(-1)?.id ?? null;
     clearFileTabs();
     setActiveTerminalTabId(nextTerminalId);
-    setActiveAgentTabId(nextAgentId);
+    setActiveOverlayTabId(nextAgentId);
     if (nextTerminalId) activatePanelTab(nextTerminalId);
     else if (nextAgentId) openFilePanel();
-  }, [activatePanelTab, activeAgentTabId, activeTerminalTabId, agentTabs, clearFileTabs, openFilePanel, terminalTabs]);
+  }, [activatePanelTab, activeOverlayTabId, activeTerminalTabId, overlayTabs, clearFileTabs, openFilePanel, terminalTabs]);
 
   const handleViewFullHistory = useCallback(() => {
     if (!selectedSession) return;
@@ -1129,6 +1142,7 @@ export function AppShell() {
               onOpenFile={handleOpenLinkedFile}
               onFilesUploaded={handleExplorerRefresh}
               onOpenSubagent={handleOpenSubagentTab}
+              onOpenServerPreview={handleOpenServerPreview}
               onToolEnd={handleToolEnd}
               onAskInNewChat={handleAskInNewChat}
               quoteSelectionEnabled={quoteSelectionEnabled}
@@ -1257,7 +1271,7 @@ export function AppShell() {
 
         {/* Only the active viewer is mounted. Lightweight per-tab state is restored on activation. */}
         <div style={{ flex: 1, minHeight: 0, overflow: "hidden", paddingBottom: "env(safe-area-inset-bottom)" }}>
-          {!activeTerminalTabId && !activeAgentTab && activeFileTab?.filePath ? (
+          {!activeTerminalTabId && !activeOverlayTab && activeFileTab?.filePath ? (
             <FileViewer
               key={`${fileWorkspaceGeneration}:${activeFileTab.id}:${activeFileTab.viewerRevision ?? 0}`}
               filePath={activeFileTab.filePath}
@@ -1282,7 +1296,7 @@ export function AppShell() {
                 { sourceSessionId: activeFileTab.sourceSessionId, page },
               )}
             />
-          ) : !activeTerminalTabId && !activeAgentTab ? (
+          ) : !activeTerminalTabId && !activeOverlayTab ? (
             <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 12 }}>
                {translate("files.noneOpen")}
             </div>
@@ -1298,12 +1312,19 @@ export function AppShell() {
               />
             </div>
           ))}
-          {activeAgentTab && (
+          {activeOverlayTab?.kind === "server" && (
+            <DevServerViewer
+              key={activeOverlayTab.serverId}
+              serverId={activeOverlayTab.serverId}
+              fallbackLabel={activeOverlayTab.label}
+            />
+          )}
+          {activeOverlayTab?.kind === "agent" && (
             <SubagentViewer
-              key={activeAgentTab.sessionId}
-              sessionId={activeAgentTab.sessionId}
-              fallbackLabel={activeAgentTab.label}
-              running={runningSessionIds.has(activeAgentTab.sessionId)}
+              key={activeOverlayTab.sessionId}
+              sessionId={activeOverlayTab.sessionId}
+              fallbackLabel={activeOverlayTab.label}
+              running={runningSessionIds.has(activeOverlayTab.sessionId)}
               onOpenFile={handleOpenLinkedFile}
             />
           )}

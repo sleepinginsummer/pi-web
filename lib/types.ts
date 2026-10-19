@@ -430,3 +430,47 @@ export interface SessionContext {
   thinkingLevel: string;
   model: { provider: string; modelId: string } | null;
 }
+
+export type DevServerStatus = "starting" | "running" | "stopping" | "stopped" | "exited" | "failed";
+
+export interface DevServerSnapshot {
+  id: string;
+  name: string;
+  /** Project directory whose launch file declares the server. */
+  projectCwd: string;
+  /** Directory the process runs in. */
+  cwd: string;
+  status: DevServerStatus;
+  /** False for an entry that only attaches to a server started elsewhere. */
+  managed: boolean;
+  command?: string;
+  pid?: number;
+  port?: number;
+  url?: string;
+  startedAt: number;
+  endedAt?: number;
+  exitCode?: number | null;
+  signal?: string | null;
+  error?: string;
+}
+
+export interface DevServerLogLine {
+  stream: "stdout" | "stderr" | "system";
+  text: string;
+  time: number;
+}
+
+export interface DevServerConfigSummary {
+  name: string;
+  source: string;
+  managed: boolean;
+  port?: number;
+  url?: string;
+}
+
+export interface DevServerListResponse {
+  enabled: boolean;
+  servers: DevServerSnapshot[];
+  configs: DevServerConfigSummary[];
+  errors: string[];
+}

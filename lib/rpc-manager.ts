@@ -21,6 +21,8 @@ import { createClonedSession, createForkedSession } from "./session-fork";
 import { generateTitleForSessionFile } from "./session-file-title";
 import { findDeferredModel, findDeferredStartupModel, rememberProviderModels } from "./deferred-provider-models";
 import { isBlockingExtensionUiRequest } from "./extension-ui-queue";
+import { createDevServerExtension } from "./dev-server-extension";
+import { isDevServersEnabled } from "./dev-server-settings";
 import {
   createProjectCommandBashExtension,
   createProjectCommandBashOperations,
@@ -3172,6 +3174,10 @@ export async function startRpcSession(
               createProjectCommandBashExtension({
                 cwd: sessionCwd,
                 settings: settingsManager,
+              }),
+              createDevServerExtension({
+                cwd: sessionCwd,
+                isEnabled: () => isDevServersEnabled(),
               }),
               createSubagentExtension(
                 SUBAGENT_CONTROLLER.extensionRuntime,

@@ -18,6 +18,7 @@ import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ChatScrollFollowButton } from "./ChatScrollFollowButton";
 import { ExtensionStatusBar } from "./ExtensionStatusBar";
+import { DevServersShelf } from "./DevServersShelf";
 import { useI18n } from "@/hooks/useI18n";
 import { useAgentSession, type AgentPhase } from "@/hooks/useAgentSession";
 import { useChatScrollFollow } from "@/hooks/useChatScrollFollow";
@@ -90,6 +91,8 @@ interface Props {
   onNewSessionCwdChange?: (cwd: string) => void;
   onFilesUploaded?: () => void;
   onOpenSubagent?: (sessionId: string, label: string) => void;
+  /** Opens a dev server's preview or output in the right panel. */
+  onOpenServerPreview?: (serverId: string, label: string) => void;
   /** 顶层工具调用结束，用于运行期间刷新文件树。 */
   onToolEnd?: (toolName: string) => void;
   onAskInNewChat?: (prompt: string, sourceSessionId: string, sourceEntryId: string) => Promise<void>;
@@ -290,7 +293,7 @@ function LiveProcessDetailsGroup({ hiddenCount, renderAll, renderRecent, t }: { 
   );
 }
 
-export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigationActive, session, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, newSessionCwd, newSessionWorktrees, pendingNewSessionControl, onPendingNewSessionEvent, notificationController, onAgentEnd, onSessionCreated, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onShadowMindControlChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenSettings, onContextUsageChange, onOpenFile, onFilesUploaded, onOpenSubagent, onToolEnd, onNewSessionCwdChange, onAskInNewChat, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed }: Props) {
+export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigationActive, session, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, newSessionCwd, newSessionWorktrees, pendingNewSessionControl, onPendingNewSessionEvent, notificationController, onAgentEnd, onSessionCreated, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onShadowMindControlChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenSettings, onContextUsageChange, onOpenFile, onFilesUploaded, onOpenSubagent, onOpenServerPreview, onToolEnd, onNewSessionCwdChange, onAskInNewChat, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed }: Props) {
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio, holdAudio } = useAudio();
   const {
@@ -1156,6 +1159,10 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
               {askDialogElement}
               {chatInputElement}
             </div>
+            {/* No status bar before the first message: the entry sits under the composer. */}
+            <div className="dev-servers-welcome">
+              <DevServersShelf cwd={messageCwd} onOpenPreview={onOpenServerPreview} />
+            </div>
           </div>
         </div>
       ) : (
@@ -1628,7 +1635,13 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
           {askDialogElement}
           {chatInputElement}
         </div>
-        <ExtensionStatusBar statuses={extensionStatuses} widgets={displayExtensionWidgets} onCommand={handleSend} commandsDisabled={sessionBusy} />
+        <ExtensionStatusBar
+          statuses={extensionStatuses}
+          widgets={displayExtensionWidgets}
+          onCommand={handleSend}
+          commandsDisabled={sessionBusy}
+          leading={<DevServersShelf cwd={messageCwd} onOpenPreview={onOpenServerPreview} />}
+        />
       </div>
       </>
       )}

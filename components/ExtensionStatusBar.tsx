@@ -1,5 +1,6 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { stripAnsi } from "@/lib/ansi";
 import { AnsiText } from "./AnsiText";
 import type { ExtensionStatusItem, ExtensionWidgetItem } from "@/lib/types";
@@ -65,15 +66,22 @@ export function ExtensionStatusBar({
   widgets = [],
   onCommand,
   commandsDisabled = false,
+  leading,
 }: {
   statuses: ExtensionStatusItem[];
   widgets?: ExtensionWidgetItem[];
   /** Sends the command of a `command:` status; without it those buttons stay disabled. */
   onCommand?: (command: string) => void;
   commandsDisabled?: boolean;
+  /**
+   * Pi Web's own entries before the extension widgets. It may render nothing,
+   * which an element cannot tell from outside, so a bar holding only it hides
+   * itself with CSS (:has) instead of returning null.
+   */
+  leading?: ReactNode;
 }) {
   const cells = buildExtensionStatusCells(statuses);
-  if (cells.length === 0 && widgets.length === 0) return null;
+  if (cells.length === 0 && widgets.length === 0 && !leading) return null;
 
   const hasCommands = cells.some((cell) => cell.kind === "command");
   const plainStatusLine = cells
@@ -111,9 +119,10 @@ export function ExtensionStatusBar({
 
   return (
     <div
-      className={`extension-status-bar${widgets.length > 0 ? " has-widgets" : ""}${cells.length > 0 ? " has-statuses" : ""}${hasCommands ? " has-commands" : ""}`}
+      className={`extension-status-bar${widgets.length > 0 ? " has-widgets" : ""}${cells.length === 0 && widgets.length === 0 ? " has-only-leading" : ""}${cells.length > 0 ? " has-statuses" : ""}${hasCommands ? " has-commands" : ""}`}
       style={{ display: "flex", alignItems: "center", flexShrink: 0, minWidth: 0, height: 36, padding: "0 12px", borderTop: "1px solid var(--border)", background: "transparent" }}
     >
+      {leading}
       {widgets.length > 0 && <ExtensionWidgetShelf widgets={widgets} />}
       {statusLine}
     </div>

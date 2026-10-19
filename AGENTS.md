@@ -79,6 +79,10 @@ app/api/
   skills/route.ts                 GET/PATCH loaded skills and disable-model-invocation
   skills/install/route.ts         POST install skills through npx skills add
   skills/search/route.ts          GET/POST skills.sh search
+  servers/route.ts                GET ?cwd= dev servers + declared configs | POST start a declared one
+  servers/[id]/route.ts           POST { action: "stop" | "dismiss" }
+  servers/[id]/logs/route.ts      GET recent output
+  servers/settings/route.ts       GET/PUT Settings › General dev server switch
   subagents/settings/route.ts     GET/PUT built-in subagent feature setting
   worktrees/route.ts              GET/POST/DELETE git worktrees
 
@@ -267,6 +271,13 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 - `/api/skills` uses `DefaultResourceLoader` so settings paths, package skills, and project `.agents/skills` are listed the same way the runtime sees them.
 - Skill toggling edits only the `disable-model-invocation` frontmatter key on the target `SKILL.md`; keep that surgical so user formatting survives.
 - `/api/skills/install` shells through `npx skills add ... --agent pi`; project installs run with the selected cwd.
+
+### Dev servers (launch.json + host-owned processes)
+- `lib/dev-server-manager.ts` owns every dev server process in `globalThis.__piWebDevServers`, keyed by project cwd — not by an AgentSession, so a server outlives the session that started it (idle disposal, reload) and the panel and later sessions see the same list. Processes are spawned as their own process group and stopped by signalling the group; `npm run dev` otherwise leaves its child holding the port.
+- Servers are declared in `.pi/launch.json`, then `.claude/launch.json` (Claude Code's format, so one file serves both; `.pi` wins on a name clash). `lib/dev-server-config.ts` validates entries; a command entry needs a `port`, an entry with only `url` attaches to an outside server and is never killed.
+- `lib/dev-server-extension.ts` is a hidden inline extension registering `server_start` / `server_list` / `server_logs` / `server_stop`. The model learns the launch file from the tool description and `promptGuidelines` — no system-prompt edits. Start/stop re-check at call time that bash (or powershell) is active and the switch is on, so they add no capability beyond the shell tool.
+- The Settings › General switch is stored in `~/.pi/agent/pi-web-dev-servers.json`, defaults on, and fails closed on a damaged file. Off registers no tools (applies on reload) and does not stop running servers; the bottom-bar entry stays until they stop.
+- UI: `DevServersShelf` sits in `ExtensionStatusBar`'s `leading` slot (and under the welcome composer); a bar with only that slot hides itself via `:has()` when the shelf renders nothing. Previews are `server:<id>` overlay tabs (`components/overlay-tabs.ts`) sharing the subagent tab slot; `DevServerViewer` frames the URL (host swapped to the page's host for LAN access, `allow-same-origin` dropped if it would share Pi Web's origin) or shows logs.
 
 ### Built-in subagents
 - The global `builtInEnabled` switch is persisted in `~/.pi/agent/agents/settings.json` and defaults to `false` when the file or field is absent. Malformed settings fail closed; atomic updates preserve unknown fields.
