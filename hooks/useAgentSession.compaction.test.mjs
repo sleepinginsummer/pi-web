@@ -35,11 +35,11 @@ function createCompactionLoader(onLoaded) {
 
 function contextPayload(compacted) {
   const messages = compacted
-    ? [{ role: "custom", customType: "compaction", display: true, content: "本次压缩" }]
+    ? [{ role: "user", content: "保留的消息" }, { role: "custom", customType: "compaction", display: true, content: "本次压缩" }]
     : [{ role: "user", content: "压缩前的消息" }];
   const entryId = compacted ? "new-compaction" : "old-user";
   return {
-    context: { messages, entryIds: [entryId], oldestEntryId: entryId, hasMore: false, thinkingLevel: "off", model: null },
+    context: { messages, entryIds: compacted ? ["kept-user", "new-compaction"] : [entryId], oldestEntryId: entryId, hasMore: false, thinkingLevel: "off", model: null },
     leafId: entryId,
     version: compacted ? "after-compaction" : "before-compaction",
   };
@@ -62,7 +62,7 @@ test("手动压缩完成后首个提交就是新上下文，并请求定位本�
   assert.equal(requests, 2);
   assert.equal(commits.length, 1);
   assert.equal(commits[0].result.snapshot.version, "after-compaction");
-  assert.equal(commits[0].result.snapshot.messages[0].customType, "compaction");
+  assert.equal(commits[0].result.snapshot.messages.at(-1).customType, "compaction");
   assert.equal(commits[0].options.focusCompaction, true);
 });
 

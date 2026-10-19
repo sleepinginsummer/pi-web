@@ -24,12 +24,15 @@ export interface ChatScrollPositionRequest {
   position: ChatScrollPosition;
 }
 
-/** SDK 将最新压缩投影到最前；按 entryId 定位，避免命中保留范围内的旧卡片。 */
+/**
+ * 定位本次压缩卡片。读取器已把它放回时间线（通常就是末尾）；取最后一张可见卡片，
+ * 避免命中更早的旧摘要。
+ */
 export function getCompactionScrollPosition(
   messages: readonly { role: string; customType?: string; display?: boolean }[],
   entryIds: readonly string[],
 ): ChatEntryScrollPosition | null {
-  const index = messages.findIndex((message) => (
+  const index = messages.findLastIndex((message) => (
     message.role === "custom" && message.customType === "compaction" && message.display === true
   ));
   const entryId = entryIds[index];

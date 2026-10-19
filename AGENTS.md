@@ -217,6 +217,8 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 
 压缩后必须同时使上下文缓存、进行中的旧预取和页面历史快照失效，再强制读取最新投影；旧预取的返回值标记为非缓存，普通加载不会为它再次复验，直接复用会让新卡片直到重新打开会话才出现。手动压缩的 POST 和 `compaction_end(reason: "manual")` 都按最新投影卡片的 entryId 请求定位，复用 ChatWindow 的阅读锚点恢复，先挂载虚拟窗口再滚动；新定位必须在活动 leaf 变化的清理之后登记。自动压缩只刷新上下文，不强制移动阅读位置。
 
+`buildSessionContext` 不沿用 SDK「压缩摘要排在最前」的投影顺序，而是按原始分支顺序重排，卡片因此回到它真实的时间线位置：其后没有新消息时就是末尾，也就是用户点「压缩」的地方。定位入口取最后一张可见卡片；滚动目标超出可滚动范围时会被夹到底部，卡片就出现在原位置而不是几屏之外，更早的摘要也抢不到定位。不要把投影顺序改回「摘要在前」，也不要按时间戳猜卡片。
+
 ### Running state polling + reconciliation
 - `AppShell` owns the `/api/agent/running` poll every 2.5 seconds while the tab is visible and pauses it in background tabs. This poll is the only running-session state source; `/api/sessions` must not write a second running snapshot into it.
 - `useAgentSession` treats per-session SSE as primary for chat events and opens it before each prompt. `prompt_done` completes the current UI stage and notification immediately, but the idle SSE stays open for a 30-second grace window and is reused by the next prompt. `agent_start` cancels that close timer; `agent_settled` finishes extension-injected runs that have no wrapper-level `prompt_done` and starts a fresh grace window. Do not close on the first `agent_end`: retries, compaction, and extension-queued messages can continue the same logical prompt.

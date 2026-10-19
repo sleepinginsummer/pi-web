@@ -798,18 +798,26 @@ export function buildSessionContext(
   }
 
   // Convert the SDK-selected context entries and their IDs together. This keeps
-  // fork/navigation targets aligned while preserving pi's compaction ordering.
-  const messages: AgentMessage[] = [];
-  const entryIds: string[] = [];
+  // fork/navigation targets aligned.
   const shadowRunMetadata = collectShadowRunMetadata(sliced);
-  for (const entry of mergedContextEntries) {
+  /*
+   * SDK 把最新压缩投影到消息列表最前，但时间线里它发生在保留消息之后。
+   * 按原始分支顺序重排后，压缩卡片回到它真实的位置：其后还没有新消息时就是末尾，
+   * 也就是用户点「压缩」的地方，不会被挪到上下文开头几屏之外。
+   */
+  const branchOrder = new Map(sliced.map((entry, index) => [entry.id, index] as const));
+  const projected = mergedContextEntries.flatMap((entry) => {
     const localEntry = entry as unknown as SessionEntry;
-    const m = entryToUiMessage(localEntry, options, shadowRunMetadata);
-    if (m) {
-      messages.push(m);
-      entryIds.push(localEntry.id);
-    }
-  }
+    const message = entryToUiMessage(localEntry, options, shadowRunMetadata);
+    // 排序是稳定的：分支里查不到的条目保持投影顺序，不会被重排打乱。
+    return message ? [{ message, entryId: localEntry.id }] : [];
+  });
+  projected.sort((left, right) => (
+    (branchOrder.get(left.entryId) ?? Number.MAX_SAFE_INTEGER)
+    - (branchOrder.get(right.entryId) ?? Number.MAX_SAFE_INTEGER)
+  ));
+  const messages: AgentMessage[] = projected.map((entry) => entry.message);
+  const entryIds: string[] = projected.map((entry) => entry.entryId);
 
   // Compaction-aware conversion may filter raw entries at the front of a page.
   // Advancing from such a filtered entry would skip it forever on the next page.
