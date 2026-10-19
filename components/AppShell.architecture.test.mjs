@@ -50,8 +50,8 @@ test("keeps file panel state independent from presentation components", () => {
 
 test("closes every file tab while preserving an open terminal", () => {
   assert.match(appShell, /const handleCloseAllFileTabs = useCallback/);
-  // 激活中的子代理标签保持激活；否则沿用激活中或最后一个终端。
-  assert.match(appShell, /const nextTerminalId = activeTerminalTabId \?\? \(activeAgentTabId \? null : terminalTabs\.at\(-1\)\?\.id \?\? null\)/);
+  // 激活中的子代理或服务器预览标签保持激活；否则沿用激活中或最后一个终端。
+  assert.match(appShell, /const nextTerminalId = activeTerminalTabId \?\? \(activeOverlayTabId \? null : terminalTabs\.at\(-1\)\?\.id \?\? null\)/);
   assert.match(appShell, /clearFileTabs\(\);[\s\S]*?if \(nextTerminalId\) activatePanelTab\(nextTerminalId\)[\s\S]*?else if \(nextAgentId\) openFilePanel\(\)/);
   assert.match(appShell, /fileTabs\.length > 0[\s\S]*?onClick=\{handleCloseAllFileTabs\}[\s\S]*?files\.closeAllTabs/);
 });

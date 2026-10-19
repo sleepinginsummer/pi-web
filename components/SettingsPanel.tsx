@@ -85,6 +85,9 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
   const [cacheMissNotices, setCacheMissNotices] = useState<boolean | null>(null);
   const [cacheMissNoticesSaving, setCacheMissNoticesSaving] = useState(false);
   const [cacheMissNoticesError, setCacheMissNoticesError] = useState<string | null>(null);
+  const [devServersEnabled, setDevServersEnabled] = useState<boolean | null>(null);
+  const [devServersSaving, setDevServersSaving] = useState(false);
+  const [devServersError, setDevServersError] = useState<string | null>(null);
   const [webAuthEnabled, setWebAuthEnabled] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const [logoutError, setLogoutError] = useState("");
@@ -138,6 +141,44 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
       });
     return () => { cancelled = true; };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetch("/api/servers/settings")
+      .then(async (response) => {
+        const data = await response.json() as { enabled?: boolean; error?: string };
+        if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
+        if (!cancelled) setDevServersEnabled(data.enabled === true);
+      })
+      .catch((cause) => {
+        if (!cancelled) setDevServersError(cause instanceof Error ? cause.message : String(cause));
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  // The tools are registered when a session loads, so the open one is reloaded to apply it.
+  const toggleDevServers = async (enabled: boolean) => {
+    setDevServersSaving(true);
+    setDevServersError(null);
+    try {
+      const response = await fetch("/api/servers/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      });
+      const data = await response.json() as { enabled?: boolean; error?: string };
+      if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
+      setDevServersEnabled(data.enabled === true);
+      if (sessionId) {
+        await sendAgentCommand(sessionId, { type: "reload" });
+        onSessionReloaded();
+      }
+    } catch (cause) {
+      setDevServersError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setDevServersSaving(false);
+    }
+  };
 
   // pi's showCacheMissNotices (#1265); the open chat is read again to show or drop them.
   const toggleCacheMissNotices = async (enabled: boolean) => {
@@ -374,6 +415,22 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
       )}
 
 
+
+      <section className="settings-general-section">
+        <h3 className="settings-general-heading">{t("settings.devServers")}</h3>
+        <div className="settings-shell-option">
+          <span>{t("settings.devServersToggle")}</span>
+          <ConfigSwitch
+            checked={devServersEnabled === true}
+            loading={(devServersEnabled === null && !devServersError) || devServersSaving}
+            label={t("settings.devServersToggle")}
+            describedBy="settings-dev-servers-description"
+            onChange={(enabled) => void toggleDevServers(enabled)}
+          />
+        </div>
+        <p id="settings-dev-servers-description" className="settings-general-description">{t("settings.devServersDescription")}</p>
+        {devServersError && <p role="alert" className="settings-general-error">{devServersError}</p>}
+      </section>
 
       <section className="settings-general-section">
         <h3 className="settings-general-heading">{t("common.language")}</h3>

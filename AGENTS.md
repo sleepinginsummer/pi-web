@@ -79,6 +79,10 @@ app/api/
   skills/route.ts                 GET/PATCH loaded skills and disable-model-invocation
   skills/install/route.ts         POST install skills through npx skills add
   skills/search/route.ts          GET/POST skills.sh search
+  servers/route.ts                GET ?cwd= dev servers + declared configs | POST start a declared one
+  servers/[id]/route.ts           POST { action: "stop" | "dismiss" }
+  servers/[id]/logs/route.ts      GET recent output
+  servers/settings/route.ts       GET/PUT Settings › General dev server switch
   subagents/settings/route.ts     GET/PUT built-in subagent feature setting
   worktrees/route.ts              GET/POST/DELETE git worktrees
 
@@ -268,6 +272,13 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 - Skill toggling edits only the `disable-model-invocation` frontmatter key on the target `SKILL.md`; keep that surgical so user formatting survives.
 - `/api/skills/install` shells through `npx skills add ... --agent pi`; project installs run with the selected cwd.
 
+### Dev servers (launch.json + host-owned processes)
+- `lib/dev-server-manager.ts` owns every dev server process in `globalThis.__piWebDevServers`, keyed by project cwd — not by an AgentSession, so a server outlives the session that started it (idle disposal, reload) and the panel and later sessions see the same list. Processes are spawned as their own process group and stopped by signalling the group; `npm run dev` otherwise leaves its child holding the port.
+- Servers are declared in `.pi/launch.json`, then `.claude/launch.json` (Claude Code's format, so one file serves both; `.pi` wins on a name clash). `lib/dev-server-config.ts` validates entries; a command entry needs a `port`, an entry with only `url` attaches to an outside server and is never killed.
+- `lib/dev-server-extension.ts` is a hidden inline extension registering `server_start` / `server_list` / `server_logs` / `server_stop`. The model learns the launch file from the tool description and `promptGuidelines` — no system-prompt edits. Start/stop re-check at call time that bash (or powershell) is active and the switch is on, so they add no capability beyond the shell tool.
+- The Settings › General switch is stored in `~/.pi/agent/pi-web-dev-servers.json`, defaults on, and fails closed on a damaged file. Off registers no tools (applies on reload) and does not stop running servers; the bottom-bar entry stays while the project has servers.
+- UI: `DevServersShelf` sits in `ExtensionStatusBar`'s `leading` slot, so it appears only in an open conversation, never on the new-session welcome page. It renders when the project has a server this pi-web process started (running or finished) or its launch file has errors (the trigger then carries a red dot); a launch file that is valid but never ran does not show it (declared servers are listed inside once it is shown). A bar with only that slot hides itself via `:has()` when the shelf renders nothing. Previews are `server:<id>` overlay tabs (`components/overlay-tabs.ts`) sharing the subagent tab slot; `DevServerViewer` frames the URL (host swapped to the page's host for LAN access, `allow-same-origin` dropped if it would share Pi Web's origin) or shows logs.
+
 ### Built-in subagents
 - The global `builtInEnabled` switch is persisted in `~/.pi/agent/agents/settings.json` and defaults to `false` when the file or field is absent. Malformed settings fail closed; atomic updates preserve unknown fields.
 - The inline built-in extension factory is always present so reloading an existing wrapper can apply setting changes, but it registers no tools while disabled. After changing the switch, the user must explicitly reload the current session.
@@ -293,7 +304,7 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 - Browser autoplay policy means sound must be unlocked from a user gesture; `ChatInput` calls the unlock hook from interactive controls, and `ChatWindow` plays the tone from `onAgentEnd`.
 
 ### PWA 版本与 Service Worker 更新策略
-- 当前合并版本使用 `0.10.0-merge.38`；此后每次代码变更都必须将最后一位递增 1，并同步更新 `package.json` 与 `package-lock.json`。
+- 当前合并版本使用 `0.10.0-merge.43`；此后每次代码变更都必须将最后一位递增 1，并同步更新 `package.json` 与 `package-lock.json`。
 - 生产环境必须使用每次构建唯一的版本标识注册 `/sw.js?v=<build-version>`，静态缓存名称也必须包含同一个版本；不能只使用长期不变的 `package.json` 版本，否则代码变化后浏览器可能继续命中旧 chunk。
 - 新 Service Worker 安装完成后保持 `waiting`，由界面提示“发现新版本”；用户确认后发送 `SKIP_WAITING`，并在 `controllerchange` 后刷新页面。不要在 `install` 阶段无条件调用 `skipWaiting()`。
 - 激活新 Service Worker 时只清理 `pi-web-` 前缀下的旧版本缓存，不得清理其它站点数据或认证信息。`/sw.js`、页面导航和 API 请求必须绕过静态资源缓存。

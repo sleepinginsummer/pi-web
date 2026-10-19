@@ -5,6 +5,7 @@ import { buildToolResultsMap, EMPTY_TRANSCRIPT, mergeTailPage, prependOlderPage 
 
 const viewer = await readFile(new URL("./SubagentViewer.tsx", import.meta.url), "utf8");
 const appShell = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
+const overlayTabs = await readFile(new URL("./overlay-tabs.ts", import.meta.url), "utf8");
 const messageView = await readFile(new URL("./MessageView.tsx", import.meta.url), "utf8");
 
 const message = (id) => ({ role: "user", content: id });
@@ -76,19 +77,20 @@ test("renders messages read-only through MessageView with the subagent's own cwd
 });
 
 test("AppShell hosts subagent tabs in the right panel next to file and terminal tabs", () => {
-  assert.match(appShell, /const \[agentTabs, setAgentTabs\] = useState<\{ sessionId: string; label: string \}\[\]>\(\[\]\)/);
+  // 子代理与开发服务器预览共用覆盖文件标签的 overlay 标签。
+  assert.match(appShell, /const \[overlayTabs, setOverlayTabs\] = useState<OverlayTab\[\]>\(\[\]\)/);
+  assert.match(overlayTabs, /\{ id: string; kind: "agent"; sessionId: string; label: string \}/);
   assert.match(appShell, /const handleOpenSubagentTab = useCallback\(\(sessionId: string, label: string\) => \{/);
   // fork：子代理标签与终端标签互斥地覆盖文件标签。
-  assert.match(appShell, /setActiveTerminalTabId\(null\);\s*setActiveAgentTabId\(`agent:\$\{sessionId\}`\);\s*openFilePanel\(\);/);
-  assert.match(appShell, /kind: "agent" as const/);
-  assert.match(appShell, /<SubagentViewer[\s\S]*?sessionId=\{activeAgentTab\.sessionId\}[\s\S]*?running=\{runningSessionIds\.has\(activeAgentTab\.sessionId\)\}/);
-  // 关闭最后一个子代理标签时依次回退到终端、文件，全部关掉才收起面板。
-  assert.match(appShell, /const nextAgent = remainingAgents\.at\(-1\);[\s\S]*?else if \(fileTabs\.length === 0\) \{\s*closeFilePanel\(\);/);
-  // 项目切换暂存文件标签并丢弃子代理标签。
-  assert.match(appShell, /switchFileWorkspaceTabs\(currentProject, newProject\);\s*setAgentTabs\(\[\]\);\s*setActiveAgentTabId\(null\);/);
-  // 子代理标签激活时不显示文件查看器或“没有打开的文件”占位。
-  assert.match(appShell, /!activeTerminalTabId && !activeAgentTab && activeFileTab\?\.filePath \? \(/);
-  assert.match(appShell, /\) : !activeTerminalTabId && !activeAgentTab \? \(/);
+  assert.match(appShell, /const id = agentOverlayTabId\(sessionId\);[\s\S]*?setActiveTerminalTabId\(null\);\s*setActiveOverlayTabId\(id\);\s*openFilePanel\(\);/);
+  assert.match(appShell, /<SubagentViewer[\s\S]*?sessionId=\{activeOverlayTab\.sessionId\}[\s\S]*?running=\{runningSessionIds\.has\(activeOverlayTab\.sessionId\)\}/);
+  // 关闭最后一个 overlay 标签时依次回退到终端、文件，全部关掉才收起面板。
+  assert.match(appShell, /const nextOverlay = remainingOverlays\.at\(-1\);[\s\S]*?else if \(fileTabs\.length === 0\) \{\s*closeFilePanel\(\);/);
+  // 项目切换暂存文件标签并丢弃 overlay 标签。
+  assert.match(appShell, /switchFileWorkspaceTabs\(currentProject, newProject\);\s*setOverlayTabs\(\[\]\);\s*setActiveOverlayTabId\(null\);/);
+  // overlay 标签激活时不显示文件查看器或“没有打开的文件”占位。
+  assert.match(appShell, /!activeTerminalTabId && !activeOverlayTab && activeFileTab\?\.filePath \? \(/);
+  assert.match(appShell, /\) : !activeTerminalTabId && !activeOverlayTab \? \(/);
 });
 
 test("the subagent card in a tool call opens the side tab with a label", () => {
