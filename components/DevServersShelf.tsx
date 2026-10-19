@@ -29,8 +29,10 @@ const iconProps = {
 
 /**
  * The bottom bar's dev server entry: a trigger like an extension widget's,
- * opening the project's server list. Hidden while the project has neither a
- * server nor a declared one.
+ * opening the project's server list. Shown once the project has a server this
+ * pi-web process started (running or finished) or a launch file that failed to
+ * parse; declared servers that never ran are listed inside it but do not make
+ * it appear.
  */
 export function DevServersShelf({
   cwd,
@@ -65,12 +67,17 @@ export function DevServersShelf({
   const servers = data.servers;
   const activeNames = new Set(servers.filter(isDevServerActive).map((server) => server.name));
   const declared = data.enabled ? data.configs.filter((config) => !activeNames.has(config.name)) : [];
-  // Turned off: running servers keep their entry until they stop.
-  if (servers.length === 0 && declared.length === 0 && data.errors.length === 0) return null;
-  if (!data.enabled && servers.length === 0) return null;
+  // 只有本进程启动过的服务器或启动配置错误才显示入口；仅声明过 launch 配置不显示。
+  if (servers.length === 0 && data.errors.length === 0) return null;
 
   const runningCount = servers.filter(isDevServerActive).length;
-  const label = t("servers.triggerLabel", { count: runningCount });
+  // 启动配置有问题时入口带告警红点，读屏用带错误的文案，不占用运行计数。
+  const hasErrors = data.errors.length > 0;
+  const label = hasErrors
+    ? t("servers.triggerErrors")
+    : runningCount > 0
+      ? t("servers.triggerLabel", { count: runningCount })
+      : t("servers.title");
 
   const renderServer = (server: DevServerSnapshot) => {
     const active = isDevServerActive(server);
@@ -131,7 +138,11 @@ export function DevServersShelf({
               disabled={busy}
               title={t("servers.dismiss")}
               aria-label={`${t("servers.dismiss")} ${server.name}`}
-              onClick={() => void dismiss(server.id)}
+              onClick={() => {
+                // 移除最后一项时先收起面板，避免正在打开的面板跟着入口一起消失。
+                if (servers.length === 1) setOpen(false);
+                void dismiss(server.id);
+              }}
             >
               <svg {...iconProps}><path d="M6 6l12 12M18 6L6 18" /></svg>
             </button>
@@ -174,7 +185,6 @@ export function DevServersShelf({
                 </ul>
               </>
             )}
-            {servers.length === 0 && declared.length === 0 && <p className="dev-server-empty">{t("servers.empty")}</p>}
             {data.errors.length > 0 && (
               <div className="dev-server-errors" role="note">
                 <div className="dev-server-subheading">{t("servers.launchErrors")}</div>
@@ -197,6 +207,7 @@ export function DevServersShelf({
         <span className="extension-widget-placement" aria-hidden="true">^</span>
         <span className="extension-widget-key">{t("servers.trigger")}</span>
         {runningCount > 0 && <span className="dev-servers-count">{runningCount}</span>}
+        {hasErrors && <span className="dev-servers-error-dot" aria-hidden="true" />}
       </button>
     </div>
   );

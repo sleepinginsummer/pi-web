@@ -165,7 +165,7 @@ export const enLocale: LocalePlugin = {
     "servers.trigger": "servers",
     "servers.title": "Dev servers",
     "servers.triggerLabel": "Dev servers, {count} running",
-    "servers.empty": "No servers yet. Ask the agent to start one, or declare it in .pi/launch.json.",
+    "servers.triggerErrors": "Dev servers, launch file has errors",
     "servers.declared": "Declared, not running",
     "servers.start": "Start",
     "servers.stop": "Stop",

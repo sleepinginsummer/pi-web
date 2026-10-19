@@ -2959,10 +2959,9 @@ span.token.table {
 .extension-widget-content { max-height: 260px; overflow: auto; margin: 0; padding: 8px 9px; color: var(--text-muted); font: 12px/1.5 var(--font-mono); white-space: pre-wrap; word-break: break-word; }
 /* Dev servers: the bottom bar entry, its list, and the right-panel viewer. */
 .extension-status-bar.has-only-leading:not(:has(.dev-servers-shelf)) { display: none !important; }
-.dev-servers-welcome { position: relative; display: flex; margin-top: 8px; padding: 0 2px; }
-.dev-servers-welcome .dev-servers-panels { left: 0; bottom: 32px; }
 .dev-servers-shelf { display: flex; flex: 0 0 auto; align-items: center; }
 .dev-servers-trigger .dev-servers-count { min-width: 14px; padding: 0 4px; border-radius: 7px; background: var(--accent); color: var(--bg); font-size: 10px; line-height: 14px; text-align: center; }
+.dev-servers-trigger .dev-servers-error-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: #ef4444; }
 .dev-servers-panels { left: 12px; right: auto; }
 .dev-servers-panel { width: min(420px, calc(100vw - 24px)); }
 .dev-server-list { list-style: none; margin: 0; padding: 4px 0; }
@@ -2982,7 +2981,7 @@ span.token.table {
 .dev-server-action.is-danger:hover:not(:disabled) { color: #ef4444; }
 .dev-server-action:disabled { opacity: .45; cursor: default; }
 .dev-server-subheading { padding: 6px 9px 2px; color: var(--text-dim); font-size: 11px; }
-.dev-server-empty, .dev-server-error { margin: 0; padding: 8px 9px; color: var(--text-dim); font-size: 12px; }
+.dev-server-error { margin: 0; padding: 8px 9px; color: var(--text-dim); font-size: 12px; }
 .dev-server-error { color: #ef4444; }
 .dev-server-errors { padding: 0 9px 8px; color: #f59e0b; font: 11px/1.5 var(--font-mono); word-break: break-word; }
 .dev-server-errors .dev-server-subheading { padding-left: 0; }

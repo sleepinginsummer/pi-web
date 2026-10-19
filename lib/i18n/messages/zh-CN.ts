@@ -165,7 +165,7 @@ export const zhCNLocale: LocalePlugin = {
     "servers.trigger": "服务器",
     "servers.title": "开发服务器",
     "servers.triggerLabel": "开发服务器，{count} 个运行中",
-    "servers.empty": "还没有服务器。可以让智能体启动一个，或在 .pi/launch.json 中声明。",
+    "servers.triggerErrors": "开发服务器，启动配置有错误",
     "servers.declared": "已声明，未运行",
     "servers.start": "启动",
     "servers.stop": "停止",

@@ -1159,10 +1159,6 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
               {askDialogElement}
               {chatInputElement}
             </div>
-            {/* No status bar before the first message: the entry sits under the composer. */}
-            <div className="dev-servers-welcome">
-              <DevServersShelf cwd={messageCwd} onOpenPreview={onOpenServerPreview} />
-            </div>
           </div>
         </div>
       ) : (
