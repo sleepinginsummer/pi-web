@@ -61,7 +61,7 @@ import { LatestContextLoader } from "@/lib/latest-context-loader";
 import { SessionContextRefreshScheduler } from "@/lib/session-context-refresh-scheduler";
 import { ShadowLifecycleCoordinator } from "@/lib/shadow-lifecycle";
 import { useShadowSessionSetting } from "@/hooks/useShadowSessionSetting";
-import type { ChatScrollPosition, ChatScrollPositionRequest } from "@/lib/chat-scroll-position";
+import { getCompactionScrollPosition, type ChatScrollPosition, type ChatScrollPositionRequest } from "@/lib/chat-scroll-position";
 import {
   createStreamingStore,
   type ClientAssistantMessageEvent,
@@ -960,7 +960,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     sid: string,
     snapshot: SessionContextSnapshot,
     leafId: string | null,
-    options: { preserveScroll?: boolean } = {},
+    options: { preserveScroll?: boolean; focusCompaction?: boolean } = {},
   ): boolean => {
     if (sessionIdRef.current !== sid) return false;
     backfillRequestRef.current.controller?.abort();
@@ -977,8 +977,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setActiveLeafId(leafId);
     pendingDetachedSubagentIdsRef.current = pendingDetachedSubagentIds(snapshot.messages);
     if (!options.preserveScroll) {
-      // 首屏、导航和 backfill 属于显式定位；后台 entry 刷新必须保持用户滚动位置。
-      requestScrollPosition("initial");
+      // 手动压缩定位本次摘要，不能沿用普通加载时的末条消息定位。
+      const compactionPosition = options.focusCompaction
+        ? getCompactionScrollPosition(snapshot.messages, snapshot.entryIds)
+        : null;
+      requestScrollPosition(compactionPosition ?? "initial");
     }
     const previousView = { messages: messagesRef.current, entryIds: entryIdsRef.current };
     const nextView = { messages: snapshot.messages, entryIds: snapshot.entryIds };
@@ -1096,7 +1099,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     sid: string,
     showLoading = false,
     includeState = false,
-    options: { preserveScroll?: boolean; validateView?: boolean } = {},
+    options: { preserveScroll?: boolean; validateView?: boolean; focusCompaction?: boolean } = {},
   ) => {
     const performancePrefix = `pi-session:${sid}`;
     if (showLoading) {
@@ -1255,7 +1258,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [commitContextSnapshot]);
 
   const loadCompactedSession = useCallback(async (sid: string, showLoading = false) => {
-    return loadSession(sid, showLoading);
+    // 压缩改变投影和活动 leaf；旧缓存、旧预取及已分页快照都不能复用。
+    invalidateSessionContext(sid);
+    deleteSessionViewSnapshot(sid);
+    return loadSession(sid, showLoading, false, { validateView: true, focusCompaction: showLoading });
   }, [loadSession]);
 
   const loadContext = useCallback(async (sid: string, leafId: string | null): Promise<boolean> => {
@@ -2272,7 +2278,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           setCompactResult(null);
         } else if (!event.aborted) {
           setCompactResult(readCompactResult(event.result, (event.reason as string | undefined) ?? "auto"));
-          if (sessionIdRef.current) loadCompactedSession(sessionIdRef.current);
+          if (sessionIdRef.current) loadCompactedSession(sessionIdRef.current, event.reason === "manual");
         }
         break;
       case "extension_ui_request":

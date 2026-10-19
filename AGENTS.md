@@ -215,6 +215,8 @@ Active `ask_user_question` tool starts are retained by `AgentSessionWrapper` for
 ### Compaction SSE events
 Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `auto_compaction_start` / `auto_compaction_end`. `handleAgentEvent` accepts both sets to keep `isCompacting` in sync. Manual compact is a blocking POST — the button stays disabled until the response returns.
 
+压缩后必须同时使上下文缓存、进行中的旧预取和页面历史快照失效，再强制读取最新投影；旧预取的返回值标记为非缓存，普通加载不会为它再次复验，直接复用会让新卡片直到重新打开会话才出现。手动压缩的 POST 和 `compaction_end(reason: "manual")` 都按最新投影卡片的 entryId 请求定位，复用 ChatWindow 的阅读锚点恢复，先挂载虚拟窗口再滚动；新定位必须在活动 leaf 变化的清理之后登记。自动压缩只刷新上下文，不强制移动阅读位置。
+
 ### Running state polling + reconciliation
 - `AppShell` owns the `/api/agent/running` poll every 2.5 seconds while the tab is visible and pauses it in background tabs. This poll is the only running-session state source; `/api/sessions` must not write a second running snapshot into it.
 - `useAgentSession` treats per-session SSE as primary for chat events and opens it before each prompt. `prompt_done` completes the current UI stage and notification immediately, but the idle SSE stays open for a 30-second grace window and is reused by the next prompt. `agent_start` cancels that close timer; `agent_settled` finishes extension-injected runs that have no wrapper-level `prompt_done` and starts a fresh grace window. Do not close on the first `agent_end`: retries, compaction, and extension-queued messages can continue the same logical prompt.
@@ -304,7 +306,7 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 - Browser autoplay policy means sound must be unlocked from a user gesture; `ChatInput` calls the unlock hook from interactive controls, and `ChatWindow` plays the tone from `onAgentEnd`.
 
 ### PWA 版本与 Service Worker 更新策略
-- 当前合并版本使用 `0.10.0-merge.43`；此后每次代码变更都必须将最后一位递增 1，并同步更新 `package.json` 与 `package-lock.json`。
+- 当前合并版本使用 `0.10.0-merge.44`；此后每次代码变更都必须将最后一位递增 1，并同步更新 `package.json` 与 `package-lock.json`。
 - 生产环境必须使用每次构建唯一的版本标识注册 `/sw.js?v=<build-version>`，静态缓存名称也必须包含同一个版本；不能只使用长期不变的 `package.json` 版本，否则代码变化后浏览器可能继续命中旧 chunk。
 - 新 Service Worker 安装完成后保持 `waiting`，由界面提示“发现新版本”；用户确认后发送 `SKIP_WAITING`，并在 `controllerchange` 后刷新页面。不要在 `install` 阶段无条件调用 `skipWaiting()`。
 - 激活新 Service Worker 时只清理 `pi-web-` 前缀下的旧版本缓存，不得清理其它站点数据或认证信息。`/sw.js`、页面导航和 API 请求必须绕过静态资源缓存。

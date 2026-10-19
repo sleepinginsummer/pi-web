@@ -639,6 +639,23 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
     restoreLoadPositionRef.current = null;
   }, [activeLeafId, loading]);
 
+  const handledEntryScrollGenerationRef = useRef(0);
+  useEffect(() => {
+    const request = scrollPositionRequest;
+    if (loading || !request || typeof request.position !== "object"
+      || request.generation <= handledEntryScrollGenerationRef.current) return;
+    handledEntryScrollGenerationRef.current = request.generation;
+    // 复用阅读锚点恢复：先挂载卡片，再在当前聊天区域中定位，并暂停末尾跟随。
+    prevScrollDistanceRef.current = null;
+    setRestoreAnchorReadyFor(null);
+    setPendingScrollRestore({
+      atBottom: false,
+      anchorEntryId: request.position.entryId,
+      anchorOffset: 16,
+      oldestEntryId: historyCursor,
+    });
+  }, [historyCursor, loading, scrollPositionRequest]);
+
   useEffect(() => {
     const position = pendingScrollRestore;
     if (!position || loading || searchTarget || loadingEarlierMessages || restoreLoadPositionRef.current === position) return;

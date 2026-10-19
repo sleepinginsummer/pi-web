@@ -270,6 +270,8 @@ export function useChatScrollFollow({
         if (hasUnhandledPosition) {
           handledPositionGenerationRef.current = positionRequest.generation;
           initialScrollDoneRef.current = true;
+          // 指定 entry 的定位由 ChatWindow 的阅读锚点恢复负责，先挂载目标虚拟窗口。
+          if (typeof positionRequest.position === "object") return;
           if (positionRequest.position === "user") {
             scrollUserMessageToTop();
           } else if (positionRequest.position === "running-end") {

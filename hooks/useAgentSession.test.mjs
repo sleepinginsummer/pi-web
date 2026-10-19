@@ -198,9 +198,11 @@ test("reloads compacted context directly from the authoritative server snapshot"
     source.indexOf('case "reload": {'),
   );
 
-  assert.match(compactLoadSource, /return loadSession\(sid, showLoading\)/);
+  assert.match(compactLoadSource, /invalidateSessionContext\(sid\)/);
+  assert.match(compactLoadSource, /deleteSessionViewSnapshot\(sid\)/);
+  assert.match(compactLoadSource, /return loadSession\(sid, showLoading, false, \{ validateView: true, focusCompaction: showLoading \}\)/);
   assert.doesNotMatch(source, /liveSessionMessages|live-session-cache/);
-  assert.match(eventSource, /case "compaction_end":[\s\S]*?loadCompactedSession\(sessionIdRef\.current\)/);
+  assert.match(eventSource, /case "compaction_end":[\s\S]*?loadCompactedSession\(sessionIdRef\.current, event\.reason === "manual"\)/);
   assert.match(manualCompactSource, /await loadCompactedSession\(sid, true\)/);
   assert.match(slashCompactSource, /await loadCompactedSession\(sid, true\)/);
 });

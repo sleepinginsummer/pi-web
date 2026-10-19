@@ -1,4 +1,8 @@
-export type ChatScrollPosition = "initial" | "user" | "running-end";
+export interface ChatEntryScrollPosition {
+  entryId: string;
+}
+
+export type ChatScrollPosition = "initial" | "user" | "running-end" | ChatEntryScrollPosition;
 
 export type ChatReadingPosition =
   | { atBottom: true }
@@ -18,6 +22,18 @@ export interface ChatScrollAnchorCandidate {
 export interface ChatScrollPositionRequest {
   generation: number;
   position: ChatScrollPosition;
+}
+
+/** SDK 将最新压缩投影到最前；按 entryId 定位，避免命中保留范围内的旧卡片。 */
+export function getCompactionScrollPosition(
+  messages: readonly { role: string; customType?: string; display?: boolean }[],
+  entryIds: readonly string[],
+): ChatEntryScrollPosition | null {
+  const index = messages.findIndex((message) => (
+    message.role === "custom" && message.customType === "compaction" && message.display === true
+  ));
+  const entryId = entryIds[index];
+  return entryId ? { entryId } : null;
 }
 
 export type ChatScrollFollowDecision = "follow" | "pause" | "keep";
