@@ -15,6 +15,23 @@ SERVICE_CONFIG="$RUNTIME_ROOT/service.env"
 PACKAGE_ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
 ACTION="${1:-}"
 
+# 只允许已安装的发布包注册服务。
+# 本仓库的 scripts/ 与安装包里的同名文件逐字一致，而 PACKAGE_ROOT 取的是"脚本所在包"：
+# 在开发检出里直接执行会把 run.sh 和 launchctl 作业指向开发目录，顶掉正在运行的正式版，
+# 而且停旧进程之后才会失败。所以在任何有副作用的动作（含 stop）之前先拒绝。
+assert_installed_package() {
+  if [ -d "$PACKAGE_ROOT/.git" ] || [ -f "$PACKAGE_ROOT/.git" ]; then
+    echo "拒绝在开发检出中注册服务：$PACKAGE_ROOT" >&2
+    echo "正式服务只跑安装产物（$RUNTIME_ROOT/current -> releases/<version>）。" >&2
+    echo "开发请用 npm run dev；安装请用 npm install 生成的 PATH 里的 pi-web。" >&2
+    return 1
+  fi
+  if [ ! -f "$PACKAGE_ROOT/.next/BUILD_ID" ]; then
+    echo "拒绝注册服务：$PACKAGE_ROOT 不是已构建的发布包（缺少 .next/BUILD_ID）。" >&2
+    return 1
+  fi
+}
+
 listener_pids() {
   # FUSE 上 lsof 的退出码可能与输出不一致，以实际 PID 输出判断端口占用。
   lsof -nP -tiTCP:"$SERVICE_PORT" -sTCP:LISTEN 2>/dev/null || true
@@ -91,9 +108,10 @@ start_service() {
 }
 
 case "$ACTION" in
-  start) start_service ;;
+  # 校验必须在 stop 之前：否则 restart 会先停掉正式进程再因为不是发布包而失败。
+  start) assert_installed_package; start_service ;;
   stop) stop_service ;;
-  restart) stop_service; start_service ;;
+  restart) assert_installed_package; stop_service; start_service ;;
   status)
     if launchctl list "$SERVICE_LABEL" >/dev/null 2>&1; then
       echo "launchctl 作业已注册。"

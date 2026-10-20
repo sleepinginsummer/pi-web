@@ -10,6 +10,13 @@ Typecheck: `node_modules/.bin/tsc --noEmit`
 Lint: `npm run lint`  
 **Never run `next build` during dev** — pollutes `.next/` and breaks `npm run dev`.
 
+### 开发环境与正式环境隔离
+
+- 代码天然分开：正式服务只跑 `~/.local/share/pi-web-runtime/current -> releases/<version>/node_modules/@agegr/pi-web`，本仓库只是源码目录，两者没有软链或 npm link。
+- 用户数据默认共用 `~/.pi/agent`（会话、登录、模型、扩展、侧栏项目）。开发检出通过 `.env.local` 的 `PI_CODING_AGENT_DIR=~/.pi-dev/agent` 使用独立副本，端口仍是 30141；正式服务由 `service.env` 启动、监听 8081。`.env.local` 在 `.gitignore` 里，发布包的 `files` 也不含它。
+- 会话文件格式只向前兼容：新版开发版改写过的会话，旧版正式版可能读不了。要让开发版碰正式会话，先复制到 `~/.pi-dev/agent/sessions` 再打开，不要两边同时打开同一个 `.jsonl`（会触发 `409 session_external_write`）。
+- `scripts/macos-service.sh` 的 `assert_installed_package()` 拒绝在 git 检出里 `start`/`restart`：校验在 `stop` 之前执行，所以误执行不会先停掉正式进程。安装包里的同一文件逐字相同，靠是否存在 `.git` 区分。
+
 ### Dev server troubleshooting
 
 - Before starting a server, run `lsof -nP -iTCP:30141 -sTCP:LISTEN` and reuse the existing Pi Web process when it is healthy. A second `next dev` for the same checkout cannot use a different port as a workaround because both processes contend for `.next/dev/lock`.
