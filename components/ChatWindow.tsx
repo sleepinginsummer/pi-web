@@ -343,6 +343,7 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
     [extensionWidgets, todos],
   );
   const {
+    initialScrollSettled,
     isFollowing: isFollowingLatest,
     isNearBottom: isNearBottomLatest,
     lastRenderedMessageRef,
@@ -744,7 +745,7 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
   // When it becomes visible, load the next page of older messages.
   useEffect(() => {
     const container = scrollContainerRef.current;
-    if (!sentinel || !container || pendingScrollRestore) return;
+    if (!sentinel || !container || pendingScrollRestore || !initialScrollSettled) return;
     const observer = new IntersectionObserver(
       (entries) => {
         if (entries[0]?.isIntersecting) {
@@ -773,7 +774,7 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [hasEarlierMessages, loadEarlierMessages, loadingEarlierMessages, messages.length, pendingScrollRestore, renderWindow.offset, renderWindowKey, scrollContainerRef, sentinel, visibleCount]);
+  }, [hasEarlierMessages, initialScrollSettled, loadEarlierMessages, loadingEarlierMessages, messages.length, pendingScrollRestore, renderWindow.offset, renderWindowKey, scrollContainerRef, sentinel, visibleCount]);
 
   useEffect(() => {
     const sentinel = endSentinelRef.current;

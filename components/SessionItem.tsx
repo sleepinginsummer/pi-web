@@ -163,15 +163,16 @@ function UnreadSessionIndicator() {
   );
 }
 
-function SessionDeleteConfirm({ title, onConfirm, onCancel }: { title: string; onConfirm: () => void; onCancel: () => void }) {
+function SessionDeleteConfirm({ title, onArchive, onDelete, onCancel }: { title: string; onArchive: () => void; onDelete: () => void; onCancel: () => void }) {
   const { t } = useI18n();
   const shortTitle = title.slice(0, 22) + (title.length > 22 ? "…" : "");
   return (
     <>
       <div style={{ flex: 1, minWidth: 0, fontSize: 12, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t("sidebar.deleteSession", { title: shortTitle })}</div>
       <div style={{ display: "flex", gap: 5, flexShrink: 0 }}>
-        <button type="button" onClick={(event) => { event.stopPropagation(); onConfirm(); }} style={{ height: 30, padding: "0 11px", background: "#ef4444", border: "none", borderRadius: 6, color: "#fff", fontSize: 12, fontWeight: 600 }}>{t("sidebar.delete")}</button>
-        <button type="button" onClick={(event) => { event.stopPropagation(); onCancel(); }} style={{ height: 30, padding: "0 11px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text-muted)", fontSize: 12, fontWeight: 500 }}>{t("sidebar.cancel")}</button>
+        <button type="button" title={t("sidebar.archiveHint")} onClick={(event) => { event.stopPropagation(); onArchive(); }} style={{ height: 30, padding: "0 9px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text)", fontSize: 12, fontWeight: 600 }}>{t("sidebar.archive")}</button>
+        <button type="button" title={t("sidebar.deletePermanentlyHint")} onClick={(event) => { event.stopPropagation(); onDelete(); }} style={{ height: 30, padding: "0 9px", background: "#ef4444", border: "none", borderRadius: 6, color: "#fff", fontSize: 12, fontWeight: 600 }}>{t("sidebar.delete")}</button>
+        <button type="button" onClick={(event) => { event.stopPropagation(); onCancel(); }} style={{ height: 30, padding: "0 9px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text-muted)", fontSize: 12, fontWeight: 500 }}>{t("sidebar.cancel")}</button>
       </div>
     </>
   );
@@ -322,7 +323,7 @@ export function SessionItem({ session, status, mobile, actions, tree = {} }: Ses
       >
         {isPinned && <span data-session-pin-marker aria-hidden="true" style={{ position: "absolute", top: 0, right: 0, width: 24, height: 16, display: "flex", alignItems: "center", justifyContent: "center", background: "#eab308", borderBottomLeftRadius: 5, color: "#713f12", boxShadow: "0 1px 2px rgba(161,98,7,0.24)", pointerEvents: "none", zIndex: 3 }}><PinIcon size={12} strokeWidth={2.4} aria-hidden="true" style={{ transform: "rotate(45deg)" }} /></span>}
         {mutations.confirmDelete ? (
-          <SessionDeleteConfirm title={title} onConfirm={() => void mutations.performDelete()} onCancel={mutations.cancelDelete} />
+          <SessionDeleteConfirm title={title} onArchive={() => void mutations.performDelete("archive")} onDelete={() => void mutations.performDelete("permanent")} onCancel={mutations.cancelDelete} />
         ) : mutations.renaming ? (
           <SessionRenameInput inputRef={mutations.renameInputRef} value={mutations.renameValue} onChange={mutations.setRenameValue} onCommit={() => void mutations.commitRename()} onCancel={mutations.cancelRename} />
         ) : (

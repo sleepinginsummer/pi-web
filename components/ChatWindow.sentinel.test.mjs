@@ -9,7 +9,7 @@ test("历史哨兵用 state 保存，出现时即重新挂载 observer（#896）
   assert.match(source, /const \[sentinel, setSentinel\] = useState<HTMLDivElement \| null>\(null\);/);
   assert.match(source, /<div ref=\{setSentinel\}/);
   assert.doesNotMatch(source, /sentinelRef/);
-  const effect = source.slice(source.indexOf("    if (!sentinel || !container || pendingScrollRestore) return;"));
+  const effect = source.slice(source.indexOf("    if (!sentinel || !container || pendingScrollRestore || !initialScrollSettled) return;"));
   assert.match(effect.slice(0, effect.indexOf("observer.disconnect()") + 400), /scrollContainerRef, sentinel, visibleCount\]\);/);
 });
 

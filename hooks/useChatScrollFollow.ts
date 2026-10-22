@@ -5,7 +5,6 @@ import {
   getBottomScrollTop,
   getChatScrollFollowDecision,
   getDistanceToBottom,
-  getInitialScrollTop,
   type ChatScrollDirection,
   type ChatScrollPositionRequest,
 } from "@/lib/chat-scroll-position";
@@ -150,6 +149,9 @@ export function useChatScrollFollow({
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const lastUserMsgRef = useRef<HTMLDivElement | null>(null);
   const initialScrollDoneRef = useRef(deferInitialScroll);
+  // 首屏定位前容器停在顶部，顶部哨兵此时可见；调用方据此推迟历史加载，
+  // 否则它记录的“距顶部距离”会在前插后把已经滚到末尾的视图拉回顶部。
+  const [initialScrollSettled, setInitialScrollSettled] = useState(deferInitialScroll);
   const handledPositionGenerationRef = useRef(0);
   const {
     beginProgrammaticScroll,
@@ -182,27 +184,11 @@ export function useChatScrollFollow({
     });
   }, [beginProgrammaticScroll, markNearBottom]);
 
+  // 打开会话、切回离开时位于底部的会话都直接停在末尾；
+  // 居中最后一条消息会让超过一屏的长回复只露出中段。
   const scrollToInitialPosition = useCallback(() => {
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    const lastMessage = lastRenderedMessageRef.current;
-    beginProgrammaticScroll();
-    if (!lastMessage) {
-      container.scrollTop = getBottomScrollTop(container.scrollHeight, container.clientHeight);
-      return;
-    }
-    // 初次打开会话时保留原有体验：短消息居中，长消息限制在可滚动范围内。
-    const containerRect = container.getBoundingClientRect();
-    const messageRect = lastMessage.getBoundingClientRect();
-    container.scrollTop = getInitialScrollTop({
-      containerHeight: container.clientHeight,
-      containerScrollTop: container.scrollTop,
-      containerTop: containerRect.top,
-      messageHeight: messageRect.height,
-      messageTop: messageRect.top,
-      scrollHeight: container.scrollHeight,
-    });
-  }, [beginProgrammaticScroll]);
+    scrollToLatest("instant");
+  }, [scrollToLatest]);
 
   const scrollUserMessageToTop = useCallback(() => {
     const container = scrollContainerRef.current;
@@ -270,6 +256,7 @@ export function useChatScrollFollow({
         if (hasUnhandledPosition) {
           handledPositionGenerationRef.current = positionRequest.generation;
           initialScrollDoneRef.current = true;
+          setInitialScrollSettled(true);
           // 指定 entry 的定位由 ChatWindow 的阅读锚点恢复负责，先挂载目标虚拟窗口。
           if (typeof positionRequest.position === "object") return;
           if (positionRequest.position === "user") {
@@ -284,6 +271,7 @@ export function useChatScrollFollow({
         }
         if (!initialScrollDoneRef.current && messageCount > 0) {
           initialScrollDoneRef.current = true;
+          setInitialScrollSettled(true);
           scrollToInitialPosition();
           return;
         }
@@ -297,6 +285,7 @@ export function useChatScrollFollow({
   }, [agentRunning, isFollowingRef, messageCount, positionRequest, scrollToInitialPosition, scrollToLatest, scrollUserMessageToTop]);
 
   return {
+    initialScrollSettled,
     isFollowing,
     isNearBottom,
     lastRenderedMessageRef,

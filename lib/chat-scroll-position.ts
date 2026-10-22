@@ -63,15 +63,6 @@ export function getChatScrollFollowDecision(options: {
   return "keep";
 }
 
-export interface InitialScrollPosition {
-  containerHeight: number;
-  containerScrollTop: number;
-  containerTop: number;
-  messageHeight: number;
-  messageTop: number;
-  scrollHeight: number;
-}
-
 export function getBottomScrollTop(scrollHeight: number, clientHeight: number): number {
   return Math.max(0, scrollHeight - clientHeight);
 }
@@ -82,22 +73,6 @@ export function getDistanceToBottom(
   scrollTop: number,
 ): number {
   return Math.max(0, getBottomScrollTop(scrollHeight, clientHeight) - scrollTop);
-}
-
-export function getInitialScrollTop(position: InitialScrollPosition): number {
-  const {
-    containerHeight,
-    containerScrollTop,
-    containerTop,
-    messageHeight,
-    messageTop,
-    scrollHeight,
-  } = position;
-  const desiredTop = containerScrollTop
-    + messageTop
-    - containerTop
-    - (containerHeight - messageHeight) / 2;
-  return Math.max(0, Math.min(desiredTop, getBottomScrollTop(scrollHeight, containerHeight)));
 }
 
 export function findChatScrollAnchor(

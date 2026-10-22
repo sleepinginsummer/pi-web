@@ -5,9 +5,15 @@ import test from "node:test";
 const source = await readFile(new URL("./SessionItem.tsx", import.meta.url), "utf8");
 const mutationSource = await readFile(new URL("../hooks/useSessionItemMutations.ts", import.meta.url), "utf8");
 
-test("only desktop Shift+click bypasses session deletion confirmation", () => {
+test("only desktop Shift+click bypasses session deletion confirmation, and only to archive", () => {
   assert.match(source, /mutations\.requestDelete\(!isMobile && event\.shiftKey\)/);
-  assert.match(mutationSource, /if \(skipConfirmation\) void performDelete\(\);\s*else setConfirmDelete\(true\);/);
+  assert.match(mutationSource, /if \(skipConfirmation\) void performDelete\("archive"\);\s*else setConfirmDelete\(true\);/);
+});
+
+test("删除确认条同时提供归档与永久删除", () => {
+  assert.match(source, /onArchive=\{\(\) => void mutations\.performDelete\("archive"\)\}/);
+  assert.match(source, /onDelete=\{\(\) => void mutations\.performDelete\("permanent"\)\}/);
+  assert.match(mutationSource, /mode === "permanent" \? "\?mode=permanent" : ""/);
 });
 
 test("does not register row-level session deletion shortcuts", () => {

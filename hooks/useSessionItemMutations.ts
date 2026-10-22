@@ -3,6 +3,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { SessionInfo } from "@/lib/types";
 
+/** archive 移入回收站（可恢复），permanent 直接删除文件。 */
+export type SessionDeleteMode = "archive" | "permanent";
+
 interface UseSessionItemMutationsOptions {
   session: SessionInfo;
   title: string;
@@ -55,11 +58,12 @@ export function useSessionItemMutations({
     }
   }, [onRenamed, renameValue, session.id, session.name, title]);
 
-  const performDelete = useCallback(async () => {
+  const performDelete = useCallback(async (mode: SessionDeleteMode) => {
     setConfirmDelete(false);
     setDeleting(true);
     try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, { method: "DELETE" });
+      const query = mode === "permanent" ? "?mode=permanent" : "";
+      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}${query}`, { method: "DELETE" });
       if (!response.ok) {
         console.error(`删除会话失败: HTTP ${response.status}`);
         return;
@@ -74,7 +78,8 @@ export function useSessionItemMutations({
 
   const requestDelete = useCallback((skipConfirmation = false) => {
     onSwipeOpenChange(false);
-    if (skipConfirmation) void performDelete();
+    // 跳过确认只做可恢复的归档，永久删除必须经过确认条。
+    if (skipConfirmation) void performDelete("archive");
     else setConfirmDelete(true);
   }, [onSwipeOpenChange, performDelete]);
 

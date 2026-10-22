@@ -156,6 +156,47 @@ test("删除中间子代理时将后代一同移入回收站", async (t) => {
   assert.ok((await readdir(join(dir, "trash"))).some((name) => name.endsWith("_child.jsonl")));
 });
 
+test("永久删除不经过回收站，子代理后代一并删除；未知模式拒绝", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-web-delete-permanent-"));
+  const parentPath = join(dir, "parent.jsonl");
+  const childPath = join(dir, "child.jsonl");
+  const parentId = "delete-permanent-parent";
+  const header = (id) => JSON.stringify({ type: "session", version: 3, id, timestamp: "2026-01-01T00:00:00.000Z", cwd: dir });
+  await writeFile(parentPath, `${header(parentId)}\n`);
+  await writeFile(childPath, [
+    header("delete-permanent-child"),
+    JSON.stringify({
+      type: "custom",
+      customType: "pi-web:subagent",
+      id: "meta",
+      parentId: null,
+      timestamp: "2026-01-01T00:00:00.000Z",
+      data: { version: 1, parentSessionId: parentId, parentSessionPath: parentPath, profile: "Explore", description: "Inspect parser" },
+    }),
+    "",
+  ].join("\n"));
+  cacheSessionPath(parentId, parentPath);
+  const oldAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  t.after(async () => {
+    if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
+    invalidateSessionPathCache(parentId);
+    await rm(dir, { recursive: true, force: true });
+  });
+  const context = { params: Promise.resolve({ id: parentId }) };
+
+  const rejected = await deleteSession(new Request(`http://localhost/api/sessions/${parentId}?mode=shred`, { method: "DELETE" }), context);
+  assert.equal(rejected.status, 400);
+  await readFile(parentPath);
+
+  const response = await deleteSession(new Request(`http://localhost/api/sessions/${parentId}?mode=permanent`, { method: "DELETE" }), context);
+  assert.equal(response.status, 200);
+  await assert.rejects(readFile(parentPath), { code: "ENOENT" });
+  await assert.rejects(readFile(childPath), { code: "ENOENT" });
+  await assert.rejects(readdir(join(dir, "trash")), { code: "ENOENT" });
+});
+
 test("live detail and state routes work without a persisted JSONL file", async (t) => {
   const previousRegistry = globalThis.__piSessions;
   const id = "live-route-test";

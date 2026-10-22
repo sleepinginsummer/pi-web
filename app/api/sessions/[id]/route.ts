@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "fs";
+import { existsSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import {
   attachSessionProjectInfo,
@@ -238,10 +238,15 @@ export async function PATCH(
 
 // DELETE /api/sessions/[id]
 export async function DELETE(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  // 默认归档（移入回收站，可恢复）；mode=permanent 直接删除文件，不经过回收站。
+  const mode = new URL(req.url).searchParams.get("mode") ?? "archive";
+  if (mode !== "archive" && mode !== "permanent") {
+    return NextResponse.json({ error: `Unknown delete mode: ${mode}` }, { status: 400 });
+  }
   try {
     const filePath = await resolveSessionPath(id);
     if (!filePath) {
@@ -390,12 +395,16 @@ export async function DELETE(
     }
     try { await abortSubagent(id); } catch { /* ordinary session */ }
     await getRpcSession(id)?.shutdown();
-    // 保留本地回收站语义；子代理后代也必须从活动目录移走，避免孤儿会话。
+    // 子代理后代也必须从活动目录移走，避免孤儿会话；归档时它们一起进回收站。
     let trashedName = "";
     for (const [deletedId, deletedPath] of deletedPaths) {
       try {
-        const name = trashSessionFile(deletedPath);
-        if (deletedId === id) trashedName = name;
+        if (mode === "permanent") {
+          unlinkSync(deletedPath);
+        } else {
+          const name = trashSessionFile(deletedPath);
+          if (deletedId === id) trashedName = name;
+        }
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
