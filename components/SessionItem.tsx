@@ -1,9 +1,9 @@
 "use client";
 
 import { Pin as PinIcon } from "lucide-react";
-import { useCallback, useState, type MouseEvent, type ReactNode, type RefObject } from "react";
+import { useCallback, useState, type CSSProperties, type MouseEvent, type ReactNode, type RefObject } from "react";
 import { useI18n } from "@/hooks/useI18n";
-import { useSessionItemMutations } from "@/hooks/useSessionItemMutations";
+import { useSessionItemMutations, type SessionDeleteMode, type SessionDeleteStep } from "@/hooks/useSessionItemMutations";
 import { useSwipeActions } from "@/hooks/useSwipeActions";
 import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
 import { isPlainActivation, sessionDeepLink } from "@/lib/session-links";
@@ -163,16 +163,43 @@ function UnreadSessionIndicator() {
   );
 }
 
-function SessionDeleteConfirm({ title, onArchive, onDelete, onCancel }: { title: string; onArchive: () => void; onDelete: () => void; onCancel: () => void }) {
+const NEUTRAL_CONFIRM_BUTTON = { height: 30, padding: "0 9px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text)", fontSize: 12, fontWeight: 600 } as const;
+const DANGER_CONFIRM_BUTTON = { height: 30, padding: "0 9px", background: "#ef4444", border: "none", borderRadius: 6, color: "#fff", fontSize: 12, fontWeight: 600 } as const;
+const MUTED_CONFIRM_BUTTON = { ...NEUTRAL_CONFIRM_BUTTON, color: "var(--text-muted)", fontWeight: 500 } as const;
+
+function ConfirmButton({ style, title, label, onClick }: { style: CSSProperties; title?: string; label: string; onClick: () => void }) {
+  return <button type="button" title={title} onClick={(event) => { event.stopPropagation(); onClick(); }} style={style}>{label}</button>;
+}
+
+function SessionDeleteConfirm({ title, step, onChoose, onConfirm, onBack, onCancel }: {
+  title: string;
+  step: SessionDeleteStep;
+  onChoose: (mode: SessionDeleteMode) => void;
+  onConfirm: (mode: SessionDeleteMode) => void;
+  onBack: () => void;
+  onCancel: () => void;
+}) {
   const { t } = useI18n();
   const shortTitle = title.slice(0, 22) + (title.length > 22 ? "…" : "");
+  const prompt = step === "choose"
+    ? t("sidebar.deleteSession", { title: shortTitle })
+    : step === "archive" ? t("sidebar.confirmArchivePrompt") : t("sidebar.confirmDeletePrompt");
   return (
     <>
-      <div style={{ flex: 1, minWidth: 0, fontSize: 12, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t("sidebar.deleteSession", { title: shortTitle })}</div>
+      <div title={prompt} style={{ flex: 1, minWidth: 0, fontSize: 12, color: step === "permanent" ? "#ef4444" : "var(--text)", fontWeight: step === "choose" ? 400 : 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{prompt}</div>
       <div style={{ display: "flex", gap: 5, flexShrink: 0 }}>
-        <button type="button" title={t("sidebar.archiveHint")} onClick={(event) => { event.stopPropagation(); onArchive(); }} style={{ height: 30, padding: "0 9px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text)", fontSize: 12, fontWeight: 600 }}>{t("sidebar.archive")}</button>
-        <button type="button" title={t("sidebar.deletePermanentlyHint")} onClick={(event) => { event.stopPropagation(); onDelete(); }} style={{ height: 30, padding: "0 9px", background: "#ef4444", border: "none", borderRadius: 6, color: "#fff", fontSize: 12, fontWeight: 600 }}>{t("sidebar.delete")}</button>
-        <button type="button" onClick={(event) => { event.stopPropagation(); onCancel(); }} style={{ height: 30, padding: "0 9px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text-muted)", fontSize: 12, fontWeight: 500 }}>{t("sidebar.cancel")}</button>
+        {step === "choose" ? (
+          <>
+            <ConfirmButton style={NEUTRAL_CONFIRM_BUTTON} title={t("sidebar.archiveHint")} label={t("sidebar.archive")} onClick={() => onChoose("archive")} />
+            <ConfirmButton style={DANGER_CONFIRM_BUTTON} title={t("sidebar.deletePermanentlyHint")} label={t("sidebar.delete")} onClick={() => onChoose("permanent")} />
+            <ConfirmButton style={MUTED_CONFIRM_BUTTON} label={t("sidebar.cancel")} onClick={onCancel} />
+          </>
+        ) : (
+          <>
+            <ConfirmButton style={step === "permanent" ? DANGER_CONFIRM_BUTTON : NEUTRAL_CONFIRM_BUTTON} title={step === "permanent" ? t("sidebar.deletePermanentlyHint") : t("sidebar.archiveHint")} label={step === "permanent" ? t("sidebar.confirmDelete") : t("sidebar.confirmArchive")} onClick={() => onConfirm(step)} />
+            <ConfirmButton style={MUTED_CONFIRM_BUTTON} label={t("sidebar.back")} onClick={onBack} />
+          </>
+        )}
       </div>
     </>
   );
@@ -322,8 +349,8 @@ export function SessionItem({ session, status, mobile, actions, tree = {} }: Ses
         style={{ width: "100%", height: ITEM_HEIGHT, boxSizing: "border-box", display: "flex", position: "relative", zIndex: 1, alignItems: "center", paddingLeft: depth > 0 ? depth * 12 + 14 : 14, paddingRight: isPinned ? 32 : 8, cursor: mutations.confirmDelete || mutations.renaming ? "default" : "pointer", background: mutations.confirmDelete ? "rgba(239,68,68,0.06)" : isSelected ? "var(--bg-selected)" : hovered ? "var(--bg-hover)" : isMobile ? "var(--bg-panel)" : "transparent", borderLeft: mutations.confirmDelete ? "2px solid #ef4444" : isSelected ? "2px solid var(--accent)" : "2px solid transparent", transform: isMobile ? `translateX(${swipe.offset}px)` : "none", transition: swipe.dragging ? "none" : "background 0.1s, transform 0.18s ease-out", touchAction: isMobile ? "pan-y" : "auto", willChange: isMobile ? "transform" : "auto", opacity: mutations.deleting ? 0.5 : 1, gap: 6, overflow: "hidden" }}
       >
         {isPinned && <span data-session-pin-marker aria-hidden="true" style={{ position: "absolute", top: 0, right: 0, width: 24, height: 16, display: "flex", alignItems: "center", justifyContent: "center", background: "#eab308", borderBottomLeftRadius: 5, color: "#713f12", boxShadow: "0 1px 2px rgba(161,98,7,0.24)", pointerEvents: "none", zIndex: 3 }}><PinIcon size={12} strokeWidth={2.4} aria-hidden="true" style={{ transform: "rotate(45deg)" }} /></span>}
-        {mutations.confirmDelete ? (
-          <SessionDeleteConfirm title={title} onArchive={() => void mutations.performDelete("archive")} onDelete={() => void mutations.performDelete("permanent")} onCancel={mutations.cancelDelete} />
+        {mutations.deleteStep ? (
+          <SessionDeleteConfirm title={title} step={mutations.deleteStep} onChoose={mutations.chooseDeleteMode} onConfirm={(mode) => void mutations.performDelete(mode)} onBack={mutations.backToDeleteChoice} onCancel={mutations.cancelDelete} />
         ) : mutations.renaming ? (
           <SessionRenameInput inputRef={mutations.renameInputRef} value={mutations.renameValue} onChange={mutations.setRenameValue} onCommit={() => void mutations.commitRename()} onCancel={mutations.cancelRename} />
         ) : (

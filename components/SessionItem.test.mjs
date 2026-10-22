@@ -5,14 +5,20 @@ import test from "node:test";
 const source = await readFile(new URL("./SessionItem.tsx", import.meta.url), "utf8");
 const mutationSource = await readFile(new URL("../hooks/useSessionItemMutations.ts", import.meta.url), "utf8");
 
-test("only desktop Shift+click bypasses session deletion confirmation, and only to archive", () => {
+test("Shift+click 只跳过选择步骤，归档仍需二次确认", () => {
   assert.match(source, /mutations\.requestDelete\(!isMobile && event\.shiftKey\)/);
-  assert.match(mutationSource, /if \(skipConfirmation\) void performDelete\("archive"\);\s*else setConfirmDelete\(true\);/);
+  assert.match(mutationSource, /setDeleteStep\(skipToArchive \? "archive" : "choose"\);/);
+  assert.doesNotMatch(mutationSource, /if \(skip\w*\) void performDelete/);
 });
 
-test("删除确认条同时提供归档与永久删除", () => {
-  assert.match(source, /onArchive=\{\(\) => void mutations\.performDelete\("archive"\)\}/);
-  assert.match(source, /onDelete=\{\(\) => void mutations\.performDelete\("permanent"\)\}/);
+test("删除确认条先选归档或删除，再对所选操作二次确认", () => {
+  const confirmSource = source.slice(source.indexOf("function SessionDeleteConfirm("), source.indexOf("function SessionRenameInput("));
+  // 第一步只切换步骤，不执行删除。
+  assert.match(confirmSource, /onClick=\{\(\) => onChoose\("archive"\)\}/);
+  assert.match(confirmSource, /onClick=\{\(\) => onChoose\("permanent"\)\}/);
+  assert.match(confirmSource, /onClick=\{\(\) => onConfirm\(step\)\}/);
+  assert.match(confirmSource, /label=\{t\("sidebar\.back"\)\} onClick=\{onBack\}/);
+  assert.match(source, /onChoose=\{mutations\.chooseDeleteMode\} onConfirm=\{\(mode\) => void mutations\.performDelete\(mode\)\}/);
   assert.match(mutationSource, /mode === "permanent" \? "\?mode=permanent" : ""/);
 });
 

@@ -46,3 +46,5 @@ next-env.d.ts
 # runtime logs
 prod.log*
 .prod.pid
+
+.idea

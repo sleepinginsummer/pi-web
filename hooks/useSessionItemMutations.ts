@@ -5,6 +5,8 @@ import type { SessionInfo } from "@/lib/types";
 
 /** archive 移入回收站（可恢复），permanent 直接删除文件。 */
 export type SessionDeleteMode = "archive" | "permanent";
+/** 确认条分两步：先选归档或删除，再对所选操作二次确认。 */
+export type SessionDeleteStep = "choose" | SessionDeleteMode;
 
 interface UseSessionItemMutationsOptions {
   session: SessionInfo;
@@ -23,7 +25,8 @@ export function useSessionItemMutations({
 }: UseSessionItemMutationsOptions) {
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
-  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleteStep, setDeleteStep] = useState<SessionDeleteStep | null>(null);
+  const confirmDelete = deleteStep !== null;
   const [deleting, setDeleting] = useState(false);
   const renameInputRef = useRef<HTMLInputElement>(null);
 
@@ -59,7 +62,7 @@ export function useSessionItemMutations({
   }, [onRenamed, renameValue, session.id, session.name, title]);
 
   const performDelete = useCallback(async (mode: SessionDeleteMode) => {
-    setConfirmDelete(false);
+    setDeleteStep(null);
     setDeleting(true);
     try {
       const query = mode === "permanent" ? "?mode=permanent" : "";
@@ -76,14 +79,15 @@ export function useSessionItemMutations({
     }
   }, [onDeleted, session.id]);
 
-  const requestDelete = useCallback((skipConfirmation = false) => {
+  const requestDelete = useCallback((skipToArchive = false) => {
     onSwipeOpenChange(false);
-    // 跳过确认只做可恢复的归档，永久删除必须经过确认条。
-    if (skipConfirmation) void performDelete("archive");
-    else setConfirmDelete(true);
-  }, [onSwipeOpenChange, performDelete]);
+    // Shift+点击只省去选择这一步，归档仍要二次确认。
+    setDeleteStep(skipToArchive ? "archive" : "choose");
+  }, [onSwipeOpenChange]);
 
-  const cancelDelete = useCallback(() => setConfirmDelete(false), []);
+  const chooseDeleteMode = useCallback((mode: SessionDeleteMode) => setDeleteStep(mode), []);
+  const backToDeleteChoice = useCallback(() => setDeleteStep("choose"), []);
+  const cancelDelete = useCallback(() => setDeleteStep(null), []);
 
   return {
     renaming,
@@ -94,8 +98,11 @@ export function useSessionItemMutations({
     cancelRename,
     commitRename,
     confirmDelete,
+    deleteStep,
     deleting,
     requestDelete,
+    chooseDeleteMode,
+    backToDeleteChoice,
     cancelDelete,
     performDelete,
   };
