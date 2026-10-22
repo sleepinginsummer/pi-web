@@ -6,6 +6,7 @@ import { writePrivateFileAtomicSync } from "./atomic-file";
 import { projectTreeForResponse } from "./project-tree";
 import { isTurnAnchorEntry } from "./session-turns";
 import type { SessionContext, SessionEntry, SessionTreeNode } from "./types";
+import { readShadowMindStateEntry, type ShadowStateEntryLike } from "./shadow-session-protocol";
 
 interface IndexedRecord {
   id: string;
@@ -19,6 +20,7 @@ interface IndexedRecord {
   previewText?: string;
   thinkingLevel?: string;
   model?: { provider: string; modelId: string };
+  shadowMindEnabled?: boolean;
 }
 
 interface FileIdentity {
@@ -30,8 +32,8 @@ interface FileIdentity {
 }
 
 interface PersistedSessionContentIndex {
-  // 2：anchor 改为与 isMessageGroupAnchor 一致的轮次锚点，旧索引需重建。
-  format: 2;
+  // 3：增加会话级 Shadow 开关元数据，旧索引需重建。
+  format: 3;
   filePath: string;
   identity: FileIdentity;
   indexedBytes: number;
@@ -122,7 +124,7 @@ function loadPersisted(filePath: string): PersistedSessionContentIndex | null {
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as PersistedSessionContentIndex;
     if (
-      parsed.format !== 2
+      parsed.format !== 3
       || parsed.filePath !== filePath
       || !isRecord(parsed.identity)
       || !Number.isSafeInteger(parsed.indexedBytes)
@@ -176,6 +178,7 @@ function toIndexedRecord(entry: Record<string, unknown>, offset: number, length:
     : entry.type === "message" && message?.role === "assistant" && typeof message.provider === "string" && typeof message.model === "string"
       ? { provider: message.provider, modelId: message.model }
       : undefined;
+  const shadowMindEnabled = readShadowMindStateEntry(entry as ShadowStateEntryLike);
   return {
     id: entry.id,
     parentId,
@@ -186,6 +189,7 @@ function toIndexedRecord(entry: Record<string, unknown>, offset: number, length:
     ...previewOf(entry),
     ...(entry.type === "thinking_level_change" && typeof entry.thinkingLevel === "string" ? { thinkingLevel: entry.thinkingLevel } : {}),
     ...(model ? { model } : {}),
+    ...(shadowMindEnabled !== null ? { shadowMindEnabled } : {}),
   };
 }
 
@@ -224,7 +228,7 @@ function buildProjectedTree(records: IndexedRecord[]): SessionTreeNode[] {
 
 function blankIndex(filePath: string, identity: FileIdentity): PersistedSessionContentIndex {
   return {
-    format: 2,
+    format: 3,
     filePath,
     identity,
     indexedBytes: 0,
@@ -285,7 +289,7 @@ async function scanFrom(filePath: string, index: PersistedSessionContentIndex): 
 async function buildOrUpdateIndex(filePath: string, attempt = 1): Promise<PersistedSessionContentIndex> {
   const current = fileIdentity(filePath);
   const memory = indexes().get(filePath);
-  const persisted = memory ?? loadPersisted(filePath);
+  const persisted = (memory?.format === 3 ? memory : null) ?? loadPersisted(filePath);
   if (persisted && persisted.identity.size === current.size && persisted.identity.mtimeNs === current.mtimeNs && persisted.identity.ctimeNs === current.ctimeNs) {
     indexes().set(filePath, persisted);
     return persisted;
@@ -349,6 +353,7 @@ export interface IndexedContextPage {
   /** 某条记录之上的轮次数，按索引中的完整祖先链计算。 */
   turnsBefore: (entryId: string) => number;
   settings: Pick<SessionContext, "thinkingLevel" | "model">;
+  shadowMindEnabled: boolean;
   totalActiveMs: number;
   version: string;
 }
@@ -398,6 +403,8 @@ export async function readIndexedContextPage(
       return turns;
     },
     settings: { thinkingLevel: thinkingLevel ?? "off", model: model ?? null },
+    // 与 wrapper 的 getEntries() 一致：开关属于整个会话，不随分支或分页回退。
+    shadowMindEnabled: index.records.findLast((record) => typeof record.shadowMindEnabled === "boolean")?.shadowMindEnabled ?? true,
     totalActiveMs: index.totalActiveMs,
     version: index.version,
   };

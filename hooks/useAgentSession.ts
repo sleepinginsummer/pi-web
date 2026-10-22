@@ -798,6 +798,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     pending: shadowMindTogglePending,
     applyRuntimeState: applyShadowRuntimeState,
     consumeEntry: consumeShadowEntry,
+    restoreSnapshot: restoreShadowSnapshot,
     runSlashCommand: runShadowSlashCommand,
     toggle: handleShadowMindToggle,
   } = shadowSessionSetting;
@@ -906,6 +907,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!state) {
       setFastEnabled(false);
       setRuntimeFastAvailable(null);
+      applyShadowRuntimeState(undefined);
       return;
     }
     if (usageRead) applyContextUsage(usageRead.sid, usageRead.runId, usageRead.requestId, state.contextUsage);
@@ -969,6 +971,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       generation: backfillRequestRef.current.generation + 1,
       controller: null,
     };
+    restoreShadowSnapshot(sid, snapshot.shadowMindEnabled);
     viewSnapshotRef.current.thinkingLevel = snapshot.thinkingLevel;
     setContextModel(snapshot.model);
     contextVersionRef.current = snapshot.version;
@@ -1004,7 +1007,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     setLoading(false);
     return true;
-  }, [modelSelectionActions, requestScrollPosition]);
+  }, [modelSelectionActions, requestScrollPosition, restoreShadowSnapshot]);
 
   viewSnapshotRef.current.leafId = activeLeafId;
   viewSnapshotRef.current.page = historyPage;

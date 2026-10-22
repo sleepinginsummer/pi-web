@@ -7,6 +7,7 @@ import { readIndexedContextPage, readIndexedSessionDetails } from "@/lib/session
 import { sessionExternalWritePayload } from "@/lib/session-external-write";
 import { attachTranscriptNotices, readSessionTranscriptNotices, readShowCacheMissNotices } from "@/lib/transcript-notices-server";
 import type { SessionEntry } from "@/lib/types";
+import { readSessionShadowMindEnabled } from "@/lib/shadow-session-protocol";
 
 export async function GET(
   req: Request,
@@ -101,6 +102,7 @@ export async function GET(
       context,
       leafId: activeLeafId,
       totalActiveMs: live ? computeSessionTotalActiveMs(live.entries) : indexed!.totalActiveMs,
+      shadowMindEnabled: live ? readSessionShadowMindEnabled(live.entries) : indexed!.shadowMindEnabled,
       version,
       tail,
       before: before ?? null,

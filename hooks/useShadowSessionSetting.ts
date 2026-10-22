@@ -22,19 +22,43 @@ export function useShadowSessionSetting({
   addErrorNotice,
   staged,
 }: UseShadowSessionSettingOptions) {
-  const [runtimeEnabled, setRuntimeEnabled] = useState(true);
-  const [runtimeAvailable, setRuntimeAvailable] = useState(false);
+  const [runtime, setRuntime] = useState({
+    sessionId: sessionIdRef.current, enabled: false, available: false, authoritative: false,
+  });
   const [pending, setPending] = useState(false);
-  const applyRuntimeState = useCallback((state: Pick<AgentRuntimeState, "shadowMindEnabled" | "shadowMindAvailable"> | undefined) => {
-    if (!state) return;
-    setRuntimeEnabled(state.shadowMindEnabled);
-    setRuntimeAvailable(state.shadowMindAvailable);
-  }, []);
+  const applyRuntimeState = useCallback((state: Pick<AgentRuntimeState,
+    "sessionId" | "shadowMindEnabled" | "shadowMindAvailable" | "extensionsInitializing"> | undefined) => {
+    const sessionId = sessionIdRef.current;
+    if (state && state.sessionId !== sessionId) return;
+    setRuntime((previous) => {
+      const enabled = previous.sessionId === sessionId ? previous.enabled : false;
+      // session_start 完成前的默认开启值不是恢复结果；此时保留历史值并禁用交互。
+      if (!state || state.extensionsInitializing) {
+        return { sessionId, enabled, available: false, authoritative: false };
+      }
+      return { sessionId, enabled: state.shadowMindEnabled, available: state.shadowMindAvailable, authoritative: true };
+    });
+  }, [sessionIdRef]);
+
+  const restoreSnapshot = useCallback((sessionId: string, enabled: boolean | undefined) => {
+    if (sessionIdRef.current !== sessionId || typeof enabled !== "boolean") return;
+    setRuntime((previous) => {
+      // 延迟的历史响应不能覆盖已经收到的 runtime、SSE 或用户操作结果。
+      if (previous.sessionId === sessionId && previous.authoritative) return previous;
+      return { sessionId, enabled, available: false, authoritative: false };
+    });
+  }, [sessionIdRef]);
 
   const consumeEntry = useCallback((entry: SessionEntry | undefined) => {
     const persisted = readShadowMindStateEntry(entry);
-    if (persisted !== null) setRuntimeEnabled(persisted);
-  }, []);
+    if (persisted === null) return;
+    const sessionId = sessionIdRef.current;
+    setRuntime((previous) => ({
+      sessionId, enabled: persisted,
+      available: previous.sessionId === sessionId && previous.available,
+      authoritative: true,
+    }));
+  }, [sessionIdRef]);
 
   const updateEnabled = useCallback(async (sessionId: string, nextEnabled: boolean): Promise<boolean> => {
     const result = await sendAgentCommand<{ enabled: boolean }>(sessionId, {
@@ -42,7 +66,9 @@ export function useShadowSessionSetting({
       enabled: nextEnabled,
     });
     const effective = result?.enabled ?? nextEnabled;
-    if (sessionIdRef.current === sessionId) setRuntimeEnabled(effective);
+    if (sessionIdRef.current === sessionId) {
+      setRuntime((previous) => ({ ...previous, sessionId, enabled: effective, authoritative: true }));
+    }
     return effective;
   }, [sessionIdRef]);
 
@@ -66,8 +92,9 @@ export function useShadowSessionSetting({
     }
   }, [updateEnabled]);
 
-  const enabled = staged?.enabled ?? runtimeEnabled;
-  const available = staged ? true : runtimeAvailable;
+  const isCurrentSession = runtime.sessionId === sessionIdRef.current;
+  const enabled = staged?.enabled ?? (isCurrentSession ? runtime.enabled : false);
+  const available = staged ? true : isCurrentSession && runtime.available;
   const effectivePending = staged?.pending ?? pending;
   const stagedOnChange = staged?.onChange;
 
@@ -97,6 +124,7 @@ export function useShadowSessionSetting({
     available,
     pending: effectivePending,
     applyRuntimeState,
+    restoreSnapshot,
     consumeEntry,
     runSlashCommand,
     toggle,

@@ -12,6 +12,7 @@ export interface SessionContextSnapshot {
   thinkingLevel: string;
   model: { provider: string; modelId: string } | null;
   totalActiveMs?: number;
+  shadowMindEnabled?: boolean;
   version: string;
 }
 
@@ -226,7 +227,7 @@ export async function fetchSessionContext(
       const failure = await response.json().catch(() => null) as { error?: unknown } | null;
       throw new Error(typeof failure?.error === "string" ? failure.error : `HTTP ${response.status}`);
     }
-    const payload = await response.json() as { context: Omit<SessionContextSnapshot, "version">; leafId: string | null; totalActiveMs?: number; version?: string };
+    const payload = await response.json() as { context: Omit<SessionContextSnapshot, "version">; leafId: string | null; totalActiveMs?: number; shadowMindEnabled?: boolean; version?: string };
     const version = payload.version ?? response.headers.get("X-Session-Version");
     if (!version) throw new Error("服务端会话上下文缺少版本");
     const entryIds = payload.context.entryIds ?? [];
@@ -242,6 +243,7 @@ export async function fetchSessionContext(
         entryIds,
         turnsBefore: typeof payload.context.turnsBefore === "number" ? payload.context.turnsBefore : 0,
         totalActiveMs: payload.totalActiveMs,
+        shadowMindEnabled: payload.shadowMindEnabled,
         version,
       },
       leafId: payload.leafId,
