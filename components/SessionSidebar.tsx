@@ -6,6 +6,7 @@ import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useSessionList } from "@/hooks/useSessionList";
 import { useSidebarNavigation } from "@/hooks/useSidebarNavigation";
+import { reconcileSessionPreferenceOrder } from "@/lib/sidebar-preference-state";
 import type { RunningSessionTransitionEvent } from "@/hooks/useRunningSessionTransitions";
 import { loadExplorerOpen, saveExplorerOpen } from "@/lib/file-explorer-state";
 import { loadCollapsedProjects, saveCollapsedProjects } from "@/lib/project-collapse-state";
@@ -625,6 +626,11 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
       : allSessions,
     [allSessions, selectedSession],
   );
+  // 新建会话在列表接口收录前也要参与排序，避免未登记的行被排到末尾。
+  const visibleSessionOrder = useMemo(
+    () => reconcileSessionPreferenceOrder(visibleSessions, sessionOrder),
+    [sessionOrder, visibleSessions],
+  );
   const recentProjects = getRecentProjects(visibleSessions);
   const selectedProject = resolveSidebarProjectPath(visibleSessions, selectedCwd, {
     projectRoot: projectRootFor(selectedCwd),
@@ -982,7 +988,7 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
                 isMobile,
                 activity: showProjectActivity(projectActivity.get(project), t),
                 sessions: projectSessions,
-                sessionOrder,
+                sessionOrder: visibleSessionOrder,
               }}
               labels={{
                 empty: t("sidebar.noSessions"),
