@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
-import { commitCustomProjectSelection } from "../lib/custom-project-selection.ts";
+import { createJiti } from "jiti";
+const { commitCustomProjectSelection } = await createJiti(import.meta.url).import("../lib/custom-project-selection.ts");
 
 const source = readFileSync(new URL("./SessionSidebar.tsx", import.meta.url), "utf8");
 
