@@ -1406,6 +1406,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       className={compact ? undefined : "chat-input-shell"}
       style={{
         flexShrink: 0,
+        // fieldset 默认的 min-inline-size 会被长排队消息撑开，须允许随容器收缩。
+        minWidth: 0,
         background: "transparent",
         padding: compact ? 0 : "0 16px 8px",
         paddingRight: compact ? 0 : isMobile ? 16 : 52, // desktop: 16px base + 36px for ChatMinimap alignment
