@@ -166,5 +166,6 @@ export function orderProjectsByPreference(projects: string[], storedOrder: strin
   const added = unique
     .filter((project) => !retainedSet.has(project))
     .sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base", numeric: true }));
-  return [...retained, ...added];
+  // 未登记的新增项目排在顶部，已有项目继续沿用用户保存的顺序。
+  return [...added, ...retained];
 }

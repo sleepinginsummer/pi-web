@@ -560,6 +560,7 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
     setCustomPathError(null);
     try {
       await commitCustomProjectSelection(path, {
+        existingProjects: [...knownProjects, ...getRecentProjects(allSessions)],
         validateProject: async (candidate) => {
           const validateResponse = await fetch("/api/cwd/validate", {
             method: "POST",
@@ -595,7 +596,7 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
     } finally {
       setCustomPathValidating(false);
     }
-  }, [addProject, customPathValue, customPathValidating]);
+  }, [addProject, allSessions, customPathValue, customPathValidating, knownProjects]);
 
   const handleCustomPathClick = useCallback(() => {
     setCustomPathValue(loadLastCustomCwd());
