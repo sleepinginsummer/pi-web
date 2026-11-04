@@ -19,6 +19,6 @@ test("tips use the compact left-side shelf and reveal full text on hover", async
 
   assert.match(source, /className="notice-shelf-overlay"/);
   assert.match(noticeShelfSource, /className="notice-shelf-message"/);
-  assert.match(styles, /\.notice-shelf-item\s*\{[\s\S]*?width: min\(240px, 100%\);[\s\S]*?min-height: 34px/);
-  assert.match(styles, /\.notice-shelf-item:hover \.notice-shelf-message[\s\S]*?white-space: normal/);
+  assert.match(styles, /\.notice-shelf-item\s*\{[\s\S]*?width: min\(240px, 100%\);[\s\S]*?\.notice-shelf-toggle\s*\{[\s\S]*?min-height: 34px/);
+  assert.match(styles, /\.notice-shelf-item:hover \.notice-shelf-message[\s\S]*?white-space: pre-wrap/);
 });

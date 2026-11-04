@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { copyText } from "@/lib/clipboard";
 import { splitNoticeText } from "@/lib/notice-text";
 
@@ -9,54 +9,42 @@ export interface NoticeShelfItem {
   message: string;
   type: "info" | "success" | "warning" | "error";
   exiting?: boolean;
+  expanded?: boolean;
 }
 
-const LONG_PRESS_MS = 500;
 const COPIED_FEEDBACK_MS = 1_500;
 
 interface NoticeShelfProps {
   notices: NoticeShelfItem[];
-  closeLabel: string;
+  copyLabel: string;
   copiedLabel: string;
-  onDismiss: (id: string) => void;
+  onToggleExpanded: (id: string, expanded: boolean) => void;
   floating?: boolean;
   copyNoticeText?: (text: string) => Promise<void>;
 }
 
+/** 点击展开并暂停自动消失，可复制完整内容；再次点击收起，重新计时后消失。 */
 export function NoticeShelf({
   notices,
-  closeLabel,
+  copyLabel,
   copiedLabel,
-  onDismiss,
+  onToggleExpanded,
   floating = false,
   copyNoticeText = copyText,
 }: NoticeShelfProps) {
   const [copiedNoticeId, setCopiedNoticeId] = useState<string | null>(null);
-  const pressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const longPressedRef = useRef(false);
-
-  const clearPressTimer = useCallback(() => {
-    if (pressTimerRef.current) clearTimeout(pressTimerRef.current);
-    pressTimerRef.current = null;
-  }, []);
 
   useEffect(() => () => {
-    clearPressTimer();
     if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
-  }, [clearPressTimer]);
+  }, []);
 
-  const startLongPress = (notice: NoticeShelfItem) => {
-    clearPressTimer();
-    longPressedRef.current = false;
-    pressTimerRef.current = setTimeout(() => {
-      longPressedRef.current = true;
-      void copyNoticeText(notice.message).then(() => {
-        setCopiedNoticeId(notice.id);
-        if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
-        copiedTimerRef.current = setTimeout(() => setCopiedNoticeId(null), COPIED_FEEDBACK_MS);
-      }).catch(() => undefined);
-    }, LONG_PRESS_MS);
+  const copyNotice = (notice: NoticeShelfItem) => {
+    void copyNoticeText(notice.message).then(() => {
+      setCopiedNoticeId(notice.id);
+      if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+      copiedTimerRef.current = setTimeout(() => setCopiedNoticeId(null), COPIED_FEEDBACK_MS);
+    }).catch(() => undefined);
   };
 
   if (notices.length === 0) return null;
@@ -70,27 +58,12 @@ export function NoticeShelf({
             : notice.type === "success"
               ? "#10b981"
               : "var(--accent)";
+        const expanded = notice.expanded === true;
         return (
-          <button
+          <div
             key={notice.id}
-            type="button"
-            onPointerDown={(event) => {
-              if (event.button === 0) startLongPress(notice);
-            }}
-            onPointerUp={clearPressTimer}
-            onPointerCancel={clearPressTimer}
-            onPointerLeave={clearPressTimer}
-            onContextMenu={(event) => event.preventDefault()}
-            onClick={(event) => {
-              if (longPressedRef.current) {
-                longPressedRef.current = false;
-                event.preventDefault();
-                return;
-              }
-              onDismiss(notice.id);
-            }}
-            aria-label={`${notice.message}，${closeLabel}`}
             className="notice-shelf-item"
+            data-expanded={expanded ? "true" : undefined}
             style={{
               marginBottom: index === notices.length - 1 ? 0 : 6,
               animation: notice.exiting
@@ -98,16 +71,30 @@ export function NoticeShelf({
                 : "notice-shelf-in 0.18s ease-out both",
             }}
           >
-            <span className="notice-shelf-dot" style={{ background: color }} />
-            <span className="notice-shelf-message">
-              {copiedNoticeId === notice.id ? copiedLabel : splitNoticeText(notice.message).map((part, partIndex) => (
-                // 终端二维码或进度条（#755）：保留全部空格、行间无缝隙，并使用自带方块字符的等宽字体。
-                part.kind === "art"
-                  ? <span key={partIndex} className="notice-shelf-art">{part.text}</span>
-                  : part.text
-              ))}
-            </span>
-          </button>
+            <button
+              type="button"
+              className="notice-shelf-toggle"
+              aria-expanded={expanded}
+              onClick={() => onToggleExpanded(notice.id, !expanded)}
+            >
+              <span className="notice-shelf-dot" style={{ background: color }} />
+              <span className="notice-shelf-message">
+                {splitNoticeText(notice.message).map((part, partIndex) => (
+                  // 终端二维码或进度条（#755）：保留全部空格、行间无缝隙，并使用自带方块字符的等宽字体。
+                  part.kind === "art"
+                    ? <span key={partIndex} className="notice-shelf-art">{part.text}</span>
+                    : part.text
+                ))}
+              </span>
+            </button>
+            {expanded && (
+              <div className="notice-shelf-actions">
+                <button type="button" className="notice-shelf-copy" onClick={() => copyNotice(notice)}>
+                  {copiedNoticeId === notice.id ? copiedLabel : copyLabel}
+                </button>
+              </div>
+            )}
+          </div>
         );
       })}
     </div>

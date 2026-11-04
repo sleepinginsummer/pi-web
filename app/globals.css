@@ -2854,18 +2854,8 @@ span.token.table {
 }
 
 .notice-shelf-item {
-  display: flex;
   width: min(240px, 100%);
-  min-height: 34px;
-  align-items: center;
-  gap: 8px;
   overflow: hidden;
-  padding: 7px 10px;
-  cursor: pointer;
-  touch-action: manipulation;
-  -webkit-touch-callout: none;
-  user-select: none;
-  text-align: left;
   color: var(--text-muted);
   background: color-mix(in srgb, var(--bg) 94%, transparent);
   border: 1px solid color-mix(in srgb, var(--border) 76%, transparent);
@@ -2878,10 +2868,43 @@ span.token.table {
   transition: width 0.16s ease, background-color 0.16s ease, box-shadow 0.16s ease;
 }
 
+.notice-shelf-toggle {
+  display: flex;
+  width: 100%;
+  min-height: 34px;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  cursor: pointer;
+  touch-action: manipulation;
+  text-align: left;
+  color: inherit;
+}
+
+.notice-shelf-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 8px 6px;
+}
+
+.notice-shelf-copy {
+  padding: 2px 8px;
+  cursor: pointer;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 11px;
+}
+
+.notice-shelf-copy:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
 .notice-shelf-item:hover,
-.notice-shelf-item:focus-visible {
+.notice-shelf-item[data-expanded],
+.notice-shelf-item:has(.notice-shelf-toggle:focus-visible) {
   width: min(360px, 100%);
-  align-items: flex-start;
   background: var(--bg);
   box-shadow: 0 10px 28px -14px rgba(15, 23, 42, 0.36);
 }
@@ -3002,13 +3025,14 @@ span.token.table {
 @keyframes extension-widget-pulse { from { opacity: 1; transform: scale(1); } to { opacity: 0; transform: scale(2.4); } }
 
 .notice-shelf-overlay .notice-shelf-item:hover,
-.notice-shelf-overlay .notice-shelf-item:focus-visible {
+.notice-shelf-overlay .notice-shelf-item[data-expanded],
+.notice-shelf-overlay .notice-shelf-item:has(.notice-shelf-toggle:focus-visible) {
   width: 100%;
 }
 
-.notice-shelf-item:focus-visible {
+.notice-shelf-toggle:focus-visible {
   outline: 2px solid var(--accent);
-  outline-offset: 2px;
+  outline-offset: -2px;
 }
 
 .notice-shelf-dot {
@@ -3026,12 +3050,24 @@ span.token.table {
   white-space: nowrap;
 }
 
+.notice-shelf-item:hover .notice-shelf-toggle,
+.notice-shelf-item[data-expanded] .notice-shelf-toggle,
+.notice-shelf-toggle:focus-visible {
+  align-items: flex-start;
+}
+
 .notice-shelf-item:hover .notice-shelf-message,
-.notice-shelf-item:focus-visible .notice-shelf-message {
+.notice-shelf-item[data-expanded] .notice-shelf-message,
+.notice-shelf-toggle:focus-visible .notice-shelf-message {
   overflow: visible;
   text-overflow: clip;
-  white-space: normal;
+  white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.notice-shelf-item[data-expanded] .notice-shelf-message {
+  max-height: 50vh;
+  overflow-y: auto;
 }
 
 /* 终端字符画（二维码、进度条）只有在终端网格上才对得齐：保留空格、行高 1、同一款含方块字符的等宽字体。 */

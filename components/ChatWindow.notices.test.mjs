@@ -42,13 +42,13 @@ const notice = {
   type: "error",
 };
 
-function renderShelf({ copyNoticeText = async () => {}, onDismiss = () => {} } = {}) {
+function renderShelf({ copyNoticeText = async () => {}, onToggleExpanded = () => {}, expanded = false } = {}) {
   return render(React.createElement(NoticeShelf, {
-    notices: [notice],
-    closeLabel: "Close",
+    notices: [{ ...notice, expanded }],
+    copyLabel: "Copy",
     copiedLabel: "Copied",
     copyNoticeText,
-    onDismiss,
+    onToggleExpanded,
   }));
 }
 
@@ -62,90 +62,75 @@ test("keeps local temporary notices connected to the chat shelf", () => {
   assert.doesNotMatch(chatWindowSource, /top: 12,\s*right: 12/);
 });
 
-test("short press dismisses without copying", () => {
-  mock.timers.enable({ apis: ["setTimeout"] });
-  const copied = [];
-  const dismissed = [];
-  const { getByRole } = renderShelf({
-    copyNoticeText: async (text) => copied.push(text),
-    onDismiss: (id) => dismissed.push(id),
-  });
-  const button = getByRole("button");
+test("clicking a collapsed notice expands it instead of dismissing it", () => {
+  const toggled = [];
+  const { getByRole, queryByRole } = renderShelf({ onToggleExpanded: (id, value) => toggled.push([id, value]) });
+  const toggle = getByRole("button");
 
-  fireEvent.pointerDown(button, { button: 0 });
-  mock.timers.tick(499);
-  fireEvent.pointerUp(button);
-  fireEvent.click(button);
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  assert.equal(queryByRole("button", { name: "Copy" }), null);
+  fireEvent.click(toggle);
 
-  assert.deepEqual(copied, []);
-  assert.deepEqual(dismissed, [notice.id]);
+  assert.deepEqual(toggled, [[notice.id, true]]);
 });
 
-test("long press copies the complete message and suppresses the following click", async () => {
+test("clicking an expanded notice collapses it", () => {
+  const toggled = [];
+  const { getByRole } = renderShelf({ expanded: true, onToggleExpanded: (id, value) => toggled.push([id, value]) });
+  const toggle = getByRole("button", { expanded: true });
+
+  fireEvent.click(toggle);
+
+  assert.deepEqual(toggled, [[notice.id, false]]);
+});
+
+test("copy button copies the complete message without collapsing", async () => {
   mock.timers.enable({ apis: ["setTimeout"] });
   const copied = [];
-  const dismissed = [];
+  const toggled = [];
   const { getByRole } = renderShelf({
+    expanded: true,
     copyNoticeText: async (text) => copied.push(text),
-    onDismiss: (id) => dismissed.push(id),
+    onToggleExpanded: (id, value) => toggled.push([id, value]),
   });
-  const button = getByRole("button");
+  const copy = getByRole("button", { name: "Copy" });
 
-  fireEvent.pointerDown(button, { button: 0 });
   await act(async () => {
-    mock.timers.tick(500);
+    fireEvent.click(copy);
     await Promise.resolve();
   });
-  fireEvent.pointerUp(button);
-  fireEvent.click(button);
 
   assert.deepEqual(copied, [notice.message]);
-  assert.deepEqual(dismissed, []);
-  assert.equal(button.textContent?.includes("Copied"), true);
-});
-
-test("pointer cancellation prevents a pending long press", () => {
-  mock.timers.enable({ apis: ["setTimeout"] });
-  const copied = [];
-  const { getByRole } = renderShelf({ copyNoticeText: async (text) => copied.push(text) });
-  const button = getByRole("button");
-
-  fireEvent.pointerDown(button, { button: 0 });
-  fireEvent.pointerCancel(button);
-  mock.timers.tick(500);
-
-  assert.deepEqual(copied, []);
-});
-
-test("copy failure shows no success feedback and still suppresses the long-press click", async () => {
-  mock.timers.enable({ apis: ["setTimeout"] });
-  const dismissed = [];
-  const { getByRole } = renderShelf({
-    copyNoticeText: async () => { throw new Error("denied"); },
-    onDismiss: (id) => dismissed.push(id),
-  });
-  const button = getByRole("button");
-
-  fireEvent.pointerDown(button, { button: 0 });
+  assert.deepEqual(toggled, []);
+  assert.equal(copy.textContent, "Copied");
   await act(async () => {
-    mock.timers.tick(500);
+    mock.timers.tick(1_500);
+  });
+  assert.equal(copy.textContent, "Copy");
+});
+
+test("copy failure shows no success feedback", async () => {
+  const { getByRole } = renderShelf({
+    expanded: true,
+    copyNoticeText: async () => { throw new Error("denied"); },
+  });
+  const copy = getByRole("button", { name: "Copy" });
+
+  await act(async () => {
+    fireEvent.click(copy);
     await Promise.resolve();
   });
-  fireEvent.pointerUp(button);
-  fireEvent.click(button);
 
-  assert.deepEqual(dismissed, []);
-  assert.equal(button.textContent?.includes("Copied"), false);
-  assert.equal(button.textContent?.includes(notice.message), true);
+  assert.equal(copy.textContent, "Copy");
 });
 
 test("terminal QR codes in a notice keep every space and one monospace grid (#755)", () => {
   const qr = "█▀▀▀▀▀█ ▄ █▀▀▀▀▀█\n█ ███ █  ▀█ ███ █";
   const { container } = render(React.createElement(NoticeShelf, {
     notices: [{ id: "qr", message: `Scan to sign in:\n${qr}\nthen return here`, type: "info" }],
-    closeLabel: "Close",
+    copyLabel: "Copy",
     copiedLabel: "Copied",
-    onDismiss() {},
+    onToggleExpanded() {},
   }));
   const art = container.querySelector(".notice-shelf-art");
   assert.ok(art, "the block-character lines render as terminal art");

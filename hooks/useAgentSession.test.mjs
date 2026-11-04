@@ -364,7 +364,6 @@ test("surfaces auto-continue events from the RPC wrapper as notices", () => {
 });
 
 test("tips remain visible for five seconds before exiting", () => {
-  assert.match(source, /const NOTICE_VISIBLE_MS = 5_000;/);
   assert.match(source, /\(notice\.shownAt \?\? now\) \+ NOTICE_VISIBLE_MS/);
   assert.match(source, /type: "mark_expired", now: Date\.now\(\)/);
 });

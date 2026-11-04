@@ -320,7 +320,7 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
     retryInfo, contextUsage, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
-    notices, dismissNotice, extensionDialog, extensionCustomUi, askQuestionnaire, submitAskQuestionnaire, cancelAskQuestionnaire, extensionStatuses, extensionWidgets, detachedSubagentStatuses, todos, respondToExtensionUi, sendExtensionCustomInput, armCustomAnswer,
+    notices, setNoticeExpanded, extensionDialog, extensionCustomUi, askQuestionnaire, submitAskQuestionnaire, cancelAskQuestionnaire, extensionStatuses, extensionWidgets, detachedSubagentStatuses, todos, respondToExtensionUi, sendExtensionCustomInput, armCustomAnswer,
     agentPhase, completion,
     isNew, creationSettingsLocked, scrollPositionRequest,
     activeToolResults, editEntryId, handleEditContent, cancelEdit, addNotice,
@@ -1169,9 +1169,9 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
             </div>
             <NoticeShelf
               notices={notices}
-              closeLabel={t("i18n.close")}
+              copyLabel={t("i18n.copy")}
               copiedLabel={t("session.copied")}
-              onDismiss={dismissNotice}
+              onToggleExpanded={setNoticeExpanded}
             />
             <div className="relative">
               {askDialogElement}
@@ -1191,9 +1191,9 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
         <div className="notice-shelf-overlay">
           <NoticeShelf
             notices={notices}
-            closeLabel={t("i18n.close")}
+            copyLabel={t("i18n.copy")}
             copiedLabel={t("session.copied")}
-            onDismiss={dismissNotice}
+            onToggleExpanded={setNoticeExpanded}
             floating
           />
         </div>

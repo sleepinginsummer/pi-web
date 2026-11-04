@@ -48,6 +48,7 @@ import { isNestedToolExecutionEvent, isSystemMessageEvent } from "@/lib/agent-ev
 import { CODEMODE_TOOL_NAME, getCodemodeProgress } from "@/lib/codemode-view";
 import { bareMcpOpensSettings } from "@/lib/mcp-command";
 import type { SettingsSection } from "@/lib/settings-navigation";
+import { NOTICE_VISIBLE_MS, noticeReducer, type NoticeType } from "@/lib/notice-state";
 import { withTranscriptNotices, type TranscriptNotice } from "@/lib/transcript-notices";
 import {
   fetchRuntimeState,
@@ -262,7 +263,7 @@ function normalizeQueuedMessages(q?: Partial<QueuedMessages> | null): QueuedMess
 
 type ExtensionUiDialogRequest = Extract<ExtensionUiRequest, { method: "select" | "confirm" | "input" | "editor" }>;
 type ExtensionUiCustomRequest = Extract<ExtensionUiRequest, { method: "custom" }>;
-export type NoticeType = "info" | "success" | "warning" | "error";
+export type { NoticeItem, NoticeType } from "@/lib/notice-state";
 
 export type AskQuestionnaireOption = {
   label: string;
@@ -287,25 +288,6 @@ export type AskQuestionnaireState = {
   submitting: boolean;
   error?: string;
 };
-
-export type NoticeItem = {
-  id: string;
-  message: string;
-  type: NoticeType;
-  // 排队中的提示不计时，从真正进入可见队列时开始停留 5 秒。
-  shownAt?: number;
-  exiting?: boolean;
-};
-
-type NoticeState = {
-  visible: NoticeItem[];
-  pending: NoticeItem[];
-};
-
-type NoticeAction =
-  | { type: "add"; notice: NoticeItem; now: number }
-  | { type: "mark_expired"; now: number }
-  | { type: "remove"; id: string; now: number };
 
 export type AgentPhase =
   | { kind: "waiting_model" }
@@ -373,8 +355,6 @@ const AGENT_STATE_RECONCILE_MS = 15_000;
 const BASH_STATE_RECONCILE_MS = 1_000;
 // AgentSession 冷启动可能包含模型、扩展和资源初始化，5 秒不足以覆盖正常启动耗时。
 const EVENT_STREAM_CONNECT_TIMEOUT_MS = 15_000;
-const MAX_NOTICES = 5;
-const NOTICE_VISIBLE_MS = 5_000;
 const NOTICE_EXIT_ANIMATION_MS = 180;
 
 type EventStreamConnectionStatus = "connected" | "timeout" | "closed";
@@ -402,47 +382,6 @@ function createNoticeId(): string {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function fillPendingNotices(visible: NoticeItem[], pending: NoticeItem[], now: number): NoticeState {
-  let nextVisible = visible;
-  let nextPending = pending;
-  while (nextPending.length > 0 && nextVisible.length < MAX_NOTICES) {
-    const [next, ...rest] = nextPending;
-    nextVisible = [...nextVisible, { ...next, shownAt: now }];
-    nextPending = rest;
-  }
-  return { visible: nextVisible, pending: nextPending };
-}
-
-function noticeReducer(state: NoticeState, action: NoticeAction): NoticeState {
-  switch (action.type) {
-    case "add": {
-      if (state.visible.length >= MAX_NOTICES) {
-        return { ...state, pending: [...state.pending, action.notice] };
-      }
-      return {
-        ...state,
-        visible: [...state.visible, { ...action.notice, shownAt: action.now }],
-      };
-    }
-    case "mark_expired":
-      return {
-        ...state,
-        visible: state.visible.map((notice) => (
-          !notice.exiting && notice.shownAt !== undefined
-            && action.now - notice.shownAt >= NOTICE_VISIBLE_MS
-            ? { ...notice, exiting: true }
-            : notice
-        )),
-      };
-    case "remove": {
-      const visible = state.visible.filter((notice) => notice.id !== action.id);
-      return fillPendingNotices(visible, state.pending, action.now);
-    }
-    default:
-      return state;
-  }
 }
 
 function parseAskQuestionnaire(input: unknown): AskQuestionnaireQuestion[] | null {
@@ -1617,8 +1556,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, []);
 
-  const dismissNotice = useCallback((id: string) => {
-    dispatchNotice({ type: "remove", id, now: Date.now() });
+  const setNoticeExpanded = useCallback((id: string, expanded: boolean) => {
+    dispatchNotice({ type: "set_expanded", id, expanded, now: Date.now() });
   }, []);
 
   // Type something. 行内输入接力：见模块级 CUSTOM_ANSWER_ARM_MS 注释
@@ -3079,8 +3018,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return () => clearTimeout(t);
     }
 
+    // 展开的提示不计时；全部展开时没有需要等待的到期时间。
+    const counting = noticeState.visible.filter((notice) => !notice.expanded);
+    if (counting.length === 0) return;
     const now = Date.now();
-    const nextExpiryAt = Math.min(...noticeState.visible.map((notice) => (
+    const nextExpiryAt = Math.min(...counting.map((notice) => (
       (notice.shownAt ?? now) + NOTICE_VISIBLE_MS
     )));
     const t = setTimeout(() => {
@@ -3146,7 +3088,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     retryInfo, contextUsage, systemPrompt, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
-    notices: noticeState.visible, dismissNotice, extensionDialog, extensionCustomUi, askQuestionnaire, submitAskQuestionnaire, cancelAskQuestionnaire, extensionStatuses, extensionWidgets, detachedSubagentStatuses: [...detachedSubagentStatuses, ...shadowReportStatuses], todos, respondToExtensionUi, sendExtensionCustomInput, armCustomAnswer,
+    notices: noticeState.visible, setNoticeExpanded, extensionDialog, extensionCustomUi, askQuestionnaire, submitAskQuestionnaire, cancelAskQuestionnaire, extensionStatuses, extensionWidgets, detachedSubagentStatuses: [...detachedSubagentStatuses, ...shadowReportStatuses], todos, respondToExtensionUi, sendExtensionCustomInput, armCustomAnswer,
     agentPhase, completion,
     isNew, creationSettingsLocked, scrollPositionRequest,
     activeToolResults, editEntryId,
@@ -3171,7 +3113,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     retryInfo, contextUsage, systemPrompt, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
-    noticeState.visible, dismissNotice, extensionDialog, extensionCustomUi, askQuestionnaire, submitAskQuestionnaire, cancelAskQuestionnaire, extensionStatuses, extensionWidgets, detachedSubagentStatuses, todos, respondToExtensionUi, sendExtensionCustomInput, armCustomAnswer,
+    noticeState.visible, setNoticeExpanded, extensionDialog, extensionCustomUi, askQuestionnaire, submitAskQuestionnaire, cancelAskQuestionnaire, extensionStatuses, extensionWidgets, detachedSubagentStatuses, todos, respondToExtensionUi, sendExtensionCustomInput, armCustomAnswer,
     isNew, creationSettingsLocked, scrollPositionRequest,
     agentPhase, completion,
     activeToolResults, editEntryId, handleEditContent, cancelEdit, addNotice, shadowReportStatuses,
