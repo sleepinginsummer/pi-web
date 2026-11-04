@@ -280,6 +280,10 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 - `/api/cwd/validate`, `/api/default-cwd`, and `/api/worktrees` call `allowFileRoot()` when they make a new location browsable.
 - Allowed roots are stored slash-normalized, but that is a Set-key convention, not a correctness requirement: `isPathWithinRoots()` (`lib/path-security.ts`, the single implementation behind `isFilePathAllowed()`) re-resolves and case-folds both sides, so either path form authorizes correctly. Keep that one implementation — it is the security boundary.
 
+### Secret vault (pi-secret-vault extension)
+- 存储和遮蔽在扩展里，pi-web 只有界面：`lib/secret-vault.ts` 按扩展 `src/store.ts` 的磁盘约定（AES-256-GCM、record 绑定名字的 AAD、mkdir 锁、钥匙串条目）读写 `<agentDir>/pi-secret-vault/vault.json`，运行中的会话靠文件签名在下一个钩子同步。只加密不解密，`/api/secret-vault` 不返回任何值。改格式要两边一起改并升 `version`。
+- 扩展用 `ctx.ui.input` 的 placeholder 前缀 `\u0000` 标记密钥输入，`ChatWindow` 的 `ExtensionDialog` 据此渲染密码框并去掉前缀。
+
 ### Plugins and skills
 - `/api/plugins` uses pi's `SettingsManager` + `DefaultPackageManager` for global/project package install, remove, update, enable, and disable. Disabling writes empty `extensions/skills/prompts/themes` arrays for that package entry.
 - `/api/skills` uses `DefaultResourceLoader` so settings paths, package skills, and project `.agents/skills` are listed the same way the runtime sees them.

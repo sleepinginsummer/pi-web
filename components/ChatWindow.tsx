@@ -1665,6 +1665,10 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
 
 type ExtensionDialogRequest = Extract<ExtensionUiRequest, { method: "confirm" | "input" | "editor" }>;
 
+/** An extension marks a secret prompt by prefixing the placeholder with NUL (RPC input has no other field for it). */
+const SECRET_INPUT_MARKER = "\u0000";
+
+
 function getExtensionDialogSummary(request: ExtensionDialogRequest): string | undefined {
   if (request.method !== "confirm") return undefined;
   return request.message.split("\n").find((line) => line.trim())?.trim();
@@ -1920,8 +1924,11 @@ function ExtensionDialog({
           {request.method === "input" && (
             <input
               autoFocus
+              type={request.placeholder?.startsWith(SECRET_INPUT_MARKER) ? "password" : "text"}
+              autoComplete={request.placeholder?.startsWith(SECRET_INPUT_MARKER) ? "new-password" : undefined}
+              spellCheck={request.placeholder?.startsWith(SECRET_INPUT_MARKER) ? false : undefined}
               value={value}
-              placeholder={request.placeholder}
+              placeholder={request.placeholder?.replace(SECRET_INPUT_MARKER, "")}
               onChange={(e) => setValue(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.nativeEvent.isComposing) submitValue();
