@@ -15,7 +15,7 @@ import {
   readSessionHeader,
 } from "@/lib/session-reader";
 import { sessionPathKey } from "@/lib/session-path";
-import { abortSubagent, getRpcSession, getRpcSessionInfos } from "@/lib/rpc-manager";
+import { abortSubagent, getRpcSession, getRpcSessionInfos, renameRpcSession, subagentDisplayStatus } from "@/lib/rpc-manager";
 import { removeSidebarPreferenceIds } from "@/lib/sidebar-preferences";
 import { projectTreeForResponse, toSummaryTree } from "@/lib/project-tree";
 import { computeSessionTotalActiveMs } from "@/lib/session-timing";
@@ -161,7 +161,7 @@ export async function GET(
         : "(no messages)",
       parentSessionId,
       ...(subagent
-        ? { relation: { kind: "subagent" as const, parentSessionId: subagent.parentSessionId, profile: subagent.profile, description: subagent.description, status: liveRpc?.isRunning() ? "running" as const : subagent.status } }
+        ? { relation: { kind: "subagent" as const, parentSessionId: subagent.parentSessionId, profile: subagent.profile, description: subagent.description, status: subagentDisplayStatus(header.id, subagent.status) } }
         : header.parentSession
           ? { relation: { kind: "fork" as const, ...(parentSessionId ? { originSessionId: parentSessionId } : {}) } }
           : {}),
@@ -218,18 +218,22 @@ export async function PATCH(
       return NextResponse.json({ error: "name is required" }, { status: 400 });
     }
     const filePath = await resolveSessionPath(id);
-    if (!filePath) {
+    const trimmed = name.trim();
+    // 等待正在启动或关闭的 wrapper 落定后再写。显式重命名总是生效：存活 wrapper 且内存与磁盘
+    // 一致时用它的 SessionManager 追加，保证内存 entries 与文件同步；没有 wrapper 或它已经落后于
+    // 磁盘时退回文件级写入（落后的 wrapper 会在下一次读取时被淘汰重建）。
+    const renamed = await renameRpcSession(id, trimmed, () => {
+      if (!filePath) return false;
+      if (writeSessionInfoThroughLiveSession(filePath, trimmed, { sessionId: id }) !== "written") {
+        openSessionManager(filePath, { mutable: true }).appendSessionInfo(trimmed);
+      }
+      invalidateSessionManagerCache(filePath);
+      invalidateSessionListCache();
+      return true;
+    });
+    if (!renamed) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
-
-    // 显式重命名总是生效：存活 wrapper 且内存与磁盘一致时用它的 SessionManager 追加，
-    // 保证内存 entries 与文件同步；没有 wrapper 或它已经落后于磁盘时退回文件级写入
-    // （落后的 wrapper 会在下一次读取时被淘汰重建，不会把这次改名带进过期内容后面）。
-    if (writeSessionInfoThroughLiveSession(filePath, name.trim(), { sessionId: id }) !== "written") {
-      openSessionManager(filePath, { mutable: true }).appendSessionInfo(name.trim());
-    }
-    invalidateSessionManagerCache(filePath);
-    invalidateSessionListCache();
     return NextResponse.json({ ok: true });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });

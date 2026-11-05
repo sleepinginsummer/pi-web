@@ -3,12 +3,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
+import { terminalFontSize, useChatAppearance } from "@/hooks/useChatAppearance";
 import { useI18n } from "@/hooks/useI18n";
 import { setTerminalTheme, useTerminalTheme } from "@/hooks/useTerminalTheme";
 import { subscribeFontPreferences } from "@/hooks/useFontPreferences";
 import { readFontWeight } from "@/lib/font-preferences";
 import { createTerminalWriter, terminalRequest } from "@/lib/terminal-client";
 import { requestDirectStreamSlots } from "@/lib/sse-broker-client";
+import { pageId, trackEventSource } from "@/lib/page-debug";
 import {
   applyTerminalModifiers,
   NO_TERMINAL_MODIFIERS,
@@ -51,6 +53,10 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
   const theme = useTerminalTheme();
   const themeRef = useRef(theme);
   themeRef.current = theme;
+  const fontSize = terminalFontSize(useChatAppearance().fontSize);
+  const fontSizeRef = useRef(fontSize);
+  fontSizeRef.current = fontSize;
+  const refitRef = useRef<() => void>(() => {});
 
   const consumeModifiers = useCallback(() => {
     const current = modifiersRef.current;
@@ -87,7 +93,10 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
       // 终端刻意不接入共享上游：服务端的历史重放是按连接做的，而共享连接只对第一个
       // 订阅者重放；同时"暂停"会断开监听，PTY 会被回收。因此终端保持自己的一条连接，
       // 但这条连接同样吃同源额度，必须先通过 requestDirectStreamSlots 拿到许可。
-      events = new EventSource(`/api/terminal/${encodeURIComponent(id)}/events${offset === undefined ? "" : `?after=${offset}`}`);
+      // `holder`: the page, for the Debug panel's connected pages.
+      const query = new URLSearchParams({ holder: pageId() });
+      if (offset !== undefined) query.set("after", String(offset));
+      events = trackEventSource("terminal", new EventSource(`/api/terminal/${encodeURIComponent(id)}/events?${query}`), cwd);
       events.onmessage = (message: MessageEvent) => {
         const event = JSON.parse(message.data) as TerminalEvent;
         if (event.type === "output") {
@@ -235,7 +244,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
     const terminal = new Terminal({
       cursorBlink: true,
       ...readTerminalFont(),
-      fontSize: 13,
+      fontSize: fontSizeRef.current,
       lineHeight: 1.25,
       scrollback: 8000,
       screenReaderMode: true,
@@ -273,6 +282,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
       if (!connected || exited || inputFailed) return;
       writer.resize(Math.max(2, cols), Math.max(2, rows));
     });
+    refitRef.current = fitAndResize;
     const resizeObserver = new ResizeObserver(fitAndResize);
     resizeObserver.observe(container);
     const updateFont = () => {
@@ -358,12 +368,21 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
       window.removeEventListener("online", connect);
       terminal.dispose();
       terminalRef.current = null;
+      refitRef.current = () => {};
     };
   }, [id, cwd, restored, reconnectKey, consumeModifiers]);
 
   useEffect(() => {
     if (terminalRef.current) terminalRef.current.options.theme = TERMINAL_XTERM_THEMES[theme];
   }, [theme]);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    if (!terminal || terminal.options.fontSize === fontSize) return;
+    // A refit sends the new cols/rows to the shell through onResize, as a font change does.
+    terminal.options.fontSize = fontSize;
+    refitRef.current();
+  }, [fontSize]);
 
   useEffect(() => {
     if (active) terminalRef.current?.focus();

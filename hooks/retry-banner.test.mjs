@@ -22,7 +22,7 @@ function setup() {
   const context = createContext({
     agentRunningRef: { current: true }, sdkAgentActiveRef: { current: true }, sessionIdRef: { current: null },
     setRetryInfo: (value) => { banner.current = value; },
-    cancelEventStreamGrace() {}, setAgentRunning() {}, setAgentPhase() {}, dispatch() {},
+    markPromptLanded() {}, cancelEventStreamGrace() {}, setAgentRunning() {}, setAgentPhase() {}, dispatch() {},
     // fork 的 agent_start/agent_end 分支使用的状态与回调。
     lastStreamedMessageCountRef: { current: 0 }, lastRunAbortedRef: { current: false },
     enterMainRun() {}, flushStreamDeltas() {}, invalidateSessionContext() {}, loadSession: async () => {},

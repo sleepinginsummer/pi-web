@@ -152,6 +152,8 @@ interface ModelPickerProps {
   options: ModelPickerOption[];
   value?: { provider: string; modelId: string } | null;
   onChange?: (provider: string, modelId: string) => void;
+  /** The current model picked again: re-reads its definition so a saved edit applies (#1273). */
+  onReselect?: (provider: string, modelId: string) => void;
   onClear?: () => void;
   emptyLabel?: string;
   selectedLabel?: string;
@@ -169,6 +171,7 @@ export const ModelPicker = memo(function ModelPicker({
   options,
   value,
   onChange,
+  onReselect,
   onClear,
   emptyLabel,
   selectedLabel,
@@ -331,7 +334,7 @@ export const ModelPicker = memo(function ModelPicker({
                   {groups.length > 1 && <div style={{ padding: "6px 12px 4px", fontSize: 10, fontWeight: 600, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.07em", borderTop: groupIndex > 0 ? "1px solid var(--border)" : "none" }}>{group.provider}</div>}
                   {group.options.map((option) => {
                     const active = option.modelId === value?.modelId && option.provider === value?.provider;
-                    return <ModelOptionButton key={`${option.provider}:${option.modelId}`} active={active} label={option.name} onClick={() => { setOpen(false); setFilter(""); if (!active || isAutoSelection) onChange(option.provider, option.modelId); }} />;
+                    return <ModelOptionButton key={`${option.provider}:${option.modelId}`} active={active} label={option.name} onClick={() => { setOpen(false); setFilter(""); if (!active || isAutoSelection) onChange(option.provider, option.modelId); else onReselect?.(option.provider, option.modelId); }} />;
                   })}
                 </div>
               ))}

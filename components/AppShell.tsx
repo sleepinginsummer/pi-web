@@ -57,7 +57,11 @@ import { DEFAULT_PENDING_NEW_SESSION_CONTROL, type PendingNewSessionControl } fr
 import type { ChatInputHandle } from "./ChatInput";
 import { AppTopPanels } from "./AppTopPanels";
 import { getLastSettingsSection, settingsSectionRequiresProject, type SettingsSection } from "@/lib/settings-navigation";
-import { getSessionFamily } from "@/lib/session-family";
+import { getAgentsBadge, getSessionFamily } from "@/lib/session-family";
+import { DebugPanel, DebugPanelBoundary } from "./DebugPanel";
+import { focusIfLost } from "@/lib/stacked-dialog";
+import { startPageVisibilityTracking } from "@/lib/page-debug";
+import type { DebugClientSession } from "@/lib/debug-types";
 import type { SessionInfo } from "@/lib/types";
 import { PRESET_READ_ONLY, type ToolEntry } from "@/lib/tool-presets";
 
@@ -214,6 +218,7 @@ export function AppShell() {
   const {
     activePanel: activeTopPanel,
     close: closeTopPanel,
+    closeDebug: closeDebugPanelState,
     open: openTopPanel,
     position: topPanelPos,
     toggle: toggleTopPanel,
@@ -449,8 +454,23 @@ export function AppShell() {
   const handleSearchTargetHandled = useCallback((target: { sessionId: string; entryId: string }) => {
     setSearchTarget((current) => current?.sessionId === target.sessionId && current.entryId === target.entryId ? null : current);
   }, []);
-  const { runningSessionIds, awaitingInputSessionIds, sessionListVersion } = useRunningSessions();
-  const runningSessionTransitions = useRunningSessionTransitions(runningSessionIds, selectedSession?.id ?? null);
+  const { runningSessionIds, awaitingInputSessionIds, subagentsActiveSessionIds, sessionListVersion } = useRunningSessions();
+  const runningSessionTransitions = useRunningSessionTransitions(runningSessionIds, selectedSession?.id ?? null, subagentsActiveSessionIds);
+  // The debug panel's reader of the chat's own state: kept in a ref, so registering renders
+  // nothing, and read only by the open panel (DebugPanel), never on AppShell's renders.
+  const debugSnapshotReaderRef = useRef<(() => DebugClientSession) | null>(null);
+  const handleDebugSnapshotReaderChange = useCallback((reader: (() => DebugClientSession) | null) => {
+    debugSnapshotReaderRef.current = reader;
+  }, []);
+  // The panel reports the page's visibility history from the first mount on, opened or not.
+  useEffect(() => {
+    startPageVisibilityTracking();
+  }, []);
+  // Escape inside the debug panel gives focus back to the Debug button once the panel is gone.
+  const closeDebugPanel = useCallback((restoreFocus: boolean) => {
+    closeDebugPanelState();
+    if (restoreFocus) requestAnimationFrame(() => focusIfLost(document, document.querySelector<HTMLElement>("[data-debug-button]")));
+  }, [closeDebugPanelState]);
   useBackgroundCompletionNotifications(
     runningSessionTransitions,
     notifySession,
@@ -1059,7 +1079,7 @@ export function AppShell() {
           }}
           onTogglePanel={handleTopPanelToggle}
           session={{
-            agentCount: activeSessionFamily?.subagents.length ?? 0,
+            agentsBadge: activeSessionFamily?.subagents.length ? getAgentsBadge(activeSessionFamily.subagents, runningSessionIds) : null,
             autoNameStatus,
             contextUsage,
             hasPersistedSession: Boolean(selectedSession),
@@ -1103,6 +1123,16 @@ export function AppShell() {
             translate={translate}
           />
 
+          {activeTopPanel === "debug" && showChat && (
+            <DebugPanelBoundary fallback={translate("debug.failed")}>
+              <DebugPanel
+                readerRef={debugSnapshotReaderRef}
+                selectedSessionId={selectedSession?.id ?? null}
+                sessions={sessionsWithSelection}
+                onClose={closeDebugPanel}
+              />
+            </DebugPanelBoundary>
+          )}
 
         {/* Chat content */}
         <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
@@ -1132,6 +1162,7 @@ export function AppShell() {
               chatInputRef={chatInputRef}
               onBranchDataChange={handleBranchDataChange}
               onSystemPromptChange={handleSystemPromptChange}
+              onDebugSnapshotReaderChange={handleDebugSnapshotReaderChange}
         onSystemPromptLoaderChange={handleSystemPromptLoaderChange}
         onToolsLoaderChange={handleToolsLoaderChange}
               onShadowMindControlChange={handleShadowMindControlChange}

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { noteRunningPoll } from "@/lib/page-debug";
 import { stabilizeStringSet } from "@/lib/stable-string-set";
 
 const RUNNING_SESSIONS_POLL_MS = 2500;
@@ -10,11 +11,14 @@ export function useRunningSessions() {
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
   // 运行中但停在扩展阻塞对话框上的会话（select/confirm/input/editor/自定义面板），侧栏显示为等待输入。
   const [awaitingInputSessionIds, setAwaitingInputSessionIds] = useState<Set<string>>(() => new Set());
+  // Sessions whose subagents can still report back with a run there: not done yet (#1434).
+  const [subagentsActiveSessionIds, setSubagentsActiveSessionIds] = useState<Set<string>>(() => new Set());
   const [sessionListVersion, setSessionListVersion] = useState<number | null>(null);
 
-  const commitSnapshot = useCallback((ids: string[], awaitingIds: string[]) => {
+  const commitSnapshot = useCallback((ids: string[], awaitingIds: string[], subagentsActiveIds: string[]) => {
     setRunningSessionIds((current) => stabilizeStringSet(current, ids));
     setAwaitingInputSessionIds((current) => stabilizeStringSet(current, awaitingIds));
+    setSubagentsActiveSessionIds((current) => stabilizeStringSet(current, subagentsActiveIds));
   }, []);
 
 
@@ -39,25 +43,36 @@ export function useRunningSessions() {
       const current = new AbortController();
       controller?.abort();
       controller = current;
+      // The debug panel's record of this poll: the request alone, up to its answer.
+      const startedAt = Date.now();
+      let answeredAt: number | null = null;
+      let outcome: "ok" | "error" | "aborted" = "error";
+      let httpStatus: number | null = null;
       try {
         const response = await fetch("/api/agent/running", {
           cache: "no-store",
           signal: current.signal,
         });
+        httpStatus = response.status;
         if (!response.ok) return;
+        outcome = "ok";
         const data = await response.json() as {
           runningSessionIds?: string[];
           awaitingInputSessionIds?: string[];
+          subagentsActiveSessionIds?: string[];
           sessionListVersion?: number;
         };
+        answeredAt = Date.now();
         if (stopped || controller !== current) return;
-        commitSnapshot(data.runningSessionIds ?? [], data.awaitingInputSessionIds ?? []);
+        commitSnapshot(data.runningSessionIds ?? [], data.awaitingInputSessionIds ?? [], data.subagentsActiveSessionIds ?? []);
         if (typeof data.sessionListVersion === "number") setSessionListVersion(data.sessionListVersion);
       } catch {
         // 保留最后一次成功状态；下一个可见页轮询会重试。
+        outcome = current.signal.aborted ? "aborted" : "error";
       } finally {
         if (controller === current) controller = null;
         schedule();
+        noteRunningPoll(startedAt, outcome, httpStatus, answeredAt);
       }
     };
 
@@ -81,5 +96,5 @@ export function useRunningSessions() {
     };
   }, [commitSnapshot]);
 
-  return { runningSessionIds, awaitingInputSessionIds, sessionListVersion };
+  return { runningSessionIds, awaitingInputSessionIds, subagentsActiveSessionIds, sessionListVersion };
 }

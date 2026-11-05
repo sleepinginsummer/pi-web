@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-export type TopPanel = "agents" | "branches" | "system" | "tools" | "session";
+export type TopPanel = "agents" | "branches" | "system" | "tools" | "session" | "debug";
 export interface TopPanelPosition { top: number; left: number; width: number }
 
 const AGENT_PANEL_WIDTH = 420;
@@ -12,7 +12,9 @@ export function useTopPanel({ isMobile, onMobileOpen }: { isMobile: boolean; onM
   const [position, setPosition] = useState<TopPanelPosition | null>(null);
   const topBarRef = useRef<HTMLDivElement>(null);
 
-  const close = useCallback(() => setActivePanel(null), []);
+  // The debug panel stays open across a session switch: it follows whichever session is shown.
+  const close = useCallback(() => setActivePanel((current) => current === "debug" ? current : null), []);
+  const closeDebug = useCallback(() => setActivePanel((current) => current === "debug" ? null : current), []);
   const open = useCallback((panel: TopPanel) => {
     if (isMobile) onMobileOpen();
     setActivePanel(panel);
@@ -24,7 +26,7 @@ export function useTopPanel({ isMobile, onMobileOpen }: { isMobile: boolean; onM
 
   useEffect(() => {
     const topBar = topBarRef.current;
-    if (!activePanel || activePanel === "branches" || !topBar) {
+    if (!activePanel || activePanel === "branches" || activePanel === "debug" || !topBar) {
       setPosition(null);
       return;
     }
@@ -48,5 +50,5 @@ export function useTopPanel({ isMobile, onMobileOpen }: { isMobile: boolean; onM
     return () => observer.disconnect();
   }, [activePanel, isMobile]);
 
-  return { activePanel, close, open, position, toggle, topBarRef };
+  return { activePanel, close, closeDebug, open, position, toggle, topBarRef };
 }

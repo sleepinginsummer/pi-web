@@ -6,6 +6,8 @@ import {
 import { forceRefreshModelCatalog } from "@/lib/model-catalog-refresh";
 import { ModelsConfigReadError } from "@/lib/models-config-store";
 import { ContextWindowError, normalizeContextWindowOverrides } from "@/lib/model-context";
+import { checkProviderEntries, ProviderEntryError } from "@/lib/model-provider-check";
+import { checkImageMaxBytes, ImageMaxBytesError } from "@/lib/model-image-limits";
 
 export const dynamic = "force-dynamic";
 
@@ -24,7 +26,10 @@ export async function PUT(req: Request) {
   try {
     const body = await req.json() as Record<string, unknown>;
     // 托管模型的上下文窗口覆盖值先校验并规整为整数，再进入成对加锁提交。
-    await commitModelsConfigWithCapabilities(normalizeContextWindowOverrides(body));
+    const config = normalizeContextWindowOverrides(body);
+    checkProviderEntries(config);
+    checkImageMaxBytes(config);
+    await commitModelsConfigWithCapabilities(config);
     const providers = body.providers && typeof body.providers === "object" && !Array.isArray(body.providers)
       ? Object.keys(body.providers)
       : [];
@@ -36,7 +41,7 @@ export async function PUT(req: Request) {
       return NextResponse.json({ success: true, catalogRefreshed: false });
     }
   } catch (error) {
-    if (error instanceof ContextWindowError) {
+    if (error instanceof ContextWindowError || error instanceof ProviderEntryError || error instanceof ImageMaxBytesError) {
       return NextResponse.json({ error: error.message }, { status: 400 });
     }
     if (error instanceof ModelsConfigReadError) {

@@ -11,6 +11,7 @@ import {
   setRpcSessionTools,
   startRpcSession,
 } from "@/lib/rpc-manager";
+import { cwdMissingBody, missingCwdFromBody } from "@/lib/missing-cwd";
 
 /**
  * 会话列表只依赖会话文件中的持久化数据。查询类命令不需要淘汰缓存，
@@ -152,8 +153,11 @@ export async function POST(
         { status: 409 },
       );
     }
+    // Read by its fields: the wrapper that threw may come from another route's bundle.
+    const missingCwd = missingCwdFromBody(error);
     return NextResponse.json({
-      error: String(error),
+      error: error instanceof Error ? error.message : String(error),
+      ...(missingCwd ? cwdMissingBody(missingCwd) : {}),
       ...(commandType === "prompt" && !promptAccepted
         ? { code: "prompt_rejected", accepted: false }
         : {}),
@@ -163,13 +167,19 @@ export async function POST(
 
 // GET /api/agent/[id] - Get current agent state
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
 
   try {
-    return NextResponse.json(await getRpcSessionSnapshot(id));
+    const snapshot = await getRpcSessionSnapshot(id);
+    // Status reads leave out the system prompt, most of the reply (agentStatusUrl()).
+    if (snapshot.state && new URL(req.url).searchParams.get("systemPrompt") === "0") {
+      const { systemPrompt: _omitted, ...state } = snapshot.state;
+      return NextResponse.json({ ...snapshot, state });
+    }
+    return NextResponse.json(snapshot);
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
-import { Bot, History, MoreHorizontal, ScrollText, Sparkles, Wrench, X } from "lucide-react";
+import { Bot, Bug, History, MoreHorizontal, ScrollText, Sparkles, Wrench, X } from "lucide-react";
 import { useIsNarrowMobile } from "@/hooks/useIsMobile";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { SessionTreeNode } from "@/lib/types";
@@ -13,7 +13,7 @@ import { SessionStatsButton } from "./SessionInfoControls";
 
 const ICON_BUTTON_SIZE = 36;
 const NOOP = () => {};
-type Translate = (key: string) => string;
+type Translate = (key: string, params?: Record<string, string | number>) => string;
 type AutoNameStatus = { kind: "idle" | "naming" | "success" } | { kind: "error"; message: string };
 
 interface AppTopBarProps {
@@ -31,7 +31,8 @@ interface AppTopBarProps {
   };
   onTogglePanel: (panel: TopPanel) => void;
   session: {
-    agentCount: number;
+    /** Running subagents while any runs, else all of them; null without subagents. */
+    agentsBadge: { count: number; running: boolean } | null;
     autoNameStatus: AutoNameStatus;
     contextUsage: { percent: number | null; contextWindow: number; tokens: number | null } | null;
     hasPersistedSession: boolean;
@@ -48,9 +49,39 @@ interface AppTopBarProps {
   trust: { needsTrust: boolean; onOpen: () => void };
 }
 
-function IconButton({ active = false, children, label, onClick }: { active?: boolean; children: React.ReactNode; label: string; onClick: (event: React.MouseEvent<HTMLButtonElement>) => void }) {
+// While subagents run: their count, ringed by a spinner; otherwise all of them.
+function AgentsBadge({ badge }: { badge: { count: number; running: boolean } }) {
   return (
-    <button type="button" onClick={onClick} title={label} aria-label={label} aria-pressed={active} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: ICON_BUTTON_SIZE, height: ICON_BUTTON_SIZE, padding: 0, fontFamily: "inherit", fontSize: "inherit", lineHeight: 1, background: active ? "var(--bg-selected)" : "none", border: "none", borderRight: "1px solid var(--border)", color: active ? "var(--text)" : "var(--text-muted)", cursor: "pointer", flexShrink: 0 }}>
+    <span
+      aria-hidden="true"
+      style={{
+        position: "absolute", top: 3, right: 3,
+        minWidth: 13, height: 13, padding: "0 3px", display: "grid", placeItems: "center",
+        borderRadius: 7,
+        background: badge.running ? "color-mix(in srgb, var(--accent) 22%, var(--bg-panel))" : "var(--bg-selected)",
+        color: "var(--accent)",
+        fontSize: 9, lineHeight: 1, fontVariantNumeric: "tabular-nums",
+        fontWeight: badge.running ? 600 : undefined,
+      }}
+    >
+      {badge.running && (
+        <svg
+          className="animate-spin motion-reduce:animate-none"
+          viewBox="0 0 24 24" fill="none" aria-hidden="true"
+          style={{ position: "absolute", top: -3, left: -3, width: "calc(100% + 6px)", height: "calc(100% + 6px)", pointerEvents: "none" }}
+        >
+          <circle cx="12" cy="12" r="11" stroke="currentColor" strokeWidth="2" opacity="0.2" />
+          <path d="M23 12a11 11 0 0 0-11-11" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+        </svg>
+      )}
+      {badge.count}
+    </span>
+  );
+}
+
+function IconButton({ active = false, children, debugButton = false, label, onClick }: { active?: boolean; children: React.ReactNode; debugButton?: boolean; label: string; onClick: (event: React.MouseEvent<HTMLButtonElement>) => void }) {
+  return (
+    <button type="button" data-debug-button={debugButton ? "" : undefined} onClick={onClick} title={label} aria-label={label} aria-pressed={active} style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "center", width: ICON_BUTTON_SIZE, height: ICON_BUTTON_SIZE, padding: 0, fontFamily: "inherit", fontSize: "inherit", lineHeight: 1, background: active ? "var(--bg-selected)" : "none", border: "none", borderRight: "1px solid var(--border)", color: active ? "var(--text)" : "var(--text-muted)", cursor: "pointer", flexShrink: 0 }}>
       {children}
     </button>
   );
@@ -84,9 +115,14 @@ function SessionTopBarControls({ activePanel, hideShadow = false, hideStats = fa
         <button type="button" onClick={session.onAutoName} disabled={autoNameDisabled} title={autoNameLabel} aria-label={autoNameLabel} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: navigation.isMobile ? ICON_BUTTON_SIZE : undefined, height: "100%", padding: navigation.isMobile ? 0 : "0 12px", background: "none", border: 0, borderRight: "1px solid var(--border)", color: autoNameDisabled ? "var(--text-dim)" : "var(--text-muted)", cursor: autoNameDisabled ? "not-allowed" : "pointer" }}>
           {navigation.isMobile ? <Sparkles size={15} aria-hidden="true" /> : autoNameLabel}
         </button>
-        {session.agentCount > 0 && (
-          <IconButton active={activePanel === "agents"} label={translate("agentSwitcher.title")} onClick={() => onTogglePanel("agents")}>
+        {session.agentsBadge && (
+          <IconButton
+            active={activePanel === "agents"}
+            label={session.agentsBadge.running ? translate("agentSwitcher.titleRunning", { count: session.agentsBadge.count }) : translate("agentSwitcher.title")}
+            onClick={() => onTogglePanel("agents")}
+          >
             <Bot size={15} aria-hidden="true" />
+            <AgentsBadge badge={session.agentsBadge} />
           </IconButton>
         )}
         {hasBranches && (
@@ -118,6 +154,9 @@ function SessionTopBarControls({ activePanel, hideShadow = false, hideStats = fa
           />
         )}
       </div>
+      <IconButton active={activePanel === "debug"} label={translate("debug.title")} onClick={() => onTogglePanel("debug")} debugButton>
+        <Bug size={13} aria-hidden="true" />
+      </IconButton>
       {!hideStats && (
         <SessionStatsButton
           active={activePanel === "session"}

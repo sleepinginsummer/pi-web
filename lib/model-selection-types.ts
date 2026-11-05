@@ -6,6 +6,8 @@ export interface ModelSelectionState {
   names: Record<string, string>;
   list: ModelEntry[];
   error: string | null;
+  /** The session's folder, when the model list could not load because it no longer exists (#1422). */
+  missingCwd: string | null;
   scopeWarnings: string[];
   dataDiagnostics: ModelsDataDiagnostic[];
   thinkingLevels: Record<string, ThinkingLevel[]>;

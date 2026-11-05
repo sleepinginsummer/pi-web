@@ -20,15 +20,16 @@ import {
   isVideoPath,
 } from "@/lib/file-types";
 import { encodeFilePathForApi, getFileApiUrl, getFileDirectory, getFileName, getRelativeFilePath } from "@/lib/file-paths";
+import { trackEventSource } from "@/lib/page-debug";
 import { parsePdfPageFragment, resolveLocalFileHref, shouldOpenLocalFileInApp } from "@/lib/file-links";
 import { parseFrontmatter } from "@/lib/frontmatter";
-import { isExternalMarkdownHref, markdownAppUrlTransform, markdownPreviewRehypePlugins, markdownPreviewRemarkPlugins, markdownUrlTransform, normalizeDisplayMath } from "@/lib/markdown";
+import { isExternalMarkdownHref, jumpToMarkdownFragment, markdownAppUrlTransform, markdownPreviewRehypePlugins, markdownPreviewRemarkPlugins, markdownUrlTransform, normalizeDisplayMath } from "@/lib/markdown";
 import { CodeBlock, MermaidBlock } from "./MermaidBlock";
 import { DelimitedTable } from "./DelimitedTable";
 import { isDelimitedTablePath } from "@/lib/delimited-table";
 import { FrontmatterCard } from "./FrontmatterCard";
 import { RevealFileButton } from "./RevealFileButton";
-import { parseUnifiedPatch } from "@/lib/patch";
+import { diffGapLabel, parseUnifiedPatch, unifiedDiffLines, type SplitDiffGap, type UnifiedDiffLine } from "@/lib/patch";
 import type { GitFileDiffResponse } from "@/lib/git-types";
 import { useI18n } from "@/hooks/useI18n";
 import { copyText } from "@/lib/clipboard";
@@ -63,6 +64,8 @@ interface FileData {
   size: number;
   nextOffset: number;
   truncated: boolean;
+  // A NUL in the first bytes (lib/text-preview.ts): no text view, only the download.
+  binary?: boolean;
 }
 
 const SOURCE_HIGHLIGHT_MAX_LINES = 1_000;
@@ -344,12 +347,11 @@ function CopyFileButton({ content }: { content: string }) {
     </button>
   );
 }
-type DiffLine = {
-  type: "unchanged" | "removed" | "added";
-  text: string;
-  oldLineNo: number | null;
-  newLineNo: number | null;
-};
+// The same rows the tool card's split diff parses, in one column; see `unifiedDiffLines()`.
+type DiffLine = UnifiedDiffLine;
+
+// Unchanged lines the patch leaves out between two hunks.
+type DiffGap = SplitDiffGap;
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -357,47 +359,18 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function diffLines(patch: string): DiffLine[] {
+function diffLines(patch: string): Array<DiffLine | DiffGap> {
   const files = parseUnifiedPatch(patch);
   if (!files) return [];
-
-  return files.flatMap((file) => file.rows.flatMap((row): DiffLine[] => {
-    if (row.type === "hunk") return [];
-    if (row.left.type === "context" && row.right.type === "context") {
-      return [{
-        type: "unchanged",
-        text: row.right.text,
-        oldLineNo: row.left.lineNo,
-        newLineNo: row.right.lineNo,
-      }];
-    }
-
-    const lines: DiffLine[] = [];
-    if (row.left.type === "removed") {
-      lines.push({
-        type: "removed",
-        text: row.left.text,
-        oldLineNo: row.left.lineNo,
-        newLineNo: null,
-      });
-    }
-    if (row.right.type === "added") {
-      lines.push({
-        type: "added",
-        text: row.right.text,
-        oldLineNo: null,
-        newLineNo: row.right.lineNo,
-      });
-    }
-    return lines;
-  }));
+  return files.flatMap(unifiedDiffLines);
 }
 
 function DiffView({ patch }: { patch: string }) {
   const { t } = useI18n();
   const diff = diffLines(patch);
 
-  const hasChanges = diff.some((l) => l.type !== "unchanged");
+  const isChange = (l: DiffLine | DiffGap) => l.type === "added" || l.type === "removed";
+  const hasChanges = diff.some(isChange);
   if (!hasChanges) {
     return (
       <div style={{ padding: "12px 16px", fontSize: 12, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>
@@ -408,7 +381,7 @@ function DiffView({ patch }: { patch: string }) {
 
   // Render with context: show 3 lines around each change, collapse the rest
   const CONTEXT = 3;
-  const changed = new Set(diff.flatMap((l, i) => (l.type !== "unchanged" ? [i] : [])));
+  const changed = new Set(diff.flatMap((l, i) => (isChange(l) ? [i] : [])));
   const visible = new Set<number>();
   for (const ci of changed) {
     for (let j = Math.max(0, ci - CONTEXT); j <= Math.min(diff.length - 1, ci + CONTEXT); j++) {
@@ -419,20 +392,26 @@ function DiffView({ patch }: { patch: string }) {
     ? FILE_PINNED_LINE_NUMBER_STYLE
     : FILE_LINE_NUMBER_STYLE;
 
-  const segments: Array<{ hidden: true; count: number } | { hidden: false; lines: DiffLine[] }> = [];
+  // Collapsed lines and the lines the patch leaves out between hunks share one
+  // marker; its count is unknown when a gap's is.
+  const isShown = (j: number) => diff[j].type !== "gap" && visible.has(j);
+  const segments: Array<{ hidden: true; count: number | null } | { hidden: false; lines: DiffLine[] }> = [];
   let i = 0;
   while (i < diff.length) {
-    if (visible.has(i)) {
+    if (isShown(i)) {
       const block: DiffLine[] = [];
-      while (i < diff.length && visible.has(i)) {
-        block.push(diff[i]);
+      while (i < diff.length && isShown(i)) {
+        const line = diff[i];
+        if (line.type !== "gap") block.push(line);
         i++;
       }
       segments.push({ hidden: false, lines: block });
     } else {
-      let count = 0;
-      while (i < diff.length && !visible.has(i)) {
-        count++;
+      let count: number | null = 0;
+      while (i < diff.length && !isShown(i)) {
+        const item = diff[i];
+        const skipped = item.type === "gap" ? item.count : 1;
+        count = count === null || skipped === null ? null : count + skipped;
         i++;
       }
       segments.push({ hidden: true, count });
@@ -462,7 +441,7 @@ function DiffView({ patch }: { patch: string }) {
                 borderBottom: "1px solid var(--border)",
               }}
             >
-              ... {seg.count} unchanged lines ...
+              {seg.count === null ? "⋯" : `⋯ ${diffGapLabel(seg.count, t)}`}
             </div>
           );
           return result;
@@ -617,7 +596,7 @@ function ImageViewer({ filePath, cwd, sourceSessionId, watchEnabled = true }: Pr
               const img = e.currentTarget;
               setNaturalSize({ w: img.naturalWidth, h: img.naturalHeight });
             }}
-            onError={() => setImageLoadError("Failed to load image")}
+            onError={() => setImageLoadError(t("files.imageLoadFailed"))}
             style={{
               maxWidth: "100%",
               maxHeight: "100%",
@@ -718,7 +697,7 @@ function AudioViewer({ filePath, cwd, sourceSessionId, watchEnabled = true }: Pr
             preload="metadata"
             src={src}
             onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
-            onError={() => setMediaLoadError("Failed to load audio")}
+            onError={() => setMediaLoadError(t("files.audioLoadFailed"))}
             style={{ width: "100%" }}
           />
         </div>
@@ -809,7 +788,7 @@ function VideoViewer({ filePath, cwd, sourceSessionId, watchEnabled = true }: Pr
             preload="metadata"
             src={src}
             onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
-            onError={() => setMediaLoadError("Failed to load video")}
+            onError={() => setMediaLoadError(t("files.videoLoadFailed"))}
             style={{ maxWidth: "100%", maxHeight: "100%" }}
           />
         </div>
@@ -905,8 +884,9 @@ export function FileViewer({
   initialState,
   initialPage,
   onStateChange,
-  watchEnabled = true,
+  watchEnabled: watchRequested = true,
 }: Props) {
+  const watchEnabled = watchRequested;
   if (isImagePath(filePath)) {
     return <ImageViewer filePath={filePath} cwd={cwd} sourceSessionId={sourceSessionId} watchEnabled={watchEnabled} />;
   }
@@ -965,6 +945,9 @@ function TextFileViewer({
   const [displayMode, setDisplayMode] = useState<DisplayMode>(requestedInitialDisplayMode);
   const [wrapLines, setWrapLines] = useState(initialWrapLines);
   const contentRequestRef = useRef(0);
+  // The version of the content on screen; a reconnect that finds it unchanged
+  // keeps what is loaded (Load more chunks, scroll, highlighting).
+  const shownVersionRef = useRef<string | null>(null);
   const gitDiffRequestRef = useRef(0);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const autoDiffAppliedRef = useRef(false);
@@ -1026,7 +1009,7 @@ function TextFileViewer({
     const requestId = ++contentRequestRef.current;
     return fetch(getFileApiUrl(filePath, "read", sourceSessionId, { offset: offset || undefined }))
       .then((r) => r.json())
-      .then((d: FileData & { error?: string }) => {
+      .then((d: FileData & { mtime?: string; error?: string }) => {
         if (requestId !== contentRequestRef.current) return null;
         if (d.error) {
           setError(d.error);
@@ -1106,10 +1089,11 @@ function TextFileViewer({
     void fetchGitDiff(filePath);
   }, [fetchGitDiff, filePath, gitRefreshKey]);
 
-  const isDelimitedTable = isDelimitedTablePath(filePath);
+  const isBinary = data?.binary === true;
+  const isDelimitedTable = !isBinary && isDelimitedTablePath(filePath);
   const language = data?.language ?? "text";
-  const isHtml = language === "html";
-  const isMarkdown = language === "markdown";
+  const isHtml = !isBinary && language === "html";
+  const isMarkdown = !isBinary && language === "markdown";
   // The HTML preview streams the file into an iframe, so a truncated source read
   // never limits it; the markdown preview still renders the loaded text. A CSV/TSV
   // table shows a loaded prefix too, without its cut last record.
@@ -1336,7 +1320,9 @@ function TextFileViewer({
       ];
   const metadata = isDeletedDiff
     ? t("files.deleted")
-    : `${language} · ${lines.length} lines · ${formatSize(data!.size)}`;
+    : isBinary
+      ? `${t("files.binary")} · ${formatSize(data!.size)}`
+      : `${language} · ${lines.length} lines · ${formatSize(data!.size)}`;
 
   return (
     <div className="file-viewer-shell" style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden", position: "relative" }}>
@@ -1423,7 +1409,7 @@ function TextFileViewer({
                 <MentionIcon />
               </button>
             )}
-            {effectiveDisplayMode === "source" && (
+            {effectiveDisplayMode === "source" && !isBinary && (
               <>
                 <button
                   type="button"
@@ -1544,7 +1530,7 @@ function TextFileViewer({
                     // Like chat links: a web or app link must not replace Pi Web.
                     return isExternalMarkdownHref(href)
                       ? <a href={href} {...props} target="_blank" rel="noopener noreferrer">{children}</a>
-                      : <a href={href} {...props}>{children}</a>;
+                      : <a href={href} {...props} onClick={jumpToMarkdownFragment}>{children}</a>;
                   }
 
                   const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
@@ -1579,6 +1565,19 @@ function TextFileViewer({
             complete={!data?.truncated}
             scrollRef={contentRef}
           />
+        ) : isBinary ? (
+          // Decoded bytes are noise; opening a file never downloads it on its own (#1401).
+          <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, padding: 24, color: "var(--text-muted)", fontSize: 13, textAlign: "center" }}>
+            <span>{t("files.binaryNoPreview")}</span>
+            <a
+              href={getFileApiUrl(filePath, "download", sourceSessionId)}
+              download={getFileName(filePath)}
+              className="file-viewer-mode-button"
+              style={{ display: "inline-flex", alignItems: "center", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text)", textDecoration: "none" }}
+            >
+              {t("files.download")}
+            </a>
+          </div>
         ) : useLightweightSource ? (
           <div
             className="file-source-view is-lightweight"

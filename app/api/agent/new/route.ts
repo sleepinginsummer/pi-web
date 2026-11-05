@@ -8,6 +8,8 @@ import { allowFileRoot } from "@/lib/file-access";
 import { invalidateSessionListCache, readSessionHeader, resolveSessionPath } from "@/lib/session-reader";
 import { getRpcSession, startRpcSession } from "@/lib/rpc-manager";
 import { getNewSessionOperationRegistry } from "@/lib/new-session-operation-registry";
+import { cwdMissingBody } from "@/lib/missing-cwd";
+
 
 function parseThinkingLevel(value: unknown): ThinkingLevel | undefined {
   if (value === undefined) return undefined;
@@ -92,7 +94,7 @@ export async function POST(req: Request) {
     }
     if (!existsSync(cwd)) {
       return NextResponse.json({
-        error: `Directory does not exist: ${cwd}`,
+        ...cwdMissingBody(cwd),
         ...(commandType === "prompt"
           ? { code: "prompt_rejected", accepted: false }
           : {}),

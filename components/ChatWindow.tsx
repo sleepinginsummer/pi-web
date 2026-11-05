@@ -31,6 +31,7 @@ import { useDragDrop } from "@/hooks/useDragDrop";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useScrollbarVisibility } from "@/hooks/useScrollbarVisibility";
 import type { SessionStatsInfo } from "@/lib/pi-types";
+import type { DebugClientSession } from "@/lib/debug-types";
 import type { AppUpdateResponse } from "@/lib/api-types";
 import { selectPendingNewSession, type PendingNewSessionControl, type PendingNewSessionEvent } from "@/lib/pending-new-session";
 import type { ShadowSessionControl } from "@/lib/shadow-session-control";
@@ -82,6 +83,8 @@ interface Props {
   onSystemPromptLoaderChange?: (loader: (() => Promise<void>) | null) => void;
   onToolsLoaderChange?: (loader: (() => Promise<ToolEntry[]>) | null) => void;
   onShadowMindControlChange?: (control: ShadowSessionControl) => void;
+  /** Registers the debug panel's read-only reader of this chat's stream and lease. */
+  onDebugSnapshotReaderChange?: (reader: (() => DebugClientSession) | null) => void;
   onSessionStatsChange?: (stats: SessionStatsInfo | null) => void;
   onSessionStatsPanelOpen?: () => void;
   /** Opens Settings on a section: a bare `/mcp` that pi's built-in MCP extension owns opens Settings › MCP. */
@@ -101,7 +104,8 @@ interface Props {
   onInitialPromptConsumed?: (sessionId: string, prompt: string) => void;
 }
 
-function phaseLabel(phase: AgentPhase, t: (key: string, params?: Record<string, string | number>) => string): string {
+function phaseLabel(phase: AgentPhase, t: (key: string, params?: Record<string, string | number>) => string, isCompacting = false, queuedCount = 0): string {
+  if (isCompacting) return queuedCount > 0 ? t("chat.compactingQueued", { count: queuedCount }) : t("chat.compacting");
   if (phase?.kind === "running_tools") {
     const progress = phase.tools.find((tool) => tool.progress)?.progress;
     if (progress) return progress;
@@ -293,7 +297,7 @@ function LiveProcessDetailsGroup({ hiddenCount, renderAll, renderRecent, t }: { 
   );
 }
 
-export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigationActive, session, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, newSessionCwd, newSessionWorktrees, pendingNewSessionControl, onPendingNewSessionEvent, notificationController, onAgentEnd, onSessionCreated, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onShadowMindControlChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenSettings, onContextUsageChange, onOpenFile, onFilesUploaded, onOpenSubagent, onOpenServerPreview, onToolEnd, onNewSessionCwdChange, onAskInNewChat, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed }: Props) {
+export const ChatWindow = memo(function ChatWindow({ onDebugSnapshotReaderChange, navigationKey, isNavigationActive, session, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, newSessionCwd, newSessionWorktrees, pendingNewSessionControl, onPendingNewSessionEvent, notificationController, onAgentEnd, onSessionCreated, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onShadowMindControlChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenSettings, onContextUsageChange, onOpenFile, onFilesUploaded, onOpenSubagent, onOpenServerPreview, onToolEnd, onNewSessionCwdChange, onAskInNewChat, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed }: Props) {
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio, holdAudio } = useAudio();
   const {
@@ -316,7 +320,7 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
 
   const {
     loading, error, activeLeafId, messages, entryIds, messageKeys, historyCursor, streamingStore, hasEarlierMessages, loadingEarlierMessages, earlierTurnCount,
-    agentRunning, bashRunning, pendingBash, modelState, modelActions, toolPreset,
+    agentRunning, bashRunning, pendingBash, modelState, modelActions, missingCwd, toolPreset,
     retryInfo, contextUsage, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
@@ -332,7 +336,7 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
     handleShadowMindToggle, handleToolPresetChange, loadSlashCommands,
   } = useAgentSession({
     navigationKey, isNavigationActive, session, newSessionCwd, pendingNewSessionControl, onPendingNewSessionEvent, onSessionCreated, onSessionListRefresh, onSessionForked, onToolEnd,
-    modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onSessionStatsPanelOpen, onOpenSettings,
+    onDebugSnapshotReaderChange, t, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onSessionStatsPanelOpen, onOpenSettings,
   });
   const isStreaming = useStreamingSelector(streamingStore, selectIsStreaming);
   const hasStreamingContent = useStreamingSelector(streamingStore, selectHasStreamingContent);
@@ -510,7 +514,10 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
       t("chat.quoteIntro"),
       t("chat.quoteQuestion"),
     ));
-    window.getSelection()?.removeAllRanges();
+    // No `removeAllRanges()` here: inserting focuses the composer, and that
+    // focus already collapses the page's selection. Calling it afterwards also
+    // clears the composer's own selection and drops its caret to offset 0
+    // (#1319), so the quote would be typed in front of instead of after.
     closeQuotedSelection();
   }, [chatInputRef, closeQuotedSelection, quotedSelection, t]);
 
@@ -983,6 +990,7 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
       extensionsInitializing={pendingNewSessionView.extensionsPending}
       modelState={modelState}
       modelActions={modelActions}
+      missingCwd={missingCwd}
       onCompact={session || isNew ? handleCompact : undefined}
       onAbortCompaction={handleAbortCompaction}
       isCompacting={isCompacting}
@@ -1498,9 +1506,9 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
               );
             })()}
 
-            {agentRunning && !hasStreamingContent && (agentPhase || isCompacting) && (
+            {(agentRunning || isCompacting) && !hasStreamingContent && (agentPhase || isCompacting) && (
               <div className="break-words py-2 text-[13px] text-text-muted">
-                <span className="animate-[pulse_1.5s_infinite]">{isCompacting ? t("chat.compacting") : phaseLabel(agentPhase, t)}</span>
+                <span className="animate-[pulse_1.5s_infinite]">{phaseLabel(agentPhase, t, isCompacting, (queuedMessages?.steering.length ?? 0) + (queuedMessages?.followUp.length ?? 0))}</span>
               </div>
             )}
 
@@ -1632,7 +1640,7 @@ export const ChatWindow = memo(function ChatWindow({ navigationKey, isNavigation
         document.body,
       )}
 
-      <div className="relative shrink-0">
+      <div className="relative flex min-h-0 flex-col">
         <div
           style={{
             padding: `0 ${CHAT_COLUMN_PADDING}px`,
@@ -1733,10 +1741,13 @@ function ExtensionDialog({
       if (disposed) return;
       const blocks = body.querySelectorAll<HTMLElement>("pre, .markdown-table-wrap");
       if (blocks.length === 0) return;
-      const needed = fitExtensionDialogWidth(
-        dialog.offsetWidth,
-        Array.from(blocks, (block) => block.scrollWidth - block.clientWidth),
-      );
+      // Code fences wrap their long lines; measured unwrapped, they still widen
+      // the dialog as far as the screen allows and wrap only past that. The
+      // class is an attribute change, which the observer below does not watch.
+      body.classList.add("extension-dialog-measuring");
+      const overflows = Array.from(blocks, (block) => block.scrollWidth - block.clientWidth);
+      body.classList.remove("extension-dialog-measuring");
+      const needed = fitExtensionDialogWidth(dialog.offsetWidth, overflows);
       // Only ever grow: shrinking again would make the dialog jump while it is read.
       if (needed !== null) setFitWidth((prev) => (prev !== null && prev >= needed ? prev : needed));
     };

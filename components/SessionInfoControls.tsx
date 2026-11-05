@@ -114,11 +114,11 @@ export function SessionStatsButton({ active, contextUsage, isMobile, locale, onC
     ? `${contextPercent !== null ? contextPercent?.toFixed(0) : "?"}% / ${formatCompact(contextUsage.contextWindow)}`
     : null;
   const tooltip = tokens ? [
-    `in: ${tokens.input.toLocaleString(locale)}`,
-    `out: ${tokens.output.toLocaleString(locale)}`,
-    `cache read: ${tokens.cacheRead.toLocaleString(locale)}`,
-    `cache write: ${tokens.cacheWrite.toLocaleString(locale)}`,
-    ...(cost > 0 ? [`cost: $${cost.toFixed(4)}`] : []),
+    `${translate("session.input")}: ${tokens.input.toLocaleString(locale)}`,
+    `${translate("session.output")}: ${tokens.output.toLocaleString(locale)}`,
+    `${translate("session.cacheRead")}: ${tokens.cacheRead.toLocaleString(locale)}`,
+    `${translate("session.cacheWrite")}: ${tokens.cacheWrite.toLocaleString(locale)}`,
+    ...(cost > 0 ? [`${translate("session.cost")}: $${cost.toFixed(4)}`] : []),
   ].join("  |  ") : translate("session.title");
 
   return (

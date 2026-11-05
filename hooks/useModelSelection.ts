@@ -1,5 +1,6 @@
 "use client";
 
+import { missingCwdFromBody } from "@/lib/missing-cwd";
 import { useCallback, useMemo, useReducer, useRef } from "react";
 import { parseModelsData } from "@/lib/model-data-schema";
 import type { SelectedModel } from "@/lib/model-types";
@@ -9,7 +10,7 @@ import { fetchThinkingLevelRecommendation } from "@/lib/thinking-level-preferenc
 import { parseThinkingLevelOption, type ThinkingLevel, type ThinkingLevelOption } from "@/lib/thinking-levels";
 
 interface ModelsLoadedPayload {
-  state: Pick<ModelSelectionState, "names" | "list" | "error" | "scopeWarnings" | "dataDiagnostics" | "thinkingLevels" | "thinkingLevelMaps" | "thinkingLevelPins">;
+  state: Pick<ModelSelectionState, "names" | "list" | "error" | "missingCwd" | "scopeWarnings" | "dataDiagnostics" | "thinkingLevels" | "thinkingLevelMaps" | "thinkingLevelPins">;
   defaultModel?: SelectedModel | null;
   defaultThinkingLevel?: ThinkingLevel | null;
   pinnedThinkingLevel?: ThinkingLevel;
@@ -23,15 +24,17 @@ export async function fetchModelsData(cwd: string, signal?: AbortSignal): Promis
   const response = await fetch(url, signal ? { signal } : undefined);
   if (!response.ok) {
     let detail = "";
+    let missingCwd: string | null = null;
     try {
       const body: unknown = await response.json();
       if (body && typeof body === "object" && "error" in body && typeof body.error === "string") {
         detail = body.error;
       }
+      missingCwd = missingCwdFromBody(body);
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") throw error;
     }
-    throw new Error(detail || `Failed to load models (HTTP ${response.status})`);
+    throw Object.assign(new Error(detail || `Failed to load models (HTTP ${response.status})`), { missingCwd });
   }
   const data: unknown = await response.json();
   signal?.throwIfAborted();
@@ -62,13 +65,14 @@ export type ModelSelectionAction =
   | { type: "applyPreferredThinking"; level: ThinkingLevel }
   | { type: "selectNewSessionModel"; model: SelectedModel; thinkingLevel?: ThinkingLevel }
   | { type: "setNewSessionDefaultModel"; model: SelectedModel | null }
-  | { type: "modelsLoadFailed"; error: string }
+  | { type: "modelsLoadFailed"; error: string | null; missingCwd: string | null }
   | { type: "setThinkingLevel"; level: ThinkingLevelOption };
 
 export const initialModelSelectionState: ModelSelectionState = {
   names: {},
   list: [],
   error: null,
+  missingCwd: null,
   scopeWarnings: [],
   dataDiagnostics: [],
   thinkingLevels: {},
@@ -112,6 +116,7 @@ export function modelSelectionReducer(state: ModelSelectionState, action: ModelS
         names: {},
         list: [],
         error: action.error,
+        missingCwd: action.missingCwd,
         scopeWarnings: [],
         dataDiagnostics: [],
         thinkingLevels: {},
@@ -158,6 +163,7 @@ export function useModelSelection() {
             names: data.models,
             list,
             error: data.modelError ?? null,
+            missingCwd: null,
             scopeWarnings: data.modelScopeWarnings ?? [],
             dataDiagnostics: parsed.diagnostics,
             thinkingLevels: data.thinkingLevels ?? {},
@@ -179,7 +185,9 @@ export function useModelSelection() {
       if (error instanceof DOMException && error.name === "AbortError") return undefined;
       if (!loadGateRef.current.isLatest("models", modelsGeneration)) return undefined;
       const message = error instanceof Error ? error.message : String(error);
-      dispatch({ type: "modelsLoadFailed", error: message });
+      // A moved or deleted project folder is not a model problem (#1422).
+      const missingCwd = (error as { missingCwd?: string | null }).missingCwd ?? null;
+      dispatch({ type: "modelsLoadFailed", error: missingCwd ? null : message, missingCwd });
       throw error;
     } finally {
       loadGateRef.current.finish("models");

@@ -5,6 +5,8 @@
 // 占位（样式与高亮结果接近，避免布局跳动）。未知语言或加载失败也回退纯文本。
 
 import { useEffect, useState } from "react";
+import type { SyntaxHighlighterProps } from "react-syntax-highlighter";
+import renderSyntaxNode from "react-syntax-highlighter/dist/esm/create-element";
 import PrismLight from "react-syntax-highlighter/dist/esm/prism-light";
 import vs from "react-syntax-highlighter/dist/esm/styles/prism/vs";
 import vscDarkPlus from "react-syntax-highlighter/dist/esm/styles/prism/vsc-dark-plus";
@@ -15,6 +17,33 @@ import { takeHighlightBudget, waitForHighlight } from "@/lib/highlight-queue";
 // 暗色主题使用 background 简写，交由 customStyle 统一管理以免切换主题时重置背景。
 const codeBlockDarkTheme = { ...vscDarkPlus, 'pre[class*="language-"]': { ...vscDarkPlus['pre[class*="language-"]'] } };
 delete codeBlockDarkTheme['pre[class*="language-"]'].background;
+type CodeLinesProps = Parameters<NonNullable<SyntaxHighlighterProps["renderer"]>>[0];
+
+/**
+ * A fence's lines, each a row of its number and its text (`.markdown-code-line`
+ * in app/globals.css): long lines wrap, as in pi's TUI, and a wrapped line goes
+ * on under its own text, never under the number. The text keeps the row's own
+ * classes, which color the later lines of a token that spans several (a block
+ * comment).
+ */
+function renderCodeLines({ rows, stylesheet, useInlineStyles }: CodeLinesProps) {
+  return rows.map((row, index) => {
+    const children = row.children ?? [];
+    const number = children[0]?.properties?.className.includes("react-syntax-highlighter-line-number") ? children[0] : null;
+    const text = {
+      ...row,
+      properties: { ...row.properties, className: [...(row.properties?.className ?? []), "markdown-code-line-text"] },
+      children: number ? children.slice(1) : children,
+    };
+    return (
+      <span key={index} className="markdown-code-line">
+        {number && renderSyntaxNode({ node: number, stylesheet, useInlineStyles, key: "number" })}
+        {renderSyntaxNode({ node: text, stylesheet, useInlineStyles, key: "text" })}
+      </span>
+    );
+  });
+}
+
 interface CodeHighlightProps {
   code: string;
   lang: string;
@@ -62,7 +91,8 @@ export default function CodeHighlight({ code, lang, isDark }: CodeHighlightProps
       language={lang || "text"}
       style={isDark ? codeBlockDarkTheme : vs}
       showLineNumbers
-      lineNumberStyle={{ color: "var(--text-dim)", fontStyle: "normal" }}
+      lineNumberStyle={{ color: "var(--text-dim)", fontStyle: "normal", flexShrink: 0 }}
+      renderer={renderCodeLines}
       customStyle={{
         margin: 0,
         padding: "11px 13px",

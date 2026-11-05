@@ -1,13 +1,17 @@
 "use client";
 
-import { Children, cloneElement, createContext, isValidElement, memo, useCallback, useContext, useMemo, useRef, type ComponentProps, type MouseEvent, type ReactNode } from "react";
+import { Children, cloneElement, createContext, isValidElement, memo, useCallback, useContext, useMemo, useRef, useState, type ComponentProps, type MouseEvent, type ReactNode } from "react";
 import ReactMarkdown, { type Components, type ExtraProps, type Options as ReactMarkdownOptions } from "react-markdown";
+import { useI18n } from "@/hooks/useI18n";
+import { copyText } from "@/lib/clipboard";
 import { parsePdfPageFragment, resolveLocalFileHref, shouldOpenLocalFileInApp } from "@/lib/file-links";
 import { encodeFilePathForApi } from "@/lib/file-paths";
-import { isExternalMarkdownHref, markdownAppUrlTransform, markdownDocumentRehypePlugins, markdownRehypePlugins, markdownRemarkPlugins, markdownUrlTransform, markdownUserRemarkPlugins, normalizeDisplayMath } from "@/lib/markdown";
+import { isAudioPath, isVideoPath } from "@/lib/file-types";
+import { isExternalMarkdownHref, jumpToMarkdownFragment, markdownAppUrlTransform, markdownDocumentRehypePlugins, markdownRehypePlugins, markdownRemarkPlugins, markdownUrlTransform, markdownUserRemarkPlugins, normalizeDisplayMath } from "@/lib/markdown";
 import { splitStreamingMarkdown } from "@/lib/streaming-markdown-blocks";
 import { ImagePreview } from "./ImagePreview";
 import { MermaidBlock, CodeBlock } from "./MermaidBlock";
+import { SvgBlock } from "./SvgBlock";
 
 const MarkdownLinkContext = createContext(false);
 
@@ -17,6 +21,7 @@ type MarkdownRenderConfig = Pick<ReactMarkdownOptions, "remarkPlugins" | "rehype
 function renderCodeBlock(raw: string, lang: string, isStreaming?: boolean) {
   const code = raw.replace(/\n$/, "");
   if (lang === "mermaid") return <MermaidBlock code={code} isStreaming={isStreaming} defaultPreview />;
+  if (lang === "svg") return <SvgBlock code={code} isStreaming={isStreaming} />;
   return <CodeBlock code={code} lang={lang} isStreaming={isStreaming} />;
 }
 
@@ -45,7 +50,7 @@ interface MarkdownBodyProps {
   onOpenFile?: (filePath: string, page?: number) => void;
   /** A document reader's own links: relative paths and `#headings` stay in the reader. */
   onNavigateLink?: (href: string) => void;
-  /** Render every line ending as a line break, for text the user typed. */
+  /** Text the user typed: every line ending is a line break and raw HTML shows as text, as in pi's TUI. */
   keepLineBreaks?: boolean;
 }
 
@@ -59,17 +64,51 @@ function MarkdownImage({
   delete props.node;
   const href = typeof src === "string" ? src : undefined;
   const filePath = href ? resolveLocalFileHref(href, cwd) : null;
-  const imageSrc = filePath
+  const mediaSrc = filePath
     ? `/api/files/${encodeFilePathForApi(filePath)}?type=read`
     : href;
+  // `![](take.wav)` is how a model shows a sound or clip it made, and an <img>
+  // cannot play it. The file API already streams both with range requests.
+  const mediaPath = filePath ?? href?.split(/[?#]/, 1)[0] ?? "";
+  const label = alt?.trim() ? alt : undefined;
+  if (isAudioPath(mediaPath)) {
+    return <audio controls preload="metadata" src={mediaSrc} aria-label={label} />;
+  }
+  if (isVideoPath(mediaPath)) {
+    return <video controls playsInline preload="metadata" src={mediaSrc} aria-label={label} />;
+  }
   // Dynamic local paths are served directly by the file API.
   // eslint-disable-next-line @next/next/no-img-element
-  const image = <img src={imageSrc} alt={alt ?? ""} loading="lazy" {...props} />;
-  if (!imageSrc || insideLink) return image;
+  const image = <img src={mediaSrc} alt={alt ?? ""} loading="lazy" {...props} />;
+  if (!mediaSrc || insideLink) return image;
   return (
-    <ImagePreview src={imageSrc} alt={alt ?? ""} className="markdown-image">
+    <ImagePreview src={mediaSrc} alt={alt ?? ""} className="markdown-image">
       {image}
     </ImagePreview>
+  );
+}
+
+/**
+ * A display formula with a Copy button for its LaTeX, as code fences have
+ * (#1380). The button sits outside KaTeX's scroller, so it stays put while a
+ * wide formula scrolls; it shows on hover where there is one (app/globals.css).
+ */
+function MathDisplay({ source, children }: { source: string; children: ReactNode }) {
+  const { t } = useI18n();
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    copyText(source).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  };
+  return (
+    <div className="markdown-math-display">
+      {children}
+      <button type="button" onClick={copy} className="markdown-code-action markdown-math-copy">
+        {copied ? t("i18n.copied") : t("i18n.copy")}
+      </button>
+    </div>
   );
 }
 
@@ -158,6 +197,16 @@ export const MarkdownBody = memo(function MarkdownBody({ children, className, is
           </MarkdownLinkContext.Provider>
         );
       }
+      if (href?.startsWith("#")) {
+        // An in-page link: never a second tab of Pi Web.
+        return (
+          <MarkdownLinkContext.Provider value={true}>
+            <a href={href} {...props} onClick={jumpToMarkdownFragment}>
+              {children}
+            </a>
+          </MarkdownLinkContext.Provider>
+        );
+      }
       const filePath = hasOnOpenFile ? resolveLocalFileHref(href, cwd) : null;
       if (!filePath || !hasOnOpenFile) {
         return (
@@ -187,6 +236,11 @@ export const MarkdownBody = memo(function MarkdownBody({ children, className, is
     },
     img(props) {
       return <MarkdownImage cwd={cwd} {...props} />;
+    },
+    div({ node, children, ...props }) {
+      const source = node?.properties?.dataMathSource;
+      if (typeof source === "string") return <MathDisplay source={source}>{children}</MathDisplay>;
+      return <div {...props}>{children}</div>;
     },
     table({ children }) {
       // The frame draws the border; the scroller inside it fades its scrolled

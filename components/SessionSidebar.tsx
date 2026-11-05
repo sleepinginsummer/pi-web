@@ -1,5 +1,6 @@
 "use client";
 
+import { stabilizeStringSet } from "@/lib/stable-string-set";
 import { useEffect, useState, useCallback, useMemo, useRef, type ReactNode } from "react";
 import type { SessionInfo, WorktreeState } from "@/lib/types";
 import { useI18n } from "@/hooks/useI18n";
@@ -164,14 +165,21 @@ function saveLastCustomCwd(cwd: string): void {
   }
 }
 
+function parseUnreadSessionIds(raw: string | null): Set<string> {
+  if (!raw) return new Set();
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (Array.isArray(parsed)) return new Set(parsed.filter((id): id is string => typeof id === "string"));
+  } catch {
+    // A malformed value (an interrupted write, another client) means no markers.
+  }
+  return new Set();
+}
+
 function loadUnreadSessionIds(): Set<string> {
   if (typeof window === "undefined") return new Set();
   try {
-    const raw = window.localStorage.getItem(UNREAD_SESSIONS_STORAGE_KEY);
-    if (!raw) return new Set();
-    const parsed = JSON.parse(raw) as unknown;
-    if (Array.isArray(parsed)) return new Set(parsed.filter((id): id is string => typeof id === "string"));
-    return new Set();
+    return parseUnreadSessionIds(window.localStorage.getItem(UNREAD_SESSIONS_STORAGE_KEY));
   } catch {
     return new Set();
   }
@@ -436,6 +444,21 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
     saveUnreadSessionIds(unreadSessionIds);
   }, [unreadSessionIds]);
 
+  // Another tab's read or mark-unread of the same session: its localStorage
+  // write is the only cross-tab notice there is, and the browser fires the
+  // storage event only in the tabs that did not write. Without adopting the
+  // written set here, a session read in the other tab keeps its dot in this
+  // one, and this tab's next local write would persist the stale marker
+  // again, resurrecting it everywhere after a refresh.
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== null && event.key !== UNREAD_SESSIONS_STORAGE_KEY) return;
+      setUnreadSessionIds((prev) => stabilizeStringSet(prev, [...parseUnreadSessionIds(event.newValue)]));
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
   useEffect(() => {
     setCollapsedProjects(loadCollapsedProjects());
     setCollapsedProjectsReady(true);
@@ -603,7 +626,6 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
     setCustomPathOpen(true);
     setCustomPathError(null);
   }, []);
-
   // Clicking a session moves the effective cwd to that session's worktree.
   // Done on the click path (not via the selectedCwd prop sync) so it also
   // works when the prop value won't change — e.g. re-clicking the already

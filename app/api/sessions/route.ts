@@ -12,6 +12,7 @@ import {
   getCompletionNotificationSuppressedRpcSessionIds,
   getRpcSessionInfos,
   getRunningRpcSessionIds,
+  withSubagentDisplayStatus,
 } from "@/lib/rpc-manager";
 import type { SessionInfo } from "@/lib/types";
 import { startServerPerf } from "@/lib/perf";
@@ -65,7 +66,7 @@ export async function GET(req: Request) {
       attachSessionProjectInfo(getRpcSessionInfos()),
     ]);
     perf?.span("scan+projects");
-    const sessions = mergeSessionLists(persistedSessions, runtimeSessions);
+    const sessions = withSubagentDisplayStatus(mergeSessionLists(persistedSessions, runtimeSessions));
     const revision = publishDirectoryRevision(sessions);
     const rawSince = searchParams.get("since");
     const since = rawSince === null ? null : Number(rawSince);

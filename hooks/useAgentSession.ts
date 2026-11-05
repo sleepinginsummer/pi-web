@@ -36,11 +36,16 @@ export type { ThinkingLevelOption } from "@/lib/thinking-levels";
 import { normalizeAssistantMessage } from "@/lib/normalize";
 import { getPreferredToolPreset, setPreferredToolPreset } from "@/lib/tool-preset-preference";
 import type { ToolPreset } from "@/lib/tool-presets";
-import { isPromptRejectedError, sendAgentCommand } from "@/lib/agent-client";
+import { AgentCommandError, agentStatusUrl, isPromptRejectedError, sendAgentCommand } from "@/lib/agent-client";
+import { peekPageId } from "@/lib/page-debug";
+import { runStatePhase } from "@/lib/chat-phase-label";
+import { SESSION_LEASE_TIMEOUT_MS, type SessionLeaseReply } from "@/lib/agent-event-connection";
+import type { DebugClientLease, DebugClientSession } from "@/lib/debug-types";
+import type { TranslationParams } from "@/lib/i18n/types";
 import { isSessionExternalWriteError } from "@/lib/session-external-write";
 import { prependChatDraft, queuedMessagesToDraft, type QueuedMessages } from "@/lib/queued-messages";
 export type { QueuedMessages } from "@/lib/queued-messages";
-import { getDraft, setDraft, type ChatDraft } from "@/lib/draft-store";
+import { getDraft, parkedNewSessionDraftKey, setDraft, type ChatDraft } from "@/lib/draft-store";
 import { getToolNamesForPreset, type ToolEntry } from "@/lib/tool-presets";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import { carryMessageKeys, messageRenderKeys } from "@/lib/message-keys";
@@ -124,6 +129,45 @@ interface LastAssistantTextResponse {
 // 在 input 请求到达时自动应答，使自定义答案无需弹窗即可提交。
 // 超时兜底：pi 侧异常未发 input 时，残留记录自动失效，避免误应答后续无关请求。
 const CUSTOM_ANSWER_ARM_MS = 15_000;
+// 上游的会话存活改由页面续租维持（#1445）；SSE 不再保活，选中的会话必须定期续租。
+const SESSION_LEASE_RENEW_INTERVAL_MS = 30_000;
+type SessionLeaseOutcome = SessionLeaseReply | "unanswered" | null;
+
+/**
+ * A normal send whose prompt request failed without the server's refusal (#1432):
+ * what to give back should the server turn out never to have got it.
+ */
+type UnconfirmedSend = {
+  runId: number;
+  sid: string;
+  message: string;
+  images?: AttachedImage[];
+  draftKey: string | undefined;
+  /** A fresh composer's: the cwd's parked draft, which the next fresh composer there takes back. */
+  parkedDraftKey: string | null;
+  /** The view's last saved entry when the prompt was sent: the prompt can only show up after it. */
+  lastEntryIdAtSend: string | null;
+  /** User messages with the same text the view already had after that entry (sent before, not saved yet when read). */
+  sameTextAfterSend: number;
+  /** The optimistic bubble, dropped with its text's return once a read shows the prompt is not there. */
+  bubble: AgentMessage;
+  /** userMessageKey() of the optimistic bubble: the user message the prompt becomes. */
+  key: string;
+  /** A slash command: an extension command or template need not become that user message. */
+  command: boolean;
+};
+
+/** The messages without that one (by identity, its last occurrence); the same array when it is absent. */
+function withoutMessage(messages: AgentMessage[], message: AgentMessage): AgentMessage[] {
+  const index = messages.lastIndexOf(message);
+  return index === -1 ? messages : [...messages.slice(0, index), ...messages.slice(index + 1)];
+}
+
+function countUserMessages(messages: readonly AgentMessage[], key: string): number {
+  return messages.reduce((count, message) => (
+    message.role === "user" && userMessageKey(message) === key ? count + 1 : count
+  ), 0);
+}
 
 
 function contentText(content: string | Array<{ type: string; text?: string }>): string {
@@ -316,7 +360,7 @@ export interface SlashCommandInfo {
 
 export type BuiltinSlashCommandResult =
   | { handled: false }
-  | { handled: true; message?: string; error?: string; action?: "openSessionStats" | "openSettings" };
+  | { handled: true; message?: string; error?: string; action?: "openSessionStats" | "openSettings" | "compact" };
 
 export interface UseAgentSessionOptions {
   navigationKey: number;
@@ -337,6 +381,10 @@ export interface UseAgentSessionOptions {
   onSystemPromptChange?: (prompt: string | null) => void;
   /** 注册一个非 prompt 的启动动作，供系统面板按需读取系统提示词。 */
   onSystemPromptLoaderChange?: (loader: (() => Promise<void>) | null) => void;
+  /** Registers the debug panel's reader of this page's stream and lease: it reads refs only, never a request. */
+  onDebugSnapshotReaderChange?: (reader: (() => DebugClientSession) | null) => void;
+  /** The page's translator, for the notices the hook writes itself. */
+  t: (key: string, params?: TranslationParams) => string;
   onToolsLoaderChange?: (loader: (() => Promise<ToolEntry[]>) | null) => void;
   onSessionStatsPanelOpen?: () => void;
   /** Opens Settings on a section; a bare `/mcp` the built-in MCP extension owns opens Settings › MCP. */
@@ -505,6 +553,24 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // 控制类 UI 的授权是另一个投影（runtimeSessionId），两者不要混用。
   const attachSessionId = pendingSessionView.transportSessionId;
   const { completion, beginRun, settleRun } = useRunCompletion();
+  const lastRunSubagentsActiveRef = useRef(false);
+  // The run whose prompt the server is known to have got: one of its events
+  // (agent_start, prompt_done, queue_update, its user message) arrived, maybe
+  // before its request failed. Later ones clear the unconfirmed record itself.
+  const landedPromptRunIdRef = useRef<number | null>(null);
+  const unconfirmedSendRef = useRef<UnconfirmedSend | null>(null);
+  const markPromptLanded = useCallback(() => {
+    landedPromptRunIdRef.current = promptRunIdRef.current;
+    if (unconfirmedSendRef.current?.runId === promptRunIdRef.current) unconfirmedSendRef.current = null;
+  }, []);
+  // The context the newest session read found, and the order its request
+  // started in: only a read started after the run settled can settle it.
+  const sessionReadSeqRef = useRef(0);
+  const lastReadContextRef = useRef<{ sid: string; seq: number; messages: AgentMessage[]; entryIds: string[] } | null>(null);
+  const leaseDebugRef = useRef<Pick<DebugClientLease, "renewStartedAt" | "inFlightSince" | "requests" | "unanswered" | "errors" | "last">>({
+    renewStartedAt: null, inFlightSince: null, requests: 0, unanswered: 0, errors: 0, last: null,
+  });
+  const [promptMissingCwd, setPromptMissingCwd] = useState<string | null>(null);
   // 服务端 agent_settled/prompt_done 的 aborted：任一客户端停止的运行都不算完成。
   const lastRunAbortedRef = useRef(false);
 
@@ -547,6 +613,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [bashRunning, setBashRunning] = useState(false);
   const [pendingBash, setPendingBash] = useState<{ command: string; excludeFromContext: boolean } | null>(null);
   const { modelState: modelSelectionState, modelActions: modelSelectionActions } = useModelSelection();
+  const missingCwd = promptMissingCwd ?? modelSelectionState.missingCwd;
   const {
     names: modelNames,
     list: modelList,
@@ -566,6 +633,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [toolPreset, setToolPreset] = useState<ToolPreset>("default");
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxAttempts: number; errorMessage?: string } | null>(null);
   const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
+  // Active time read from the live state, with the session it belongs to: the
+  // panel's snapshot is older than the transcript on screen, and this is what
+  // keeps the value current while a run appends entries (#1334).
+  const [liveTotalActiveMs, setLiveTotalActiveMs] = useState<{ sessionId: string; value: number } | null>(null);
   const contextUsageRequestIdRef = useRef(0);
   // Highest request id whose reply was applied. A reply applies only when it
   // is newer, so a failed newer read never discards an older good one.
@@ -776,9 +847,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const cancelEdit = useCallback(() => setEdit(null), [setEdit]);
 
   const sessionStats = useMemo(() => {
+    // Active time is a monotone sum over the session's entries, so of the two
+    // readings the larger one is the newer one (#1334).
+    const liveActiveMs = liveTotalActiveMs && liveTotalActiveMs.sessionId === session?.id ? liveTotalActiveMs.value : 0;
+    const totalActiveMs = Math.max(sessionTotalActiveMs, liveActiveMs);
     if (sessionStatsOverride) return {
       ...sessionStatsOverride,
-      ...(sessionTotalActiveMs > 0 ? { totalActiveMs: sessionTotalActiveMs } : {}),
+      ...(totalActiveMs > 0 ? { totalActiveMs } : {}),
     };
     const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
     let cost = 0;
@@ -814,9 +889,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       tokens,
       cost,
       ...(contextUsage ? { contextUsage } : {}),
-      ...(sessionTotalActiveMs > 0 ? { totalActiveMs: sessionTotalActiveMs } : {}),
+      ...(totalActiveMs > 0 ? { totalActiveMs } : {}),
     } satisfies SessionStatsInfo;
-  }, [messages, sessionStatsOverride, contextUsage, details?.filePath, session?.id, session?.name, sessionTotalActiveMs]);
+  }, [messages, sessionStatsOverride, contextUsage, liveTotalActiveMs, details?.filePath, session?.id, session?.name, sessionTotalActiveMs]);
 
   // 只让已成功读取的较新用量覆盖旧值；失败的新请求不影响仍在等待的旧请求。
   const applyContextUsage = useCallback((sid: string, runId: number, requestId: number, usage: AgentRuntimeState["contextUsage"]) => {
@@ -830,7 +905,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const runId = promptRunIdRef.current;
     const requestId = ++contextUsageRequestIdRef.current;
     try {
-      const response = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
+      const response = await fetch(agentStatusUrl(sid));
       if (!response.ok) return;
       const snapshot = await response.json() as AgentRuntimeSnapshot;
       if (snapshot.state) applyContextUsage(sid, runId, requestId, snapshot.state.contextUsage);
@@ -851,7 +926,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     if (usageRead) applyContextUsage(usageRead.sid, usageRead.runId, usageRead.requestId, state.contextUsage);
     else setContextUsage(state.contextUsage);
-    setSystemPrompt(state.systemPrompt);
+    // 状态读取不带系统提示词（agentStatusUrl）：缺失不代表提示词被清空。
+    if (state.systemPrompt !== undefined) setSystemPrompt(state.systemPrompt);
+    if (typeof state.totalActiveMs === "number" && sessionIdRef.current) {
+      setLiveTotalActiveMs({ sessionId: sessionIdRef.current, value: state.totalActiveMs });
+    }
     applyShadowRuntimeState(state);
     modelSelectionActions.setThinkingLevel(state.thinkingLevel);
     setFastEnabled(state.fastEnabled);
@@ -1069,10 +1148,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       : null;
     if (showLoading) setLoading(true);
     try {
+      const readSeq = ++sessionReadSeqRef.current;
       const contextResult = await contextLoaderRef.current.run(
         sid,
         (signal) => fetchSessionContext(sid, signal, { skipCache: options.validateView }),
         (loaded) => {
+          if (loaded.kind !== "missing" && (lastReadContextRef.current?.seq ?? 0) < readSeq) {
+            lastReadContextRef.current = { sid, seq: readSeq, messages: loaded.snapshot.messages, entryIds: loaded.snapshot.entryIds ?? [] };
+          }
           if (sessionIdRef.current !== sid) return false;
           if (loaded.kind === "missing") {
             if (showLoading) {
@@ -1600,6 +1683,90 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       };
     });
   }, []);
+  // 把未送达的文字（含附件）还回输入框；输入框已卸载时写回草稿，合并在已有内容之前。
+  const restoreSubmission = useCallback((message: string, images: AttachedImage[] | undefined, draftKey: string | undefined) => {
+    const draft = { value: message, images: (images ?? []).map(({ data, mimeType }) => ({ data, mimeType })) };
+    const input = opts.chatInputRef?.current;
+    if (input && sessionHookMountedRef.current && sessionIdRef.current === draftKey) {
+      input.prependDraft(draft);
+      return;
+    }
+    if (draftKey) setDraft(draftKey, prependChatDraft(draft, getDraft(draftKey) ?? { value: "", images: [] }));
+  }, [opts.chatInputRef]);
+  const translateRef = useRef(opts.t);
+  translateRef.current = opts.t;
+  const translate = useCallback((key: string, params?: TranslationParams) => translateRef.current(key, params), []);
+  // A steer or follow-up whose request failed without the server's refusal (the
+  // network dropped, a proxy answered) may still have been accepted. Its text
+  // goes back to the composer all the same (restoreSubmission merges it in front
+  // of anything typed since) and is never sent again on its own; this notice
+  // says the send is unconfirmed rather than failed.
+  const addUnconfirmedSendNotice = useCallback(() => {
+    addNotice({ type: "warning", message: translate("chat.sendUnconfirmed") });
+  }, [addNotice, translate]);
+
+  // A normal send keeps its bubble while unconfirmed (#1432). Once the server is
+  // idle, a session read started after that settles it: the prompt arrived only
+  // if the read shows it, one more user message with its text past the view's
+  // last saved entry at the send than the view already had there. Otherwise
+  // the text goes back, as not received when the read ends on that entry, else
+  // as unconfirmed: a read that moved on (messages the view had not saved, or
+  // more than its window), failed, or a command, whose prompt need not become
+  // that user message. Any of the run's events clears the record first
+  // (markPromptLanded()).
+  // The text is back in the composer and the prompt is not in the transcript:
+  // its bubble goes, from the view and from the session's cached view. A read of
+  // a file the prompt never changed keeps the view's messages (the snapshot
+  // revision is the same), so it would never drop the bubble itself.
+  const dropUnconfirmedBubble = useCallback((pending: UnconfirmedSend) => {
+    if (sessionHookMountedRef.current) setMessages((prev) => withoutMessage(prev, pending.bubble));
+    const snapshot = getSessionViewSnapshot(pending.sid);
+    if (snapshot?.messages.includes(pending.bubble)) {
+      setSessionViewSnapshot({ ...snapshot, messages: withoutMessage(snapshot.messages, pending.bubble) });
+    }
+  }, []);
+  const settleUnconfirmedSend = useCallback((sid: string, runId: number, readSeqBefore: number) => {
+    const pending = unconfirmedSendRef.current;
+    if (!pending || pending.runId !== runId || pending.sid !== sid) return;
+    unconfirmedSendRef.current = null;
+    const read = lastReadContextRef.current;
+    const reread = read?.sid === sid && read.seq > readSeqBefore ? read : null;
+    // Where the read goes past the send's last entry; -1 when that entry fell out of its window.
+    const start = !reread ? -1
+      : pending.lastEntryIdAtSend === null ? 0
+        : reread.entryIds.indexOf(pending.lastEntryIdAtSend) + 1 || -1;
+    if (reread && start >= 0) {
+      const sameText = countUserMessages(reread.messages.slice(start), pending.key);
+      if (sameText > pending.sameTextAfterSend) return;
+    }
+    restoreSubmission(pending.message, pending.images, pending.draftKey);
+    // A failed read leaves the view stale: the bubble stays with "could not confirm".
+    if (reread) dropUnconfirmedBubble(pending);
+    addNotice(reread && !pending.command && start === reread.entryIds.length
+      ? { type: "error", message: translate("chat.sendNotReceived") }
+      : { type: "warning", message: translate("chat.sendUnconfirmed") });
+  }, [addNotice, dropUnconfirmedBubble, restoreSubmission, translate]);
+  // The hook unmounts (a session switch) with a send still unconfirmed: nothing
+  // here will settle it, so its text goes back unless one of the run's events
+  // cleared the record. With the stream closed, a prompt that did arrive is
+  // given back too, without a notice. A fresh composer's goes to its cwd's
+  // parked draft: its session has no row and no draft of its own until a
+  // prompt reaches it (getRpcSessionInfos()). The cached view loses the bubble:
+  // coming back, a read of an unchanged file keeps that view, and a changed
+  // one replaces it with the prompt if it did arrive.
+  const releaseUnconfirmedSend = useCallback(() => {
+    const pending = unconfirmedSendRef.current;
+    unconfirmedSendRef.current = null;
+    if (!pending) return;
+    if (pending.parkedDraftKey) {
+      restoreSubmission(pending.message, pending.images, pending.parkedDraftKey);
+    } else {
+      restoreSubmission(pending.message, pending.images, pending.draftKey);
+    }
+    dropUnconfirmedBubble(pending);
+  }, [dropUnconfirmedBubble, restoreSubmission]);
+  const releaseUnconfirmedSendRef = useRef(releaseUnconfirmedSend);
+  releaseUnconfirmedSendRef.current = releaseUnconfirmedSend;
 
   const clearAskQuestionnaire = useCallback(() => {
     askQuestionnaireRequestQueueRef.current = [];
@@ -1794,7 +1961,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const finishPromptWithoutStream = useCallback(async (sid: string | null = sessionIdRef.current, runId = promptRunIdRef.current) => {
     // completion 控制器负责当前轮校验与重复 settled 拒绝。
-    if (!settleRun(runId, sid, lastRunAbortedRef.current)) return;
+    if (!settleRun(runId, sid, lastRunAbortedRef.current, lastRunSubagentsActiveRef.current)) return;
 
     // 服务端确认 idle 后立即发布完成事件；消息重载不能阻塞声音和系统通知。
     agentRunningRef.current = false;
@@ -1810,15 +1977,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       onSessionListRefresh?.({ reason: "run-settled", sessionId: sid });
       // 先提交最终上下文，再发出结束定位，避免初始定位覆盖底部位置。
       invalidateSessionContext(sid);
+      const readSeqBefore = sessionReadSeqRef.current;
       void loadSession(sid, false, false, { preserveScroll: true }).then(() => {
+        // The server is idle: an unconfirmed send of this run either is in the
+        // read just made or never arrived.
+        settleUnconfirmedSend(sid, runId, readSeqBefore);
         if (sessionIdRef.current === sid) requestScrollPosition("running-end");
       });
     }
-  }, [dispatch, flushStreamDeltas, loadSession, onSessionListRefresh, requestScrollPosition, scheduleEventStreamClose, settleRun]);
+  }, [settleUnconfirmedSend, dispatch, flushStreamDeltas, loadSession, onSessionListRefresh, requestScrollPosition, scheduleEventStreamClose, settleRun]);
 
   const readAgentSnapshot = useCallback(async (sid: string): Promise<AgentRuntimeSnapshot | null> => {
     try {
-      const response = await fetch(`/api/agent/${encodeURIComponent(sid)}`, { cache: "no-store" });
+      const response = await fetch(agentStatusUrl(sid), { cache: "no-store" });
       if (!response.ok) return null;
       return await response.json() as AgentRuntimeSnapshot;
     } catch {
@@ -1867,7 +2038,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     ) {
       await delay(BASH_STATE_RECONCILE_MS);
       try {
-        const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
+        const res = await fetch(agentStatusUrl(sid));
         if (!res.ok) continue;
         const data = await res.json() as AgentRuntimeSnapshot;
         if (data.state?.isBashRunning) continue;
@@ -1933,6 +2104,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
       case "agent_start":
+        markPromptLanded();
         cancelEventStreamGrace();
         // 新一轮运行开始：重置流式消息计数（message_end 的 updater 会重新累计）。
         lastStreamedMessageCountRef.current = 0;
@@ -1976,6 +2148,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "prompt_done":
         if (event.type === "agent_settled") lastRunAbortedRef.current = event.aborted === true;
         else if (event.aborted === true) lastRunAbortedRef.current = true;
+        // Subagents still at work report back with a run of their own: the task is not done yet (#1434).
+        lastRunSubagentsActiveRef.current = event.subagentsActive === true;
+        if (event.type === "prompt_done") markPromptLanded();
         if (!agentRunningRef.current || !sessionIdRef.current) break;
         void reconcileAgentState(sessionIdRef.current, promptRunIdRef.current);
         break;
@@ -2062,6 +2237,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           const deliveredKey = userMessageKey(delivered);
           const optimisticKey = optimisticUserMessageKeyRef.current;
           optimisticUserMessageKeyRef.current = null;
+          // While the run's own bubble waits, a delivered user message is its prompt.
+          if (optimisticKey) markPromptLanded();
           setMessages((prev) => {
             const last = prev[prev.length - 1];
             if (optimisticKey && last?.role === "user" && userMessageKey(last) === optimisticKey) {
@@ -2290,11 +2467,27 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         : message,
       timestamp: Date.now(),
     };
+    // What the view holds before the bubble: its last saved entry, and the same
+    // text already sent since (the run messages the stream added), for #1432.
+    const userKey = userMessageKey(userMsg);
+    const savedViewIds = entryIdsRef.current;
+    const lastEntryIdAtSend = savedViewIds.at(-1) ?? null;
+    const sameTextAfterSend = countUserMessages(messagesRef.current.slice(savedViewIds.length), userKey);
     setMessages((prev) => [...prev, userMsg]);
-    optimisticUserMessageKeyRef.current = userMessageKey(userMsg);
+    optimisticUserMessageKeyRef.current = userKey;
     const promptRunId = enterMainRun(isSlashCommandPrompt ? { kind: "running_command" } : { kind: "waiting_model" });
     requestScrollPosition("user");
 
+    // A queued prompt (parked behind compaction, or queued into a run) is not a
+    // sent message yet: the queue rows show it, and the transcript shows it when
+    // the flush delivers it. Drop the optimistic bubble for it.
+    const dropOptimisticUserMessage = () => {
+      setMessages((prev) => {
+        const index = prev.lastIndexOf(userMsg);
+        return index === -1 ? prev : [...prev.slice(0, index), ...prev.slice(index + 1)];
+      });
+      optimisticUserMessageKeyRef.current = null;
+    };
     const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
     let sentSessionId: string | null = null;
     let promptRequestStarted = false;
@@ -2317,11 +2510,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           await ensureEventsConnected(sid);
           if (!isNavigationActive(navigationKey)) throw new Error("会话已切换，消息未发送");
           promptRequestStarted = true;
-          await sendAgentCommand(sid, {
+          const queuedAck = await sendAgentCommand<{ queued?: boolean }>(sid, {
             type: "prompt",
             message,
             ...(piImages?.length ? { images: piImages } : {}),
           });
+          if (queuedAck?.queued) dropOptimisticUserMessage();
           try {
             const runtimeState = await sendAgentCommand<AgentRuntimeState>(sid, { type: "get_state" });
             if (runtimeState.model && isThinkingLevel(runtimeState.thinkingLevel)) {
@@ -2342,12 +2536,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           throw new Error("会话已切换，消息未发送");
         }
         promptRequestStarted = true;
-        await sendAgentCommand(sid, {
+        const queuedAck = await sendAgentCommand<{ queued?: boolean }>(sid, {
           type: "prompt",
           message,
           ...(piImages?.length ? { images: piImages } : {}),
         });
+        if (queuedAck?.queued) dropOptimisticUserMessage();
       }
+      setPromptMissingCwd(null);
       if (isSlashCommandPrompt && sentSessionId) {
         void reconcileAgentState(sentSessionId, promptRunId);
       }
@@ -2357,10 +2553,30 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // before the response connection was lost. Keep SSE alive until the
       // server confirms idle so a real run cannot continue unseen.
       if (promptRequestStarted && sentSessionId && !isPromptRejectedError(e)) {
+        // 请求已发出但响应失败时，服务端可能已受理：气泡保留到服务端确认 idle，
+        // 只有确认未收到时才把文字还回输入框，绝不重发（#1432）。
+        if (landedPromptRunIdRef.current !== promptRunId) {
+          unconfirmedSendRef.current = {
+            runId: promptRunId,
+            sid: sentSessionId,
+            message,
+            images,
+            draftKey: sentSessionId,
+            parkedDraftKey: isNew && newSessionCwd ? parkedNewSessionDraftKey(newSessionCwd) : null,
+            lastEntryIdAtSend,
+            sameTextAfterSend,
+            bubble: userMsg,
+            key: userKey,
+            command: isSlashCommandPrompt,
+          };
+          if (!sessionHookMountedRef.current) releaseUnconfirmedSendRef.current();
+        }
         void reconcileAgentState(sentSessionId, promptRunId);
-        // 请求已发出但响应失败时，服务端可能已受理；保留原有的乐观提交行为。
         return true;
       }
+      // A folder that no longer exists never reached the model: the composer's
+      // banner names it (translated) instead of the server's English notice.
+      if (e instanceof AgentCommandError && e.missingCwd) setPromptMissingCwd(e.missingCwd);
       agentRunningRef.current = false;
       closeEvents();
       const optimisticKey = optimisticUserMessageKeyRef.current;
@@ -2373,7 +2589,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
       }
       const detail = e instanceof Error ? e.message : String(e);
-      addNotice({ type: "error", message: `消息发送失败，输入已保留：${detail}` });
+      if (!(e instanceof AgentCommandError && e.missingCwd)) addNotice({ type: "error", message: `消息发送失败，输入已保留：${detail}` });
       optimisticUserMessageKeyRef.current = null;
       setAgentRunning(false);
       setAgentPhase(null);
@@ -2411,6 +2627,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [addNotice, ensureNewSession, loadSession, opts.chatInputRef, promoteNewSession]);
   executeBashRef.current = executeBash;
 
+  /** Stop 交还的停在压缩之后的消息（含附件）回到输入框。 */
+  const restoreRecalledPrompts = useCallback((recalled: QueuedMessages | null | undefined) => {
+    if (!recalled) return;
+    const draft = queuedMessagesToDraft(recalled);
+    if (draft.value || draft.images.length > 0) opts.chatInputRef?.current?.prependDraft(draft);
+  }, [opts.chatInputRef]);
+
   const handleAbort = useCallback(async () => {
     const sid = sessionIdRef.current;
     if (!sid) return;
@@ -2428,7 +2651,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     clearAskQuestionnaire();
     markManualStopNotificationSuppressed(sid);
     try {
-      await sendAgentCommand(sid, { type: "abort" });
+      // Prompts parked behind a compaction come back for the composer, as Recall's do.
+      restoreRecalledPrompts(await sendAgentCommand<QueuedMessages | null>(sid, { type: "abort" }));
     } catch (e) {
       clearManualStopNotificationSuppression(sid);
       console.error("Failed to abort:", e);
@@ -2559,23 +2783,36 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [addNotice, creationSettingsLocked, currentModelOverride, isNavigationActive, isNew, loadSession, modelSelectionActions, navigationKey, newSessionCwd, onPendingNewSessionEvent]);
 
-  const handleCompact = useCallback(async () => {
+  /**
+   * Manual compaction (the Compact button and `/compact`). Never awaited by a
+   * caller that holds the composer: the compact POST is blocking and lasts the
+   * whole compaction, and `runBuiltinCommand` keeps the composer's fieldset
+   * disabled until the command resolves. The compaction reports itself — the
+   * Compacting status, Stop compaction, the result banner and its error.
+   */
+  /** Resolves false when the compaction failed. */
+  const handleCompact = useCallback(async (customInstructions?: string): Promise<boolean> => {
     const sid = sessionIdRef.current;
-    if (!sid || isCompacting) return;
+    if (!sid || isCompacting) return true;
     setIsCompacting(true);
     setCompactError(null);
     setCompactResult(null);
     try {
-      const result = await sendAgentCommand<CompactCommandResult>(sid, { type: "compact" });
+      const result = await sendAgentCommand<CompactCommandResult>(sid, {
+        type: "compact",
+        ...(customInstructions ? { customInstructions } : {}),
+      });
       setCompactResult(readCompactResult(result, "manual"));
-      await loadCompactedSession(sid, true);
+      if (await loadCompactedSession(sid, true)) promoteNewSession();
+      return true;
     } catch (e) {
       setCompactError(e instanceof Error ? e.message : String(e));
       setCompactResult(null);
+      return false;
     } finally {
       setIsCompacting(false);
     }
-  }, [isCompacting, loadCompactedSession]);
+  }, [isCompacting, loadCompactedSession, promoteNewSession]);
 
   // The banner otherwise stays until the next compaction, e.g. "Nothing to compact".
   const dismissCompactError = useCallback(() => setCompactError(null), []);
@@ -2619,16 +2856,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       switch (commandName) {
         case "compact": {
           if (!sid || isCompacting) return complete({ handled: true, error: "No active session to compact" });
-          setIsCompacting(true);
-          setCompactError(null);
-          setCompactResult(null);
-          const result = await sendAgentCommand<CompactCommandResult>(sid, {
-            type: "compact",
-            ...(args ? { customInstructions: args } : {}),
+          // Detached on purpose. This must resolve now: runBuiltinCommand holds
+          // the composer's fieldset disabled until the command resolves, and the
+          // compact POST blocks for the whole compaction, which read as an input
+          // box that stopped taking text until the session was switched away and
+          // back. The compaction reports itself (Compacting status, Stop
+          // compaction, result banner, error), so no completion notice here.
+          // A failed compaction gives its instructions back, as the awaited command
+          // left them in the composer.
+          void handleCompact(args || undefined).then((compacted) => {
+            if (!compacted && args) opts.chatInputRef?.current?.prependText(`/compact ${args}`);
           });
-          setCompactResult(readCompactResult(result, "manual"));
-          if (await loadCompactedSession(sid, true)) promoteNewSession();
-          return complete({ handled: true, message: "Compacted context" });
+          return complete({ handled: true, action: "compact" });
         }
 
         case "auto-compact": {
@@ -2730,8 +2969,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
     } catch (e) {
       return complete({ handled: true, error: e instanceof Error ? e.message : String(e) });
-    } finally {
-      if (commandName === "compact") setIsCompacting(false);
     }
   }, [activeLeafId, addNotice, ensureNewSession, isCompacting, loadCompactedSession, loadModels, loadSession, loadSlashCommands, loadTools, onSessionForked, promoteNewSession, onSessionStatsPanelOpen, runShadowSlashCommand, onOpenSettings, slashCommandsForMcp]);
 
@@ -2885,6 +3122,106 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [creationSettingsLocked, setToolPresetState, clearSlashCommands, closeEvents, clearAskQuestionnaire, ensureEventsConnected, loadTools, applyRuntimeState, addNotice]);
 
+  // One lease request: it resets the session's idle countdown (renewIdleTimer()). A reply
+  // that does not come within SESSION_LEASE_TIMEOUT_MS, or no network, counts as "unanswered".
+  const requestLease = useCallback(async (sid: string): Promise<SessionLeaseOutcome> => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), SESSION_LEASE_TIMEOUT_MS);
+    const lease = leaseDebugRef.current;
+    const startedAt = Date.now();
+    let httpStatus: number | null = null;
+    let result: SessionLeaseOutcome = null;
+    lease.inFlightSince = startedAt;
+    lease.requests += 1;
+    try {
+      const response = await fetch(`/api/agent/${encodeURIComponent(sid)}/lease`, { method: "POST", cache: "no-store", signal: controller.signal });
+      httpStatus = response.status;
+      result = response.ok ? await response.json() as SessionLeaseReply : null;
+      return result;
+    } catch (error) {
+      result = controller.signal.aborted || error instanceof TypeError ? "unanswered" : null;
+      return result;
+    } finally {
+      clearTimeout(timeout);
+      const at = Date.now();
+      const outcome = result === "unanswered" ? "unanswered" : result === null ? "error" : "reply";
+      if (outcome === "unanswered") lease.unanswered += 1;
+      if (outcome === "error") lease.errors += 1;
+      const reply = typeof result === "object" && result !== null ? result : null;
+      lease.inFlightSince = null;
+      lease.last = {
+        at,
+        durationMs: Math.max(0, at - startedAt),
+        outcome,
+        httpStatus,
+        reply: reply && {
+          running: reply.running === true,
+          awaitingInput: reply.awaitingInput === true,
+          subagentsActive: reply.subagentsActive === true,
+        },
+      };
+    }
+  }, []);
+
+  // 页面续租维持选中会话存活，隐藏页也继续（后台冻结时回到前台立即补一次）。
+  useEffect(() => {
+    const sid = session?.id;
+    if (!sid) return;
+    const leaseDebug = leaseDebugRef.current;
+    void requestLease(sid);
+    const interval = setInterval(() => void requestLease(sid), SESSION_LEASE_RENEW_INTERVAL_MS);
+    leaseDebug.renewStartedAt = Date.now();
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") void requestLease(sid);
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      clearInterval(interval);
+      leaseDebug.renewStartedAt = null;
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [requestLease, session?.id]);
+
+  // The debug panel's view of this page's lease and run, read on its own clock. Refs only.
+  // The fork's shared SSE broker owns the stream, so there is no per-page connection to report.
+  const readDebugSnapshot = useCallback((): DebugClientSession => {
+    const sid = sessionIdRef.current;
+    const lease = leaseDebugRef.current;
+    return {
+      pageId: peekPageId(),
+      sessionId: sid,
+      selectedSessionId: session?.id ?? null,
+      mounted: sessionHookMountedRef.current,
+      wantsStream: sid !== null,
+      connection: null,
+      released: { active: false, count: 0, lastAt: null },
+      reattached: { count: 0, lastAt: null, lastReason: null },
+      hiddenReleaseDueAt: null,
+      hiddenGraceMs: 0,
+      graceDueAt: null,
+      run: {
+        agentRunning: agentRunningRef.current,
+        bashRunning: bashRunningRef.current,
+        compacting: isCompacting,
+        dialogs: extensionDialogRef.current ? 1 : 0,
+      },
+      lease: {
+        renewIntervalMs: SESSION_LEASE_RENEW_INTERVAL_MS,
+        renewStartedAt: lease.renewStartedAt,
+        inFlightSince: lease.inFlightSince,
+        requests: lease.requests,
+        unanswered: lease.unanswered,
+        errors: lease.errors,
+        last: lease.last && { ...lease.last, reply: lease.last.reply && { ...lease.last.reply } },
+      },
+    };
+  }, [isCompacting, session?.id]);
+  const { onDebugSnapshotReaderChange } = opts;
+  useEffect(() => {
+    onDebugSnapshotReaderChange?.(readDebugSnapshot);
+    return () => onDebugSnapshotReaderChange?.(null);
+  }, [readDebugSnapshot, onDebugSnapshotReaderChange]);
+
   // Load session on mount
   useEffect(() => {
     applyRuntimeState(undefined);
@@ -2948,6 +3285,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             thinkingLevel, model, totalActiveMs, loadedEntryIds: entryIdsRef.current });
         }
         if (agentRunningRef.current || bashRunningRef.current) deleteSessionViewSnapshot(sid);
+        // After the snapshot above, so the bubble of a send given back leaves it.
+        releaseUnconfirmedSendRef.current();
         contextLoaderRef.current.cancel(sid);
         contextRefreshSchedulerRef.current.cancel(sid);
         shadowLifecycleRef.current.reset();
@@ -3084,7 +3423,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     hasEarlierMessages: historyPage.sid === sessionIdRef.current && historyPage.hasMore,
     loadingEarlierMessages: historyPage.sid === sessionIdRef.current && historyPage.loading,
     earlierTurnCount: historyPage.sid === sessionIdRef.current ? historyPage.turnsBefore : 0,
-    agentRunning, modelState: modelViewState, modelActions: modelViewActions, toolPreset,
+    missingCwd, agentRunning, modelState: modelViewState, modelActions: modelViewActions, toolPreset,
     retryInfo, contextUsage, systemPrompt, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
@@ -3108,6 +3447,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // Subscriptions
     handleAgentEventRef,
   }), [
+    missingCwd,
     details, loading, error, activeLeafId, messages, entryIds, messageKeys, streamingStore, historyPage,
     agentRunning, modelViewState, modelViewActions, toolPreset,
     retryInfo, contextUsage, systemPrompt, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,

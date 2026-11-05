@@ -26,6 +26,7 @@ function setup() {
     modelSelectionActions: { setThinkingLevel() {} }, setFastEnabled() {}, setRuntimeFastAvailable() {},
     setExtensionStatuses() {}, setExtensionWidgets() {}, filterVisibleExtensionWidgets: (widgets) => widgets,
     fetch: (url) => { const request = Promise.withResolvers(); requests.push({ ...request, url }); return request.promise; },
+    agentStatusUrl: (sid) => `/api/agent/${sid}?systemPrompt=0`, setLiveTotalActiveMs() {},
     syncLiveModel() {}, setIsCompacting() {}, setAutoCompactionEnabled() {}, setQueuedMessages() {},
     // applyRuntimeState 也会把扩展绑定状态交给唯一状态机（新会话等待态）。
     newSessionCwd: null, onPendingNewSessionEvent() {},

@@ -49,7 +49,7 @@ test("polls running sessions only while the tab is visible", () => {
 });
 
 test("keeps running transitions and completion notifications outside the sidebar", () => {
-  assert.match(appShellSource, /useRunningSessionTransitions\(runningSessionIds, selectedSession\?\.id \?\? null\)/);
+  assert.match(appShellSource, /useRunningSessionTransitions\(runningSessionIds, selectedSession\?\.id \?\? null, subagentsActiveSessionIds\)/);
   assert.match(appShellSource, /useBackgroundCompletionNotifications\(/);
   assert.match(source, /runningSessionTransitions\.revision/);
   assert.doesNotMatch(source, /diffRunningSessions|onBackgroundSessionComplete|notifySession/);

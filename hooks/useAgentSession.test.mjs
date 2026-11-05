@@ -204,7 +204,7 @@ test("reloads compacted context directly from the authoritative server snapshot"
   assert.doesNotMatch(source, /liveSessionMessages|live-session-cache/);
   assert.match(eventSource, /case "compaction_end":[\s\S]*?loadCompactedSession\(sessionIdRef\.current, event\.reason === "manual"\)/);
   assert.match(manualCompactSource, /await loadCompactedSession\(sid, true\)/);
-  assert.match(slashCompactSource, /await loadCompactedSession\(sid, true\)/);
+  assert.match(slashCompactSource, /handleCompact\(args \|\| undefined\)/);
 });
 
 test("context loads atomically through the shared latest loader", () => {

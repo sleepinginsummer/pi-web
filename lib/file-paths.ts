@@ -1,3 +1,4 @@
+import { pageId } from "./page-debug";
 export function normalizeFilePathSlashes(filePath: string): string {
   if (/^[a-zA-Z]:[\\/]/.test(filePath) || filePath.startsWith("\\\\")) {
     return filePath.replace(/\\/g, "/");
@@ -59,6 +60,8 @@ export function getFileApiUrl(
   const encoded = encodeFilePathForApi(filePath);
   const searchParams = new URLSearchParams({ type });
   if (sourceSessionId) searchParams.set("sessionId", sourceSessionId);
+  // A watch is a stream: the page that holds it, for the Debug panel's connected pages.
+  if (type === "watch") searchParams.set("holder", pageId());
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined) searchParams.set(key, String(value));
   }

@@ -2,6 +2,8 @@ import { resolveSessionPath, invalidateSessionListCache } from "@/lib/session-re
 import { getRpcSession, startRpcSession } from "@/lib/rpc-manager";
 import { createAgentEventStream } from "@/lib/agent-event-stream";
 import type { AgentEventLike } from "@/lib/agent-event-wire";
+import { isValidLivenessHolder } from "@/lib/session-liveness";
+import { describeStreamClient } from "@/lib/stream-client";
 
 export const dynamic = "force-dynamic";
 
@@ -16,12 +18,17 @@ function isSessionFlushBoundaryEvent(event: { type?: string; message?: { role?: 
   return event.type === "tool_execution_end" || event.type === "agent_end";
 }
 
-// GET /api/agent/[id]/events - SSE stream of agent events
+// GET /api/agent/[id]/events?holder=<page id> - SSE stream of agent events. The holder, the
+// request's reported address and its browser label only label the stream for the debug panel: the
+// page's lease renewals keep the session alive, never the stream (#1283).
 export async function GET(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  if (req.signal.aborted) return new Response(null, { status: 204 });
+  const holderParam = new URL(req.url).searchParams.get("holder");
+  const holder = isValidLivenessHolder(holderParam) ? holderParam : null;
 
   // Fast path: already-running session. The cold start remains a promise so
   // the SSE transport can flush headers and heartbeat before SDK startup.
@@ -42,6 +49,8 @@ export async function GET(
   }
 
   const stream = createAgentEventStream(req, id, sessionPromise, {
+    holder,
+    ...describeStreamClient(req.headers),
     onEvent: (event) => {
       // 新会话文件落盘后立即失效列表缓存（见 isSessionFlushBoundaryEvent 注释）
       if (isSessionFlushBoundaryEvent(event)) invalidateSessionListCache();

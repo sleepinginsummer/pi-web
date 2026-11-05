@@ -40,7 +40,7 @@ test("keeps Shadow outside the narrow-phone action layer", () => {
 });
 
 test("only renders optional Agents and branch actions when available", () => {
-  assert.match(topBarSource, /session\.agentCount > 0 && \(/);
+  assert.match(topBarSource, /session\.agentsBadge && \(/);
   assert.match(topBarSource, /const hasBranches = hasSessionBranches\(navigation\.branchTree\)/);
   assert.match(topBarSource, /\{hasBranches && \(/);
   assert.match(appShellSource, /agentCount: activeSessionFamily\?\.subagents\.length \?\? 0/);

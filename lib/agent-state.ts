@@ -16,6 +16,8 @@ export interface AgentRuntimeState {
   messageCount: number;
   pendingMessageCount: number;
   queuedMessages: QueuedMessages;
+  /** Active time over the live wrapper's entries (the snapshot carries the same field). */
+  totalActiveMs?: number;
   contextUsage: { percent: number | null; contextWindow: number; tokens: number | null } | null;
   systemPrompt: string;
   thinkingLevel: ThinkingLevel;
