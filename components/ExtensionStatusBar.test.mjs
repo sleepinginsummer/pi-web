@@ -82,7 +82,7 @@ test("状态栏保留本地高度并按键排序显示独立状态", () => {
   assert.match(html, /background:transparent/);
   assert.equal(html.match(/class="extension-status-item"/g)?.length, 2);
   assert.match(html, /extension-status-item"><span>ponytail<\/span><\/span>/);
-  assert.match(html, /<span style="[^"]*">memory<\/span>/);
+  assert.match(html, /<span class="ansi-green-fg">memory<\/span>/);
   assert.doesNotMatch(html, /05-ponytail|20-memory/);
   assert.doesNotMatch(html, /<button/);
 });

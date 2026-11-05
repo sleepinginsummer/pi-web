@@ -1,5 +1,6 @@
 "use client";
 
+import { stripAnsi } from "@/lib/ansi";
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import type { ExtensionUiRequest } from "@/lib/types";
@@ -192,7 +193,7 @@ export function AskDialog({ request, remainingSeconds, onSelect, onCancel, onCus
             onClick={() => onSelect(request, option)}
             className={styles.option}
           >
-            <div inert><MarkdownBody>{option}</MarkdownBody></div>
+            <div inert><MarkdownBody>{stripAnsi(option)}</MarkdownBody></div>
           </div>
         ))}
       </div>

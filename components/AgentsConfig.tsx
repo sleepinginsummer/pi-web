@@ -205,6 +205,7 @@ export function AgentsConfig({
   );
   const modelPickerOptions = useMemo(() => modelOptions.map((model) => ({
     provider: model.provider,
+    providerName: model.providerName,
     modelId: model.id,
     name: model.name,
   })), [modelOptions]);

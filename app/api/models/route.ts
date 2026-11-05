@@ -16,7 +16,7 @@ import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-acces
 import { projectTrustReloadOptions } from "@/lib/project-trust";
 import { isFastModeAvailable } from "@/lib/fast-mode";
 import { readModelsConfigSnapshot } from "@/lib/models-config-commit";
-import { rememberProviderModels, withDeferredProviderModels } from "@/lib/deferred-provider-models";
+import { providerDisplayNames, rememberProviderModels, withDeferredProviderModels } from "@/lib/deferred-provider-models";
 import { inferRemovedWorktree } from "@/lib/worktree";
 import { cwdMissingBody } from "@/lib/missing-cwd";
 
@@ -47,6 +47,7 @@ async function loadModels(
   const modelError = services.modelRuntime.getError();
   const settings: SettingsManager = services.settingsManager;
   await rememberProviderModels(services.modelRuntime);
+  const providerNames = providerDisplayNames(services.modelRuntime);
   // `enabledModels` supports globs and fuzzy patterns, so resolve it the same
   // way the CLI does instead of comparing pattern strings literally (#307).
   const scope = restrictVisibleModelsToConfiguredCatalog(
@@ -62,6 +63,9 @@ async function loadModels(
     name: m.name,
     provider: m.provider,
     fastAvailable: isFastModeAvailable(m, fastModels),
+    // The selector groups by provider id, but labels the group with its display
+    // name; models.json providers get theirs from `name` too.
+    providerName: providerNames.get(m.provider) ?? m.provider,
     input: m.input,
   }));
   for (const m of visible) {

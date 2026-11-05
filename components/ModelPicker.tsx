@@ -5,6 +5,8 @@ import { useI18n } from "@/hooks/useI18n";
 
 export interface ModelPickerOption {
   provider: string;
+  /** The provider's display name, shown as its group's label (#1514). */
+  providerName?: string;
   modelId: string;
   name: string;
 }
@@ -30,7 +32,7 @@ export function filterModelOptions(options: ModelPickerOption[], query: string):
   const normalizedQuery = query.trim().toLocaleLowerCase();
   if (!normalizedQuery) return options;
   return options.filter((option) => (
-    `${option.name} ${option.modelId}`.toLocaleLowerCase().includes(normalizedQuery)
+    `${option.name} ${option.modelId} ${option.provider} ${option.providerName ?? ""} ${option.provider}/${option.modelId}`.toLocaleLowerCase().includes(normalizedQuery)
   ));
 }
 
@@ -367,7 +369,7 @@ export const ModelPicker = memo(function ModelPicker({
                 </div>
               ) : groups.map((group, groupIndex) => (
                 <div key={group.provider}>
-                  {groups.length > 1 && <div style={{ padding: "6px 12px 4px", fontSize: 10, fontWeight: 600, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.07em", borderTop: groupIndex > 0 ? "1px solid var(--border)" : "none" }}>{group.provider}</div>}
+                  {groups.length > 1 && <div style={{ padding: "6px 12px 4px", fontSize: 10, fontWeight: 600, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.07em", borderTop: groupIndex > 0 ? "1px solid var(--border)" : "none" }}>{group.options[0]?.providerName ?? group.provider}</div>}
                   {group.options.map((option) => {
                     const active = option.modelId === value?.modelId && option.provider === value?.provider;
                     return <ModelOptionButton key={`${option.provider}:${option.modelId}`} active={active} label={option.name} onClick={() => { setOpen(false); setFilter(""); if (!active || isAutoSelection) onChange(option.provider, option.modelId); else onReselect?.(option.provider, option.modelId); }} />;

@@ -6,6 +6,7 @@ import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRe
 import { createPortal } from "react-dom";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage, WorktreeInfo } from "@/lib/types";
 import { normalizeCustomPanelLines, parseAnsiLine } from "@/lib/ansi";
+import { stripAnsi } from "@/lib/ansi";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
 import { collapsesProcessDetails, countToolCallBlocks, hasAssistantAnswer, getDisplayableAssistantBlocks, isHiddenCustomMessage, isMessageGroupAnchor, splitFinalAssistantBlocks } from "@/lib/message-display";
 import { EXTENSION_DIALOG_BASE_WIDTH, fitExtensionDialogWidth } from "@/lib/extension-dialog-fit";
@@ -1698,7 +1699,7 @@ const SECRET_INPUT_MARKER = "\u0000";
 
 function getExtensionDialogSummary(request: ExtensionDialogRequest): string | undefined {
   if (request.method !== "confirm") return undefined;
-  return request.message.split("\n").find((line) => line.trim())?.trim();
+  return stripAnsi(request.message).split("\n").find((line) => line.trim())?.trim();
 }
 
 /** "+N more": requests of the same kind queued behind the one on screen, each shown once that one closes. */
@@ -1852,7 +1853,7 @@ function ExtensionDialog({
             {t("chat.extensionPending")}
           </span>
           <span style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
-            {request.title}
+            {stripAnsi(request.title)}
           </span>
           {summary && (
             <span style={{ fontSize: 12, color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "34%", flexShrink: 1 }}>
@@ -1869,7 +1870,7 @@ function ExtensionDialog({
       <div
         ref={dialogRef}
         role="dialog"
-        aria-label={request.title}
+        aria-label={stripAnsi(request.title)}
         style={{
           pointerEvents: "auto",
           // "Full" fills the content region above the composer: the overlay is inset:0 with
@@ -1889,7 +1890,7 @@ function ExtensionDialog({
           <div style={{ flex: 1, minWidth: 0 }}>
             {/* Pi's TUI shows the title verbatim, newlines included; select/input have no
                 separate message field, so extensions put multi-line text here. */}
-            <div style={{ color: "var(--text)", fontSize: 14, fontWeight: 650, lineHeight: 1.45, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{request.title}</div>
+            <div style={{ color: "var(--text)", fontSize: 14, fontWeight: 650, lineHeight: 1.45, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{stripAnsi(request.title)}</div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 3, color: "var(--text-dim)", fontSize: 11, fontFamily: "var(--font-mono)" }}>
               <span>{t("chat.extensionRequest")}</span>
               <ExtensionWaitingCount count={waitingCount} />
@@ -1949,7 +1950,7 @@ function ExtensionDialog({
           }}
         >
           {request.method === "confirm" && (
-            <MarkdownBody>{request.message}</MarkdownBody>
+            <MarkdownBody>{stripAnsi(request.message)}</MarkdownBody>
           )}
           {request.method === "input" && (
             <input
@@ -2077,7 +2078,7 @@ function ExtensionCustomPanel({
   const composingRef = useRef(false);
   const [collapsed, setCollapsed] = useState(false);
   const displayLines = normalizeCustomPanelLines(request.lines);
-  const summary = displayLines.find((line) => line.trim())?.trim();
+  const summary = displayLines.map(stripAnsi).find((line) => line.trim())?.trim();
 
   useEffect(() => {
     if (!collapsed) inputRef.current?.focus();

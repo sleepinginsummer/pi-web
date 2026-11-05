@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { patchPiSdkExtensionCache } from "../lib/pi-sdk-extension-cache-patch.mjs";
 
 // 每个版本都已逐字核对 extensions/loader 的缓存段与补丁替换源一致。
-const REVIEWED_SDK_VERSIONS = new Set(["1.1.0", "1.2.0", "1.4.0"]);
+const REVIEWED_SDK_VERSIONS = new Set(["1.1.0", "1.2.0", "1.4.0", "1.5.0"]);
 const sdkEntryPath = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
 const sdkRoot = dirname(dirname(sdkEntryPath));
 const packageJsonPath = join(sdkRoot, "package.json");

@@ -60,7 +60,7 @@ interface Props {
   /** The session's folder, when it no longer exists (moved or renamed): said instead of a model error (#1422). */
   missingCwd?: string | null;
   /** Every available model, once loaded for the selector's "all" scope. */
-  allModelList?: { id: string; name: string; provider: string }[] | null;
+  allModelList?: { id: string; name: string; provider: string; providerName?: string }[] | null;
   /** Set only while `enabledModels` narrows the list: loads `allModelList`. */
   onLoadAllModels?: () => void;
   onCompact?: () => void;
@@ -437,7 +437,7 @@ export function ModelErrorBanner({ error }: { error?: string | null }) {
 /** True when the selected model is known to accept image input (#584). Unknown modality info never blocks the user. */
 export function modelSupportsImageInput(
   model: { provider: string; modelId: string } | null | undefined,
-  modelList: { id: string; name: string; provider: string; input?: string[] }[] | undefined
+  modelList: { id: string; name: string; provider: string; providerName?: string; input?: string[] }[] | undefined
 ): boolean {
   if (!model) return true;
   const entry = modelList?.find((m) => m.provider === model.provider && m.id === model.modelId);
@@ -499,7 +499,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const controlSize = isMobile ? 44 : 32;
   const modelPickerOptions = useMemo<ModelPickerOption[]>(() => {
     if (modelState.list?.length) {
-      return modelState.list.map((model) => ({ provider: model.provider, modelId: model.id, name: model.name }));
+      return modelState.list.map((model) => ({ provider: model.provider, providerName: model.providerName, modelId: model.id, name: model.name }));
     }
     return Object.entries(modelState.names ?? {}).map(([modelId, name]) => ({
       provider: modelState.model?.provider ?? "unknown",
@@ -546,6 +546,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isComposingRef = useRef(false);
   const lastCompositionEndAtRef = useRef(0);
+  const pendingPasteRef = useRef<object | null>(null);
   const slashCommandsRequestedRef = useRef(false);
   const slashItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const fileIndexMetaRef = useRef<{ cwd: string; fetchedAt: number } | null>(null);
@@ -1377,6 +1378,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   );
 
   const handleInput = useCallback((event: React.FormEvent<HTMLTextAreaElement>) => {
+    pendingPasteRef.current = null;
     const inputType = (event.nativeEvent as InputEvent).inputType ?? "";
     // 达到最大高度后，普通输入不会改变控件尺寸；删除、换行和粘贴时才重新测量。
     const mayShrinkOrReflow = inputType.startsWith("delete")
@@ -1397,7 +1399,25 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       return;
     }
     const pastedText = e.clipboardData?.getData("text/plain") ?? "";
-    if (pastedText.length <= TEXT_ATTACHMENT_THRESHOLD) return;
+    if (pastedText.length <= TEXT_ATTACHMENT_THRESHOLD) {
+      if (pastedText) {
+        // A dictation tool that pastes and then restores the clipboard can write
+        // it during this event; Chrome then drops its own insertion (#1513). When
+        // no input followed the paste, insert the text the event delivered.
+        const ta = e.currentTarget as HTMLTextAreaElement;
+        const native = e.nativeEvent;
+        const start = ta.selectionStart;
+        const end = ta.selectionEnd;
+        const paste = {};
+        pendingPasteRef.current = paste;
+        setTimeout(() => {
+          if (pendingPasteRef.current !== paste) return;
+          pendingPasteRef.current = null;
+          if (!native.defaultPrevented && ta.isConnected) replaceTextareaRange(ta, start, end, pastedText);
+        }, 0);
+      }
+      return;
+    }
     e.preventDefault();
     setTextAttachment(pastedText);
     setValue("");
@@ -2056,9 +2076,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               value={modelState.model}
               onChange={onModelChange}
               onReselect={onModelChange}
-              allOptions={allModelList?.map((m) => ({ provider: m.provider, modelId: m.id, name: m.name }))}
+              allOptions={allModelList?.map((m) => ({ provider: m.provider, providerName: m.providerName, modelId: m.id, name: m.name }))}
               onShowAll={onLoadAllModels}
-              disabled={isStreaming || creationSettingsLocked}
+              disabled={creationSettingsLocked}
               busy={modelState.modelSwitching}
               isAutoSelection={modelState.isAutoModelSelection}
               variant="toolbar"

@@ -8,6 +8,8 @@ import { ChatWindow } from "./ChatWindow";
 import type { ChatReadingPosition } from "@/lib/chat-scroll-position";
 import { FileViewer } from "./FileViewer";
 import { TabBar, type Tab } from "./TabBar";
+import { movePanelTab, orderPanelTabs } from "@/lib/panel-tab-order";
+import { openFileTab, saveFileViewerState, saveParkedFileViewerState, switchFileWorkspace, type ParkedFileWorkspace } from "./file-tab-state";
 import { SettingsPanel, SettingsSectionIcon } from "./SettingsPanel";
 import { ProjectTrustDialog } from "./ProjectTrustDialog";
 import { AppTopBar } from "./AppTopBar";
@@ -18,6 +20,7 @@ import { createSideChat, deleteSideChat } from "@/lib/side-chat-client";
 import { DevServerViewer } from "./DevServerViewer";
 import { agentOverlayTabId, serverOverlayTabId, type OverlayTab } from "./overlay-tabs";
 import { newTerminalTab, restoreTerminalTabs, TERMINAL_TABS_KEY, type TerminalTab } from "./terminal-tab-state";
+import { appendSideTab, restoreSideTabs, sideTabsKey } from "./side-tab-state";
 import { useFontPreferences } from "@/hooks/useFontPreferences";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -164,7 +167,8 @@ export function AppShell() {
   const toggleFilePanel = useCallback(() => {
     if (fileTabs.length > 0 || terminalTabs.length > 0 || overlayTabs.length > 0) toggleFilePanelState();
   }, [overlayTabs.length, fileTabs.length, terminalTabs.length, toggleFilePanelState]);
-  const panelTabs: Tab[] = [...fileTabs, ...terminalTabs.map((tab) => ({
+  const [panelTabOrder, setPanelTabOrder] = useState<string[]>([]);
+  const panelTabs: Tab[] = orderPanelTabs([...fileTabs, ...terminalTabs.map((tab) => ({
     id: tab.id,
     label: getFileName(tab.cwd) || tab.cwd,
     filePath: tab.cwd,
@@ -174,8 +178,14 @@ export function AppShell() {
     id: tab.id,
     label: tab.label,
     filePath: tab.kind === "agent" ? tab.sessionId : tab.serverId,
-    kind: tab.kind,
-  }))];
+    kind: tab.kind === "agent" && tab.side ? "side" as const : tab.kind,
+  }))], panelTabOrder);
+  // A closed tab leaves the saved order, so reopening it appends it like any new tab.
+  const panelTabIds = panelTabs.map((tab) => tab.id).join("\n");
+  useEffect(() => {
+    const open = new Set(panelTabIds.split("\n"));
+    setPanelTabOrder((order) => order.every((id) => open.has(id)) ? order : order.filter((id) => open.has(id)));
+  }, [panelTabIds]);
   const activePanelTabId = activeTerminalTabId ?? activeOverlayTabId ?? activeFileTabId;
   const activeOverlayTab = activeTerminalTabId === null && activeOverlayTabId
     ? overlayTabs.find((tab) => tab.id === activeOverlayTabId) ?? null
@@ -758,7 +768,18 @@ export function AppShell() {
   // the family's badge folds the new member in.
   const handleSideSession = useCallback((session: SessionInfo, prompt: string | null) => {
     if (prompt) setSideChatPrompts((prev) => ({ ...prev, [session.id]: prompt }));
-    handleOpenSubagentTab(session.id, sideChatTitle(session, (prompt && sideChatNameFrom(prompt)) || translate("sideChat.title")), true);
+    setSessionCatalog((prev) => [session, ...prev.filter((item) => item.id !== session.id)]);
+    const label = translate("agentSwitcher.sideChat");
+    const parentId = session.relation?.kind === "side" ? session.relation.parentSessionId : null;
+    if (parentId && parentId !== sideTabOwnerRef.current) {
+      // The fork landed after the main chat moved on: the tab waits with its own session.
+      try {
+        const key = sideTabsKey(parentId);
+        window.sessionStorage.setItem(key, appendSideTab(window.sessionStorage.getItem(key), session.id, label));
+      } catch { /* storage is optional */ }
+    } else {
+      handleOpenSubagentTab(session.id, label, true);
+    }
     setRefreshKey((key) => key + 1);
   }, [handleOpenSubagentTab, translate]);
 
@@ -855,6 +876,42 @@ export function AppShell() {
     }
     return null;
   }, [handleClosePanelTab, handleSelectSession, handleSessionDeleted, selectedSession?.id]);
+
+  // Side tabs follow their main session (saved in this browser tab, restored on return or reload);
+  // subagent tabs stay open within a project.
+  const sideTabOwner = activeSessionFamily?.root.id ?? null;
+  const sideTabOwnerRef = useRef<string | null>(null);
+  const sideTabsRestoredRef = useRef(false);
+  useEffect(() => {
+    if (sessionCatalog.length === 0) return;
+    if (sideTabsRestoredRef.current && sideTabOwnerRef.current === sideTabOwner) {
+      if (!sideTabOwner) return;
+      try {
+        const tabs = overlayTabs.flatMap((tab) => tab.kind === "agent" && tab.side ? [{ sessionId: tab.sessionId, label: tab.label, side: true as const }] : []);
+        if (tabs.length === 0) window.sessionStorage.removeItem(sideTabsKey(sideTabOwner));
+        else window.sessionStorage.setItem(sideTabsKey(sideTabOwner), JSON.stringify({ tabs, activeId: activeOverlayTabId, open: rightPanelOpen }));
+      } catch { /* storage is optional */ }
+      return;
+    }
+    sideTabsRestoredRef.current = true;
+    sideTabOwnerRef.current = sideTabOwner;
+    let restored: ReturnType<typeof restoreSideTabs> = { tabs: [], activeId: null, open: false };
+    if (sideTabOwner) {
+      try {
+        restored = restoreSideTabs(window.sessionStorage.getItem(sideTabsKey(sideTabOwner)), sideTabOwner, sessionCatalog);
+      } catch { /* storage is optional */ }
+    }
+    setOverlayTabs((tabs) => [
+      ...tabs.filter((tab) => !(tab.kind === "agent" && tab.side)),
+      ...restored.tabs.map((tab) => ({ id: agentOverlayTabId(tab.sessionId), kind: "agent" as const, sessionId: tab.sessionId, label: tab.label, side: true })),
+    ]);
+    const restoredActive = restored.activeId === agentOverlayTabId(selectedSession?.id ?? "") ? null : restored.activeId;
+    setActiveOverlayTabId(restoredActive);
+    if (restoredActive) {
+      setActiveTerminalTabId(null);
+      if (restored.open) openFilePanel();
+    }
+  }, [activeOverlayTabId, openFilePanel, overlayTabs, rightPanelOpen, selectedSession?.id, sessionCatalog, sideTabOwner]);
 
   // One session, one chat: opening a subagent or side chat in the main chat closes its tab.
   const selectedSessionId = selectedSession?.id;
@@ -1353,6 +1410,7 @@ export function AppShell() {
               activeTabId={activePanelTabId ?? ""}
               onSelectTab={handleSelectPanelTab}
               onCloseTab={handleClosePanelTab}
+              onReorderTab={(source, target, after) => setPanelTabOrder(movePanelTab(panelTabs.map((tab) => tab.id), source, target, after))}
             />
           </div>
           {rightPanelOpen && isMobile && (

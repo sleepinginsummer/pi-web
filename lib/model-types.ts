@@ -12,6 +12,8 @@ export interface ModelEntry {
   id: string;
   name: string;
   provider: string;
+  /** The provider's display name, which the selector labels its group with. */
+  providerName?: string;
   fastAvailable: boolean;
   input?: string[];
 }
