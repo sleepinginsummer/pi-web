@@ -910,8 +910,11 @@ export function AppShell() {
     if (restoredActive) {
       setActiveTerminalTabId(null);
       if (restored.open) openFilePanel();
+    } else if (fileTabs.length === 0 && terminalTabs.length === 0 && !overlayTabs.some((tab) => !(tab.kind === "agent" && tab.side))) {
+      // The panel held only the previous session's side tabs: nothing is left to show.
+      closeFilePanel();
     }
-  }, [activeOverlayTabId, openFilePanel, overlayTabs, rightPanelOpen, selectedSession?.id, sessionCatalog, sideTabOwner]);
+  }, [activeOverlayTabId, closeFilePanel, fileTabs.length, terminalTabs.length, openFilePanel, overlayTabs, rightPanelOpen, selectedSession?.id, sessionCatalog, sideTabOwner]);
 
   // One session, one chat: opening a subagent or side chat in the main chat closes its tab.
   const selectedSessionId = selectedSession?.id;

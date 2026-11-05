@@ -142,7 +142,7 @@ export async function POST(
         mode,
         ...submitFingerprint(body),
       });
-      return NextResponse.json({ success: true, data: { accepted: true, mode } });
+      return NextResponse.json({ success: true, data: { accepted: true, mode, ...((result as { queued?: boolean } | null)?.queued ? { queued: true } : {}) } });
     }
 
     return NextResponse.json({ success: true, data: result });

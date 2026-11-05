@@ -388,6 +388,8 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
     48,
   );
   const notificationPreview = getAssistantNotificationPreview(messages);
+  // Subagent runs and side chats finish silently: they owe no sound or notification.
+  const completionNotificationsEnabled = !isHiddenRelation(session?.relation);
   useCompletionEffects({
     completion,
     soundEnabled,
@@ -397,6 +399,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
     body: notificationPreview || t("chat.notificationDoneBody"),
     folderName: getFileName(session?.cwd ?? newSessionCwd ?? "") || undefined,
     onComplete: onAgentEnd,
+    enabled: completionNotificationsEnabled,
   });
   const sessionBusy = agentRunning || bashRunning;
   // 运行期间保持提示音的 AudioContext 运行：手机锁屏时被挂起的 context 无法再启动（#1157）。

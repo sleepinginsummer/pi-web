@@ -6,7 +6,9 @@ export interface SessionTreeNode {
 }
 
 /** Build the sidebar hierarchy. Forks remain roots; only subagents nest. */
-export function buildSessionTree(sessions: SessionInfo[], manualOrder: readonly string[] = []): SessionTreeNode[] {
+export function buildSessionTree(allSessions: SessionInfo[], manualOrder: readonly string[] = []): SessionTreeNode[] {
+  // 侧聊只出现在所属会话的 Agents 面板和右侧标签里，不占侧栏行（ADR 0007）。
+  const sessions = allSessions.filter((session) => session.relation?.kind !== "side");
   const byId = new Map<string, SessionTreeNode>();
   for (const session of sessions) {
     byId.set(session.id, { session, children: [] });

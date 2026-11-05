@@ -280,6 +280,14 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 - `/api/cwd/validate`, `/api/default-cwd`, and `/api/worktrees` call `allowFileRoot()` when they make a new location browsable.
 - Allowed roots are stored slash-normalized, but that is a Set-key convention, not a correctness requirement: `isPathWithinRoots()` (`lib/path-security.ts`, the single implementation behind `isFilePathAllowed()`) re-resolves and case-folds both sides, so either path form authorizes correctly. Keep that one implementation — it is the security boundary.
 
+### 上游合并取舍（v0.13–v0.15）
+- 隐藏页释放 SSE（#1328）未移植：fork 的 SSE broker 已解决连接数问题。但上游让 SSE 不再保活（#1445），页面续租是会话存活的唯一来源，`useAgentSession` 必须继续每 30 秒 POST `/lease`。调试面板的 SSE 一栏因此显示“尚无连接”，属预期。
+- 压缩期间排队（#1426）接在 fork 的 `PendingPromptTracker` 和带附件的 `QueuedMessages` 上；`POST /api/agent/[id]` 要把 `queued` 带回 `AgentSubmitAcknowledgement`，否则乐观气泡和队列行会重复。
+- 改名保留 `writeSessionInfoThroughLiveSession` 的 stale 语义，`renameRpcSession` 只负责等待启动或关闭中的 wrapper；`appendSessionInfoName` 走 `setSessionName` 以通知扩展。
+- 侧聊：`POST /api/sessions/[id]/fork` 只接受 `{ side: true }`，复制走 fork 的分阶段发布；`buildSessionTree` 过滤 `relation.kind === "side"`，侧聊不占侧栏行；普通子代理仍用 `SubagentViewer`，只有侧聊用 `SessionChatPanel`。
+- pi 1.5.0 的 `extensions/loader` 只把 cwd 比较换成 `pathsEqual`，`lib/pi-sdk-extension-cache-patch.mjs` 用 `alternativeFrom` 同时接受两种写法。
+- `npm test` 走 `scripts/run-tests.mjs`：单文件 3 分钟、单用例 90 秒、整轮 30 分钟，默认并发 2。Node 的 `assert.match` 在大字符串上失败时生成 diff 可能卡死 CPU，所以源码正则测试失败常表现为超时，`pkill` 杀不掉时要 `kill -9`。
+
 ### Secret vault (pi-secret-vault extension)
 - 存储和遮蔽在扩展里，pi-web 只有界面：`lib/secret-vault.ts` 按扩展 `src/store.ts` 的磁盘约定（AES-256-GCM、record 绑定名字的 AAD、mkdir 锁、钥匙串条目）读写 `<agentDir>/pi-secret-vault/vault.json`，运行中的会话靠文件签名在下一个钩子同步。只加密不解密，`/api/secret-vault` 不返回任何值。改格式要两边一起改并升 `version`。
 - 扩展用 `ctx.ui.input` 的 placeholder 前缀 `\u0000` 标记密钥输入，`ChatWindow` 的 `ExtensionDialog` 据此渲染密码框并去掉前缀。

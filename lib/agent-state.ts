@@ -45,4 +45,6 @@ export interface AgentRuntimeSnapshot {
 export interface AgentSubmitAcknowledgement {
   accepted: true;
   mode: "prompt" | "steer" | "followUp";
+  /** The prompt is parked behind a compaction: a queue row until the flush sends it. */
+  queued?: boolean;
 }

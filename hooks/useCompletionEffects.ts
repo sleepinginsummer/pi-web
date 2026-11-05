@@ -6,6 +6,8 @@ import type { SessionNotificationOptions } from "@/lib/session-notifications";
 import { isManualStopNotificationSuppressed } from "@/lib/manual-stop-notification";
 
 interface CompletionEffectsOptions {
+  /** Off for subagents and side chats: an aside the user drives owes no sound or notification. */
+  enabled?: boolean;
   completion: RunCompletion | null;
   soundEnabled: boolean;
   playDoneSound: () => void;
@@ -26,6 +28,7 @@ export function useCompletionEffects({
   body,
   folderName,
   onComplete,
+  enabled = true,
 }: CompletionEffectsOptions) {
   const handledRunIdRef = useRef<number | null>(null);
 
@@ -33,7 +36,7 @@ export function useCompletionEffects({
     if (!completion || handledRunIdRef.current === completion.runId) return;
     handledRunIdRef.current = completion.runId;
     // 被停止的运行没有完成任务，与 pi 自身的状态报告一致：不提示。
-    if (completion.aborted || completion.subagentsActive) {
+    if (!enabled || completion.aborted || completion.subagentsActive) {
       onComplete?.();
       return;
     }
@@ -46,5 +49,5 @@ export function useCompletionEffects({
       void notifySession(title, body, completion.sessionId, { folderName, showWhenActive: true });
     }
     onComplete?.();
-  }, [body, completion, folderName, notifySession, onComplete, playDoneSound, soundEnabled, title]);
+  }, [body, completion, enabled, folderName, notifySession, onComplete, playDoneSound, soundEnabled, title]);
 }
