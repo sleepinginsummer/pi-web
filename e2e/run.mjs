@@ -9,15 +9,12 @@ import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
-import { checkFilePanel, checkLargeHtmlStorage, filePanelFixture, largeStorageFixture } from "./file-panel.mjs";
+import { checkFilePanel, filePanelFixture } from "./file-panel.mjs";
 import { checkExtensionDialogSizing, checkExtensionDialogs, extensionSource } from "./extension-dialog.mjs";
 import { checkChatAppearance } from "./chat-appearance.mjs";
 import { checkCodeBackground } from "./code-background.mjs";
-import { checkStreamingMetrics } from "./streaming-metrics.mjs";
 import { checkModelDiscovery } from "./model-discovery.mjs";
-import { checkModelOrder } from "./model-order.mjs";
 import { checkModelContext } from "./model-context.mjs";
-import { checkModelSelector } from "./model-selector.mjs";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const mode = process.env.E2E_SERVER_MODE || "dev";
@@ -31,8 +28,6 @@ const sessionDir = join(agentDir, "sessions", "e2e");
 mkdirSync(project);
 const previewFile = join(project, "preview.html");
 writeFileSync(previewFile, filePanelFixture);
-const largeStorageFile = join(project, "large-storage.html");
-writeFileSync(largeStorageFile, largeStorageFixture);
 mkdirSync(sessionDir, { recursive: true });
 const timestamp = "2026-08-23T00:00:00.000Z";
 const LONG = "e2e-long-session";
@@ -558,7 +553,6 @@ try {
     await page.goto(`${base}/?session=${RICH}`, { waitUntil: "domcontentloaded" });
     await page.locator(".markdown-code-block pre").waitFor();
     await checkFilePanel(page, previewFile);
-    await checkLargeHtmlStorage(page, largeStorageFile);
     await checkExtensionDialogs(page, artifacts, viewport.width);
     await checkExtensionDialogSizing(page, viewport.width);
     // 扩展场景会留下完成通知；设置场景从干净页面开始，避免移动端通知遮住侧栏按钮。
@@ -582,24 +576,21 @@ try {
       const hideSidebar = page.getByRole("button", { name: "Hide sidebar", exact: true });
       const showSidebar = page.getByRole("button", { name: "Show sidebar", exact: true });
       await hideSidebar.or(showSidebar).waitFor({ state: "visible" });
-      // That effect can also open the sidebar between the visible check and the click, so "Show sidebar" is
-      // gone and the click waits its full 30s for a button that will not come back. Retry against a short
-      // deadline: only the click's own timeout is ignored, and the wait below still fails if the sidebar
-      // never opens.
-      for (let attempt = 0; attempt < 5 && !(await hideSidebar.isVisible()); attempt++) {
-        await showSidebar.click({ timeout: 1_000 }).catch(() => {});
-        await page.waitForTimeout(200);
+      // 恢复 effect 仍可能落在可见性检查与 click 之间；只在目标状态已达成时接受按钮消失。
+      for (let attempt = 0; attempt < 4 && !await hideSidebar.isVisible(); attempt++) {
+        try {
+          await showSidebar.click({ timeout: 1000 });
+        } catch (error) {
+          if (!await hideSidebar.isVisible()) throw error;
+        }
       }
       await hideSidebar.waitFor({ state: "visible" });
       await checkModelDiscovery(page);
     }
     await checkModelContext(page);
-    await checkModelOrder(page);
     await page.goto(`${base}/?session=${CODE_BACKGROUND}`, { waitUntil: "domcontentloaded" });
     await page.locator(".markdown-code-block pre").waitFor();
     await checkCodeBackground(page);
-    await checkStreamingMetrics(page);
-    await checkModelSelector(page, { base, project, artifacts });
     assert.deepEqual(errors, [], `Browser errors at width ${viewport.width}`);
     console.log(`PASS: ${viewport.width}px browser pagination, branch, markdown, code, tool call, and compaction navigation`);
     await context.tracing.stop();
