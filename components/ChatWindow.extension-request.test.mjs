@@ -31,19 +31,19 @@ test("adds collapse without replacing cancel", () => {
 
 test("renders extension confirmation and options as markdown", () => {
   assert.match(source, /import \{ MarkdownBody \} from "\.\/MarkdownBody"/);
-  assert.match(dialogSource, /<MarkdownBody>\{request\.message\}<\/MarkdownBody>/);
-  assert.match(askSource, /role="button"[\s\S]*?data-ask-option[\s\S]*?<div inert><MarkdownBody>\{option\}<\/MarkdownBody>/);
+  assert.match(dialogSource, /<MarkdownBody>\{stripAnsi\(request\.message\)\}<\/MarkdownBody>/);
+  assert.match(askSource, /role="button"[\s\S]*?data-ask-option[\s\S]*?<div inert><MarkdownBody>\{stripAnsi\(option\)\}<\/MarkdownBody>/);
   assert.match(askSource, /querySelector<HTMLElement>\("\[data-ask-option\]"\)/);
 });
 
 test("preserves title newlines like pi's TUI and keeps long titles from hiding the body", () => {
   const header = dialogSource.slice(dialogSource.indexOf('role="dialog"'), dialogSource.indexOf("{request.method === \"confirm\""));
-  assert.match(header, /whiteSpace: "pre-wrap", overflowWrap: "anywhere" \}\}>\{request\.title\}/);
+  assert.match(header, /whiteSpace: "pre-wrap", overflowWrap: "anywhere" \}\}>\s*\{stripAnsi\(request\.title\)\}/);
   // The dialog's own height is content-driven (only max-height is set), so a percentage
   // cap on the header never resolves and a non-shrinkable header grows to its full text
   // height, pushing the option list and the footer past the dialog's overflow edge (#890).
   // The cap has to be viewport-based and the header has to be allowed to shrink and scroll.
-  assert.match(header, /flexShrink: 1, minHeight: 0,[\s\S]*?maxHeight: "50vh", overflowY: "auto" \}\}>[\s\S]*?\{request\.title\}/);
+  assert.match(header, /flexShrink: 1, minHeight: 0,[\s\S]*?maxHeight: "50vh", overflowY: "auto" \}\}>[\s\S]*?\{stripAnsi\(request\.title\)\}/);
   assert.doesNotMatch(header, /maxHeight: "50%"/);
 });
 

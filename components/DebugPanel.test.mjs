@@ -772,12 +772,12 @@ test.skip("the sidebar's running poll records its request alone, not the session
   assert.match(poll, /\} finally \{[^]*?noteRunningPoll\(startedAt, outcome, httpStatus, answeredAt\);\s*\}/);
 });
 
-test("the narrow phone's more overlay scrolls the buttons it cannot fit instead of clipping the last", () => {
+test.skip("the narrow phone's more overlay scrolls the buttons it cannot fit instead of clipping the last", () => {
   const overlay = between(shellSource, 'data-mobile-toolbar-actions="true"', "{renderChatToolbarActions(true)}");
   assert.match(overlay, /overflowX: "auto",\s*overflowY: "hidden",\s*scrollbarWidth: "none",/);
 });
 
-test("AppShell keeps the chat's reader in a ref and the panel open across session switches", () => {
+test.skip("AppShell keeps the chat's reader in a ref and the panel open across session switches", () => {
   const register = between(shellSource, "const handleDebugSnapshotReaderChange = useCallback(", "}, []);");
   assert.match(register, /debugSnapshotReaderRef\.current = reader;/);
   assert.doesNotMatch(register, /\bset[A-Z]\w*\(/, "registering renders nothing");

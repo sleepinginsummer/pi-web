@@ -185,10 +185,14 @@ export function createForkedSession(sourceSessionFile: string, entryId: string):
 }
 
 /** 将当前分支完整复制为独立会话，源会话及其运行实例保持不变。 */
-export function createClonedSession(sourceSessionFile: string, leafId: string): ForkedSession {
+export function createClonedSession(
+  sourceSessionFile: string,
+  leafId: string,
+  options: { allowWithoutAssistant?: boolean } = {},
+): ForkedSession {
   const sourceManager = SessionManager.open(sourceSessionFile);
   const branch = sourceManager.getBranch(leafId);
-  if (!branch.some((entry) => isMessageEntry(entry) && entry.message.role === "assistant")) {
+  if (!options.allowWithoutAssistant && !branch.some((entry) => isMessageEntry(entry) && entry.message.role === "assistant")) {
     throw new Error("Cannot clone an empty or assistant-free session branch");
   }
   assertCompleteToolCallHistory(getCloneValidationBranch(branch));
@@ -262,12 +266,13 @@ export function createSideSession(
   if (readSideRelation(branch as unknown as WebSessionEntry[])) {
     throw new SessionForkError("side", "A side chat cannot be forked");
   }
-  if (!branch.some((entry) => entry.type === "message" && entry.message.role === "assistant")) {
+  // 只有 shell 命令的分支也能分出侧聊（pi-web 保留这类会话）。
+  if (!branch.some((entry) => entry.type === "message")) {
     throw new SessionForkError("empty", "Nothing to fork: the session has no messages");
   }
   const sourceSessionId = manager.getSessionId();
   const toolSelection = readSessionToolSelection(manager.getEntries() as unknown as WebSessionEntry[]);
-  const copy = createClonedSession(sourcePath, leafId);
+  const copy = createClonedSession(sourcePath, leafId, { allowWithoutAssistant: true });
   const [header, first, ...rest] = readFileSync(copy.newSessionFile, "utf8").trimEnd().split("\n");
   const firstEntry = JSON.parse(first) as { parentId?: string | null };
   const metadata = createSideMetadataEntry(sourceSessionId, `side-${randomUUID()}`, firstEntry.parentId ?? null);

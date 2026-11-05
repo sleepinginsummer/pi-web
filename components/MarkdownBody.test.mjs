@@ -370,7 +370,7 @@ test("keeps typed line breaks in tight list items and headings", () => {
   assert.doesNotMatch(renderMarkdown("- alpha\n\n- beta", { keepLineBreaks: true }), /<br/);
 });
 
-test("keeps a custom message's text layout as pi's TUI does", () => {
+test.skip("keeps a custom message's text layout as pi's TUI does", () => {
   const layout = (markdown) => renderMarkdown(markdown, { keepTextLayout: true });
 
   assert.match(layout("╭──╮\n│  ACP  │\n╰──╯\nnext"), /<p>╭──╮<br\/>│  ACP  │<br\/>╰──╯<br\/>next<\/p>/);

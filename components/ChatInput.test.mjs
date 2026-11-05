@@ -372,8 +372,9 @@ test("filters model options by name and id", () => {
 
   assert.deepEqual(filterModelOptions(options, "QWEN"), [options[0]]);
   assert.deepEqual(filterModelOptions(options, "claude-sonnet"), [options[1]]);
-  assert.equal(filterModelOptions(options, "OpenAI").length, 0);
-  assert.equal(filterModelOptions(options, "anthropic/claude").length, 0);
+  // 也匹配提供商 id 和 provider/modelId（#1308）。
+  assert.deepEqual(filterModelOptions(options, "OpenAI"), [options[2]]);
+  assert.deepEqual(filterModelOptions(options, "anthropic/claude"), [options[1]]);
   assert.equal(filterModelOptions(options, "missing").length, 0);
   assert.equal(filterModelOptions(options, "  "), options);
 });

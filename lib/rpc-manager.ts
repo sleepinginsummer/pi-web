@@ -465,6 +465,8 @@ export class AgentSessionWrapper {
   private extensionBindingError: unknown = null;
   private forceEmptySystemPrompt = false;
   private readonly onDirectTurnSettled?: (aborted: boolean) => void;
+  // agent_start 之后尚未上报的子代理回合（onDirectTurnSettled 每轮只报一次）。
+  private agentRunNeedsCompletion = false;
   private readonly suppressCompletionNotifications: boolean;
   private readonly mcpHost?: WrapperMcpHost;
   private readonly chatOnlyExtensionModel?: { provider: string; id: string };
@@ -538,7 +540,7 @@ export class AgentSessionWrapper {
     this.chatOnlyExtensionModel = options.chatOnlyExtensionModel;
     this.sideChat = options.sideChat === true;
     const sessionEntries = () => (
-      typeof this.inner.sessionManager.getEntries === "function"
+      typeof this.inner.sessionManager?.getEntries === "function"
         ? this.inner.sessionManager.getEntries()
         : []
     );
@@ -671,7 +673,8 @@ export class AgentSessionWrapper {
    */
   appendSessionInfoName(name: string): void {
     // setSessionName 除写入外还会通知扩展 session_info_changed（#1388）。
-    this.inner.setSessionName(name);
+    if (typeof this.inner.setSessionName === "function") this.inner.setSessionName(name);
+    else this.inner.sessionManager.appendSessionInfo(name);
     invalidateSessionListCache();
   }
 
@@ -822,7 +825,9 @@ export class AgentSessionWrapper {
           : event.type === "agent_settled" ? this.withSubagentsActive(event)
             : event,
       );
-      if (event.type === "agent_settled") {
+      if (event.type === "agent_start") this.agentRunNeedsCompletion = true;
+      if (event.type === "agent_settled" && this.agentRunNeedsCompletion && !this.isRunning()) {
+        this.agentRunNeedsCompletion = false;
         try {
           this.onDirectTurnSettled?.(this.lastRunAborted);
         } catch (error) {

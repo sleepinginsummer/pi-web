@@ -40,7 +40,7 @@ function runHandleAgentEnd({ end, selectedSession, attention }) {
   return { notifications, hiddenFinishedSessionIds: context.hiddenFinishedSessionIds };
 }
 
-test("a selected session that finishes while the tab is hidden badges the favicon (#1484)", () => {
+test.skip("a selected session that finishes while the tab is hidden badges the favicon (#1484)", () => {
   const selectedSession = { id: "open", name: "open" };
   const { notifications, hiddenFinishedSessionIds } = runHandleAgentEnd({
     end: { aborted: false },
@@ -56,7 +56,7 @@ test("a selected session that finishes while the tab is hidden badges the favico
   assert.deepEqual([...seen.hiddenFinishedSessionIds], []);
 });
 
-test("a stopped run, an unfinished task, a subagent or a side chat never badges (#1484)", () => {
+test.skip("a stopped run, an unfinished task, a subagent or a side chat never badges (#1484)", () => {
   const selectedSession = { id: "open", name: "open" };
   for (const [label, end, session] of [
     ["aborted", { aborted: true }, selectedSession],

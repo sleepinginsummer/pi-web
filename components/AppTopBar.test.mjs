@@ -47,7 +47,7 @@ function renderTopBar(isMobile) {
         },
         onTogglePanel() {},
         session: {
-          agentCount: 0,
+          agentsBadge: null,
           autoNameStatus: { kind: "idle" },
           contextUsage: { percent: 62, contextWindow: 1000, tokens: 620 },
           hasPersistedSession: true,

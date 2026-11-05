@@ -79,8 +79,8 @@ test("renders messages read-only through MessageView with the subagent's own cwd
 test("AppShell hosts subagent tabs in the right panel next to file and terminal tabs", () => {
   // 子代理与开发服务器预览共用覆盖文件标签的 overlay 标签。
   assert.match(appShell, /const \[overlayTabs, setOverlayTabs\] = useState<OverlayTab\[\]>\(\[\]\)/);
-  assert.match(overlayTabs, /\{ id: string; kind: "agent"; sessionId: string; label: string \}/);
-  assert.match(appShell, /const handleOpenSubagentTab = useCallback\(\(sessionId: string, label: string\) => \{/);
+  assert.match(overlayTabs, /\{ id: string; kind: "agent"; sessionId: string; label: string; side\?: boolean \}/);
+  assert.match(appShell, /const handleOpenSubagentTab = useCallback\(\(sessionId: string, label: string, side\?: boolean\) => \{/);
   // fork：子代理标签与终端标签互斥地覆盖文件标签。
   assert.match(appShell, /const id = agentOverlayTabId\(sessionId\);[\s\S]*?setActiveTerminalTabId\(null\);\s*setActiveOverlayTabId\(id\);\s*openFilePanel\(\);/);
   assert.match(appShell, /<SubagentViewer[\s\S]*?sessionId=\{activeOverlayTab\.sessionId\}[\s\S]*?running=\{runningSessionIds\.has\(activeOverlayTab\.sessionId\)\}/);

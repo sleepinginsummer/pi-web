@@ -124,6 +124,11 @@ test("a missing folder that is not a removed worktree of a repo is refused as be
   assert.equal(orphan.body.error, `Directory does not exist: ${join(`${root}-worktrees`, "orphan")}`);
 });
 
+// 机器上的提供商环境变量会把内置模型算作可用，这里只看 models.json 的模型。
+for (const key of Object.keys(process.env)) {
+  if (/(_API_KEY|_AUTH_TOKEN|_OAUTH_TOKEN)$/.test(key)) delete process.env[key];
+}
+
 test("honors ?scope=all on demand and reports isScoped accurately", async () => {
   await writeFile(join(agentDir, "models.json"), JSON.stringify({
     providers: {
