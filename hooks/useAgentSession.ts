@@ -28,6 +28,7 @@ import { useFrameBatchedStreamDispatch } from "@/hooks/useFrameBatchedStreamDisp
 import { useRunCompletion } from "@/hooks/useRunCompletion";
 import { STREAM_CLOSED, STREAM_OPEN, createStreamSource, type StreamEventSource } from "@/lib/sse-broker-client";
 import { SESSION_BINDING_DEADLINE_MS, useSessionBindingPoll } from "@/hooks/useSessionBindingPoll";
+import { createSideChat, SIDE_REFUSAL_MESSAGES } from "@/lib/side-chat-client";
 import {
   clearManualStopNotificationSuppression,
   markManualStopNotificationSuppressed,
@@ -48,6 +49,7 @@ export type { QueuedMessages } from "@/lib/queued-messages";
 import { getDraft, parkedNewSessionDraftKey, setDraft, type ChatDraft } from "@/lib/draft-store";
 import { getToolNamesForPreset, type ToolEntry } from "@/lib/tool-presets";
 import type { SessionStatsInfo } from "@/lib/pi-types";
+import { formatSessionSummary } from "@/lib/session-stats-format";
 import { carryMessageKeys, messageRenderKeys } from "@/lib/message-keys";
 import { isNestedToolExecutionEvent, isSystemMessageEvent } from "@/lib/agent-event-wire";
 import { CODEMODE_TOOL_NAME, getCodemodeProgress } from "@/lib/codemode-view";
@@ -360,7 +362,7 @@ export interface SlashCommandInfo {
 
 export type BuiltinSlashCommandResult =
   | { handled: false }
-  | { handled: true; message?: string; error?: string; action?: "openSessionStats" | "openSettings" | "compact" };
+  | { handled: true; message?: string; error?: string; action?: "openSessionStats" | "openSettings" | "compact" | "openSideChat" };
 
 export interface UseAgentSessionOptions {
   navigationKey: number;
@@ -375,6 +377,9 @@ export interface UseAgentSessionOptions {
   onSessionForked?: (newSessionId: string) => void;
   /** 顶层工具调用结束；除只读工具外，它可能改动了文件（#1144）。 */
   onToolEnd?: (toolName: string) => void;
+  /** `/side`: a side chat was forked from this session; open its tab. The
+   *  prompt argument, if any, seeds the new chat's composer. */
+  onSideSession?: (session: SessionInfo, prompt: string | null) => void;
   modelsRefreshKey?: number;
   chatInputRef?: React.RefObject<ChatInputHandle | null>;
   onBranchDataChange?: (tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void, locked: boolean) => void;
@@ -540,7 +545,7 @@ type SlashCommandsResponse = {
 
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
-    navigationKey, isNavigationActive, session, newSessionCwd, pendingNewSessionControl, onPendingNewSessionEvent, onSessionCreated, onSessionListRefresh, onSessionForked, onToolEnd,
+    navigationKey, isNavigationActive, session, onSideSession, newSessionCwd, pendingNewSessionControl, onPendingNewSessionEvent, onSessionCreated, onSessionListRefresh, onSessionForked, onToolEnd,
     modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onSessionStatsPanelOpen, onOpenSettings,
   } = opts;
 
@@ -2833,6 +2838,26 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
 
 
+
+  /**
+   * Fork this session into a side chat and open its tab: `/side` and the selected-text
+   * popover. `prompt` is its first message, `name` what to call it instead of that
+   * message's first line. Answers the refusal to show, or null.
+   */
+  const startSideChat = useCallback(async (prompt: string | null, name?: string): Promise<string | null> => {
+    // The route refuses these too; a tab has nowhere to open another tab from.
+    const relationKind = opts.session?.relation?.kind;
+    if (relationKind === "side" || relationKind === "subagent") return translate(SIDE_REFUSAL_MESSAGES[relationKind]);
+    // Unlike the other built-ins, no ensureNewSession(): forking a session
+    // that does not exist yet has nothing to inherit.
+    const sourceId = sessionIdRef.current;
+    if (!sourceId) return translate("sideChat.error.noSession");
+    const result = await createSideChat(sourceId, translate, name);
+    if ("error" in result) return result.error;
+    onSideSession?.(result.session, prompt);
+    return null;
+  }, [onSideSession, opts.session?.relation?.kind, translate]);
+
   const handleBuiltinSlashCommand = useCallback(async (text: string): Promise<BuiltinSlashCommandResult> => {
     if (!text.startsWith("/")) return { handled: false };
     const match = text.match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/);
@@ -2910,11 +2935,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
         case "session": {
           if (!sid) return complete({ handled: true, error: "No active session" });
+          if (!onSessionStatsPanelOpen) return complete({ handled: true, message: formatSessionSummary(sessionStats) });
           const stats = await sendAgentCommand<SessionStatsInfo>(sid, { type: "get_session_stats" });
           if (stats) {
             setSessionStatsOverride(stats);
           }
-          onSessionStatsPanelOpen?.();
+          onSessionStatsPanelOpen();
           return complete({ handled: true, action: "openSessionStats" });
         }
 
@@ -2964,13 +2990,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           return completed;
         }
 
+        case "side": {
+          const error = await startSideChat(args || null);
+          return complete(error ? { handled: true, error } : { handled: true, action: "openSideChat" });
+        }
+
         default:
           return { handled: false };
       }
     } catch (e) {
       return complete({ handled: true, error: e instanceof Error ? e.message : String(e) });
     }
-  }, [activeLeafId, addNotice, ensureNewSession, isCompacting, loadCompactedSession, loadModels, loadSession, loadSlashCommands, loadTools, onSessionForked, promoteNewSession, onSessionStatsPanelOpen, runShadowSlashCommand, onOpenSettings, slashCommandsForMcp]);
+  }, [startSideChat, activeLeafId, addNotice, ensureNewSession, isCompacting, loadCompactedSession, loadModels, loadSession, loadSlashCommands, loadTools, onSessionForked, promoteNewSession, onSessionStatsPanelOpen, runShadowSlashCommand, onOpenSettings, slashCommandsForMcp]);
 
   // 运行中提交统一走确认式契约：只有服务端确认 Pi 已接受后才允许输入框清空。
   // 斜杠命令需要保留 prompt 的模板展开语义，普通文本则使用原生 steer/followUp 队列。
@@ -3434,7 +3465,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // Refs
     sessionIdRef, eventSourceRef,
     // Actions
-    handleSend, handleAbort, handleFork, loadEarlierMessages,
+    handleSend, handleAbort, startSideChat, handleFork, loadEarlierMessages,
     handleCompact, handleQueuedSubmit, handleAbortCompaction, dismissCompactError,
     handleRecallQueue,
     handleBuiltinSlashCommand,

@@ -13,6 +13,8 @@ import { ProjectTrustDialog } from "./ProjectTrustDialog";
 import { AppTopBar } from "./AppTopBar";
 import { TerminalPanel } from "./TerminalPanel";
 import { SubagentViewer } from "./SubagentViewer";
+import { SessionChatPanel } from "./SessionChatPanel";
+import { createSideChat } from "@/lib/side-chat-client";
 import { DevServerViewer } from "./DevServerViewer";
 import { agentOverlayTabId, serverOverlayTabId, type OverlayTab } from "./overlay-tabs";
 import { newTerminalTab, restoreTerminalTabs, TERMINAL_TABS_KEY, type TerminalTab } from "./terminal-tab-state";
@@ -57,7 +59,7 @@ import { DEFAULT_PENDING_NEW_SESSION_CONTROL, type PendingNewSessionControl } fr
 import type { ChatInputHandle } from "./ChatInput";
 import { AppTopPanels } from "./AppTopPanels";
 import { getLastSettingsSection, settingsSectionRequiresProject, type SettingsSection } from "@/lib/settings-navigation";
-import { getAgentsBadge, getSessionFamily } from "@/lib/session-family";
+import { getAgentsBadge, getSessionFamily, isHiddenRelation, sideChatNameFrom, sideChatTitle } from "@/lib/session-family";
 import { DebugPanel, DebugPanelBoundary } from "./DebugPanel";
 import { focusIfLost } from "@/lib/stacked-dialog";
 import { startPageVisibilityTracking } from "@/lib/page-debug";
@@ -108,6 +110,11 @@ export function AppShell() {
   const [terminalsRestored, setTerminalsRestored] = useState(false);
   // 子代理与开发服务器预览标签与文件、终端标签并列；激活时覆盖文件标签，切换项目时随旧项目一起丢弃。
   const [overlayTabs, setOverlayTabs] = useState<OverlayTab[]>([]);
+  // `/side <prompt>`: the text that seeds the side chat's composer, until its panel consumes it.
+  const [sideChatPrompts, setSideChatPrompts] = useState<Record<string, string>>({});
+  // Sessions that finished while the tab was out of sight (#1484): the favicon keeps their
+  // badge until the tab is opened again; never persisted, never dotted.
+  const [hiddenFinishedSessionIds, setHiddenFinishedSessionIds] = useState<Set<string>>(new Set());
   const [activeOverlayTabId, setActiveOverlayTabId] = useState<string | null>(null);
   const closeMobileSidebar = useCallback(() => setSidebarOpen(false), []);
 
@@ -626,9 +633,29 @@ export function AppShell() {
   });
 
 
-  const handleAgentEnd = useCallback(() => {
-    setExplorerRefreshKey((k) => k + 1);
+  // The badge is for an unseen tab: opening it puts the finished chat on screen (#1484).
+  useEffect(() => {
+    const clearIfSeen = () => {
+      if (document.visibilityState !== "visible" || !document.hasFocus()) return;
+      setHiddenFinishedSessionIds((prev) => (prev.size === 0 ? prev : new Set()));
+    };
+    clearIfSeen();
+    document.addEventListener("visibilitychange", clearIfSeen);
+    window.addEventListener("focus", clearIfSeen);
+    return () => {
+      document.removeEventListener("visibilitychange", clearIfSeen);
+      window.removeEventListener("focus", clearIfSeen);
+    };
   }, []);
+
+  const handleAgentEnd = useCallback(() => {
+    if (selectedSession && !isHiddenRelation(selectedSession.relation)
+      && (document.visibilityState !== "visible" || !document.hasFocus())) {
+      const finishedId = selectedSession.id;
+      setHiddenFinishedSessionIds((prev) => (prev.has(finishedId) ? prev : new Set(prev).add(finishedId)));
+    }
+    setExplorerRefreshKey((k) => k + 1);
+  }, [selectedSession]);
 
   const handleSessionListRefresh = useCallback(() => {
     setRefreshKey((k) => k + 1);
@@ -680,9 +707,16 @@ export function AppShell() {
   }, [activatePanelTab, terminalTabs, isMobile]);
 
   // Subagent work opens in a right-panel tab instead of hijacking the main chat.
-  const handleOpenSubagentTab = useCallback((sessionId: string, label: string) => {
+  const handleOpenSubagentTab = useCallback((sessionId: string, label: string, side?: boolean) => {
     const id = agentOverlayTabId(sessionId);
-    setOverlayTabs((prev) => prev.some((tab) => tab.id === id) ? prev : [...prev, { id, kind: "agent", sessionId, label }]);
+    setOverlayTabs((prev) => {
+      if (prev.some((tab) => tab.id === id)) return prev;
+      // Every side chat has the same name, and `/side` can be used again and
+      // again: the lowest number no open tab shows tells them apart.
+      let numbered = label;
+      for (let number = 2; side && prev.some((tab) => tab.label === numbered); number += 1) numbered = `${label} ${number}`;
+      return [...prev, { id, kind: "agent" as const, sessionId, label: numbered, ...(side ? { side: true } : {}) }];
+    });
     setActiveTerminalTabId(null);
     setActiveOverlayTabId(id);
     openFilePanel();
@@ -707,7 +741,7 @@ export function AppShell() {
     () => new Set(rightPanelOpen ? overlayTabs.flatMap((tab) => tab.kind === "agent" ? [tab.sessionId] : []) : []),
     [overlayTabs, rightPanelOpen],
   );
-  const handleToggleSubagentTab = (sessionId: string, label: string) => {
+  const handleToggleSubagentTab = (sessionId: string, label: string, side?: boolean) => {
     if (openSubagentTabIds.has(sessionId)) {
       handleClosePanelTab(agentOverlayTabId(sessionId));
       return;
@@ -715,6 +749,30 @@ export function AppShell() {
     if (isMobile) closeTopPanel();
     handleOpenSubagentTab(sessionId, label);
   };
+
+  // `/side` landed (hooks/useAgentSession): open the forked chat's tab, seed
+  // its composer when the command carried a prompt, and refresh the list so
+  // the family's badge folds the new member in.
+  const handleSideSession = useCallback((session: SessionInfo, prompt: string | null) => {
+    if (prompt) setSideChatPrompts((prev) => ({ ...prev, [session.id]: prompt }));
+    handleOpenSubagentTab(session.id, sideChatTitle(session, (prompt && sideChatNameFrom(prompt)) || translate("sideChat.title")), true);
+    setRefreshKey((key) => key + 1);
+  }, [handleOpenSubagentTab, translate]);
+
+  // The switcher's New side chat, on the main agent's row, whichever family member the main chat shows.
+  const handleNewSideChat = useCallback(async (rootSessionId: string) => {
+    const result = await createSideChat(rootSessionId, translate);
+    if ("error" in result) return result.error;
+    if (isMobile) closeTopPanel();
+    handleSideSession(result.session, null);
+    return null;
+  }, [closeTopPanel, handleSideSession, isMobile, translate]);
+
+  // A side chat's first prompt names it: read the name when a run in an open tab starts or ends.
+  const runningSideTabs = overlayTabs.flatMap((tab) => tab.kind === "agent" && tab.side && runningSessionIds.has(tab.sessionId) ? [tab.sessionId] : []).join();
+  useEffect(() => {
+    if (runningSideTabs) setRefreshKey((key) => key + 1);
+  }, [runningSideTabs]);
 
   const handleTerminalClosed = (tab: TerminalTab) => {
     const replacement = tab.closing === "restart" ? newTerminalTab(tab.cwd) : null;
@@ -778,6 +836,14 @@ export function AppShell() {
     if (nextTerminalId) activatePanelTab(nextTerminalId);
     else if (nextAgentId) openFilePanel();
   }, [activatePanelTab, activeOverlayTabId, activeTerminalTabId, overlayTabs, clearFileTabs, openFilePanel, terminalTabs]);
+
+  // One session, one chat: opening a subagent or side chat in the main chat closes its tab.
+  const selectedSessionId = selectedSession?.id;
+  useEffect(() => {
+    if (selectedSessionId && overlayTabs.some((tab) => tab.kind === "agent" && tab.sessionId === selectedSessionId)) {
+      handleClosePanelTab(agentOverlayTabId(selectedSessionId));
+    }
+  }, [overlayTabs, handleClosePanelTab, selectedSessionId]);
 
   const handleViewFullHistory = useCallback(() => {
     if (!selectedSession) return;
@@ -856,6 +922,7 @@ export function AppShell() {
         onExplorerRefresh={handleExplorerRefresh}
         onAtMention={handleAtMention}
         onAtMentions={handleAtMentions}
+        hiddenFinishedSessionIds={hiddenFinishedSessionIds}
         onSessionsChange={setSessionCatalog}
       />
       <div style={{ padding: "8px", flexShrink: 0, display: "flex", justifyContent: "space-between", gap: 4 }}>
@@ -1079,7 +1146,8 @@ export function AppShell() {
           }}
           onTogglePanel={handleTopPanelToggle}
           session={{
-            agentsBadge: activeSessionFamily?.subagents.length ? getAgentsBadge(activeSessionFamily.subagents, runningSessionIds) : null,
+            // The Agents panel also starts side chats, so it is there for any saved session.
+            agentsBadge: activeSessionFamily ? getAgentsBadge(activeSessionFamily.subagents, runningSessionIds) : null,
             autoNameStatus,
             contextUsage,
             hasPersistedSession: Boolean(selectedSession),
@@ -1106,6 +1174,7 @@ export function AppShell() {
             onSelectSession={handleSelectSession}
             onToggleSubagentTab={handleToggleSubagentTab}
             openSubagentTabIds={openSubagentTabIds}
+            onNewSideChat={() => activeSessionFamily ? handleNewSideChat(activeSessionFamily.root.id) : Promise.resolve(null)}
             position={topPanelPos}
             runningSessionIds={runningSessionIds}
             selectedSessionId={selectedSession?.id ?? null}
@@ -1158,6 +1227,7 @@ export function AppShell() {
               onSessionCreated={handleSessionCreated}
               onSessionListRefresh={requestAgentSessionListRefresh}
               onSessionForked={handleSessionForked}
+              onSideSession={handleSideSession}
               modelsRefreshKey={modelsRefreshKey}
               chatInputRef={chatInputRef}
               onBranchDataChange={handleBranchDataChange}
@@ -1175,7 +1245,6 @@ export function AppShell() {
               onOpenSubagent={handleOpenSubagentTab}
               onOpenServerPreview={handleOpenServerPreview}
               onToolEnd={handleToolEnd}
-              onAskInNewChat={handleAskInNewChat}
               quoteSelectionEnabled={quoteSelectionEnabled}
               initialPrompt={pendingQuotePrompt && pendingQuotePrompt.sessionId === selectedSession?.id ? pendingQuotePrompt.text : undefined}
               onInitialPromptConsumed={handleInitialQuotePromptConsumed}
@@ -1350,7 +1419,30 @@ export function AppShell() {
               fallbackLabel={activeOverlayTab.label}
             />
           )}
-          {activeOverlayTab?.kind === "agent" && (
+          {activeOverlayTab?.kind === "agent" && activeOverlayTab.side && (
+            <SessionChatPanel
+              key={activeOverlayTab.sessionId}
+              sessionId={activeOverlayTab.sessionId}
+              running={runningSessionIds.has(activeOverlayTab.sessionId)}
+              initialPrompt={sideChatPrompts[activeOverlayTab.sessionId]}
+              onInitialPromptConsumed={() => setSideChatPrompts((prev) => {
+                if (!(activeOverlayTab.sessionId in prev)) return prev;
+                const next = { ...prev };
+                delete next[activeOverlayTab.sessionId];
+                return next;
+              })}
+              modelsRefreshKey={modelsRefreshKey}
+              notificationController={notificationController}
+              onOpenFile={handleOpenLinkedFile}
+              onOpenSubagent={handleOpenSubagentTab}
+              onSessionForked={handleSessionForked}
+              onOpenSettings={openSettingsSection}
+              onToolEnd={handleToolEnd}
+              onFilesUploaded={handleExplorerRefresh}
+              quoteSelectionEnabled={quoteSelectionEnabled}
+            />
+          )}
+          {activeOverlayTab?.kind === "agent" && !activeOverlayTab.side && (
             <SubagentViewer
               key={activeOverlayTab.sessionId}
               sessionId={activeOverlayTab.sessionId}

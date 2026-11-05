@@ -1,11 +1,17 @@
 import { basename, join } from "node:path";
-import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import {
   SessionManager,
   type SessionEntry,
   type SessionMessageEntry,
 } from "@earendil-works/pi-coding-agent";
+import { randomUUID } from "node:crypto";
 import { writePrivateFileCreateAtomicSync } from "./atomic-file";
+import { SIDE_SESSION_NAME } from "./session-family";
+import { createSessionToolSelectionEntry, readSessionToolSelection } from "./session-tool-selection";
+import { createSideBoundaryEntry, createSideMetadataEntry, readSideRelation } from "./side-session";
+import { SUBAGENT_META_TYPE } from "./subagents";
+import type { SessionEntry as WebSessionEntry } from "./types";
 
 export interface ForkedSession {
   newSessionId: string;
@@ -211,4 +217,66 @@ export function createClonedSession(sourceSessionFile: string, leafId: string): 
   const newSessionFile = join(sessionDir, prepared.fileName);
   publishValidatedSession(prepared.content, newSessionFile, sessionDir, prepared.sessionId);
   return { newSessionId: prepared.sessionId, newSessionFile };
+}
+
+export type SessionForkRefusal = "not_found" | "unsaved" | "empty" | "subagent" | "side";
+
+/** A fork route refusal, its code the client's translated notice. */
+export class SessionForkError extends Error {
+  constructor(readonly code: SessionForkRefusal, message: string) {
+    super(message);
+    this.name = "SessionForkError";
+  }
+}
+
+/**
+ * The current branch copied as a side chat (ADR 0007, `lib/side-session.ts`): the metadata entry
+ * goes directly after the header, where the list's bounded head read finds it, with the first
+ * copied entry chained under it, and the hidden boundary message goes last, as the new leaf. The
+ * tool pin is written again before the boundary: one set on another branch still binds the side
+ * chat. The copy has no wrapper yet, so this is the only rewrite it ever gets. The copy itself
+ * goes through the fork's staged publish (`createClonedSession()`), so a running source is safe.
+ */
+export function createSideSession(
+  sourcePath: string,
+  liveLeafId?: string | null,
+  name: string = SIDE_SESSION_NAME,
+): { sessionId: string; path: string } {
+  const live = liveLeafId !== undefined;
+  if (!existsSync(sourcePath)) {
+    throw live
+      ? new SessionForkError("unsaved", "This session has not been saved yet. Send a message before forking it.")
+      : new SessionForkError("not_found", "Session not found");
+  }
+  const manager = SessionManager.open(sourcePath);
+  const leafId = live ? liveLeafId : manager.getLeafId();
+  if (!leafId) throw new SessionForkError("empty", "Nothing to fork: the session has no messages");
+  if (!manager.getEntry(leafId)) {
+    throw new SessionForkError("unsaved", "This session has not been saved yet. Send a message before forking it.");
+  }
+  const branch = manager.getBranch(leafId);
+  if (branch.some((entry) => entry.type === "custom" && entry.customType === SUBAGENT_META_TYPE)) {
+    throw new SessionForkError("subagent", "A subagent session cannot be forked");
+  }
+  // Forking a side chat would leak its parent's context into a visible session (ADR 0007).
+  if (readSideRelation(branch as unknown as WebSessionEntry[])) {
+    throw new SessionForkError("side", "A side chat cannot be forked");
+  }
+  if (!branch.some((entry) => entry.type === "message" && entry.message.role === "assistant")) {
+    throw new SessionForkError("empty", "Nothing to fork: the session has no messages");
+  }
+  const sourceSessionId = manager.getSessionId();
+  const toolSelection = readSessionToolSelection(manager.getEntries() as unknown as WebSessionEntry[]);
+  const copy = createClonedSession(sourcePath, leafId);
+  const [header, first, ...rest] = readFileSync(copy.newSessionFile, "utf8").trimEnd().split("\n");
+  const firstEntry = JSON.parse(first) as { parentId?: string | null };
+  const metadata = createSideMetadataEntry(sourceSessionId, `side-${randomUUID()}`, firstEntry.parentId ?? null);
+  firstEntry.parentId = metadata.id;
+  const leaf = JSON.parse(rest.at(-1) ?? first) as { id: string };
+  const named = { type: "session_info", id: `side-name-${randomUUID()}`, parentId: leaf.id, timestamp: new Date().toISOString(), name };
+  const pin = toolSelection && createSessionToolSelectionEntry(toolSelection, `side-tools-${randomUUID()}`, named.id);
+  const boundary = createSideBoundaryEntry(`side-boundary-${randomUUID()}`, pin?.id ?? named.id);
+  const added = [named, ...(pin ? [pin] : []), boundary].map((entry) => JSON.stringify(entry));
+  writeFileSync(copy.newSessionFile, [header, JSON.stringify(metadata), JSON.stringify(firstEntry), ...rest, ...added].join("\n") + "\n", "utf8");
+  return { sessionId: copy.newSessionId, path: copy.newSessionFile };
 }

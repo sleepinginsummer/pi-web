@@ -34,6 +34,7 @@ import { filePathFromApiSegments, samePath } from "@/lib/paths";
 import { hasParentDirectorySegment } from "@/lib/path-security";
 import { readTextPreviewChunk } from "@/lib/text-preview";
 import { getFileWatchVersion } from "@/lib/file-watch-version";
+import { injectSandboxedHtmlPolyfill } from "@/lib/html-sandbox-polyfill";
 import { getPreviewDocumentRedirect, isRawPreviewCredentialAllowed, rawPreviewFileSegments } from "@/lib/html-preview-auth";
 import { registerFileWatch } from "@/lib/file-watch-registry";
 import { pageStreamLabel, registerPageStream } from "@/lib/page-stream-registry";
@@ -354,6 +355,15 @@ function streamFile(filePath: string, stat: fs.Stats, contentType: string, range
     // still permits script and subresources, which a rendered preview needs.
     headers["Content-Security-Policy"] = "sandbox allow-scripts; frame-ancestors 'self'";
     headers["Referrer-Policy"] = "no-referrer";
+  }
+
+  // 沙箱文档访问 localStorage/sessionStorage 会抛 SecurityError：预览时注入内存实现（#1494），不改磁盘文件。
+  if (!rangeHeader && contentType.startsWith("text/html")) {
+    const html = injectSandboxedHtmlPolyfill(fs.readFileSync(filePath, "utf8"));
+    return new Response(html, {
+      status: 200,
+      headers: { ...headers, "Content-Length": String(Buffer.byteLength(html)) },
+    });
   }
 
   if (!rangeHeader) {

@@ -811,7 +811,7 @@ function AssistantMessageView({
         )}
         <MessageActions actions={actions} visible={hovered || !!forking} />
         {time && !isStreaming && (
-          <span style={{ fontSize: 10, color: "var(--text-dim)", marginLeft: "auto" }}>{time}</span>
+          <span style={{ fontSize: 10, color: "var(--text-dim)", marginLeft: "auto", whiteSpace: "nowrap" }}>{time}</span>
         )}
       </div>
     </div>

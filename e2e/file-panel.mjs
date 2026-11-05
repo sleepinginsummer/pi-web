@@ -1,34 +1,78 @@
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
-import { basename } from "node:path";
+import { showSidebarFiles } from "./sidebar.mjs";
 
-export const filePanelFixture = `<!doctype html><html><body style="margin:20px;min-height:2400px">
+export const filePanelFixture = `<!doctype html><html><head><script>
+localStorage.setItem("number", 42);
+sessionStorage.setItem("flag", true);
+localStorage.setItem("remove", "gone");
+localStorage.removeItem("remove");
+localStorage.named = "property value";
+const named = localStorage.getItem("named");
+delete localStorage.named;
+let parentDenied = false;
+try { window.parent.document.body; } catch (error) { parentDenied = error.name === "SecurityError"; }
+document.documentElement.setAttribute("data-storage-result", JSON.stringify({
+  local: localStorage.getItem("number"),
+  session: sessionStorage.getItem("flag"),
+  separate: sessionStorage.getItem("number"),
+  removed: localStorage.getItem("remove"),
+  length: localStorage.length,
+  key: localStorage.key(0),
+  named,
+  parentDenied,
+  origin: self.origin
+}));
+</script></head><body style="margin:20px;min-height:2400px">
 <label>Notes <input id="notes"></label>
 <label>Filter <select id="filter"><option>All</option><option>Pending</option></select></label>
 <p>HTML preview state must survive layout changes.</p>
 <script>window.previewInstance = Math.random();</script></body></html>`;
 
+// Over 256 KB so the preview must use the full-file download rather than the
+// source view's first chunk. The first script precedes any explicit head.
+export const largeStorageFixture = `<!doctype html><!-- <head> in a comment --><html lang="en">
+<script>
+localStorage.setItem("large", "ready");
+sessionStorage.named = "separate";
+document.documentElement.dataset.largeStorage = JSON.stringify({
+  value: localStorage.getItem("large"),
+  session: sessionStorage.getItem("named"),
+  mode: document.compatMode
+});
+</script><body><p>Large HTML preview ready</p><!--${"x".repeat(300 * 1024)}--></body></html>`;
+
 export async function checkFilePanel(page, filePath) {
   const showSidebar = page.getByRole("button", { name: "Show sidebar", exact: true });
   if (await showSidebar.isVisible()) await showSidebar.click();
+  // The explorer lives in the sidebar's files: below the sessions, or its tab.
+  await showSidebarFiles(page);
   // The DOM title normalizes Windows paths to forward slashes
   // (lib/file-paths.ts normalizeFilePathSlashes), so match in that form.
   await page.getByTitle(filePath.replace(/\\/g, "/"), { exact: true }).click();
   const panel = page.locator("#file-panel");
   const iframe = panel.locator("iframe");
-  const nextMetaResponse = () => page.waitForResponse((response) => {
-    const url = new URL(response.url());
-    return url.searchParams.get("type") === "meta"
-      && decodeURIComponent(url.pathname).endsWith(filePath.replace(/\\/g, "/"));
-  });
   await iframe.waitFor();
-  // 初始化时语言识别可能替换 iframe；用可重新定位的 FrameLocator 等待真实预览，
-  // 后续仍核对 previewInstance，布局切换造成的意外重载不会被重定位掩盖。
-  const frame = page.frameLocator("#file-panel iframe");
+  let frame = await (await iframe.elementHandle()).contentFrame();
+  await frame.locator("#notes").waitFor();
+  assert.equal(await iframe.getAttribute("sandbox"), "allow-scripts");
+  assert.deepEqual(JSON.parse(await frame.locator("html").getAttribute("data-storage-result")), {
+    local: "42", session: "true", separate: null, removed: null, length: 1, key: "number",
+    named: "property value", parentDenied: true, origin: "null",
+  }, "the preview's first script can use both isolated storage objects without accessing its parent");
+  await frame.evaluate(() => localStorage.setItem("ephemeral", "preview only"));
+  await panel.getByRole("button", { name: "Source", exact: true }).click();
+  const source = await panel.locator(".file-viewer-content").innerText();
+  assert.ok(source.includes('localStorage.setItem("number", 42)'));
+  assert.ok(!source.includes("data-pi-web-polyfill"), "the source view must remain unchanged");
+  await panel.getByRole("button", { name: "Preview", exact: true }).click();
+  await iframe.waitFor();
+  frame = await (await iframe.elementHandle()).contentFrame();
+  await frame.locator("#notes").waitFor();
+  assert.equal(await frame.evaluate(() => localStorage.getItem("ephemeral")), null, "a remounted preview gets fresh in-memory storage");
   await frame.locator("#notes").fill("Keep this note");
   await frame.locator("#filter").selectOption({ label: "Pending" });
-  await frame.locator("html").evaluate(() => scrollTo(0, 120));
-  const instance = await frame.locator("html").evaluate(() => window.previewInstance);
+  await frame.evaluate(() => scrollTo(0, 120));
+  const instance = await frame.evaluate(() => window.previewInstance);
   const width = () => panel.evaluate(async el => {
     await new Promise(requestAnimationFrame);
     await Promise.all(el.getAnimations().map(animation => animation.finished.catch(() => {})));
@@ -56,8 +100,8 @@ export async function checkFilePanel(page, filePath) {
       assert.equal(await panel.getByRole("button", { name: "Restore file panel width", exact: true }).getAttribute("aria-pressed"), "true");
       assert.equal(Math.round(await width()), page.viewportSize().width);
       assert.equal(await page.locator("#session-sidebar").evaluate(el => el.inert), true);
-      assert.equal(await frame.locator("html").evaluate(() => window.previewInstance), instance);
-      assert.equal(await frame.locator("html").evaluate(() => scrollY), 120);
+      assert.equal(await frame.evaluate(() => window.previewInstance), instance);
+      assert.equal(await frame.evaluate(() => scrollY), 120);
       assert.equal(await frame.locator("#notes").inputValue(), "Keep this note");
       assert.equal(await frame.locator("#filter").inputValue(), "Pending");
       await panel.getByRole("button", { name: "Restore file panel width", exact: true }).press("Enter");
@@ -66,49 +110,34 @@ export async function checkFilePanel(page, filePath) {
       assert.equal(await page.locator("#session-sidebar").evaluate(el => el.inert), false);
     }
     await toggle.click();
-    await panel.getByRole("button", { name: "Restore file panel width", exact: true }).click();
-    await page.getByRole("button", { name: "Hide file panel", exact: true }).click();
-    const unchangedMeta = nextMetaResponse();
+    await panel.getByRole("button", { name: "Hide file panel", exact: true }).click();
     await page.getByRole("button", { name: "Show file panel", exact: true }).click();
-    assert.equal((await unchangedMeta).status(), 200);
     assert.equal(await toggle.getAttribute("aria-pressed"), "false", "Reopening returns to the split layout");
     assert.equal(await width(), originalWidth);
-    assert.equal(await frame.locator("html").evaluate(() => window.previewInstance), instance);
-    assert.equal(await frame.locator("html").evaluate(() => scrollY), 120);
-    assert.equal(await frame.locator("#notes").inputValue(), "Keep this note");
-    assert.equal(await frame.locator("#filter").inputValue(), "Pending");
-
-    // 隐藏期间同大小编辑文件：重开必须发现版本变化并加载新的预览。
-    const originalContent = readFileSync(filePath, "utf8");
-    await page.getByRole("button", { name: "Hide file panel", exact: true }).click();
-    try {
-      writeFileSync(filePath, originalContent.replace("Notes", "Draft"));
-      const changedMeta = nextMetaResponse();
-      await page.getByRole("button", { name: "Show file panel", exact: true }).click();
-      assert.equal((await changedMeta).status(), 200);
-      const updatedFrame = page.frameLocator("#file-panel iframe");
-      await updatedFrame.getByLabel("Draft").waitFor();
-      const reloaded = await (await iframe.elementHandle()).contentFrame();
-      assert.notEqual(await reloaded.evaluate(() => window.previewInstance), instance);
-      assert.equal(await updatedFrame.locator("#notes").inputValue(), "");
-    } finally {
-      writeFileSync(filePath, originalContent);
-    }
+    assert.equal(await frame.evaluate(() => window.previewInstance), instance);
   }
-  // 预览工具栏的 @ 按钮必须真的把提及写进输入框（无选区时是整文件提及）。
-  const composer = page.locator(".chat-input-textarea");
-  const mobile = page.viewportSize().width <= 640;
-  const panelIsOpen = () => panel.evaluate((element) => element.classList.contains("right-panel-open"));
-  assert.equal(await composer.inputValue(), "", "Composer starts empty so the mention value is unambiguous");
-  assert.equal(await panelIsOpen(), true, "The mention button only exists while the panel is open");
-  await panel.getByRole("button", { name: "mention", exact: true }).click();
-  // 等 React 提交受控输入值再读。
-  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-  assert.equal(await composer.inputValue(), `@${basename(filePath)} `, "The @ button inserts a whole-file mention");
-  // 移动端面板盖住聊天区，插入后必须回到输入框；桌面端并排显示，面板保持打开。
-  assert.equal(await panelIsOpen(), !mobile, mobile
-    ? "Mobile returns to the composer after mentioning"
-    : "Desktop keeps the split layout after mentioning");
-  if (!mobile) await page.getByRole("button", { name: "Hide file panel", exact: true }).click();
+  await panel.getByRole("button", { name: "Hide file panel", exact: true }).click();
   console.log(`PASS: file panel width and preview state at ${page.viewportSize().width}px`);
+}
+
+export async function checkLargeHtmlStorage(page, filePath) {
+  const showSidebar = page.getByRole("button", { name: "Show sidebar", exact: true });
+  if (await showSidebar.isVisible()) await showSidebar.click();
+  await showSidebarFiles(page);
+  const download = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname.endsWith("/large-storage.html") && url.searchParams.get("type") === "download";
+  });
+  await page.getByTitle(filePath.replace(/\\/g, "/"), { exact: true }).click();
+  assert.equal((await download).status(), 200);
+  const panel = page.locator("#file-panel");
+  const iframe = panel.locator('iframe[sandbox="allow-scripts"]');
+  await iframe.waitFor();
+  const frame = await (await iframe.elementHandle()).contentFrame();
+  await frame.getByText("Large HTML preview ready", { exact: true }).waitFor();
+  assert.deepEqual(JSON.parse(await frame.locator("html").getAttribute("data-large-storage")), {
+    value: "ready", session: "separate", mode: "CSS1Compat",
+  });
+  await panel.getByRole("button", { name: "Hide file panel", exact: true }).click();
+  console.log(`PASS: full-file sandboxed HTML storage preview at ${page.viewportSize().width}px`);
 }

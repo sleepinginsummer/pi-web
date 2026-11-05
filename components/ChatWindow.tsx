@@ -1,5 +1,7 @@
 "use client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
+import { isHiddenRelation, SIDE_BOUNDARY_MESSAGE_TYPE } from "@/lib/session-family";
+import Image from "next/image";
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage, WorktreeInfo } from "@/lib/types";
@@ -76,6 +78,8 @@ interface Props {
   onSessionCreated?: (session: SessionInfo) => void;
   onSessionListRefresh?: (request: SessionListRefreshRequest) => void;
   onSessionForked?: (newSessionId: string) => void;
+  /** A subagent's or side chat's tab beside the main chat: the page's global shortcuts stay with the main chat. */
+  panel?: boolean;
   modelsRefreshKey?: number;
   chatInputRef?: React.RefObject<ChatInputHandle | null>;
   onBranchDataChange?: (tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void, locked: boolean) => void;
@@ -98,7 +102,8 @@ interface Props {
   onOpenServerPreview?: (serverId: string, label: string) => void;
   /** 顶层工具调用结束，用于运行期间刷新文件树。 */
   onToolEnd?: (toolName: string) => void;
-  onAskInNewChat?: (prompt: string, sourceSessionId: string, sourceEntryId: string) => Promise<void>;
+  /** A side chat was forked from this chat: open its tab. */
+  onSideSession?: (session: SessionInfo, prompt: string | null) => void;
   quoteSelectionEnabled?: boolean;
   initialPrompt?: string;
   onInitialPromptConsumed?: (sessionId: string, prompt: string) => void;
@@ -297,7 +302,7 @@ function LiveProcessDetailsGroup({ hiddenCount, renderAll, renderRecent, t }: { 
   );
 }
 
-export const ChatWindow = memo(function ChatWindow({ onDebugSnapshotReaderChange, navigationKey, isNavigationActive, session, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, newSessionCwd, newSessionWorktrees, pendingNewSessionControl, onPendingNewSessionEvent, notificationController, onAgentEnd, onSessionCreated, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onShadowMindControlChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenSettings, onContextUsageChange, onOpenFile, onFilesUploaded, onOpenSubagent, onOpenServerPreview, onToolEnd, onNewSessionCwdChange, onAskInNewChat, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed }: Props) {
+export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSession, onDebugSnapshotReaderChange, navigationKey, isNavigationActive, session, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, newSessionCwd, newSessionWorktrees, pendingNewSessionControl, onPendingNewSessionEvent, notificationController, onAgentEnd, onSessionCreated, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onShadowMindControlChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenSettings, onContextUsageChange, onOpenFile, onFilesUploaded, onOpenSubagent, onOpenServerPreview, onToolEnd, onNewSessionCwdChange, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed }: Props) {
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio, holdAudio } = useAudio();
   const {
@@ -329,14 +334,14 @@ export const ChatWindow = memo(function ChatWindow({ onDebugSnapshotReaderChange
     isNew, creationSettingsLocked, scrollPositionRequest,
     activeToolResults, editEntryId, handleEditContent, cancelEdit, addNotice,
     sessionIdRef,
-    handleSend, handleAbort, handleFork, loadEarlierMessages,
+    handleSend, handleAbort, startSideChat, handleFork, loadEarlierMessages,
     handleCompact, handleQueuedSubmit, handleAbortCompaction, dismissCompactError,
     handleRecallQueue,
     handleBuiltinSlashCommand,
     handleShadowMindToggle, handleToolPresetChange, loadSlashCommands,
   } = useAgentSession({
     navigationKey, isNavigationActive, session, newSessionCwd, pendingNewSessionControl, onPendingNewSessionEvent, onSessionCreated, onSessionListRefresh, onSessionForked, onToolEnd,
-    onDebugSnapshotReaderChange, t, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onSessionStatsPanelOpen, onOpenSettings,
+    onSideSession, onDebugSnapshotReaderChange, t, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onSessionStatsPanelOpen, onOpenSettings,
   });
   const isStreaming = useStreamingSelector(streamingStore, selectIsStreaming);
   const hasStreamingContent = useStreamingSelector(streamingStore, selectHasStreamingContent);
@@ -402,7 +407,6 @@ export const ChatWindow = memo(function ChatWindow({ onDebugSnapshotReaderChange
     text: string;
     top: number;
     left: number;
-    sourceEntryId?: string;
   } | null>(null);
   const [quoteInputOpen, setQuoteInputOpen] = useState(false);
   const [quoteSubmitting, setQuoteSubmitting] = useState(false);
@@ -434,34 +438,17 @@ export const ChatWindow = memo(function ChatWindow({ onDebugSnapshotReaderChange
       return;
     }
     const rect = range.getBoundingClientRect();
-    const ancestor = range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
-      ? range.commonAncestorContainer as Element
-      : range.commonAncestorContainer.parentElement;
-    const start = range.startContainer.nodeType === Node.ELEMENT_NODE
-      ? range.startContainer as Element
-      : range.startContainer.parentElement;
-    const end = range.endContainer.nodeType === Node.ELEMENT_NODE
-      ? range.endContainer as Element
-      : range.endContainer.parentElement;
-    const sourceEntryId = [ancestor, start, end]
-      .map((element) => element?.closest<HTMLElement>("[data-message-role=\"assistant\"]")?.dataset.entryId)
-      .find((entryId): entryId is string => Boolean(entryId));
     setQuotedSelection({
       text,
       top: Math.min(window.innerHeight - 44, rect.bottom + 8),
       left: Math.max(64, Math.min(window.innerWidth - 64, rect.left + rect.width / 2)),
-      sourceEntryId,
     });
   }, [quoteInputOpen, quoteSelectionEnabled]);
 
   useEffect(() => {
     if (!quoteInputOpen || !quotedSelection) return;
-    quoteChatInputRef.current?.insertIfEmpty(buildQuotedSelection(
-      quotedSelection.text,
-      t("chat.quoteIntro"),
-      t("chat.quoteQuestion"),
-    ));
-  }, [quoteInputOpen, quotedSelection, t]);
+    quoteChatInputRef.current?.insertIfEmpty(buildQuotedSelection(quotedSelection.text));
+  }, [quoteInputOpen, quotedSelection]);
 
   useLayoutEffect(() => {
     const popover = quotePopoverRef.current;
@@ -507,13 +494,9 @@ export const ChatWindow = memo(function ChatWindow({ onDebugSnapshotReaderChange
     };
   }, [closeQuotedSelection, quotedSelection, quoteInputOpen, quoteSubmitting]);
 
-  const askSelectionHere = useCallback(() => {
+  const quoteSelectionHere = useCallback(() => {
     if (!quotedSelection) return;
-    chatInputRef?.current?.insertText(buildQuotedSelection(
-      quotedSelection.text,
-      t("chat.quoteIntro"),
-      t("chat.quoteQuestion"),
-    ));
+    chatInputRef?.current?.insertQuote(buildQuotedSelection(quotedSelection.text));
     // No `removeAllRanges()` here: inserting focuses the composer, and that
     // focus already collapses the page's selection. Calling it afterwards also
     // clears the composer's own selection and drops its caret to offset 0
@@ -521,22 +504,39 @@ export const ChatWindow = memo(function ChatWindow({ onDebugSnapshotReaderChange
     closeQuotedSelection();
   }, [chatInputRef, closeQuotedSelection, quotedSelection, t]);
 
-  const askSelectionInNewChat = useCallback(async (prompt: string) => {
-    const sourceSessionId = sessionIdRef.current ?? session?.id;
-    if (quoteSubmitting || !prompt.trim() || !quotedSelection?.sourceEntryId || !sourceSessionId || !onAskInNewChat) return;
+  const askSelectionInSideChat = useCallback(async (prompt: string) => {
+    if (quoteSubmitting || !prompt.trim() || !quotedSelection) return;
     setQuoteSubmitting(true);
     setQuoteError(null);
     unlockAudio();
     try {
-      await onAskInNewChat(prompt, sourceSessionId, quotedSelection.sourceEntryId);
-      closeQuotedSelection();
-    } catch (cause) {
-      setQuoteError(cause instanceof Error ? cause.message : String(cause));
-      return false;
+      const refusal = await startSideChat(prompt, quotedSelection.text);
+      if (!refusal) {
+        closeQuotedSelection();
+        return;
+      }
+      quoteChatInputRef.current?.prependDraft({ value: prompt, images: [] });
+      setQuoteError(refusal);
+    } catch (error) {
+      quoteChatInputRef.current?.prependDraft({ value: prompt, images: [] });
+      setQuoteError(error instanceof Error ? error.message : String(error));
     } finally {
       setQuoteSubmitting(false);
     }
-  }, [closeQuotedSelection, onAskInNewChat, quoteSubmitting, quotedSelection, session?.id, sessionIdRef, unlockAudio]);
+  }, [quotedSelection, quoteSubmitting, closeQuotedSelection, startSideChat]);
+
+  // The composer's Side chat button: its draft goes back on a refusal, as a failed send's does.
+  const askInSideChat = useCallback(async (message: string) => {
+    let refusal: string | null;
+    try {
+      refusal = await startSideChat(message);
+    } catch (error) {
+      refusal = error instanceof Error ? error.message : String(error);
+    }
+    if (!refusal) return;
+    chatInputRef?.current?.prependDraft({ value: message, images: [] });
+    addNotice({ type: "error", message: refusal });
+  }, [addNotice, chatInputRef, startSideChat]);
 
   const initialPromptAttemptRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
@@ -573,8 +573,8 @@ export const ChatWindow = memo(function ChatWindow({ onDebugSnapshotReaderChange
 
   // Register the abort handler for the global Esc shortcut
   useEffect(() => {
-    registerAbortHandler(sessionBusy ? handleAbort : null);
-  }, [sessionBusy, handleAbort]);
+    if (!panel) registerAbortHandler(sessionBusy ? handleAbort : null);
+  }, [panel, sessionBusy, handleAbort]);
 
   // --- Lazy-load historical messages ---
   // Only render the last N messages initially. When the user scrolls to the
@@ -983,6 +983,7 @@ export const ChatWindow = memo(function ChatWindow({ onDebugSnapshotReaderChange
       ref={chatInputRef}
       onSend={handleSend}
       onAbort={handleAbort}
+      onSideChat={onSideSession && !isHiddenRelation(session?.relation) ? askInSideChat : undefined}
       onQueuedSubmit={agentRunning ? handleQueuedSubmit : undefined}
       isStreaming={sessionBusy}
       creationSettingsLocked={creationSettingsLocked}
@@ -998,7 +999,7 @@ export const ChatWindow = memo(function ChatWindow({ onDebugSnapshotReaderChange
       onDismissCompactError={dismissCompactError}
       compactResult={compactResult}
       toolPreset={toolPreset}
-      onToolPresetChange={session || isNew ? handleToolPresetChange : undefined}
+      onToolPresetChange={(session && !isHiddenRelation(session.relation)) || isNew ? handleToolPresetChange : undefined}
       retryInfo={retryInfo}
       queuedMessages={queuedMessages}
       inputHistory={inputHistory}
@@ -1233,6 +1234,7 @@ export const ChatWindow = memo(function ChatWindow({ onDebugSnapshotReaderChange
 
               const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; writtenFiles?: WrittenFile[]; visibleBlockOffset?: number; recoverTruncation?: boolean; turnDurationMs?: number; withNotices?: boolean } = {}): ReactNode => {
                 const msg = options.messageOverride ?? messages[idx];
+                if (msg.role === "custom" && msg.customType === SIDE_BOUNDARY_MESSAGE_TYPE) return <SideChatDivider key="side-chat-divider" />;
                 if (isHiddenCustomMessage(msg)) return null;
                 // pi's showCacheMissNotices (#1265): read from the stored message, not a turn view's copy.
                 const notices = options.withNotices === false ? [] : getTranscriptNotices(messages[idx]);
@@ -1563,7 +1565,7 @@ export const ChatWindow = memo(function ChatWindow({ onDebugSnapshotReaderChange
         <div
           ref={quotePopoverRef}
           role={quoteInputOpen ? "dialog" : "toolbar"}
-          aria-label={t(quoteInputOpen ? "chat.newQuoteChat" : "chat.askSelection")}
+          aria-label={t(quoteInputOpen ? "chat.newQuoteChat" : "chat.selectionActions")}
           style={{
             position: "fixed",
             top: quotedSelection.top,
@@ -1590,7 +1592,7 @@ export const ChatWindow = memo(function ChatWindow({ onDebugSnapshotReaderChange
               style={{ width: "100%", minWidth: 0, margin: 0, padding: 0, border: "none", display: "flex", flexDirection: "column", gap: 10 }}
             >
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span style={{ flex: 1, minWidth: 0, fontSize: 12, fontWeight: 600 }}>{t("chat.askInNewChat")}</span>
+                <span style={{ flex: 1, minWidth: 0, fontSize: 12, fontWeight: 600 }}>{t("chat.askInSideChat")}</span>
                 <button type="button" className="file-viewer-icon-button" title={t("i18n.close")} aria-label={t("i18n.close")} disabled={quoteSubmitting} onClick={closeQuotedSelection} style={{ border: "none" }}>
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
                 </button>
@@ -1598,7 +1600,7 @@ export const ChatWindow = memo(function ChatWindow({ onDebugSnapshotReaderChange
               <ChatInput
                 ref={quoteChatInputRef}
                 compact
-                onSend={askSelectionInNewChat}
+                onSend={askSelectionInSideChat}
                 onAbort={closeQuotedSelection}
                 isStreaming={false}
                 modelState={modelState}
@@ -1607,34 +1609,37 @@ export const ChatWindow = memo(function ChatWindow({ onDebugSnapshotReaderChange
               {quoteError && <div role="alert" style={{ color: "#dc2626", fontSize: 12, overflowWrap: "anywhere" }}>{quoteError}</div>}
             </fieldset>
           ) : <>
+          <button
+            type="button"
+            className="file-viewer-icon-button"
+            title={t("chat.quoteSelection")}
+            aria-label={t("chat.quoteSelection")}
+            onPointerDown={(event) => event.preventDefault()}
+            onClick={quoteSelectionHere}
+            style={{ width: "auto", height: 35, flex: "0 0 auto", gap: 5, padding: "0 10px", border: "none", fontSize: 12, fontWeight: 500 }}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M16 3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2 1 1 0 0 1 1 1v1a2 2 0 0 1-2 2 1 1 0 0 0-1 1v2a1 1 0 0 0 1 1 6 6 0 0 0 6-6V5a2 2 0 0 0-2-2z" />
+              <path d="M5 3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2 1 1 0 0 1 1 1v1a2 2 0 0 1-2 2 1 1 0 0 0-1 1v2a1 1 0 0 0 1 1 6 6 0 0 0 6-6V5a2 2 0 0 0-2-2z" />
+            </svg>
+            <span>{t("chat.quoteSelection")}</span>
+          </button>
+          {onSideSession && !isHiddenRelation(session?.relation) && (
             <button
               type="button"
               className="file-viewer-icon-button"
-              title={t("chat.askInCurrent")}
-              aria-label={t("chat.askInCurrent")}
+              title={t("chat.askInSideChat")}
+              aria-label={t("chat.askInSideChat")}
               onPointerDown={(event) => event.preventDefault()}
-              onClick={askSelectionHere}
+              onClick={() => { setQuoteInputOpen(true); window.getSelection()?.removeAllRanges(); }}
               style={{ width: "auto", height: 35, flex: "0 0 auto", gap: 5, padding: "0 10px", border: "none", fontSize: 12, fontWeight: 500 }}
             >
-              <span aria-hidden="true" style={{ fontSize: 15 }}>@</span>
-              <span>{t("chat.askInCurrent")}</span>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M21 12a8 8 0 0 1-8 8H5.5a2 2 0 0 1-1.4-3.4A8 8 0 1 1 21 12z" />
+              </svg>
+              <span>{t("chat.askInSideChat")}</span>
             </button>
-            {onAskInNewChat && quotedSelection.sourceEntryId && !sessionBusy && (
-              <button
-                type="button"
-                className="file-viewer-icon-button"
-                title={t("chat.askInNewChat")}
-                aria-label={t("chat.askInNewChat")}
-                onPointerDown={(event) => event.preventDefault()}
-                onClick={() => { setQuoteInputOpen(true); window.getSelection()?.removeAllRanges(); }}
-                style={{ width: "auto", height: 35, flex: "0 0 auto", gap: 5, padding: "0 10px", border: "none", fontSize: 12, fontWeight: 500 }}
-              >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <path d="M6 3v12M18 9a9 9 0 0 1-9 9" /><circle cx="18" cy="6" r="3" /><circle cx="6" cy="18" r="3" />
-                </svg>
-                <span>{t("chat.askInNewChat")}</span>
-              </button>
-            )}
+          )}
           </>}
         </div>,
         document.body,
@@ -1670,6 +1675,18 @@ export const ChatWindow = memo(function ChatWindow({ onDebugSnapshotReaderChange
     </div>
   );
 });
+
+function SideChatDivider() {
+  const { t } = useI18n();
+  return (
+    <div role="separator" className="my-4 flex items-center gap-3 text-xs" style={{ color: "var(--text-dim)" }}>
+      <span className="h-px flex-1" style={{ background: "var(--border)" }} />
+      <span>{t("sideChat.divider")}</span>
+      <span className="h-px flex-1" style={{ background: "var(--border)" }} />
+    </div>
+  );
+}
+
 
 type ExtensionDialogRequest = Extract<ExtensionUiRequest, { method: "confirm" | "input" | "editor" }>;
 

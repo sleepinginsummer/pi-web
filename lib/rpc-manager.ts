@@ -64,6 +64,12 @@ import {
   SUBAGENT_CONTROL_TOOL_NAMES,
 } from "./subagents";
 import { invalidateModelRuntimeWithExtensions } from "./model-runtime";
+import {
+  hasSideMetadata,
+  readSideRelation,
+  sideToolNames,
+} from "./side-session";
+import { SIDE_SESSION_NAME, sideChatNameFrom } from "./session-family";
 import { createSubagentController, getLiveSubagentStatus, hasUnsettledSubagentRun } from "./subagent-runtime";
 import { isBuiltInSubagentsEnabled } from "./subagent-settings";
 import { resolveShellTools } from "./powershell-settings";
@@ -196,10 +202,13 @@ type AgentSessionWrapperOptions = {
   exactSystemPrompt?: () => string;
   chatOnly?: boolean;
   suppressCompletionNotifications?: boolean;
+  /** A subagent's wrapper: a run ended and nothing is left to do. */
+  onDirectTurnSettled?: (aborted: boolean) => void;
   /** Connects the session's MCP servers before a prompt starts a run, and lets go of them when it closes (lib/mcp-host.ts). */
   mcpHost?: WrapperMcpHost;
   /** Chat only: the extension-provided model the session wanted, named when a prompt finds no model. */
   chatOnlyExtensionModel?: { provider: string; id: string };
+  sideChat?: boolean;
 };
 
 const RUNNING_STATE_EVENT_TYPES = new Set([
@@ -358,6 +367,10 @@ const SESSION_TOOL_NAMES = new Set<string>(["codemode", "tool_search", ...SUBAGE
  * tool one switched off stays off. Nothing else is added: pi itself activates the extension
  * tools it registers (all of them when it builds or reloads a session, then each new one), so
  * `carry` already holds them. An empty selection is Chat only.
+ *
+ * Order follows `carry`, the order the `pi` CLI declares for the same set: regrouping the
+ * coding tools ahead rewrites the prompt's `<tools>` section and drops the provider's prompt
+ * cache on every harness switch (#1405). Newly selected coding tools go at the end.
  */
 export function resolveActiveToolNames(
   session: AgentSessionLike,
@@ -373,11 +386,12 @@ export function resolveActiveToolNames(
     session.settingsManager.getDefaultTools(),
   );
   const carriedToolNames = carry.filter((name) => {
+    if (codingToolNames.has(name)) return selectedToolNames.includes(name);
     const tool = registered.get(name);
-    return tool !== undefined && !codingToolNames.has(name) && tool.exposure !== "hidden";
+    return tool !== undefined && tool.exposure !== "hidden";
   });
 
-  return [...new Set([...selectedToolNames, ...carriedToolNames])];
+  return [...new Set([...carriedToolNames, ...selectedToolNames])];
 }
 
 
@@ -475,8 +489,11 @@ export class AgentSessionWrapper {
   private manualThinkingLevel: string | null = null;
   private extensionBindingError: unknown = null;
   private forceEmptySystemPrompt = false;
+  private readonly onDirectTurnSettled?: (aborted: boolean) => void;
+  private readonly suppressCompletionNotifications: boolean;
   private readonly mcpHost?: WrapperMcpHost;
   private readonly chatOnlyExtensionModel?: { provider: string; id: string };
+  private readonly sideChat: boolean;
   private mcpHostDisposed = false;
   // The MCP wait of the prompt being admitted; Stop ends it.
   private mcpPromptWait: { controller: AbortController; done: Promise<void> } | null = null;
@@ -501,7 +518,6 @@ export class AgentSessionWrapper {
   private fastRuntimeGeneration = 0;
   private readonly exactSystemPrompt?: () => string;
   private readonly chatOnly: boolean;
-  private readonly suppressCompletionNotifications: boolean;
   private sessionShutdownEmitted = false;
   private forceShutdownOnIdle = false;
   // The armed idle timer is the forced cleanup Stop scheduled.
@@ -541,9 +557,11 @@ export class AgentSessionWrapper {
     };
     this.exactSystemPrompt = options.exactSystemPrompt;
     this.chatOnly = options.chatOnly ?? false;
+    this.onDirectTurnSettled = options.onDirectTurnSettled;
     this.suppressCompletionNotifications = options.suppressCompletionNotifications ?? false;
     this.mcpHost = options.mcpHost;
     this.chatOnlyExtensionModel = options.chatOnlyExtensionModel;
+    this.sideChat = options.sideChat === true;
     const sessionEntries = () => (
       typeof this.inner.sessionManager.getEntries === "function"
         ? this.inner.sessionManager.getEntries()
@@ -829,6 +847,13 @@ export class AgentSessionWrapper {
           : event.type === "agent_settled" ? this.withSubagentsActive(event)
             : event,
       );
+      if (event.type === "agent_settled") {
+        try {
+          this.onDirectTurnSettled?.(this.lastRunAborted);
+        } catch (error) {
+          console.error("[pi-web] could not settle the subagent turn:", error instanceof Error ? error.message : error);
+        }
+      }
       if (RUNNING_STATE_EVENT_TYPES.has(event.type)) notifyRunningChange();
     });
     this.resetIdleTimer();
@@ -1394,12 +1419,25 @@ export class AgentSessionWrapper {
           readSessionToolSelection(entries) ?? activeAfter,
           [...activeAfter, ...activeBefore.filter((name) => SESSION_TOOL_NAMES.has(name))],
         );
-      } else if (activeBefore.some((name, index) => name !== activeAfter[index])) {
-        // Same tools, other order: pi declares them in this order, so keep the previous one.
-        this.inner.setActiveToolsByName(activeBefore);
       }
     }
     return { cancelled: false };
+  }
+
+  /** The first prompt names a side chat that still has the name it started with. */
+  private nameSideChat(message: unknown): void {
+    if (this.inner.sessionManager.getSessionName() !== SIDE_SESSION_NAME || typeof message !== "string") return;
+    const name = sideChatNameFrom(message);
+    if (!name) return;
+    this.inner.setSessionName(name);
+    invalidateSessionListCache();
+  }
+
+  /** A copy of a side chat would be read as one, or show its parent's history as a new session. */
+  private refuseForkOfSideChat(): void {
+    if (hasSideMetadata(this.inner.sessionManager.getEntries() as unknown as SessionEntry[])) {
+      throw new Error("A side chat cannot be forked");
+    }
   }
 
   private emit(event: AgentEvent): void {
@@ -1608,6 +1646,7 @@ export class AgentSessionWrapper {
           if (this.inner.isBashRunning) {
             throw new Error("Cannot send a prompt while a shell command is running");
           }
+          if (this.sideChat) this.nameSideChat(command.message);
           const model = this.inner.model;
           if (this.chatOnlyExtensionModel && !(model && this.inner.modelRuntime.getModel(model.provider, model.id))) {
             throw chatOnlyExtensionModelError(this.chatOnlyExtensionModel.provider, this.chatOnlyExtensionModel.id);
@@ -1847,6 +1886,7 @@ export class AgentSessionWrapper {
         if (this.inner.isBashRunning) {
           throw new Error("Cannot fork while a shell command is running");
         }
+        this.refuseForkOfSideChat();
         const entryId = command.entryId as string;
         const sessionManager = this.inner.sessionManager;
         const currentSessionFile = this.inner.sessionFile;
@@ -1866,6 +1906,7 @@ export class AgentSessionWrapper {
         if (this.inner.isBashRunning) {
           throw new Error("Cannot fork while a shell command is running");
         }
+        this.refuseForkOfSideChat();
         const entryId = command.entryId as string;
         const sessionManager = this.inner.sessionManager;
         const currentSessionFile = this.inner.sessionFile;
@@ -1886,6 +1927,7 @@ export class AgentSessionWrapper {
 
       case "clone": {
         if (this.isRunning()) throw new Error("Cannot clone while the session is running");
+        this.refuseForkOfSideChat();
         const sessionManager = this.inner.sessionManager;
         const currentSessionFile = this.inner.sessionFile;
         const leafId = typeof command.leafId === "string" ? command.leafId : sessionManager.getLeafId();
@@ -3047,6 +3089,7 @@ const SUBAGENT_CONTROLLER = createSubagentController({
         : {}),
       chatOnly: options?.chatOnly,
       suppressCompletionNotifications: true,
+      onDirectTurnSettled: (aborted) => SUBAGENT_CONTROLLER.settleDirectTurn(inner.sessionId, aborted),
       ...(options?.mcpHost ? { mcpHost: options.mcpHost } : {}),
     });
     registerRpcWrapper(wrapper);
@@ -3223,6 +3266,9 @@ export async function setRpcSessionTools(
     if (readSubagentSessionResources(manager.getEntries() as unknown as SessionEntry[])) {
       throw new Error("Subagent tool selection is fixed by its profile");
     }
+    if (hasSideMetadata(manager.getEntries() as unknown as SessionEntry[])) {
+      throw new Error("Side chat tools are fixed when it is forked");
+    }
     if (toolNames === undefined) appendClearedSessionToolSelection(manager);
     else appendSessionToolSelection(manager, toolNames);
     invalidateSessionListCache();
@@ -3234,6 +3280,9 @@ export async function setRpcSessionTools(
   if (existing.diskFreshness() !== "current") throw new SessionFileConflictError();
   if (readSubagentSessionResources(existing.inner.sessionManager.getEntries() as unknown as SessionEntry[])) {
     throw new Error("Subagent tool selection is fixed by its profile");
+  }
+  if (hasSideMetadata(existing.inner.sessionManager.getEntries() as unknown as SessionEntry[])) {
+    throw new Error("Side chat tools are fixed when it is forked");
   }
 
   const hasCurrentResourcePolicy = typeof existing.isChatOnly === "function"
@@ -3332,6 +3381,7 @@ export function getRpcSessionInfos(options: { includeTransient?: boolean } = {})
     const sessionFile = manager.getSessionFile() ?? session.sessionFile;
     const persisted = Boolean(sessionFile && existsSync(sessionFile));
     const subagent = readSubagentRun(entries as unknown as SessionEntry[], header?.id ?? session.sessionId, sessionFile ?? "");
+    const side = subagent ? null : readSideRelation(entries as unknown as SessionEntry[]);
 
     // An ensure_session call creates an idle, empty runtime while the composer
     // loads commands. Do not leak it into history before a prompt is accepted.
@@ -3363,6 +3413,9 @@ export function getRpcSessionInfos(options: { includeTransient?: boolean } = {})
           description: subagent.description,
           status: session.isRunning() ? "running" as const : subagent.status,
         },
+      } : side ? {
+        parentSessionId: side.parentSessionId,
+        relation: { kind: "side" as const, ...side },
       } : {}),
       transient: !persisted,
     });
@@ -3648,14 +3701,23 @@ export async function startRpcSession(
   const persistedToolNames = subagentResources
     ? undefined
     : readSessionToolSelection(sessionEntries);
-  const selectedToolNames = subagentResources?.tools ?? persistedToolNames ?? requestedToolNames;
+  const pinnedToolNames = subagentResources?.tools ?? persistedToolNames ?? requestedToolNames;
   if (!subagentResources && persistedToolNames === undefined && requestedToolNames !== undefined) {
     appendSessionToolSelection(sessionManager, requestedToolNames);
   }
   const subagentLoadsResources = Boolean(
     subagentResources?.loadExtensions || subagentResources?.loadSkills || subagentResources?.codemode || subagentResources?.mcp,
   );
-  const chatOnly = selectedToolNames?.length === 0 && !subagentLoadsResources;
+  const chatOnly = pinnedToolNames?.length === 0 && !subagentLoadsResources;
+  // A side chat (ADR 0007) starts as a normal session, or as Chat only, with fewer tools.
+  const isSideChat = hasSideMetadata(sessionEntries);
+  if (isSideChat && !readSideRelation(sessionEntries)) throw new Error("Invalid side chat metadata");
+  const sideChatTools = isSideChat && !chatOnly;
+  const selectedToolNames = sideChatTools
+    ? sideToolNames(pinnedToolNames, sessionManager.getBranch().flatMap((entry) => (
+        entry.type === "message" && entry.message.role === "system" ? [entry.message] : []
+      )))
+    : pinnedToolNames;
   const finishStartingSession = trackStartingSession(sessionCwd);
   const startupStartedAt = performance.now();
   const startupTimings: RpcStartupTimings = {};
@@ -3695,6 +3757,9 @@ export async function startRpcSession(
     startupStage = "services";
     let stageStartedAt = performance.now();
     const modelConfigSnapshot = await readModelsConfigSnapshot();
+    // Here the allow-list is the point: extensions stay loaded, their tools and what
+    // the parent did not have stay out of the registry.
+    if (sideChatTools) toolsOption = resolveShellTools(selectedToolNames ?? [], settingsManager.getDefaultTools());
     // Chat-only sessions and subagents that replace Pi's prompt send an exact
     // system prompt. The prompt is resolved at prompt time through this inline
     // extension: it may read the session's context files, which exist only
@@ -3703,7 +3768,7 @@ export async function startRpcSession(
     const exactSystemPromptExtension = createExactSystemPromptExtension(() => exactSystemPromptRef.current?.());
     // codemode, tool-search, and mcp, as the pi CLI loads them, and the host that decides
     // which MCP servers the session connects (ADR 0006).
-    const builtins = subagentResources || chatOnly
+    const builtins = subagentResources || chatOnly || sideChatTools
       ? undefined
       : await createPiWebBuiltinExtensions({ agentDir });
     const subagentCodemode = subagentResources?.codemode
@@ -3927,7 +3992,11 @@ export async function startRpcSession(
       {
         exactSystemPrompt,
         chatOnly,
-        suppressCompletionNotifications: Boolean(subagentResources),
+        suppressCompletionNotifications: Boolean(subagentResources) || isSideChat,
+        ...(subagentResources
+          ? { onDirectTurnSettled: (aborted: boolean) => SUBAGENT_CONTROLLER.settleDirectTurn(inner.sessionId, aborted) }
+          : {}),
+        sideChat: isSideChat,
         persistedSessionFile: Boolean(sessionFile),
         ...(mcpHost ? { mcpHost } : {}),
         ...(chatOnlyExtensionModel ? { chatOnlyExtensionModel } : {}),

@@ -144,7 +144,7 @@ function CustomMessageContent({ view }: { view: CustomMessageContentView }) {
         </div>
       )}
       {view.text
-        ? <MarkdownBody className="markdown-custom-message" cwd={view.cwd} onOpenFile={view.onOpenFile}>{view.text}</MarkdownBody>
+        ? <MarkdownBody className="markdown-custom-message" keepTextLayout cwd={view.cwd} onOpenFile={view.onOpenFile}>{view.text}</MarkdownBody>
         : <span style={{ color: "var(--text-dim)", fontSize: 12 }}>{t("i18n.noMessage")}</span>}
     </div>
   );

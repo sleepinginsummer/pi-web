@@ -119,3 +119,14 @@ test("通知跳转会展开目标项目并让会话树执行一次定位", () =>
   assert.match(projectSectionSource, /handledLocateRevisionRef\.current === request\.revision/);
   assert.match(projectSectionSource, /scroll\.scrollTo\(\{ top, behavior: "auto" \}\)/);
 });
+
+test("the favicon counts sessions that finished while the tab was hidden (#1484)", () => {
+  // The rows exclude the selected session ("already looking"), which is false
+  // while hidden: the badge takes those ids as a separate prop instead.
+  assert.match(source, /hiddenFinishedSessionIds\?: Set<string>;/);
+  assert.match(source, /countFaviconUnread\(unreadSessionIds, hiddenFinishedSessionIds\)/);
+  assert.match(
+    source,
+    /\}, \[awaitingInputSessionIds, unreadSessionIds, hiddenFinishedSessionIds\]\);/,
+  );
+});

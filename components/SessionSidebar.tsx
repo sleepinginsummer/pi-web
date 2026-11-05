@@ -3,6 +3,8 @@
 import { stabilizeStringSet } from "@/lib/stable-string-set";
 import { useEffect, useState, useCallback, useMemo, useRef, type ReactNode } from "react";
 import type { SessionInfo, WorktreeState } from "@/lib/types";
+import { isHiddenRelation } from "@/lib/session-family";
+import { countFaviconUnread, syncFaviconBadge } from "@/lib/favicon-badge";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useSessionList } from "@/hooks/useSessionList";
@@ -141,6 +143,16 @@ interface Props {
   onExplorerRefresh?: () => void;
   onAtMention?: (relativePath: string, isDir: boolean) => void;
   onAtMentions?: (relativePaths: string[]) => void;
+  /** Fired when a session that is not currently selected finishes running.
+   *  Lets the app play a cross-workspace completion tone. */
+  onBackgroundTaskDone?: () => void;
+  /**
+   * Sessions that finished while the tab was hidden (#1484): usually the
+   * selected one, which `unreadSessionIds` excludes. Counted by the favicon
+   * until the tab is opened again; never persisted, never dotted.
+   */
+  hiddenFinishedSessionIds?: Set<string>;
+  onRunningSessionIdsChange?: (ids: Set<string>) => void;
   onSessionsChange?: (sessions: SessionInfo[]) => void;
 }
 
@@ -293,7 +305,7 @@ function PiWebTitle() {
 }
 const EMPTY_SESSION_ID_SET: ReadonlySet<string> = new Set();
 
-export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, runningSessionIds, awaitingInputSessionIds = EMPTY_SESSION_ID_SET, runningSessionTransitions, locateSessionRequest, selectedCwd: selectedCwdProp, onCwdChange, worktreeState = null, onOpenFile, onOpenTerminal, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onSessionsChange }: Props) {
+export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, selectedSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, runningSessionIds, awaitingInputSessionIds = EMPTY_SESSION_ID_SET, runningSessionTransitions, locateSessionRequest, selectedCwd: selectedCwdProp, onCwdChange, worktreeState = null, onOpenFile, onOpenTerminal, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onSessionsChange }: Props) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
   const {
@@ -479,6 +491,17 @@ export function SessionSidebar({ selectedSessionId, selectedSession, onSelectSes
       return next;
     });
   }, [runningSessionIds]);
+
+  // The tab strip's favicon mirrors what the rows show (#1483): a persistent
+  // badge after the completion sound fades, cleared the same way the blue dot is.
+  // Sessions that finished while the tab was hidden count too (#1484): the rows
+  // exclude the selected session ("already looking"), which is false while hidden.
+  useEffect(() => {
+    syncFaviconBadge({
+      awaiting: awaitingInputSessionIds.size,
+      unread: countFaviconUnread(unreadSessionIds, hiddenFinishedSessionIds),
+    });
+  }, [awaitingInputSessionIds, unreadSessionIds, hiddenFinishedSessionIds]);
 
   useEffect(() => {
     if (runningSessionTransitions.revision === 0) return;

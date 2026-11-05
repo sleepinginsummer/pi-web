@@ -7,7 +7,7 @@ import { copyText } from "@/lib/clipboard";
 import { parsePdfPageFragment, resolveLocalFileHref, shouldOpenLocalFileInApp } from "@/lib/file-links";
 import { encodeFilePathForApi } from "@/lib/file-paths";
 import { isAudioPath, isVideoPath } from "@/lib/file-types";
-import { isExternalMarkdownHref, jumpToMarkdownFragment, markdownAppUrlTransform, markdownDocumentRehypePlugins, markdownRehypePlugins, markdownRemarkPlugins, markdownUrlTransform, markdownUserRemarkPlugins, normalizeDisplayMath } from "@/lib/markdown";
+import { markdownTextLayoutRemarkPlugins, isExternalMarkdownHref, jumpToMarkdownFragment, markdownAppUrlTransform, markdownDocumentRehypePlugins, markdownRehypePlugins, markdownRemarkPlugins, markdownUrlTransform, markdownUserRemarkPlugins, normalizeDisplayMath } from "@/lib/markdown";
 import { splitStreamingMarkdown } from "@/lib/streaming-markdown-blocks";
 import { ImagePreview } from "./ImagePreview";
 import { MermaidBlock, CodeBlock } from "./MermaidBlock";
@@ -52,6 +52,8 @@ interface MarkdownBodyProps {
   onNavigateLink?: (href: string) => void;
   /** Text the user typed: every line ending is a line break and raw HTML shows as text, as in pi's TUI. */
   keepLineBreaks?: boolean;
+  /** An extension's custom message: keepLineBreaks, plus each paragraph line's indent, as in pi's TUI. */
+  keepTextLayout?: boolean;
 }
 
 function MarkdownImage({
@@ -135,7 +137,7 @@ function renderListItems(children: ReactNode, ordered: boolean, start = 1) {
 }
 
 // 整体 memo：父组件因无关状态重渲染时，相同正文不再重新解析。
-export const MarkdownBody = memo(function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile, onNavigateLink, keepLineBreaks }: MarkdownBodyProps) {
+export const MarkdownBody = memo(function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile, onNavigateLink, keepLineBreaks, keepTextLayout }: MarkdownBodyProps) {
   const normalizedMarkdown = useMemo(() => normalizeDisplayMath(children), [children]);
   // 回调和配置都通过 ref 读取，让 components 只随 cwd / 流式状态 / 是否有打开文件
   // 能力变化，块级 memo 才能在上游回调换身份时依然命中。
@@ -256,12 +258,12 @@ export const MarkdownBody = memo(function MarkdownBody({ children, className, is
   }), [cwd, hasOnNavigateLink, hasOnOpenFile, isStreaming, openFile]);
 
   const renderConfig = useMemo<MarkdownRenderConfig>(() => ({
-    remarkPlugins: keepLineBreaks ? markdownUserRemarkPlugins : markdownRemarkPlugins,
+    remarkPlugins: keepTextLayout ? markdownTextLayoutRemarkPlugins : keepLineBreaks ? markdownUserRemarkPlugins : markdownRemarkPlugins,
     rehypePlugins: hasOnNavigateLink ? markdownDocumentRehypePlugins : markdownRehypePlugins,
     // 没有文件打开回调时仍需保留 obsidian://、vscode:// 等桌面应用链接。
     urlTransform: hasOnOpenFile ? markdownUrlTransform : markdownAppUrlTransform,
     components,
-  }), [components, hasOnNavigateLink, hasOnOpenFile, keepLineBreaks]);
+  }), [components, hasOnNavigateLink, hasOnOpenFile, keepLineBreaks, keepTextLayout]);
   // 流式期间把累积文本切成可缓存前缀块，每帧只重新解析仍在增长的尾部。
   const streamingSplit = useMemo(
     () => (isStreaming ? splitStreamingMarkdown(normalizedMarkdown) : null),

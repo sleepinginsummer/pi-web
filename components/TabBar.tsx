@@ -7,7 +7,7 @@ import type { FileTab } from "@/lib/file-panel-model";
 import type { FileViewerDisplayMode, FileViewerState } from "@/lib/file-viewer-state";
 
 export type Tab = FileTab & {
-  kind?: "terminal" | "agent" | "server";
+  kind?: "terminal" | "agent" | "side" | "server";
   closing?: boolean;
   sourceSessionId?: string | null;
   initialDisplayMode?: FileViewerDisplayMode;
@@ -135,6 +135,10 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab }: Props) {
               ) : tab.kind === "server" ? (
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                   <rect x="3" y="4" width="18" height="16" rx="2" /><path d="M3 9h18M7 6.5h.01M10 6.5h.01" />
+                </svg>
+              ) : tab.kind === "side" ? (
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M21 12a8 8 0 0 1-8 8H5.5a2 2 0 0 1-1.4-3.4A8 8 0 1 1 21 12z" />
                 </svg>
               ) : getFileIcon(tab.label, 13)}
             </span>
