@@ -290,7 +290,8 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 - `npm test` 走 `scripts/run-tests.mjs`：单文件 3 分钟、单用例 90 秒、整轮 30 分钟，默认并发 2。Node 的 `assert.match` 在大字符串上失败时生成 diff 可能卡死 CPU，所以源码正则测试失败常表现为超时，`pkill` 杀不掉时要 `kill -9`。
 
 ### Secret vault (pi-secret-vault extension)
-- 存储和遮蔽在扩展里，pi-web 只有界面：`lib/secret-vault.ts` 按扩展 `src/store.ts` 的磁盘约定（AES-256-GCM、record 绑定名字的 AAD、mkdir 锁、钥匙串条目）读写 `<agentDir>/pi-secret-vault/vault.json`，运行中的会话靠文件签名在下一个钩子同步。只加密不解密，`/api/secret-vault` 不返回任何值。改格式要两边一起改并升 `version`。
+- 存储和遮蔽在扩展里，pi-web 只有界面：`lib/secret-vault.ts` 按扩展 `src/store.ts` 的磁盘约定（AES-256-GCM、record 绑定名字的 AAD、mkdir 锁、钥匙串条目）读写 `<agentDir>/pi-secret-vault/vault.json`，运行中的会话靠文件签名在下一个钩子同步。`/api/secret-vault` 不返回任何值；唯一的解密在 `renameSecret`（名字绑定在密文里，只能重新加密），值不离开该函数。改格式要两边一起改并升 `version`。
+- `remark` 是记录上的可选明文字段（单行、最多 200 字，写场景、URL 和所需用户名），会经 `sec_list` 发给模型。旧读取方能忽略它，所以没有升 `version`；替换值和改名都必须保留它。人可以在设置页改，模型通过 `sec_remark` / `sec_request` 改，后者每次都会通知用户。两边都拒绝疑似凭证，只有扩展会比对已存的值；`sec_remark` 和 `sec_request` 的参数不展开 `{{sec:NAME}}`，否则真实值会写进明文 remark。
 - 扩展用 `ctx.ui.input` 的 placeholder 前缀 `\u0000` 标记密钥输入，`ChatWindow` 的 `ExtensionDialog` 据此渲染密码框并去掉前缀。
 
 ### Plugins and skills
