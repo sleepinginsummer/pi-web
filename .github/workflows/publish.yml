@@ -18,6 +18,8 @@ concurrency:
 
 jobs:
   check-tag:
+    # 只在上游仓库发布 npm 和镜像；本 fork 走 release-package.yml（GitHub Release）。
+    if: github.repository == 'agegr/pi-web'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
