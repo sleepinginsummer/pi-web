@@ -1,10 +1,10 @@
 import { existsSync } from "fs";
 import { stat } from "fs/promises";
-import { resolve } from "path";
+import { join, resolve } from "path";
 import { createAgentSessionServices, getAgentDir, type SettingsManager } from "@earendil-works/pi-coding-agent";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import type { ModelEntry, ModelsData, SelectedModel, ThinkingLevelMap } from "@/lib/model-types";
-import { loadModelsWithCache, withModelRuntimeError, withSafeModelLoadFailure } from "@/lib/models-cache";
+import { invalidateModelsCache, loadModelsWithCache, withModelRuntimeError, withSafeModelLoadFailure } from "@/lib/models-cache";
 import type { ThinkingLevel } from "@/lib/thinking-levels";
 import {
   orderSelectorModels,
@@ -129,6 +129,17 @@ const EMPTY_MODELS: ModelsData = {
   isScoped: false,
 };
 
+// enabledModels 可能被手工或 pi CLI 改写，这类外部修改没有主动失效；模型缓存 TTL 又长达 10 分钟，
+// 所以按 settings 文件的修改时间判断，改过就让这个 cwd 的缓存失效。
+const settingsVersions = new Map<string, string>();
+async function invalidateModelsAfterSettingsEdit(cwd: string): Promise<void> {
+  const mtime = async (path: string) => (await stat(path).catch(() => null))?.mtimeMs ?? 0;
+  const version = `${await mtime(join(getAgentDir(), "settings.json"))}:${await mtime(join(cwd, ".pi", "settings.json"))}`;
+  const previous = settingsVersions.get(cwd);
+  settingsVersions.set(cwd, version);
+  if (previous !== undefined && previous !== version) invalidateModelsCache(cwd);
+}
+
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const requestedCwd = resolve(url.searchParams.get("cwd") || process.cwd());
@@ -158,6 +169,7 @@ export async function GET(req: Request) {
     return Response.json({ error: "Access denied" }, { status: 403 });
   }
 
+  await invalidateModelsAfterSettingsEdit(cwd);
   try {
     const cacheKey = scopeAll ? `${cwd}#all` : cwd;
     return Response.json(await loadModelsWithCache(cacheKey, () => loadModelsConsistently(cwd, scopeAll)));

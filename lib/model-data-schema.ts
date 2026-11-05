@@ -36,7 +36,13 @@ function parseModelList(value: unknown): ModelEntry[] {
     ) {
       throw new Error(`Invalid models response: modelList[${index}] is malformed`);
     }
-    return { id: item.id, name: item.name, provider: item.provider, fastAvailable: item.fastAvailable };
+    return {
+      id: item.id,
+      name: item.name,
+      provider: item.provider,
+      ...(typeof item.providerName === "string" ? { providerName: item.providerName } : {}),
+      fastAvailable: item.fastAvailable,
+    };
   });
 }
 
@@ -105,6 +111,7 @@ export function parseModelsData(value: unknown): ModelsDataParseResult {
       thinkingLevels: parseThinkingLevels(value.thinkingLevels, diagnostics),
       thinkingLevelMaps: parseThinkingMaps(value.thinkingLevelMaps, diagnostics),
       thinkingLevelPins: parsePins(value.thinkingLevelPins, diagnostics),
+      ...(typeof value.isScoped === "boolean" ? { isScoped: value.isScoped } : {}),
       ...(typeof value.modelError === "string" ? { modelError: value.modelError } : {}),
       ...(Array.isArray(value.modelScopeWarnings)
         ? { modelScopeWarnings: value.modelScopeWarnings.filter((item): item is string => typeof item === "string") }

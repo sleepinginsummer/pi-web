@@ -37,6 +37,10 @@ export function invalidateModelsCache(cwd?: string): void {
     state.cwdGenerations.set(cwd, (state.cwdGenerations.get(cwd) ?? 0) + 1);
     state.entries.delete(cwd);
     state.inFlight.delete(cwd);
+    // The selector's "all" scope is cached beside it (/api/models?scope=all).
+    state.cwdGenerations.set(`${cwd}#all`, (state.cwdGenerations.get(`${cwd}#all`) ?? 0) + 1);
+    state.entries.delete(`${cwd}#all`);
+    state.inFlight.delete(`${cwd}#all`);
     return;
   }
   state.generation += 1;
