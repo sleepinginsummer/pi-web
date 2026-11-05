@@ -19,6 +19,7 @@ interface AppTopPanelsProps {
   onSelectSession: (session: SessionInfo) => void;
   onToggleSubagentTab: (sessionId: string, label: string) => void;
   onNewSideChat: () => Promise<string | null>;
+  onDeleteSideChat: (sessionId: string) => Promise<string | null>;
   openSubagentTabIds: ReadonlySet<string>;
   position: TopPanelPosition | null;
   runningSessionIds: ReadonlySet<string>;
@@ -43,7 +44,7 @@ export function AppTopPanels({
   locale,
   onCopySessionField,
   onSelectSession,
-  onToggleSubagentTab, onNewSideChat,
+  onToggleSubagentTab, onNewSideChat, onDeleteSideChat,
   openSubagentTabIds,
   position,
   runningSessionIds,
@@ -75,6 +76,7 @@ export function AppTopPanels({
           openSubagentTabIds={openSubagentTabIds}
           onToggleSubagentTab={onToggleSubagentTab}
           onNewSideChat={onNewSideChat}
+          onDeleteSideChat={onDeleteSideChat}
         />
       )}
       {activePanel === "session" && (

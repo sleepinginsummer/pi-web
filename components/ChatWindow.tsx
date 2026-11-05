@@ -325,7 +325,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
 
   const {
     loading, error, activeLeafId, messages, entryIds, messageKeys, historyCursor, streamingStore, hasEarlierMessages, loadingEarlierMessages, earlierTurnCount,
-    agentRunning, bashRunning, pendingBash, modelState, modelActions, missingCwd, toolPreset,
+    agentRunning, bashRunning, pendingBash, modelState, modelActions, missingCwd, isModelScopeActive, allModelList, loadAllModels, toolPreset,
     retryInfo, contextUsage, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
@@ -992,6 +992,8 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
       modelState={modelState}
       modelActions={modelActions}
       missingCwd={missingCwd}
+      allModelList={allModelList}
+      onLoadAllModels={isModelScopeActive ? loadAllModels : undefined}
       onCompact={session || isNew ? handleCompact : undefined}
       onAbortCompaction={handleAbortCompaction}
       isCompacting={isCompacting}

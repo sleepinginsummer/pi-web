@@ -10,7 +10,7 @@ import { fetchThinkingLevelRecommendation } from "@/lib/thinking-level-preferenc
 import { parseThinkingLevelOption, type ThinkingLevel, type ThinkingLevelOption } from "@/lib/thinking-levels";
 
 interface ModelsLoadedPayload {
-  state: Pick<ModelSelectionState, "names" | "list" | "error" | "missingCwd" | "scopeWarnings" | "dataDiagnostics" | "thinkingLevels" | "thinkingLevelMaps" | "thinkingLevelPins">;
+  state: Pick<ModelSelectionState, "names" | "list" | "error" | "missingCwd" | "isScoped" | "scopeWarnings" | "dataDiagnostics" | "thinkingLevels" | "thinkingLevelMaps" | "thinkingLevelPins">;
   defaultModel?: SelectedModel | null;
   defaultThinkingLevel?: ThinkingLevel | null;
   pinnedThinkingLevel?: ThinkingLevel;
@@ -66,6 +66,7 @@ export type ModelSelectionAction =
   | { type: "selectNewSessionModel"; model: SelectedModel; thinkingLevel?: ThinkingLevel }
   | { type: "setNewSessionDefaultModel"; model: SelectedModel | null }
   | { type: "modelsLoadFailed"; error: string | null; missingCwd: string | null }
+  | { type: "mergeCatalog"; names: Record<string, string>; thinkingLevels: ModelSelectionState["thinkingLevels"]; thinkingLevelMaps: ModelSelectionState["thinkingLevelMaps"] }
   | { type: "setThinkingLevel"; level: ThinkingLevelOption };
 
 export const initialModelSelectionState: ModelSelectionState = {
@@ -73,6 +74,7 @@ export const initialModelSelectionState: ModelSelectionState = {
   list: [],
   error: null,
   missingCwd: null,
+  isScoped: false,
   scopeWarnings: [],
   dataDiagnostics: [],
   thinkingLevels: {},
@@ -110,6 +112,14 @@ export function modelSelectionReducer(state: ModelSelectionState, action: ModelS
       };
     case "setNewSessionDefaultModel":
       return { ...state, newSessionDefaultModel: action.model };
+    case "mergeCatalog":
+      // Models outside `enabledModels` join the maps; what the scope already says wins.
+      return {
+        ...state,
+        names: { ...action.names, ...state.names },
+        thinkingLevels: { ...action.thinkingLevels, ...state.thinkingLevels },
+        thinkingLevelMaps: { ...action.thinkingLevelMaps, ...state.thinkingLevelMaps },
+      };
     case "modelsLoadFailed":
       return {
         ...state,
@@ -164,6 +174,7 @@ export function useModelSelection() {
             list,
             error: data.modelError ?? null,
             missingCwd: null,
+            isScoped: data.isScoped === true,
             scopeWarnings: data.modelScopeWarnings ?? [],
             dataDiagnostics: parsed.diagnostics,
             thinkingLevels: data.thinkingLevels ?? {},
@@ -223,6 +234,9 @@ export function useModelSelection() {
   }, []);
 
   const actions = useMemo(() => ({
+    mergeCatalog: (catalog: { names: Record<string, string>; thinkingLevels: ModelSelectionState["thinkingLevels"]; thinkingLevelMaps: ModelSelectionState["thinkingLevelMaps"] }) => {
+      dispatch({ type: "mergeCatalog", ...catalog });
+    },
     load,
     selectNewSessionModel,
     setNewSessionDefaultModel: (model: SelectedModel | null) => dispatch({ type: "setNewSessionDefaultModel", model }),

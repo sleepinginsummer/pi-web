@@ -154,6 +154,10 @@ interface ModelPickerProps {
   onChange?: (provider: string, modelId: string) => void;
   /** The current model picked again: re-reads its definition so a saved edit applies (#1273). */
   onReselect?: (provider: string, modelId: string) => void;
+  /** Every available model, once loaded for the "all" scope. */
+  allOptions?: ModelPickerOption[] | null;
+  /** Set only while `enabledModels` narrows `options`: shows pi's /model "scoped | all" row and loads `allOptions`. */
+  onShowAll?: () => void;
   onClear?: () => void;
   emptyLabel?: string;
   selectedLabel?: string;
@@ -172,6 +176,8 @@ export const ModelPicker = memo(function ModelPicker({
   value,
   onChange,
   onReselect,
+  allOptions,
+  onShowAll,
   onClear,
   emptyLabel,
   selectedLabel,
@@ -190,7 +196,14 @@ export const ModelPicker = memo(function ModelPicker({
   const panelGeometry = useModelPickerPanelGeometry(open, triggerRef);
 
   const locked = disabled || busy;
-  const modelOptions = useMemo(() => [...options].sort(compareModelOptions), [options]);
+  // pi's /model starts on the scope; Tab on the filter or a tap switches.
+  const [showAll, setShowAll] = useState(false);
+  const listed = showAll ? allOptions ?? null : options;
+  const switchScope = () => {
+    if (!showAll) onShowAll?.();
+    setShowAll(!showAll);
+  };
+  const modelOptions = useMemo(() => [...(listed ?? [])].sort(compareModelOptions), [listed]);
   const filteredOptions = useMemo(() => filterModelOptions(modelOptions, filter), [filter, modelOptions]);
   const groups = useMemo(() => {
     const optionsByProvider = new Map<string, ModelPickerOption[]>();
@@ -315,10 +328,33 @@ export const ModelPicker = memo(function ModelPicker({
           borderRadius: 8, boxShadow: "bottom" in panelLayout ? "0 -4px 16px rgba(0,0,0,0.10)" : "0 4px 16px rgba(0,0,0,0.10)", overflow: "hidden",
           display: "flex", flexDirection: "column",
           }}>
-            {modelOptions.length > MODEL_FILTER_THRESHOLD && (
+            {onShowAll && (
+              <div style={{ display: "flex", gap: 4, padding: "6px 8px 0", flexShrink: 0 }}>
+                {[false, true].map((all) => (
+                  <button
+                    key={String(all)}
+                    type="button"
+                    aria-pressed={showAll === all}
+                    onClick={() => { if (showAll !== all) switchScope(); }}
+                    style={{
+                      padding: "2px 8px", fontSize: 11, borderRadius: 4, cursor: "pointer",
+                      border: "1px solid", borderColor: showAll === all ? "var(--border)" : "transparent",
+                      background: showAll === all ? "var(--bg-hover)" : "none",
+                      color: showAll === all ? "var(--text)" : "var(--text-muted)",
+                    }}
+                  >
+                    {t(all ? "chat.modelScopeAll" : "chat.modelScopeScoped")}
+                  </button>
+                ))}
+              </div>
+            )}
+            {(onShowAll || modelOptions.length > MODEL_FILTER_THRESHOLD) && (
               <div style={{ padding: "6px 8px", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
                 <input value={filter} onChange={(event) => setFilter(event.target.value)}
-                  onKeyDown={(event) => { if (event.key === "Escape") { setFilter(""); setOpen(false); } }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") { setFilter(""); setOpen(false); }
+                    if (onShowAll && event.key === "Tab") { event.preventDefault(); switchScope(); }
+                  }}
                   placeholder={t("chat.filterModels")} aria-label={t("chat.filterModels")} autoFocus={!isMobile} autoComplete="off" spellCheck={false}
                   style={{ width: "100%", minWidth: isMobile ? 0 : 220, fontSize: 11, fontFamily: "var(--font-mono)", padding: "5px 8px", border: "1px solid var(--border)", borderRadius: 5, outline: "none", background: "var(--bg)", color: "var(--text)", boxSizing: "border-box" }} />
               </div>

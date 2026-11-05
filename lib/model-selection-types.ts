@@ -8,6 +8,8 @@ export interface ModelSelectionState {
   error: string | null;
   /** The session's folder, when the model list could not load because it no longer exists (#1422). */
   missingCwd: string | null;
+  /** True when enabledModels is active and restricting the list. */
+  isScoped: boolean;
   scopeWarnings: string[];
   dataDiagnostics: ModelsDataDiagnostic[];
   thinkingLevels: Record<string, ThinkingLevel[]>;

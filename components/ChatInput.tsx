@@ -59,6 +59,10 @@ interface Props {
   modelActions: ModelSelectionViewActions;
   /** The session's folder, when it no longer exists (moved or renamed): said instead of a model error (#1422). */
   missingCwd?: string | null;
+  /** Every available model, once loaded for the selector's "all" scope. */
+  allModelList?: { id: string; name: string; provider: string }[] | null;
+  /** Set only while `enabledModels` narrows the list: loads `allModelList`. */
+  onLoadAllModels?: () => void;
   onCompact?: () => void;
   onAbortCompaction?: () => void;
   isCompacting?: boolean;
@@ -467,7 +471,7 @@ export function ModelDataDiagnosticBanner({ diagnostics }: { diagnostics?: Model
   return <ModelNoticeBanner tone="warning" title={t("chat.modelDataWarning")} body={messages.join("\n")} />;
 }
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onAbort, onSideChat, onQueuedSubmit, isStreaming, creationSettingsLocked = false, extensionsInitializing = false, modelState, modelActions, missingCwd,
+  onSend, onAbort, onSideChat, onQueuedSubmit, isStreaming, creationSettingsLocked = false, extensionsInitializing = false, modelState, modelActions, missingCwd, allModelList, onLoadAllModels,
   onCompact, onAbortCompaction, isCompacting, compactError, onDismissCompactError, compactResult, toolPreset, onToolPresetChange,
   retryInfo, queuedMessages, inputHistory = [], onRecallQueue,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
@@ -491,6 +495,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const { fontSize, width } = useChatAppearance();
   const { ui: uiFontFamily, uiWeight } = useFontPreferences();
   const isMobile = useIsMobile();
+  // The controls row under the composer: a finger's 44px on a phone.
+  const controlSize = isMobile ? 44 : 32;
   const modelPickerOptions = useMemo<ModelPickerOption[]>(() => {
     if (modelState.list?.length) {
       return modelState.list.map((model) => ({ provider: model.provider, modelId: model.id, name: model.name }));
@@ -2022,7 +2028,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               title={t(onAttachFiles ? "chat.attachFiles" : "chat.attachImage")}
               style={{
                 flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
-                width: 32, height: 32, padding: 0,
+                width: controlSize, height: controlSize, padding: 0,
                 background: "none", border: "none",
                 borderRadius: 9,
                 color: attachedImages.length ? "var(--accent)" : "var(--text-muted)",
@@ -2038,7 +2044,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 e.currentTarget.style.color = attachedImages.length ? "var(--accent)" : "var(--text-muted)";
               }}
             >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <svg width={isMobile ? 18 : 15} height={isMobile ? 18 : 15} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                 <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
                 <circle cx="8.5" cy="8.5" r="1.5" />
                 <polyline points="21 15 16 10 5 21" />
@@ -2050,6 +2056,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               value={modelState.model}
               onChange={onModelChange}
               onReselect={onModelChange}
+              allOptions={allModelList?.map((m) => ({ provider: m.provider, modelId: m.id, name: m.name }))}
+              onShowAll={onLoadAllModels}
               disabled={isStreaming || creationSettingsLocked}
               busy={modelState.modelSwitching}
               isAutoSelection={modelState.isAutoModelSelection}

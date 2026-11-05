@@ -13,12 +13,12 @@ import type {
   SessionTreeNode,
 } from "@/lib/types";
 import type { AgentRuntimeSnapshot, AgentRuntimeState, AgentSubmitAcknowledgement } from "@/lib/agent-state";
-import type { SelectedModel } from "@/lib/model-types";
+import type { ModelEntry, SelectedModel, ThinkingLevelMap } from "@/lib/model-types";
 import type { ModelSelectionViewActions, ModelSelectionViewState } from "@/lib/model-selection-types";
 import { resolveFastModeAvailability } from "@/lib/fast-mode";
 import { deleteSessionViewSnapshot, getSessionViewSnapshot, setSessionViewSnapshot } from "@/lib/session-view-cache";
 
-import { isThinkingLevel, type ThinkingLevelOption } from "@/lib/thinking-levels";
+import { isThinkingLevel, type ThinkingLevel, type ThinkingLevelOption } from "@/lib/thinking-levels";
 import { recordThinkingLevelPreference } from "@/lib/thinking-level-preference-client";
 import { materializeNewSession, releaseNewSessionMaterialization, type NewSessionMaterializationResult } from "@/lib/new-session-materialization-client";
 import { selectNewSessionRequest, selectPendingNewSession, type PendingNewSessionControl, type PendingNewSessionEvent } from "@/lib/pending-new-session";
@@ -636,6 +636,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [runtimeFastAvailable, setRuntimeFastAvailable] = useState<boolean | null>(null);
   const [fastPending, setFastPending] = useState(false);
   const [toolPreset, setToolPreset] = useState<ToolPreset>("default");
+  // Every available model, fetched only when the selector switches to "all" or the
+  // shown model is outside the scope; null until then and after each loadModels.
+  const [allModelList, setAllModelList] = useState<ModelEntry[] | null>(null);
+  const allModelsLoadRef = useRef<object | null>(null);
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxAttempts: number; errorMessage?: string } | null>(null);
   const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
   // Active time read from the live state, with the session it belongs to: the
@@ -2829,12 +2833,37 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       applyPinnedThinking: thinkingLevelOverrideRef.current === null,
       signal,
     });
+    // The maps replace the ones loadAllModels merged into: load that list again.
+    setAllModelList(null);
+    allModelsLoadRef.current = null;
     if (isNew && !sessionIdRef.current) {
       if (thinkingLevelOverrideRef.current === null) {
         recommendedThinkingLevelRef.current = preferredThinking ?? null;
       }
     }
   }, [isNew, modelSelectionActions, newSessionCwd, session?.cwd]);
+
+  // pi's /model "all" scope: names and reasoning levels of models outside
+  // `enabledModels` join the maps, so a picked unscoped model shows them too.
+  const loadAllModels = useCallback(() => {
+    if (allModelsLoadRef.current) return;
+    const load = {};
+    allModelsLoadRef.current = load;
+    const modelCwd = newSessionCwd ?? session?.cwd ?? "";
+    fetch(`/api/models?scope=all${modelCwd ? `&cwd=${encodeURIComponent(modelCwd)}` : ""}`)
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`Failed to load models (HTTP ${res.status})`);
+        const d = await res.json() as { models?: Record<string, string>; modelList?: ModelEntry[]; thinkingLevels?: Record<string, ThinkingLevel[]>; thinkingLevelMaps?: Record<string, ThinkingLevelMap> };
+        if (allModelsLoadRef.current !== load) return;
+        modelSelectionActions.mergeCatalog({ names: d.models ?? {}, thinkingLevels: d.thinkingLevels ?? {}, thinkingLevelMaps: d.thinkingLevelMaps ?? {} });
+        setAllModelList(d.modelList ?? []);
+      })
+      .catch((e) => {
+        if (allModelsLoadRef.current !== load) return;
+        allModelsLoadRef.current = null;
+        addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
+      });
+  }, [addNotice, modelSelectionActions, newSessionCwd, session?.cwd]);
 
 
 
@@ -3454,7 +3483,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     hasEarlierMessages: historyPage.sid === sessionIdRef.current && historyPage.hasMore,
     loadingEarlierMessages: historyPage.sid === sessionIdRef.current && historyPage.loading,
     earlierTurnCount: historyPage.sid === sessionIdRef.current ? historyPage.turnsBefore : 0,
-    missingCwd, agentRunning, modelState: modelViewState, modelActions: modelViewActions, toolPreset,
+    missingCwd, isModelScopeActive: modelSelectionState.isScoped, allModelList, loadAllModels, agentRunning, modelState: modelViewState, modelActions: modelViewActions, toolPreset,
     retryInfo, contextUsage, systemPrompt, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,

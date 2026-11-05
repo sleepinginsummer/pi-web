@@ -1,4 +1,4 @@
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineTool, type InlineExtension } from "@earendil-works/pi-coding-agent";
 import {
   DEFAULT_LAUNCH_CONFIG_FILE,

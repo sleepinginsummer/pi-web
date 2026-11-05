@@ -14,7 +14,7 @@ import { AppTopBar } from "./AppTopBar";
 import { TerminalPanel } from "./TerminalPanel";
 import { SubagentViewer } from "./SubagentViewer";
 import { SessionChatPanel } from "./SessionChatPanel";
-import { createSideChat } from "@/lib/side-chat-client";
+import { createSideChat, deleteSideChat } from "@/lib/side-chat-client";
 import { DevServerViewer } from "./DevServerViewer";
 import { agentOverlayTabId, serverOverlayTabId, type OverlayTab } from "./overlay-tabs";
 import { newTerminalTab, restoreTerminalTabs, TERMINAL_TABS_KEY, type TerminalTab } from "./terminal-tab-state";
@@ -110,6 +110,8 @@ export function AppShell() {
   const [terminalsRestored, setTerminalsRestored] = useState(false);
   // 子代理与开发服务器预览标签与文件、终端标签并列；激活时覆盖文件标签，切换项目时随旧项目一起丢弃。
   const [overlayTabs, setOverlayTabs] = useState<OverlayTab[]>([]);
+  // The plain Settings button opens a phone's Settings on its list of sections; shortcuts open theirs.
+  const [settingsOpenAtHome, setSettingsOpenAtHome] = useState(false);
   // `/side <prompt>`: the text that seeds the side chat's composer, until its panel consumes it.
   const [sideChatPrompts, setSideChatPrompts] = useState<Record<string, string>>({});
   // Sessions that finished while the tab was out of sight (#1484): the favicon keeps their
@@ -502,6 +504,7 @@ export function AppShell() {
 
   // The composer opens Settings too: a bare /mcp opens Settings › MCP (useAgentSession).
   const openSettingsSection = useCallback((section: SettingsSection) => {
+    setSettingsOpenAtHome(false);
     setSettingsSection(section);
   }, []);
 
@@ -837,6 +840,22 @@ export function AppShell() {
     else if (nextAgentId) openFilePanel();
   }, [activatePanelTab, activeOverlayTabId, activeTerminalTabId, overlayTabs, clearFileTabs, openFilePanel, terminalTabs]);
 
+  // The Agents switcher's Delete on a side chat: its tab goes with it, and the
+  // main chat showing it goes back to the parent, as the Main agent row does
+  // (`handleSessionDeleted` would leave the family for a fresh composer).
+  const handleDeleteSideChat = useCallback(async (sessionId: string, root: SessionInfo): Promise<string | null> => {
+    const result = await deleteSideChat(sessionId);
+    if (result) return result.error;
+    handleClosePanelTab(agentOverlayTabId(sessionId));
+    if (selectedSession?.id === sessionId) {
+      handleSelectSession(root);
+      setRefreshKey((key) => key + 1);
+    } else {
+      handleSessionDeleted(sessionId);
+    }
+    return null;
+  }, [handleClosePanelTab, handleSelectSession, handleSessionDeleted, selectedSession?.id]);
+
   // One session, one chat: opening a subagent or side chat in the main chat closes its tab.
   const selectedSessionId = selectedSession?.id;
   useEffect(() => {
@@ -935,7 +954,7 @@ export function AppShell() {
             <button
               key={section}
               type="button"
-              onClick={() => setSettingsSection(section)}
+              onClick={() => openSettingsSection(section)}
               disabled={disabled}
               title={disabled ? translate("settings.projectRequired") : label}
               aria-label={label}
@@ -956,7 +975,10 @@ export function AppShell() {
         })}
         <button
           type="button"
-          onClick={() => setSettingsSection(getLastSettingsSection(projectTrustCwd))}
+          onClick={() => {
+            setSettingsOpenAtHome(true);
+            setSettingsSection(getLastSettingsSection(projectTrustCwd));
+          }}
           title={translate("common.settings")}
           aria-label={translate("common.settings")}
           style={{
@@ -1175,6 +1197,7 @@ export function AppShell() {
             onToggleSubagentTab={handleToggleSubagentTab}
             openSubagentTabIds={openSubagentTabIds}
             onNewSideChat={() => activeSessionFamily ? handleNewSideChat(activeSessionFamily.root.id) : Promise.resolve(null)}
+            onDeleteSideChat={(sessionId) => activeSessionFamily ? handleDeleteSideChat(sessionId, activeSessionFamily.root) : Promise.resolve(null)}
             position={topPanelPos}
             runningSessionIds={runningSessionIds}
             selectedSessionId={selectedSession?.id ?? null}
@@ -1467,6 +1490,7 @@ export function AppShell() {
         cwd={projectTrustCwd}
         sessionId={selectedSession?.id ?? null}
         initialSection={settingsSection}
+        openAtHome={settingsOpenAtHome}
         quoteSelectionEnabled={quoteSelectionEnabled}
         onQuoteSelectionChange={handleQuoteSelectionChange}
         onClose={() => {

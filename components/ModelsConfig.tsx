@@ -51,6 +51,7 @@ import {
   ConfigSidebarList,
   ConfigSidebarText,
   ConfigSplitView,
+  useConfigDetailNavigation,
 } from "./SettingsUi";
 import {
   EnabledModelsBanner,
@@ -1913,6 +1914,7 @@ export function ModelsConfig({ onClose, onModelsChanged, embedded = false, cwd =
   cwd?: string | null;
 }) {
   const { t } = useI18n();
+  const { openDetail, closeDetail } = useConfigDetailNavigation();
   // `enabledModels` lives in pi's settings, not models.json, so these switches
   // apply immediately instead of waiting for this panel's Save button.
   const enabledModels = useEnabledModels(cwd);
@@ -2059,7 +2061,9 @@ export function ModelsConfig({ onClose, onModelsChanged, embedded = false, cwd =
     setProviderNameDraft((prev) => prev?.provider === name ? null : prev);
     setConfig(next);
     setSelection(remaining.length > 0 ? { type: "provider", name: remaining[0] } : null);
-  }, [config]);
+    // A phone goes back to the list the provider left, not to another provider's detail.
+    closeDetail();
+  }, [config, closeDetail]);
 
   const addModel = useCallback((providerName: string) => {
     trackAddedModels(savedModelIdsRef.current, providerName, 1);
@@ -2114,7 +2118,8 @@ export function ModelsConfig({ onClose, onModelsChanged, embedded = false, cwd =
       return { ...prev, providers: { ...(prev.providers ?? {}), [providerName]: { ...provider, models: models.length ? models : undefined } } };
     });
     setSelection({ type: "provider", name: providerName });
-  }, []);
+    closeDetail();
+  }, [closeDetail]);
 
   const handleSave = useCallback(async () => {
     if (loadError) return;
@@ -2338,7 +2343,8 @@ export function ModelsConfig({ onClose, onModelsChanged, embedded = false, cwd =
             </ConfigSidebarList>
 
             {/* Add provider */}
-            <ConfigListAction onClick={() => setPickerOpen(true)}>{t("i18n.addProvider")}</ConfigListAction>
+            {/* The picker chooses first; its choice opens the detail on a phone. */}
+            <ConfigListAction onClick={(event) => { event.preventDefault(); setPickerOpen(true); }}>{t("i18n.addProvider")}</ConfigListAction>
           </ConfigSidebar>
 
           {/* Right: detail */}
@@ -2380,9 +2386,9 @@ export function ModelsConfig({ onClose, onModelsChanged, embedded = false, cwd =
       <AddProviderPicker
         oauthProviders={oauthProviders}
         apiKeyProviders={apiKeyProviders}
-        onSelectOAuth={(id) => setSelection({ type: "oauth", providerId: id })}
-        onSelectApiKey={(id) => setSelection({ type: "apikey", providerId: id })}
-        onAddCustom={addCustomProvider}
+        onSelectOAuth={(id) => { setSelection({ type: "oauth", providerId: id }); openDetail(); }}
+        onSelectApiKey={(id) => { setSelection({ type: "apikey", providerId: id }); openDetail(); }}
+        onAddCustom={() => { addCustomProvider(); openDetail(); }}
         onClose={() => setPickerOpen(false)}
       />
     )}

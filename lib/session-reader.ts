@@ -18,7 +18,7 @@ import { skillExpansionToCommand } from "./slash-display";
 import { MAX_TOOL_RESULT_IMAGE_BYTES, TOOL_RESULT_IMAGE_MIMES } from "./tool-result-images";
 import { resolveProject, type ProjectInfo } from "./worktree";
 import { readSubagentRun, SUBAGENT_META_TYPE } from "./subagents";
-import { checkSessionMembership, listSessionsIncremental, type ScannedSessionInfo } from "./session-list-scanner";
+import { checkSessionMembership, listSessionsIncremental, scanSessionFileInfo, type ScannedSessionInfo } from "./session-list-scanner";
 import { readSideRelation } from "./side-session";
 
 export { getAgentDir };
@@ -296,6 +296,12 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
  * header/stat metadata; a normal listAllSessions() call hydrates the exact
  * counts, names, and first messages afterwards.
  */
+/** One session's catalogue row, read from its file: as GET /api/sessions will list it. */
+export async function readSessionInfo(filePath: string): Promise<SessionInfo | null> {
+  const scanned = await scanSessionFileInfo(filePath);
+  return scanned ? (await buildSessionList([scanned]))[0] ?? null : null;
+}
+
 export async function listSessionSummaries(): Promise<SessionInfo[]> {
   return buildSessionList(await listSessionsIncremental({ deferDetails: true }));
 }

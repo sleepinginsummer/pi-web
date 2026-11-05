@@ -23,6 +23,8 @@ export type ModelsDataDiagnostic =
   | { code: "unknown-pin"; modelKey: string; level: string };
 /** GET /api/models、缓存和客户端共同使用的模型契约。 */
 export interface ModelsData {
+  /** True when enabledModels is active and restricting the model list. */
+  isScoped?: boolean;
   models: Record<string, string>;
   modelList: ModelEntry[];
   defaultModel: SelectedModel | null;

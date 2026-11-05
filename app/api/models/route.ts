@@ -26,6 +26,7 @@ async function loadModels(
   cwd: string,
   modelsConfig: Record<string, unknown>,
   fastModels: ReadonlySet<string>,
+  scopeAll = false,
 ): Promise<ModelsData> {
   const nameMap = new Map<string, string>();
   let modelList: ModelEntry[] = [];
@@ -51,7 +52,7 @@ async function loadModels(
   const scope = restrictVisibleModelsToConfiguredCatalog(
     await resolveVisibleModels(
       withDeferredProviderModels(services.modelRuntime),
-      settings.getEnabledModels(),
+      scopeAll ? undefined : settings.getEnabledModels(),
     ),
     modelsConfig,
   );
@@ -98,14 +99,15 @@ async function loadModels(
       thinkingLevelMaps,
       thinkingLevelPins,
       ...(warnings.length > 0 ? { modelScopeWarnings: warnings } : {}),
+      isScoped: scopeAll ? false : scope.scopedModels.length > 0,
     },
     modelError,
   );
 }
 
-async function loadModelsConsistently(cwd: string): Promise<ModelsData> {
+async function loadModelsConsistently(cwd: string, scopeAll = false): Promise<ModelsData> {
   const before = await readModelsConfigSnapshot();
-  const result = await loadModels(cwd, before.modelsConfig, before.fastModels);
+  const result = await loadModels(cwd, before.modelsConfig, before.fastModels, scopeAll);
   const after = await readModelsConfigSnapshot();
   if (before.generation === after.generation) return result;
   throw new Error("模型配置在目录加载期间发生变化，请重试");
@@ -120,10 +122,13 @@ const EMPTY_MODELS: ModelsData = {
   thinkingLevels: {},
   thinkingLevelMaps: {},
   thinkingLevelPins: {},
+  isScoped: false,
 };
 
 export async function GET(req: Request) {
-  const requestedCwd = resolve(new URL(req.url).searchParams.get("cwd") || process.cwd());
+  const url = new URL(req.url);
+  const requestedCwd = resolve(url.searchParams.get("cwd") || process.cwd());
+  const scopeAll = url.searchParams.get("scope") === "all";
   // A subagent run isolated in a worktree has that worktree removed when the run
   // finishes, yet its session file still records the worktree as its cwd. Fall back
   // to the main repo it branched from, so opening a finished subagent resolves the
@@ -150,7 +155,8 @@ export async function GET(req: Request) {
   }
 
   try {
-    return Response.json(await loadModelsWithCache(cwd, () => loadModelsConsistently(cwd)));
+    const cacheKey = scopeAll ? `${cwd}#all` : cwd;
+    return Response.json(await loadModelsWithCache(cacheKey, () => loadModelsConsistently(cwd, scopeAll)));
   } catch {
     return Response.json(withSafeModelLoadFailure(EMPTY_MODELS));
   }

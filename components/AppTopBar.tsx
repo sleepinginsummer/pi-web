@@ -11,7 +11,8 @@ import { BranchNavigator, hasSessionBranches } from "./BranchNavigator";
 import { ShadowSessionToggle } from "./ShadowSessionToggle";
 import { SessionStatsButton } from "./SessionInfoControls";
 
-const ICON_BUTTON_SIZE = 36;
+// app/globals.css: 36px, 44px on a phone or touch screen.
+const ICON_BUTTON_SIZE = "var(--top-bar-height)";
 const NOOP = () => {};
 type Translate = (key: string, params?: Record<string, string | number>) => string;
 type AutoNameStatus = { kind: "idle" | "naming" | "success" } | { kind: "error"; message: string };
@@ -87,7 +88,21 @@ function IconButton({ active = false, children, debugButton = false, label, onCl
   );
 }
 
-function SessionTopBarControls({ activePanel, hideShadow = false, hideStats = false, locale, navigation, onTogglePanel, session, translate }: Pick<AppTopBarProps, "activePanel" | "navigation" | "onTogglePanel" | "session" | "translate"> & { hideShadow?: boolean; hideStats?: boolean; locale: string }) {
+function AgentsButton({ activePanel, onTogglePanel, session, translate }: Pick<AppTopBarProps, "activePanel" | "onTogglePanel" | "session" | "translate">) {
+  if (!session.agentsBadge) return null;
+  return (
+    <IconButton
+      active={activePanel === "agents"}
+      label={session.agentsBadge.running ? translate("agentSwitcher.titleRunning", { count: session.agentsBadge.count }) : translate("agentSwitcher.title")}
+      onClick={() => onTogglePanel("agents")}
+    >
+      <Bot size={15} aria-hidden="true" />
+      {session.agentsBadge.count > 0 && <AgentsBadge badge={session.agentsBadge} />}
+    </IconButton>
+  );
+}
+
+function SessionTopBarControls({ activePanel, hideAgents = false, hideShadow = false, hideStats = false, locale, navigation, onTogglePanel, session, translate }: Pick<AppTopBarProps, "activePanel" | "navigation" | "onTogglePanel" | "session" | "translate"> & { hideAgents?: boolean; hideShadow?: boolean; hideStats?: boolean; locale: string }) {
   if (!session.show) return null;
   const hasMessages = session.hasPersistedSession && (
     (session.stats?.userMessages ?? 0) > 0
@@ -115,16 +130,7 @@ function SessionTopBarControls({ activePanel, hideShadow = false, hideStats = fa
         <button type="button" onClick={session.onAutoName} disabled={autoNameDisabled} title={autoNameLabel} aria-label={autoNameLabel} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: navigation.isMobile ? ICON_BUTTON_SIZE : undefined, height: "100%", padding: navigation.isMobile ? 0 : "0 12px", background: "none", border: 0, borderRight: "1px solid var(--border)", color: autoNameDisabled ? "var(--text-dim)" : "var(--text-muted)", cursor: autoNameDisabled ? "not-allowed" : "pointer" }}>
           {navigation.isMobile ? <Sparkles size={15} aria-hidden="true" /> : autoNameLabel}
         </button>
-        {session.agentsBadge && (
-          <IconButton
-            active={activePanel === "agents"}
-            label={session.agentsBadge.running ? translate("agentSwitcher.titleRunning", { count: session.agentsBadge.count }) : translate("agentSwitcher.title")}
-            onClick={() => onTogglePanel("agents")}
-          >
-            <Bot size={15} aria-hidden="true" />
-            <AgentsBadge badge={session.agentsBadge} />
-          </IconButton>
-        )}
+        {!hideAgents && <AgentsButton {...{ activePanel, onTogglePanel, session, translate }} />}
         {hasBranches && (
           <BranchNavigator
             tree={navigation.branchTree}
@@ -250,6 +256,8 @@ export function AppTopBar(props: AppTopBarProps) {
                         translate={translate}
                       />
                     )}
+                    {/* A narrow phone keeps Agents beside More, so its badge stays in sight. */}
+                    {session.show && <AgentsButton {...{ activePanel, onTogglePanel, session, translate }} />}
                     <IconButton label={translate("chat.moreControls")} onClick={() => setMobileToolbarMoreOpen(true)}>
                       <MoreHorizontal size={17} aria-hidden="true" />
                     </IconButton>
@@ -259,6 +267,7 @@ export function AppTopBar(props: AppTopBarProps) {
                   <div data-mobile-toolbar-actions="true" style={{ position: "absolute", inset: 0, display: "flex", alignItems: "stretch", overflowX: "auto", overflowY: "hidden", scrollbarWidth: "none", background: "var(--bg-panel)", zIndex: 1 }}>
                     <SessionTopBarControls
                       {...{ activePanel, navigation, onTogglePanel, session, translate }}
+                      hideAgents
                       hideShadow
                       hideStats
                       locale={locale}
