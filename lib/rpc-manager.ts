@@ -989,6 +989,18 @@ export class AgentSessionWrapper {
     this.emit({ type: "queue_update", ...this.mergedQueuedMessages() });
   }
 
+  /** Stop 已经生效，队列读取失败只保留队列行，不能让 Stop 本身报错。 */
+  private recallSdkQueueAfterStop(): RecalledPrompts {
+    try {
+      const recalled = recallAgentMessageQueue(this.inner);
+      this.emitQueueUpdate();
+      return recalled;
+    } catch (error) {
+      console.error("[pi-web] could not recall the queue after Stop:", error instanceof Error ? error.message : error);
+      return { steering: [], followUp: [] };
+    }
+  }
+
   private parkDuringCompaction(entry: ParkedPrompt): void {
     this.parkedDuringCompaction.push(entry);
     this.emitQueueUpdate();
@@ -1798,7 +1810,17 @@ export class AgentSessionWrapper {
           }
           this.activeAskToolStarts.clear();
           await this.withFinalRunningNotification(() => this.inner.abort());
-          return recalled.steering.length || recalled.followUp.length ? recalled : null;
+          // pi 在 Stop 后不再消费自己的队列，留着的消息既发不出去，也会随 Stop 触发的
+          // 空闲关闭丢失。等运行停下再移回，避免和 agent loop 抢同一批消息。内部中止的
+          // 调用方拿不到返回值，不能替它清空。
+          const sdkQueue: RecalledPrompts = command.keepQueue === true
+            ? { steering: [], followUp: [] }
+            : this.recallSdkQueueAfterStop();
+          const returned: RecalledPrompts = {
+            steering: [...sdkQueue.steering, ...recalled.steering],
+            followUp: [...sdkQueue.followUp, ...recalled.followUp],
+          };
+          return returned.steering.length || returned.followUp.length ? returned : null;
         } finally {
           this.aborting = false;
         }
@@ -2667,7 +2689,7 @@ export class AgentSessionWrapper {
     const abortForUiFailure = (reason: string, reject: (error: Error) => void): void => {
       reject(new Error(`Required user interaction failed: ${reason}`));
       if (required && !this.aborting) {
-        void this.send({ type: "abort" }).catch((error) => {
+        void this.send({ type: "abort", keepQueue: true }).catch((error) => {
           console.error(`[pi-web] failed to abort after ask UI failure (${reason}):`, error instanceof Error ? error.message : error);
         });
       }

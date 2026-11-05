@@ -219,6 +219,7 @@ Active `ask_user_question` tool starts are retained by `AgentSessionWrapper` for
 ### 排队消息附件与移回
 - `lib/queued-messages.ts` 是队列 SSE、运行状态和 `clear_queue` 的统一契约，每条消息包含文字和完整 base64 图片；输入框显示图片数量，移回时同时恢复文字、图片及已有草稿。
 - `lib/agent-message-queue.ts` 将 Pi agent-core（1.0.0–1.2.0 的 `agent.js` 逐字一致）的内部 `steeringQueue.messages` / `followUpQueue.messages` 只读依赖隔离在单一边界，结构不兼容时在清空前报错。SDK 的纯文本 getter 和单批 `peekQueuedMessages()` 不能用于移回；以真实队列为准，避免重复移回已 drain 的消息。升级 SDK 必须复核此适配器并运行其集成测试。
+- Stop 后 SDK 不再消费自己的队列（`_agentRunAbortRequested` 跳过 post-run 的 `agent.continue()`），而 Stop 又会触发空闲关闭，留在队列里的消息会一直卡着，最终丢失。`abort` 命令等运行停下后把 SDK 队列连同压缩期间暂存的提示一起返回，由 `useAgentSession` 放回输入框，与 TUI 一致。`abortForUiFailure` 这类内部中止拿不到返回值，必须带 `keepQueue: true`。
 - SDK 在真实入队之前广播 `queue_update`，wrapper 延迟到 microtask 读取完整队列；用户 `message_start` 也同步实际队列，覆盖纯图片消息无法被 SDK 文字匹配移除的情况。
 
 ### Compaction SSE events

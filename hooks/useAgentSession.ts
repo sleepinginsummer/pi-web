@@ -2637,12 +2637,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [addNotice, ensureNewSession, loadSession, opts.chatInputRef, promoteNewSession]);
   executeBashRef.current = executeBash;
 
-  /** Stop 交还的停在压缩之后的消息（含附件）回到输入框。 */
-  const restoreRecalledPrompts = useCallback((recalled: QueuedMessages | null | undefined) => {
+  /** Stop 交还的排队消息（含附件）回到输入框；请求期间切走会话时只恢复到原会话草稿。 */
+  const restoreRecalledPrompts = useCallback((sid: string, recalled: QueuedMessages | null | undefined) => {
     if (!recalled) return;
     const draft = queuedMessagesToDraft(recalled);
-    if (draft.value || draft.images.length > 0) opts.chatInputRef?.current?.prependDraft(draft);
-  }, [opts.chatInputRef]);
+    const hasDraft = draft.value.length > 0 || draft.images.length > 0;
+    if (!isNavigationActive(navigationKey) || sessionIdRef.current !== sid || !opts.chatInputRef?.current) {
+      if (hasDraft) setDraft(sid, prependChatDraft(draft, getDraft(sid) ?? { value: "", images: [] }));
+      return;
+    }
+    // 无 SSE 的会话也立即清除队列显示。
+    setQueuedMessages({ steering: [], followUp: [] });
+    if (hasDraft) opts.chatInputRef.current.prependDraft(draft);
+  }, [opts.chatInputRef, isNavigationActive, navigationKey]);
 
   const handleAbort = useCallback(async () => {
     const sid = sessionIdRef.current;
@@ -2661,13 +2668,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     clearAskQuestionnaire();
     markManualStopNotificationSuppressed(sid);
     try {
-      // Prompts parked behind a compaction come back for the composer, as Recall's do.
-      restoreRecalledPrompts(await sendAgentCommand<QueuedMessages | null>(sid, { type: "abort" }));
+      // Queued prompts come back for the composer, as Recall's do.
+      restoreRecalledPrompts(sid, await sendAgentCommand<QueuedMessages | null>(sid, { type: "abort" }));
     } catch (e) {
       clearManualStopNotificationSuppression(sid);
       console.error("Failed to abort:", e);
     }
-  }, [clearAskQuestionnaire]);
+  }, [clearAskQuestionnaire, restoreRecalledPrompts]);
 
   const handleFork = useCallback(async (entryId: string, draft?: ChatDraft) => {
     if (bashRunningRef.current) return;
