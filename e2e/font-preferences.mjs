@@ -6,10 +6,16 @@ export async function checkFontPreferences(page) {
   const mono = page.getByRole("textbox", { name: "Monospace font", exact: true });
   const uiWeight = page.getByRole("slider", { name: "Interface font weight", exact: true });
   const monoWeight = page.getByRole("slider", { name: "Monospace font weight", exact: true });
-  const weight = (selector) => page.locator(selector).first().evaluate((el) => getComputedStyle(el).fontWeight);
+  // 代码块空闲时才换成高亮版本，<code> 会被替换。先拿元素再读样式可能读到已脱离文档的
+  // 旧元素，得到空字符串，所以定位和读取要在同一个任务里完成。
+  const computedStyle = async (selector, property) => {
+    await page.locator(selector).first().waitFor({ state: "attached" });
+    return page.evaluate(([target, name]) => getComputedStyle(document.querySelector(target))[name], [selector, property]);
+  };
+  const weight = (selector) => computedStyle(selector, "fontWeight");
   const resetUi = page.getByRole("button", { name: "Reset interface font", exact: true });
   const resetMono = page.getByRole("button", { name: "Reset monospace font", exact: true });
-  const font = (selector) => page.locator(selector).first().evaluate((el) => getComputedStyle(el).fontFamily);
+  const font = (selector) => computedStyle(selector, "fontFamily");
   const openSettings = async () => {
     const sidebar = page.getByRole("button", { name: "Show sidebar", exact: true });
     if (await sidebar.isVisible()) await sidebar.click();
