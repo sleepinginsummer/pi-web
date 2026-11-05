@@ -411,6 +411,7 @@ export function AppShell() {
     selectSession: handleSelectSession,
     selectedSession,
     sessionCreated: handleSessionCreated,
+    sessionCreatedInBackground: handleSessionCreatedInBackground,
     sessionDeleted: handleSessionDeleted,
     sessionForked: handleSessionForked,
     sessionKey,
@@ -473,7 +474,7 @@ export function AppShell() {
   const handleSearchTargetHandled = useCallback((target: { sessionId: string; entryId: string }) => {
     setSearchTarget((current) => current?.sessionId === target.sessionId && current.entryId === target.entryId ? null : current);
   }, []);
-  const { runningSessionIds, awaitingInputSessionIds, subagentsActiveSessionIds, sessionListVersion } = useRunningSessions();
+  const { runningSessionIds, awaitingInputSessionIds, startingSessions, subagentsActiveSessionIds, sessionListVersion } = useRunningSessions();
   const runningSessionTransitions = useRunningSessionTransitions(runningSessionIds, selectedSession?.id ?? null, subagentsActiveSessionIds);
   // The debug panel's reader of the chat's own state: kept in a ref, so registering renders
   // nothing, and read only by the open panel (DebugPanel), never on AppShell's renders.
@@ -990,6 +991,7 @@ export function AppShell() {
         onSessionDeleted={handleSessionDeleted}
         runningSessionIds={runningSessionIds}
         awaitingInputSessionIds={awaitingInputSessionIds}
+        startingSessions={startingSessions}
         runningSessionTransitions={runningSessionTransitions}
         locateSessionRequest={notificationSessionLocateRequest}
         selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? null}
@@ -1308,6 +1310,7 @@ export function AppShell() {
               onNewSessionCwdChange={updateDraftCwd}
               onAgentEnd={handleAgentEnd}
               onSessionCreated={handleSessionCreated}
+              onSessionCreatedInBackground={handleSessionCreatedInBackground}
               onSessionListRefresh={requestAgentSessionListRefresh}
               onSessionForked={handleSessionForked}
               onSideSession={handleSideSession}

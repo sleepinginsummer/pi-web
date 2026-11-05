@@ -77,6 +77,7 @@ interface Props {
   notificationController: CompletionNotificationController;
   onAgentEnd?: () => void;
   onSessionCreated?: (session: SessionInfo) => void;
+  onSessionCreatedInBackground?: (session: SessionInfo) => void;
   onSessionListRefresh?: (request: SessionListRefreshRequest) => void;
   onSessionForked?: (newSessionId: string) => void;
   /** A subagent's or side chat's tab beside the main chat: the page's global shortcuts stay with the main chat. */
@@ -303,7 +304,7 @@ function LiveProcessDetailsGroup({ hiddenCount, renderAll, renderRecent, t }: { 
   );
 }
 
-export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSession, onDebugSnapshotReaderChange, navigationKey, isNavigationActive, session, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, newSessionCwd, newSessionWorktrees, pendingNewSessionControl, onPendingNewSessionEvent, notificationController, onAgentEnd, onSessionCreated, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onShadowMindControlChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenSettings, onContextUsageChange, onOpenFile, onFilesUploaded, onOpenSubagent, onOpenServerPreview, onToolEnd, onNewSessionCwdChange, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed }: Props) {
+export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSession, onDebugSnapshotReaderChange, navigationKey, isNavigationActive, session, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, newSessionCwd, newSessionWorktrees, pendingNewSessionControl, onPendingNewSessionEvent, notificationController, onAgentEnd, onSessionCreated, onSessionCreatedInBackground, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onShadowMindControlChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenSettings, onContextUsageChange, onOpenFile, onFilesUploaded, onOpenSubagent, onOpenServerPreview, onToolEnd, onNewSessionCwdChange, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed }: Props) {
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio, holdAudio } = useAudio();
   const {
@@ -341,7 +342,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
     handleBuiltinSlashCommand,
     handleShadowMindToggle, handleToolPresetChange, loadSlashCommands,
   } = useAgentSession({
-    navigationKey, isNavigationActive, session, newSessionCwd, pendingNewSessionControl, onPendingNewSessionEvent, onSessionCreated, onSessionListRefresh, onSessionForked, onToolEnd,
+    navigationKey, isNavigationActive, session, newSessionCwd, pendingNewSessionControl, onPendingNewSessionEvent, onSessionCreated, onSessionCreatedInBackground, onSessionListRefresh, onSessionForked, onToolEnd,
     onSideSession, onDebugSnapshotReaderChange, t, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onSessionStatsPanelOpen, onOpenSettings,
   });
   const isStreaming = useStreamingSelector(streamingStore, selectIsStreaming);
@@ -384,7 +385,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
     });
   }, [controlSessionId, handleShadowMindToggle, newSessionCwd, onShadowMindControlChange, session, shadowMindAvailable, shadowMindEnabled, shadowMindTogglePending]);
   const notificationTitle = compactNotificationText(
-    session?.name || session?.firstMessage || t("i18n.newSession"),
+    session?.name || (session?.firstMessage !== "(no messages)" && session?.firstMessage) || t("i18n.newSession"),
     48,
   );
   const notificationPreview = getAssistantNotificationPreview(messages);

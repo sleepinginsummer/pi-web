@@ -70,7 +70,7 @@ async function requestNewSessionMaterialization(
         ...(request.operation === "create" ? { operationId: creationOperationId(request.cwd) } : {}),
         type: "ensure_session",
         ...(request.toolNames !== undefined ? { toolNames: request.toolNames } : {}),
-        ...(!request.shadowMindEnabled ? { shadowMindEnabled: false } : {}),
+        ...(request.shadowMindEnabled ? { shadowMindEnabled: true } : {}),
         ...(request.model ? { provider: request.model.provider, modelId: request.model.modelId } : {}),
         ...(request.thinkingLevel ? { thinkingLevel: request.thinkingLevel } : {}),
         ...(request.fastEnabled ? { fastEnabled: true } : {}),
@@ -103,6 +103,50 @@ function requestOnce(
     if (materializations.get(key) === promise) materializations.delete(key);
   });
   return promise;
+}
+
+/** 只创建 runtime 并交付身份；与其他挂载方共用同一个创建请求。 */
+export async function createNewSessionRuntime(config: NewSessionMaterializationConfig): Promise<string> {
+  const created = await requestOnce({ ...config, operation: "create" });
+  if (created.kind === "runtime-created" || created.success) return created.sessionId;
+  throw new Error(created.error);
+}
+
+/**
+ * 把首条消息交给服务端。服务端按 runtime 去重，所以网络失败时重试一次不会重复发送。
+ * 这个请求不依赖调用它的组件，切换页面后照常完成。
+ */
+export async function submitNewSessionFirstPrompt(request: Pick<NewSessionMaterializationConfig, "cwd" | "shadowMindEnabled"> & {
+  sessionId: string;
+  message: string;
+  images?: Array<{ type: "image"; data: string; mimeType: string }>;
+}): Promise<void> {
+  const submit = async () => {
+    const response = await fetch("/api/agent/new", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: AbortSignal.timeout(NEW_SESSION_REQUEST_TIMEOUT_MS),
+      body: JSON.stringify({
+        cwd: request.cwd,
+        operation: "submit-first-prompt",
+        type: "submit_first_prompt",
+        sessionId: request.sessionId,
+        message: request.message,
+        ...(request.images?.length ? { images: request.images } : {}),
+        ...(request.shadowMindEnabled ? { shadowMindEnabled: true } : {}),
+      }),
+    });
+    const payload = await response.json() as { kind?: unknown; error?: unknown };
+    if (payload.kind === "first-prompt-accepted") return;
+    // 服务端明确拒绝不必重试。
+    throw Object.assign(new Error(typeof payload.error === "string" ? payload.error : `首条消息提交失败（HTTP ${response.status}）`), { rejected: true });
+  };
+  try {
+    await submit();
+  } catch (error) {
+    if ((error as { rejected?: boolean }).rejected) throw error;
+    await submit();
+  }
 }
 
 /** 每个挂载方都先接管同一个 runtime 并连接 SSE，再复用第二阶段请求。 */

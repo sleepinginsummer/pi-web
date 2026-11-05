@@ -24,6 +24,8 @@ interface SessionItemStatus {
   isRunning?: boolean;
   /** 运行停在扩展对话框上，需要用户作答；仍属于运行中。 */
   isAwaitingInput?: boolean;
+  /** 首条消息还在等待初始化：这一行显示“创建会话中”。 */
+  startingFirstMessage?: string;
   isUnread?: boolean;
   isPinned?: boolean;
 }
@@ -232,7 +234,7 @@ function SessionRowContent({ session, view, actions }: {
   session: SessionInfo;
   view: {
     title: string;
-    status: Required<Pick<SessionItemStatus, "isSelected" | "isPinned">> & Pick<SessionItemStatus, "isRunning" | "isAwaitingInput" | "isUnread">;
+    status: Required<Pick<SessionItemStatus, "isSelected" | "isPinned">> & Pick<SessionItemStatus, "isRunning" | "isAwaitingInput" | "isUnread" | "startingFirstMessage">;
     isMobile: boolean;
     hovered: boolean;
     tree: Required<Pick<SessionItemTreeState, "depth" | "hasChildren" | "collapsed">>;
@@ -244,11 +246,14 @@ function SessionRowContent({ session, view, actions }: {
     onDelete: (event: MouseEvent<HTMLButtonElement>) => void;
   };
 }) {
-  const { title, status, isMobile, hovered, tree } = view;
-  const { isSelected, isRunning, isAwaitingInput, isUnread, isPinned } = status;
+  const { status, isMobile, hovered, tree } = view;
+  const { isSelected, isRunning, isAwaitingInput, isUnread, isPinned, startingFirstMessage } = status;
   const { depth, hasChildren, collapsed } = tree;
   const { onToggleCollapse, onTogglePinned, onRename, onDelete } = actions;
   const { t } = useI18n();
+  const title = startingFirstMessage === undefined
+    ? view.title
+    : `${t("sidebar.creatingSession")} · ${startingFirstMessage.slice(0, 50)}`;
   return (
     <>
       {depth > 0 && (
@@ -285,7 +290,7 @@ function SessionRowContent({ session, view, actions }: {
 }
 
 export function SessionItem({ session, status, mobile, actions, tree = {} }: SessionItemProps) {
-  const { isSelected, isRunning, isAwaitingInput, isUnread, isPinned = false } = status;
+  const { isSelected, isRunning, isAwaitingInput, startingFirstMessage, isUnread, isPinned = false } = status;
   const { enabled: isMobile, swipeOpen, onSwipeOpenChange } = mobile;
   const { onClick, onRenamed, onDeleted, onTogglePinned } = actions;
   const { depth = 0, hasChildren = false, collapsed = false, onToggleCollapse } = tree;
@@ -358,7 +363,7 @@ export function SessionItem({ session, status, mobile, actions, tree = {} }: Ses
             session={session}
             view={{
               title,
-              status: { isSelected, isRunning, isAwaitingInput, isUnread, isPinned },
+              status: { isSelected, isRunning, isAwaitingInput, startingFirstMessage, isUnread, isPinned },
               isMobile,
               hovered,
               tree: { depth, hasChildren, collapsed },

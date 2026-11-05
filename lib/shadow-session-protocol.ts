@@ -18,11 +18,11 @@ export function parseShadowMindToggleCommand(text: string): boolean | null {
   return match[1].toLowerCase() === "resume";
 }
 
-/** 从会话历史恢复最后一次有效开关状态；未配置时默认开启。 */
+/** 从会话历史恢复最后一次有效开关状态；未配置时默认关闭，只有显式打开才会写入开启状态。 */
 export function readSessionShadowMindEnabled(entries: readonly ShadowStateEntryLike[]): boolean {
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const enabled = readShadowMindStateEntry(entries[index]);
     if (enabled !== null) return enabled;
   }
-  return true;
+  return false;
 }

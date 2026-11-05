@@ -404,7 +404,7 @@ export async function readIndexedContextPage(
     },
     settings: { thinkingLevel: thinkingLevel ?? "off", model: model ?? null },
     // 与 wrapper 的 getEntries() 一致：开关属于整个会话，不随分支或分页回退。
-    shadowMindEnabled: index.records.findLast((record) => typeof record.shadowMindEnabled === "boolean")?.shadowMindEnabled ?? true,
+    shadowMindEnabled: index.records.findLast((record) => typeof record.shadowMindEnabled === "boolean")?.shadowMindEnabled ?? false,
     totalActiveMs: index.totalActiveMs,
     version: index.version,
   };

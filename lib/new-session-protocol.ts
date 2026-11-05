@@ -2,6 +2,9 @@ export type NewSessionModel = { provider: string; modelId: string };
 
 export type NewSessionRuntimeCreated = { kind: "runtime-created"; success: true; sessionId: string };
 
+/** 服务端已接管首条消息：等待初始化和发送都不再依赖页面。 */
+export type NewSessionFirstPromptAccepted = { kind: "first-prompt-accepted"; success: true; sessionId: string };
+
 type NewSessionMaterializationBase = {
   sessionId: string;
   model?: NewSessionModel | null;

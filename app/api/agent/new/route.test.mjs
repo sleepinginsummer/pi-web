@@ -14,9 +14,9 @@ test("auto 通过省略 thinkingLevel 字段表达", () => {
   assert.match(source, /\.\.\.\(explicitThinkingLevel \? \{ thinkingLevel: explicitThinkingLevel \} : \{\}\)/);
 });
 
-test("新会话仅在显式关闭时初始化 Shadow，失败时返回同一 runtime", () => {
-  assert.match(source, /if \(shadowMindEnabled === false\)/);
-  assert.match(source, /session\.send\(\{ type: "set_shadow_mind_enabled", enabled: false \}\)/);
+test("新会话仅在显式打开时初始化 Shadow，失败时返回同一 runtime", () => {
+  assert.match(source, /if \(shadowMindEnabled === true\)/);
+  assert.match(source, /session\.enableShadowAtStartup\(\)/);
   assert.match(source, /kind: "initialization-failed"/);
   assert.match(source, /sessionId: realSessionId/);
   assert.match(source, /satisfies NewSessionMaterializationResult/);
@@ -25,7 +25,7 @@ test("新会话仅在显式关闭时初始化 Shadow，失败时返回同一 run
   assert.match(source, /realpathSync\(wrapper\.cwd\) !== realpathSync\(cwd\)/);
   assert.match(source, /kind: "materialization-failed"/);
   assert.ok(
-    source.indexOf('type: "set_shadow_mind_enabled"') < source.indexOf("const state = await session.send"),
+    source.lastIndexOf("session.enableShadowAtStartup()") < source.indexOf("const state = await session.send"),
     "Shadow 预设必须先于首条 prompt 和状态返回生效",
   );
 });
@@ -39,7 +39,7 @@ test("ensure_session 创建阶段先返回 runtime 身份，不等待审批或 g
   assert.match(created, /sessionId: realSessionId/);
   assert.match(created, /return NextResponse\.json/);
   assert.doesNotMatch(created, /await session\.send/);
-  assert.ok(source.indexOf('kind: "runtime-created"') < source.indexOf('type: "set_shadow_mind_enabled"'));
+  assert.ok(source.indexOf('kind: "runtime-created"') < source.lastIndexOf("session.enableShadowAtStartup()"));
 });
 
 test("创建幂等：同一个 operationId 的并发与重试共享一次创建", async () => {

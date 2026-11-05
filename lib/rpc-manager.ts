@@ -447,6 +447,7 @@ export class AgentSessionWrapper {
   private extensionWidgetGenerations = new Map<string, number>();
   private extensionWidgetsResetting = false;
   private promptRunning = false;
+  private firstPromptEntry: ParkedPrompt | null = null;
   // Prompts waiting for the running compaction to finish (ParkedPrompt above).
   private parkedDuringCompaction: ParkedPrompt[] = [];
   private sessionReplacement: "fork" | "clone" | null = null;
@@ -999,6 +1000,83 @@ export class AgentSessionWrapper {
       console.error("[pi-web] could not recall the queue after Stop:", error instanceof Error ? error.message : error);
       return { steering: [], followUp: [] };
     }
+  }
+
+  /**
+   * 新会话的首条消息：扩展绑定可能要很久，等待不能押在页面请求上。这里立即写入会话文件并
+   * 返回，消息以队列行的形式由服务端持有，因此切换页面、刷新都不会丢，Stop 和移回也照常可用。
+   * 同一 wrapper 只接受一次，响应丢失后的重试不会重复发送。
+   */
+  submitFirstPrompt(input: {
+    message: string;
+    images?: ParkedPrompt["images"];
+    prepare: () => Promise<void>;
+  }): void {
+    if (this.firstPromptEntry) return;
+    this.persistPendingSession();
+    const token = this.pendingPrompts.begin();
+    let settled = false;
+    const entry: ParkedPrompt = {
+      message: input.message,
+      images: input.images,
+      // 已由 deliverFirstPrompt 负责投递，压缩结束的 flush 不能再发一次。
+      delivering: true,
+      settle: () => {
+        if (settled) return;
+        settled = true;
+        this.pendingPrompts.finish(token);
+        invalidateSessionListCache();
+        notifyRunningChange();
+        this.resetIdleTimer();
+      },
+    };
+    this.firstPromptEntry = entry;
+    this.parkDuringCompaction(entry);
+    notifyRunningChange();
+    void this.deliverFirstPrompt(entry, input.prepare);
+  }
+
+  /** 首条消息还在等初始化时的正文，侧栏据此显示“创建会话中”。 */
+  get startingFirstPrompt(): string | null {
+    const entry = this.firstPromptEntry;
+    return entry?.delivering && this.parkedDuringCompaction.includes(entry) ? entry.message : null;
+  }
+
+  private async deliverFirstPrompt(entry: ParkedPrompt, prepare: () => Promise<void>): Promise<void> {
+    const fail = (error: unknown) => {
+      // 没发出去就留作队列行，用户可以移回，绝不静默丢弃。
+      entry.delivering = false;
+      if (!this.parkedDuringCompaction.includes(entry)) this.parkedDuringCompaction.push(entry);
+      this.emitQueueUpdate();
+      entry.settle();
+      this.emit({ type: "prompt_error", errorMessage: error instanceof Error ? error.message : String(error) });
+      this.emit(this.promptDoneEvent());
+    };
+    try {
+      // 不设期限：扩展可能在等用户审批或建索引，这里没有等待中的请求。
+      await this.whenExtensionsBound();
+      await prepare();
+    } catch (error) {
+      // Stop 已经把消息交还输入框时，不再重新挂回队列。
+      if (this.parkedDuringCompaction.includes(entry)) fail(error);
+      return;
+    }
+    const index = this.parkedDuringCompaction.indexOf(entry);
+    if (index === -1 || !this._alive) return;
+    this.parkedDuringCompaction.splice(index, 1);
+    this.emitQueueUpdate();
+    try {
+      await this.send({ type: "prompt", message: entry.message, ...(entry.images?.length ? { images: entry.images } : {}) });
+      entry.settle();
+    } catch (error) {
+      fail(error);
+    }
+  }
+
+  /** 新会话显式打开 Shadow；扩展未安装时没有可开启的实例，不算初始化失败。 */
+  async enableShadowAtStartup(): Promise<void> {
+    await this.waitForExtensionsBound();
+    if (this.shadowSessionSetting.available) await this.shadowSessionSetting.setEnabled(true);
   }
 
   private parkDuringCompaction(entry: ParkedPrompt): void {
@@ -3470,6 +3548,16 @@ export function getAwaitingInputRpcSessionIds(): string[] {
     if (session.isAwaitingInput()) ids.add(session.sessionId || sessionId);
   }
   return [...ids];
+}
+
+/** 首条消息仍在等待初始化的会话，供侧栏显示“创建会话中”。 */
+export function getStartingRpcSessions(): Array<{ sessionId: string; firstMessage: string }> {
+  const sessions = new Map<string, string>();
+  for (const [sessionId, session] of getRegistry()) {
+    const firstMessage = session.startingFirstPrompt;
+    if (firstMessage !== null) sessions.set(session.sessionId || sessionId, firstMessage);
+  }
+  return [...sessions].map(([sessionId, firstMessage]) => ({ sessionId, firstMessage }));
 }
 
 /** One registered wrapper as the debug panel reads it (lib/debug-snapshot.ts). */

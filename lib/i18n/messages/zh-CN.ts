@@ -605,6 +605,7 @@ export const zhCNLocale: LocalePlugin = {
     "sidebar.loading": "加载中...",
     "sidebar.noSessions": "未找到会话",
     "sidebar.agentRunning": "Agent 运行中…",
+    "sidebar.creatingSession": "创建会话中…",
     "sidebar.awaitingInput": "Agent 正在等待你的输入",
     "sidebar.agentAwaitingInput": "Agent 等待你的输入",
     "sidebar.newActivity": "有新活动",

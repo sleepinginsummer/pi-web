@@ -603,6 +603,7 @@ export const enLocale: LocalePlugin = {
     "sidebar.loading": "Loading...",
     "sidebar.noSessions": "No sessions found",
     "sidebar.agentRunning": "Agent running…",
+    "sidebar.creatingSession": "Creating session…",
     "sidebar.awaitingInput": "Agent waiting for your input",
     "sidebar.agentAwaitingInput": "Agent waiting for your input",
     "sidebar.newActivity": "New activity",

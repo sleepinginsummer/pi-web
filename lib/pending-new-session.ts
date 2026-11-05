@@ -42,7 +42,7 @@ export type PendingNewSessionEvent =
 
 export const DEFAULT_PENDING_NEW_SESSION_CONTROL: PendingNewSessionControl = Object.freeze({
   kind: "staged",
-  // 新会话默认关闭 Shadow：只有用户显式打开才在 materialize 时省略禁用请求。
+  // 新会话默认关闭 Shadow：绑定后由 wrapper 恢复为关闭，只有用户显式打开才发送开启请求。
   shadowMindEnabled: false,
   model: null,
   thinkingLevel: "auto",

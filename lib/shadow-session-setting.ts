@@ -54,7 +54,7 @@ export class ShadowSessionSetting {
   }
 
   async setEnabled(enabled: boolean): Promise<boolean> {
-    // 关闭是新会话的默认偏好：扩展缺失时没有可暂停的实例，照常落盘，等它可用后按 entry 恢复。
+    // 关闭是默认值：扩展缺失时没有可暂停的实例，照常落盘，等它可用后按 entry 恢复。
     if (enabled && !this.available) throw new Error("当前会话未加载 Shadow Mind 扩展");
     this.desired = enabled;
     const requestRevision = this.revision + 1;

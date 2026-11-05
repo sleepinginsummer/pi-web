@@ -31,6 +31,8 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
   const selectedSessionRef = useRef(selectedSession);
   selectedSessionRef.current = selectedSession;
   const [newSessionCwd, setNewSessionCwd] = useState<string | null>(null);
+  const newSessionCwdRef = useRef(newSessionCwd);
+  newSessionCwdRef.current = newSessionCwd;
   const [pendingNewSessions, setPendingNewSessions] = useState<Map<string, PendingNewSessionControl>>(() => new Map());
   const [sessionKey, setSessionKey] = useState(0);
   const [notificationSessionLocateRequest, setNotificationSessionLocateRequest] = useState<{ sessionId: string; revision: number } | null>(null);
@@ -73,7 +75,10 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
       .then((response) => response.ok ? response.json() as Promise<{ sessions: SessionInfo[] }> : null)
       .then((data) => {
         const full = data?.sessions.find((session) => session.id === sessionId);
-        if (full) setSelectedSession((current) => current?.id === sessionId && !current.projectRoot ? full : current);
+        // 首条消息还在等初始化时文件里没有消息，保留已知的正文，通知和标题不会变成 "(no messages)"。
+        if (full) setSelectedSession((current) => current?.id === sessionId && !current.projectRoot
+          ? (full.messageCount === 0 ? { ...full, firstMessage: current.firstMessage } : full)
+          : current);
       })
       .catch(() => {});
   }, []);
@@ -151,6 +156,23 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
     hydrateSelectedSession(session.id);
     replaceSessionUrl(session.id);
   }, [hydrateSelectedSession, invalidateNotificationNavigation, invalidateWorkspaceRestore, onRefresh]);
+
+  /** 发送途中用户已切走：只收尾和刷新侧栏；如果又回到了这个目录的新会话页，才进入该会话。 */
+  const sessionCreatedInBackground = useCallback((session: SessionInfo) => {
+    releaseNewSessionMaterialization(session.cwd);
+    setPendingNewSessions((current) => {
+      if (!current.has(session.cwd)) return current;
+      const next = new Map(current);
+      next.delete(session.cwd);
+      return next;
+    });
+    onRefresh();
+    if (newSessionCwdRef.current !== session.cwd || activeSessionIdRef.current !== null) return;
+    invalidateWorkspaceRestore();
+    invalidateNotificationNavigation();
+    applySessionSelection(session);
+    hydrateSelectedSession(session.id);
+  }, [applySessionSelection, hydrateSelectedSession, invalidateNotificationNavigation, invalidateWorkspaceRestore, onRefresh]);
 
   const sessionForked = useCallback((newSessionId: string) => {
     invalidateWorkspaceRestore();
@@ -275,6 +297,7 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
     selectSession,
     selectedSession,
     sessionCreated,
+    sessionCreatedInBackground,
     sessionDeleted,
     sessionForked,
     sessionKey,

@@ -4,6 +4,7 @@ import {
   getAwaitingInputRpcSessionIds,
   getCompletionNotificationSuppressedRpcSessionIds,
   getRunningRpcSessionIds,
+  getStartingRpcSessions,
 } from "@/lib/rpc-manager";
 import { getSessionIdsWithUnsettledSubagentRuns } from "@/lib/subagent-runtime";
 
@@ -19,6 +20,7 @@ export async function GET() {
       sessionListVersion: getSessionListVersion(),
       runningSessionIds: getRunningRpcSessionIds(),
       awaitingInputSessionIds: getAwaitingInputRpcSessionIds(),
+      startingSessions: getStartingRpcSessions(),
       completionNotificationSuppressedSessionIds: getCompletionNotificationSuppressedRpcSessionIds(),
       subagentsActiveSessionIds: getSessionIdsWithUnsettledSubagentRuns(),
     },

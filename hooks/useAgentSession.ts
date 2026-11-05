@@ -21,7 +21,7 @@ import { deleteSessionViewSnapshot, getSessionViewSnapshot, setSessionViewSnapsh
 
 import { isThinkingLevel, type ThinkingLevel, type ThinkingLevelOption } from "@/lib/thinking-levels";
 import { recordThinkingLevelPreference } from "@/lib/thinking-level-preference-client";
-import { materializeNewSession, releaseNewSessionMaterialization, type NewSessionMaterializationResult } from "@/lib/new-session-materialization-client";
+import { createNewSessionRuntime, materializeNewSession, submitNewSessionFirstPrompt, releaseNewSessionMaterialization, type NewSessionMaterializationResult } from "@/lib/new-session-materialization-client";
 import { selectNewSessionRequest, selectPendingNewSession, type PendingNewSessionControl, type PendingNewSessionEvent } from "@/lib/pending-new-session";
 import { projectExtensionBinding } from "@/lib/new-session-protocol";
 import { retryModelLoad, useModelSelection } from "@/hooks/useModelSelection";
@@ -373,6 +373,8 @@ export interface UseAgentSessionOptions {
   pendingNewSessionControl: PendingNewSessionControl;
   onPendingNewSessionEvent: (cwd: string, event: PendingNewSessionEvent) => void;
   onSessionCreated?: (session: SessionInfo) => void;
+  /** 发送途中已切走：会话照常创建，但不把用户拉回来。 */
+  onSessionCreatedInBackground?: (session: SessionInfo) => void;
   // 新会话首次落盘或一轮运行结束后刷新侧栏列表。
   onSessionListRefresh?: (request: SessionListRefreshRequest) => void;
   onSessionForked?: (newSessionId: string) => void;
@@ -546,7 +548,7 @@ type SlashCommandsResponse = {
 
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
-    navigationKey, isNavigationActive, session, onSideSession, newSessionCwd, pendingNewSessionControl, onPendingNewSessionEvent, onSessionCreated, onSessionListRefresh, onSessionForked, onToolEnd,
+    navigationKey, isNavigationActive, session, onSideSession, newSessionCwd, pendingNewSessionControl, onPendingNewSessionEvent, onSessionCreated, onSessionCreatedInBackground, onSessionListRefresh, onSessionForked, onToolEnd,
     modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onSessionStatsPanelOpen, onOpenSettings,
   } = opts;
 
@@ -2503,6 +2505,57 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     let promptRequestStarted = false;
 
     try {
+      if (isNew && newSessionCwd && pendingControlKind === "staged") {
+        // 首条消息交给服务端：只有创建 runtime 这一小段依赖页面，之后切走也会照常发送。
+        const cwd = newSessionCwd;
+        const selectedModel = newSessionModelOverrideRef.current;
+        const selectedThinkingLevel = thinkingLevelOverrideRef.current ?? recommendedThinkingLevelRef.current;
+        const shadowMindEnabled = pendingSessionView.desiredShadowMindEnabled;
+        onPendingNewSessionEvent(cwd, { type: "START" });
+        // 会话文件在第一条消息发出前还没有模型记录，等待期间继续显示当前选择。
+        if (displayModel) setPendingModel(displayModel);
+        let sid: string;
+        try {
+          sid = await createNewSessionRuntime({
+            cwd,
+            toolNames: getToolNamesForPreset(toolPreset),
+            shadowMindEnabled,
+            ...(selectedModel ? { model: selectedModel } : {}),
+            ...(selectedThinkingLevel ? { thinkingLevel: selectedThinkingLevel } : {}),
+            ...(fastEnabled && displayModelFastAvailable ? { fastEnabled: true } : {}),
+          });
+        } catch (error) {
+          onPendingNewSessionEvent(cwd, { type: "REQUEST_FAIL", error: error instanceof Error ? error.message : String(error) });
+          throw error;
+        }
+        onPendingNewSessionEvent(cwd, { type: "RUNTIME_CREATED", sessionId: sid });
+        try {
+          if (isNavigationActive(navigationKey)) {
+            sessionIdRef.current = sid;
+            sentSessionId = sid;
+            await ensureEventsConnected(sid);
+          }
+          await submitNewSessionFirstPrompt({ cwd, sessionId: sid, message, images: piImages, shadowMindEnabled });
+        } catch (error) {
+          onPendingNewSessionEvent(cwd, { type: "POST_START_FAIL", sessionId: sid, error: error instanceof Error ? error.message : String(error) });
+          throw error;
+        }
+        const now = new Date().toISOString();
+        if (!isNavigationActive(navigationKey)) {
+          onSessionCreatedInBackground?.({ id: sid, path: "", cwd, created: now, modified: now, messageCount: 0, firstMessage: message });
+          return true;
+        }
+        // 消息现在是队列行，真正发出时才进入对话。
+        dropOptimisticUserMessage();
+        promoteNewSession(0, message);
+        void loadTools(sid);
+        void fetchRuntimeState(sid, new AbortController().signal).then((snapshot) => {
+          if (sessionIdRef.current === sid) applyRuntimeState(snapshot.state);
+        }).catch((error: unknown) => {
+          console.error("读取新会话 runtime 状态失败:", error);
+        });
+        return true;
+      }
       if (isNew && newSessionCwd) {
         const selectedModel = newSessionModel;
         const alreadyMaterialized = pendingControlKind === "materialized";
@@ -2607,7 +2660,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       dispatch({ type: "end" });
       return false;
     }
-  }, [addNotice, closeEvents, dispatch, editEntryId, ensureEventsConnected, ensureNewSession, enterMainRun, isNavigationActive, isNew, navigationKey, newSessionCwd, newSessionModel, pendingControlKind, promoteNewSession, reconcileAgentState, requestScrollPosition, resetStreamDeltas, session, setEdit]);
+  }, [addNotice, applyRuntimeState, closeEvents, dispatch, displayModel, displayModelFastAvailable, editEntryId, ensureEventsConnected, ensureNewSession, enterMainRun, fastEnabled, loadTools, onPendingNewSessionEvent, onSessionCreatedInBackground, pendingSessionView, toolPreset, isNavigationActive, isNew, navigationKey, newSessionCwd, newSessionModel, pendingControlKind, promoteNewSession, reconcileAgentState, requestScrollPosition, resetStreamDeltas, session, setEdit]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
     if (agentRunningRef.current || bashRunningRef.current) return;

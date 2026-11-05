@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import type { NewSessionMaterializationResult, NewSessionRuntimeCreated } from "@/lib/new-session-protocol";
+import type { NewSessionFirstPromptAccepted, NewSessionMaterializationResult, NewSessionRuntimeCreated } from "@/lib/new-session-protocol";
 import type { AgentRuntimeState } from "@/lib/agent-state";
 import { isThinkingLevel, type ThinkingLevel } from "@/lib/thinking-levels";
 import { existsSync, realpathSync } from "fs";
@@ -103,7 +103,7 @@ export async function POST(req: Request) {
 
     // Use a one-time key so startRpcSession's lock doesn't conflict with real session ids
     const { operation = "create", sessionId, operationId, provider, modelId, toolNames, thinkingLevel, fastEnabled, shadowMindEnabled, ...promptCommand } = command as { operation?: unknown; sessionId?: unknown; operationId?: unknown; provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: unknown; fastEnabled?: unknown; shadowMindEnabled?: unknown; [key: string]: unknown };
-    if (operation !== "create" && operation !== "finalize-existing") {
+    if (operation !== "create" && operation !== "finalize-existing" && operation !== "submit-first-prompt") {
       throw new Error(`Invalid new-session operation: ${String(operation)}`);
     }
     if (operation === "finalize-existing" && typeof sessionId !== "string") {
@@ -127,6 +127,30 @@ export async function POST(req: Request) {
       ...(typeof fastEnabled === "boolean" ? { fastEnabled } : {}),
     };
     const requestedSessionId = typeof sessionId === "string" ? sessionId : undefined;
+
+    // 首条消息由服务端接管：立即落盘并答复，初始化慢也不占住请求，切走页面不影响发送。
+    if (operation === "submit-first-prompt") {
+      const { message, images } = promptCommand as { message?: unknown; images?: unknown };
+      if (!requestedSessionId) throw new Error("sessionId is required for submit-first-prompt");
+      if (typeof message !== "string") throw new Error("message is required for submit-first-prompt");
+      const { session } = await resolveMaterializationSession("finalize-existing", requestedSessionId, cwd, startOptions);
+      allowFileRoot(cwd);
+      session.submitFirstPrompt({
+        message,
+        ...(Array.isArray(images) && images.length > 0
+          ? { images: images as Array<{ type: "image"; data: string; mimeType: string }> }
+          : {}),
+        prepare: async () => {
+          await session.waitForStartupModelSwitch({ retry: true });
+          if (shadowMindEnabled === true) await session.enableShadowAtStartup();
+        },
+      });
+      return NextResponse.json({
+        success: true,
+        kind: "first-prompt-accepted",
+        sessionId: requestedSessionId,
+      } satisfies NewSessionFirstPromptAccepted);
+    }
     const requestedOperationId = typeof operationId === "string" && operationId !== "" ? operationId : undefined;
 
     // 创建幂等：响应可能因超时/断连丢失，客户端用同一个 operationId 重试时必须拿回同一 runtime。
@@ -195,11 +219,12 @@ export async function POST(req: Request) {
     allowFileRoot(cwd);
     invalidateSessionListCache();
 
-    // 新会话默认关闭 Shadow，禁用请求照常下发；失败时保留并返回同一个 real session，供客户端接管重试。
+    // 会话默认关闭 Shadow，由 wrapper 绑定后恢复，这里无需等待；只有显式打开才下发。
+    // 失败时保留并返回同一个 real session，供客户端接管重试。
     let initializationError: string | undefined;
-    if (shadowMindEnabled === false) {
+    if (shadowMindEnabled === true) {
       try {
-        await session.send({ type: "set_shadow_mind_enabled", enabled: false });
+        await session.enableShadowAtStartup();
       } catch (error) {
         initializationError = error instanceof Error ? error.message : String(error);
       }
