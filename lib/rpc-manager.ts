@@ -16,7 +16,7 @@ import { cwdMissingError } from "./missing-cwd";
 import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
 import { cacheSessionPath, catalogFirstMessage, getLatestModelChange, invalidateSessionListCache, resolveSessionPath } from "./session-reader";
 import { SessionDiskInspector, type SessionDiskFreshness, type SessionSelfAuthoredRewrite } from "./session-disk-freshness";
-import { isolateToolResultPersistence } from "./session-message-persistence";
+import { isolateSessionEntryPersistence } from "./session-message-persistence";
 import { canRunWithExternalSessionChange } from "./session-write-policy";
 import { restoreShadowSessionSettingSafely, ShadowSessionSetting } from "./shadow-session-setting";
 import { parseShadowMindToggleCommand, SHADOW_MIND_SESSION_STATE } from "./shadow-session-protocol";
@@ -3778,7 +3778,7 @@ export async function startRpcSession(
     if (!cwd) throw new Error("cwd is required for a new session");
     sessionManager = SessionManager.create(cwd, undefined);
   }
-  isolateToolResultPersistence(sessionManager);
+  isolateSessionEntryPersistence(sessionManager);
   const sessionCwd = sessionManager.getCwd();
   const sessionEntries = sessionManager.getEntries() as unknown as SessionEntry[];
   const hasPersistedSubagentSnapshot = sessionFile && hasSubagentResourceSnapshot(sessionEntries);

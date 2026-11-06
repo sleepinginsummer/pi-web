@@ -208,7 +208,7 @@ The `enabledModels` setting uses pi's `--models` syntax: minimatch globs against
 - 通过存活 wrapper 写 `session_info` 之前必须先确认 `diskFreshness() === "current"`：外部手工改名会让 wrapper 内存里的名称过期，拿过期名称当基线会把用户刚写的名字覆盖掉（`lib/session-info-writer.ts` 的 `stale` 语义）。自动命名遇到 `stale` 必须放弃，显式重命名（PATCH）遇到 `stale` 退回文件级写入，让落后的 wrapper 在下次读取时被淘汰重建。热更新/升级前创建的 wrapper 没有 `AgentSessionWrapper.appendSessionInfoName`，写入边界必须退回用它的 `inner.sessionManager.appendSessionInfo()` 并失效列表缓存（两者效果相同，直接调用新方法会对旧实例抛 TypeError）。
 - 客户端侧 `session_external_write` 的重试等待只能跟随**请求自身**的 signal（`init.signal`），不能用调用方的 signal：可缓存读取由多个调用方共用一次请求，用调用方的 signal 会变成「一个调用方取消，所有人的重试一起被取消」，单个调用方的取消语义归 `waitForConsumer()`。
 - 这类冲突的 409 统一带 `code: "session_external_write"`（`lib/session-external-write.ts` 是唯一契约来源，agent 命令路由、`/context`、`/details` 和强制刷新共用）。客户端把它当可恢复状态：`lib/session-load-client.ts` 自动重试一次，仍失败则由 `useAgentSession` 保留已有消息并给提示，只有无内容可保留时才回退整窗错误页。
-- `lib/session-message-persistence.ts` 在主会话和内置子代理的 SDK 保存入口，按 JSONL 序列化规则复制最终工具结果。插件返回结果后再修改嵌套字段（例如 hashline 批次中止标记）不得污染已保存的内存历史；不能通过忽略 `details` 或放宽完整文件比较来规避 409。
+- `lib/session-message-persistence.ts` 在主会话和内置子代理的 SDK 保存入口，按 JSONL 序列化规则复制最终工具结果、扩展自定义 entry 的 `data` 和扩展消息的 `content`/`details`。插件保存后再原地修改对象（例如 hashline 批次中止标记、pi-goal 的 `goal-state` 引用活动 goal 后每轮累加用量）不得污染已保存的内存历史；不能通过忽略 `details` 或放宽完整文件比较来规避 409。
 
 ### 运行中止与扩展延迟注册的 provider（上游 v0.11.0）
 - SDK 1.1 的 `agent_settled.aborted` 由 wrapper 记入 `lastRunAborted`，`prompt_done` 在被停止时带 `aborted: true`。客户端在 `useAgentSession` 中把它写入 `RunCompletion.aborted`，`useCompletionEffects` 对被停止的运行不播放提示音、不发通知（任一客户端的 Stop/Esc 都算），与本机手动停止的通知抑制并存。fork 不使用服务端 `onAgentRunComplete` 推送。

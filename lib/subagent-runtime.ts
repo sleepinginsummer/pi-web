@@ -44,7 +44,7 @@ import { createSubagentMcpPolicyExtension } from "./mcp-read-only-policy";
 import { resolveShellTools } from "./powershell-settings";
 import { isBuiltInSubagentsEnabled, readSubagentSettings } from "./subagent-settings";
 import { SubagentQueue } from "./subagent-queue";
-import { isolateToolResultPersistence } from "./session-message-persistence";
+import { isolateSessionEntryPersistence } from "./session-message-persistence";
 import { addWorktree, removeWorktree } from "./worktree";
 import { randomUUID } from "node:crypto";
 import { existsSync, writeFileSync } from "node:fs";
@@ -562,7 +562,7 @@ export function createSubagentController(
       const sessionManager = isolatedWorktree
         ? SessionManager.create(childCwd, undefined, { parentSession: parent.sessionFile })
         : SessionManager.create(parent.cwd, undefined, { parentSession: parent.sessionFile });
-      isolateToolResultPersistence(sessionManager);
+      isolateSessionEntryPersistence(sessionManager);
       const createdAt = new Date().toISOString();
       const metadata: SubagentMetadata = {
         version: 1,
