@@ -433,6 +433,32 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
     });
   }, [quoteInputOpen, quoteSelectionEnabled]);
 
+  // 拖选常在内容列之外松手（行尾空白、滚动条、输入框），pointerup 不会落到内容列上，
+  // 所以在 document 上监听松手，只用起点判断这次选择是否属于消息区。
+  useEffect(() => {
+    if (!quoteSelectionEnabled) return;
+    let startedInMessages = false;
+    const onPointerDown = (event: PointerEvent) => {
+      startedInMessages = !!messageContentRef.current?.contains(event.target as Node);
+    };
+    const onPointerUp = () => {
+      if (!startedInMessages) return;
+      startedInMessages = false;
+      captureQuotedSelection();
+    };
+    const onPointerCancel = () => {
+      startedInMessages = false;
+    };
+    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("pointerup", onPointerUp, true);
+    document.addEventListener("pointercancel", onPointerCancel, true);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("pointerup", onPointerUp, true);
+      document.removeEventListener("pointercancel", onPointerCancel, true);
+    };
+  }, [captureQuotedSelection, quoteSelectionEnabled]);
+
   useEffect(() => {
     if (!quoteInputOpen || !quotedSelection) return;
     quoteChatInputRef.current?.insertIfEmpty(buildQuotedSelection(quotedSelection.text));
@@ -1203,7 +1229,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
           style={{ visibility: pendingScrollRestore ? "hidden" : undefined }}
         >
           <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
-            <div ref={messageContentRef} onPointerUp={captureQuotedSelection} style={{ maxWidth: "var(--chat-content-max-width, 820px)", margin: "0 auto" }}>
+            <div ref={messageContentRef} style={{ maxWidth: "var(--chat-content-max-width, 820px)", margin: "0 auto" }}>
             {(() => {
               const { toolResults, visibleRefIndexByMessage, writtenFilesByFinalAssistant } = messageRenderIndex;
               // Anchor for live-tail detection and scroll positioning: the last

@@ -6,7 +6,7 @@ test.skip("offers compact quoting controls and sends branch questions through th
   const chatSource = await readFile(new URL("./ChatWindow.tsx", import.meta.url), "utf8");
   const shellSource = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
 
-  assert.match(chatSource, /onPointerUp=\{captureQuotedSelection\}/);
+  assert.match(chatSource, /document\.addEventListener\("pointerup", onPointerUp, true\)/);
   assert.match(chatSource, /chatInputRef\?\.current\?\.insertQuote\(buildQuotedSelection/);
   assert.match(chatSource, /onAskInNewChat\([\s\S]*?sourceSessionId,[\s\S]*?quotedSelection\.sourceEntryId/);
   assert.match(shellSource, /type: "fork_branch"/);
