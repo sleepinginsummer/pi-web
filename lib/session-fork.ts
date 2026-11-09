@@ -188,14 +188,14 @@ export function createForkedSession(sourceSessionFile: string, entryId: string):
 export function createClonedSession(
   sourceSessionFile: string,
   leafId: string,
-  options: { allowWithoutAssistant?: boolean } = {},
+  options: { allowWithoutAssistant?: boolean; allowUnfinishedToolCalls?: boolean } = {},
 ): ForkedSession {
   const sourceManager = SessionManager.open(sourceSessionFile);
   const branch = sourceManager.getBranch(leafId);
   if (!options.allowWithoutAssistant && !branch.some((entry) => isMessageEntry(entry) && entry.message.role === "assistant")) {
     throw new Error("Cannot clone an empty or assistant-free session branch");
   }
-  assertCompleteToolCallHistory(getCloneValidationBranch(branch));
+  if (!options.allowUnfinishedToolCalls) assertCompleteToolCallHistory(getCloneValidationBranch(branch));
 
   const sessionDir = sourceManager.getSessionDir();
   const stagingDir = mkdtempSync(join(sessionDir, ".pi-web-clone-"));
@@ -272,7 +272,9 @@ export function createSideSession(
   }
   const sourceSessionId = manager.getSessionId();
   const toolSelection = readSessionToolSelection(manager.getEntries() as unknown as WebSessionEntry[]);
-  const copy = createClonedSession(sourcePath, leafId, { allowWithoutAssistant: true });
+  // 来源运行中，工具结果尚未写入是常态。侧聊只把继承内容当背景，不会接着执行；
+  // 缺结果的调用由 pi-ai 发送前补齐。
+  const copy = createClonedSession(sourcePath, leafId, { allowWithoutAssistant: true, allowUnfinishedToolCalls: true });
   const [header, first, ...rest] = readFileSync(copy.newSessionFile, "utf8").trimEnd().split("\n");
   const firstEntry = JSON.parse(first) as { parentId?: string | null };
   const metadata = createSideMetadataEntry(sourceSessionId, `side-${randomUUID()}`, firstEntry.parentId ?? null);
