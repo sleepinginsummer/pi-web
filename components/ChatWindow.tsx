@@ -11,6 +11,7 @@ import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
 import { collapsesProcessDetails, countToolCallBlocks, hasAssistantAnswer, getDisplayableAssistantBlocks, isHiddenCustomMessage, isMessageGroupAnchor, splitFinalAssistantBlocks } from "@/lib/message-display";
 import { EXTENSION_DIALOG_BASE_WIDTH, fitExtensionDialogWidth } from "@/lib/extension-dialog-fit";
 import { formatTurnDuration, getTurnDurationMs } from "@/lib/turn-duration";
+import { compactNotificationText, getAssistantNotificationPreview, NOTIFICATION_TITLE_CHARS } from "@/lib/notification-text";
 import { dropMentionText, splitDroppedItems, uploadFiles, type DroppedItem } from "@/lib/file-upload-client";
 import { MessageView } from "./MessageView";
 import { StreamingReply } from "./StreamingReply";
@@ -195,24 +196,6 @@ function getUserInputText(message: AgentMessage): string | null {
   return text.length > 0 ? text : null;
 }
 
-function compactNotificationText(text: string, maxLength: number): string {
-  const compact = text.replace(/\s+/g, " ").trim();
-  return compact.length > maxLength ? `${compact.slice(0, maxLength)}…` : compact;
-}
-
-function getAssistantNotificationPreview(messages: AgentMessage[]): string {
-  for (let index = messages.length - 1; index >= 0; index--) {
-    const message = messages[index];
-    if (message.role !== "assistant") continue;
-    const text = splitFinalAssistantBlocks(message as AssistantMessage).answerBlocks
-      .filter((block): block is Extract<AssistantContentBlock, { type: "text" }> => block.type === "text")
-      .map((block) => block.text)
-      .join(" ");
-    const preview = compactNotificationText(text, 80);
-    if (preview) return preview;
-  }
-  return "";
-}
 function ProcessDetailsGroup({ messageCount, toolCallCount, durationMs, cacheMisses, defaultExpanded = false, reveal = false, renderChildren, t }: { messageCount: number; toolCallCount: number; durationMs?: number; cacheMisses?: CacheMissSummary; defaultExpanded?: boolean; reveal?: boolean; renderChildren: () => ReactNode; t: (key: string, params?: Record<string, string | number>) => string }) {
   const [expanded, setExpanded] = useState(defaultExpanded);
   const contentVisible = expanded || reveal;
@@ -386,7 +369,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
   }, [controlSessionId, handleShadowMindToggle, newSessionCwd, onShadowMindControlChange, session, shadowMindAvailable, shadowMindEnabled, shadowMindTogglePending]);
   const notificationTitle = compactNotificationText(
     session?.name || (session?.firstMessage !== "(no messages)" && session?.firstMessage) || t("i18n.newSession"),
-    48,
+    NOTIFICATION_TITLE_CHARS,
   );
   const notificationPreview = getAssistantNotificationPreview(messages);
   // Subagent runs and side chats finish silently: they owe no sound or notification.

@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 import { createStreamSource } from "@/lib/sse-broker-client";
 import type { AttentionEvent } from "@/lib/attention-events";
+import { compactNotificationText } from "@/lib/notification-text";
 
 type NotifySession = (title: string, body: string, sessionId?: string | null) => Promise<void>;
 
@@ -11,11 +12,6 @@ type GlobalAttentionNotificationOptions = {
   attentionTitle: string;
   attentionBody: string;
 };
-
-function compactNotificationText(text: string, maxLength: number): string {
-  const compact = text.replace(/\s+/g, " ").trim();
-  return compact.length > maxLength ? `${compact.slice(0, maxLength)}…` : compact;
-}
 
 function getAskQuestion(args: unknown): string | undefined {
   if (!args || typeof args !== "object") return undefined;

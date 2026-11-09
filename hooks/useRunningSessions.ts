@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { noteRunningPoll } from "@/lib/page-debug";
 import { stabilizeStringSet } from "@/lib/stable-string-set";
+import type { SessionCompletionSummary } from "@/lib/session-completion-summaries";
 
 const RUNNING_SESSIONS_POLL_MS = 2500;
 
@@ -16,6 +17,9 @@ export function useRunningSessions() {
   // Sessions whose subagents can still report back with a run there: not done yet (#1434).
   const [subagentsActiveSessionIds, setSubagentsActiveSessionIds] = useState<Set<string>>(() => new Set());
   const [sessionListVersion, setSessionListVersion] = useState<number | null>(null);
+  // 放在 ref 里：只有完成通知读取，轮询不应因此重渲染。
+  const completionSummariesRef = useRef<ReadonlyMap<string, SessionCompletionSummary>>(new Map());
+  const getCompletionSummary = useCallback((sessionId: string) => completionSummariesRef.current.get(sessionId), []);
 
   const commitSnapshot = useCallback((ids: string[], awaitingIds: string[], subagentsActiveIds: string[]) => {
     setRunningSessionIds((current) => stabilizeStringSet(current, ids));
@@ -64,9 +68,12 @@ export function useRunningSessions() {
           startingSessions?: Array<{ sessionId: string; firstMessage: string }>;
           subagentsActiveSessionIds?: string[];
           sessionListVersion?: number;
+          completionSummaries?: SessionCompletionSummary[];
         };
         answeredAt = Date.now();
         if (stopped || controller !== current) return;
+        // 先于集合提交：集合变化触发的完成通知要读到同一次响应的摘要。
+        completionSummariesRef.current = new Map((data.completionSummaries ?? []).map((summary) => [summary.sessionId, summary]));
         commitSnapshot(data.runningSessionIds ?? [], data.awaitingInputSessionIds ?? [], data.subagentsActiveSessionIds ?? []);
         const starting = data.startingSessions ?? [];
         // 内容不变时保持引用稳定，轮询不重渲染整棵侧栏。
@@ -105,5 +112,5 @@ export function useRunningSessions() {
     };
   }, [commitSnapshot]);
 
-  return { runningSessionIds, awaitingInputSessionIds, startingSessions, subagentsActiveSessionIds, sessionListVersion };
+  return { runningSessionIds, awaitingInputSessionIds, startingSessions, subagentsActiveSessionIds, sessionListVersion, getCompletionSummary };
 }

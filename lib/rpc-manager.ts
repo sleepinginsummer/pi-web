@@ -36,6 +36,10 @@ import { getProjectTrustStatus, projectTrustReloadOptions } from "./project-trus
 import { persistExplicitStartupPreferences } from "./startup-preferences";
 import { hasActiveSessionLivenessProvider } from "./session-liveness";
 import { registerLiveSessionInfoWriter } from "./session-info-writer";
+import { compactNotificationText, getAssistantNotificationPreview, NOTIFICATION_TITLE_CHARS } from "./notification-text";
+import { normalizeAssistantMessage } from "./normalize";
+import type { AgentMessage } from "./types";
+import { forgetSessionCompletionSummary, recordSessionCompletionSummary } from "./session-completion-summaries";
 import { sessionPathKey } from "./session-path";
 import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
 import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./pi-types";
@@ -796,7 +800,10 @@ export class AgentSessionWrapper {
       ) {
         this.persistPendingSession();
       }
-      if (event.type === "agent_start") this.lastRunAborted = false;
+      if (event.type === "agent_start") {
+        this.lastRunAborted = false;
+        forgetSessionCompletionSummary(this.sessionId);
+      }
       if (event.type === "agent_settled") this.lastRunAborted = event.aborted === true;
       if (event.type === "agent_end") {
         invalidateSessionListCache();
@@ -805,6 +812,8 @@ export class AgentSessionWrapper {
         // SDK 的 agent_end 携带完整消息数组；缓存到 agent_settled 时做未闭合工具调用检测
         this.lastAgentEndMessages = Array.isArray(event.messages) ? (event.messages as unknown[]) : null;
         this.lastAgentEndWillRetry = event.willRetry === true;
+        // 必须先于 running 集合变化记录，轮询看到会话结束时摘要已经就绪。
+        if (!this.lastAgentEndWillRetry) this.recordCompletionSummary();
       }
       if (event.type === "agent_settled") {
         this.maybeAutoContinueUnfinishedTool();
@@ -900,6 +909,30 @@ export class AgentSessionWrapper {
     ).catch((error) => {
       console.error("[pi-web] auto-continue follow-up failed:", error instanceof Error ? error.message : String(error));
     });
+  }
+
+  /** 通知文案不能影响事件处理，失败时后台通知退回固定文案。 */
+  private recordCompletionSummary(): void {
+    try {
+      const manager = this.inner.sessionManager;
+      const firstUser = (manager.getEntries() as unknown as SessionEntry[])
+        .find((entry) => entry.type === "message" && entry.message.role === "user");
+      const content = firstUser?.type === "message" ? (firstUser.message as { content?: unknown }).content : undefined;
+      const firstUserText = typeof content === "string"
+        ? content
+        : Array.isArray(content)
+          ? content.flatMap((block: { type?: string; text?: string }) => block.type === "text" && block.text ? [block.text] : []).join(" ")
+          : "";
+      recordSessionCompletionSummary({
+        sessionId: this.sessionId,
+        title: compactNotificationText(manager.getSessionName() || firstUserText, NOTIFICATION_TITLE_CHARS),
+        preview: getAssistantNotificationPreview(
+          ((this.lastAgentEndMessages ?? []) as AgentMessage[]).map(normalizeAssistantMessage),
+        ),
+      });
+    } catch (error) {
+      console.error("[pi-web] could not record the completion summary:", error instanceof Error ? error.message : error);
+    }
   }
 
   /**
