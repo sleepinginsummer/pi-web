@@ -7,6 +7,7 @@ import { useSessionItemMutations, type SessionDeleteMode, type SessionDeleteStep
 import { useSwipeActions } from "@/hooks/useSwipeActions";
 import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
 import { isPlainActivation, sessionDeepLink } from "@/lib/session-links";
+import { DEFAULT_SESSION_PIN_COLOR, SESSION_PIN_COLOR_IDS, SESSION_PIN_COLORS, type SessionPinColor } from "@/lib/sidebar-preference-state";
 import { parseSkillMessage } from "@/lib/skill-block";
 import type { SessionInfo } from "@/lib/types";
 
@@ -28,6 +29,7 @@ interface SessionItemStatus {
   startingFirstMessage?: string;
   isUnread?: boolean;
   isPinned?: boolean;
+  pinColor?: SessionPinColor;
 }
 
 interface SessionItemMobileState {
@@ -41,6 +43,7 @@ interface SessionItemActions {
   onRenamed?: () => void;
   onDeleted?: (id: string) => void;
   onTogglePinned?: () => void;
+  onSetPinColor?: (color: SessionPinColor) => void;
 }
 
 interface SessionItemTreeState {
@@ -207,6 +210,40 @@ function SessionDeleteConfirm({ title, step, onChoose, onConfirm, onBack, onCanc
   );
 }
 
+function SessionPinColorPicker({ selected, onSelect, onClose }: {
+  selected: SessionPinColor;
+  onSelect: (color: SessionPinColor) => void;
+  onClose: () => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <div
+      role="group"
+      aria-label={t("sidebar.pinColor")}
+      data-session-pin-colors
+      onClick={(event) => event.stopPropagation()}
+      onKeyDown={(event) => { if (event.key === "Escape") onClose(); }}
+      style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 2 }}
+    >
+      {SESSION_PIN_COLOR_IDS.map((color) => (
+        <button
+          key={color}
+          type="button"
+          autoFocus={color === selected}
+          title={t(`sidebar.pinColor.${color}`)}
+          aria-label={t(`sidebar.pinColor.${color}`)}
+          aria-pressed={color === selected}
+          data-session-pin-color={color}
+          onClick={() => onSelect(color)}
+          style={{ flex: "1 1 0", minWidth: 0, maxWidth: 28, height: 32, display: "flex", alignItems: "center", justifyContent: "center", padding: 0, background: "none", border: "none", cursor: "pointer" }}
+        >
+          <span aria-hidden="true" style={{ width: 16, height: 16, borderRadius: "50%", background: SESSION_PIN_COLORS[color].background, boxShadow: color === selected ? "0 0 0 2px var(--bg), 0 0 0 3.5px var(--text-muted)" : "none" }} />
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function SessionRenameInput({ inputRef, value, onChange, onCommit, onCancel }: {
   inputRef: RefObject<HTMLInputElement | null>;
   value: string;
@@ -290,15 +327,19 @@ function SessionRowContent({ session, view, actions }: {
 }
 
 export function SessionItem({ session, status, mobile, actions, tree = {} }: SessionItemProps) {
-  const { isSelected, isRunning, isAwaitingInput, startingFirstMessage, isUnread, isPinned = false } = status;
+  const { isSelected, isRunning, isAwaitingInput, startingFirstMessage, isUnread, isPinned = false, pinColor = DEFAULT_SESSION_PIN_COLOR } = status;
   const { enabled: isMobile, swipeOpen, onSwipeOpenChange } = mobile;
-  const { onClick, onRenamed, onDeleted, onTogglePinned } = actions;
+  const { onClick, onRenamed, onDeleted, onTogglePinned, onSetPinColor } = actions;
   const { depth = 0, hasChildren = false, collapsed = false, onToggleCollapse } = tree;
   const [hovered, setHovered] = useState(false);
+  const [pinColorPickerOpen, setPinColorPickerOpen] = useState(false);
+  const pinColorStyle = SESSION_PIN_COLORS[pinColor];
   const displayFirstMessage = parseSkillMessage(session.firstMessage)?.displayText ?? session.firstMessage;
   const title = session.name || displayFirstMessage.slice(0, 50) || session.id.slice(0, 12);
+  const { t } = useI18n();
   const mutations = useSessionItemMutations({ session, title, onRenamed, onDeleted, onSwipeOpenChange });
-  const swipe = useSwipeActions({ enabled: isMobile && !mutations.renaming && !mutations.confirmDelete, open: swipeOpen, actionWidth: SESSION_SWIPE_ACTION_WIDTH, onOpenChange: onSwipeOpenChange });
+  const showPinColorPicker = pinColorPickerOpen && isPinned && !mutations.renaming && !mutations.confirmDelete;
+  const swipe = useSwipeActions({ enabled: isMobile && !mutations.renaming && !mutations.confirmDelete && !showPinColorPicker, open: swipeOpen, actionWidth: SESSION_SWIPE_ACTION_WIDTH, onOpenChange: onSwipeOpenChange });
 
   const handleContextMenu = useCallback((event: MouseEvent<HTMLDivElement>) => {
     const handled = dispatchSessionRowContextMenu({ id: session.id, path: session.path, cwd: session.cwd, name: session.name, clientX: event.clientX, clientY: event.clientY, refresh: () => onRenamed?.() });
@@ -312,14 +353,14 @@ export function SessionItem({ session, status, mobile, actions, tree = {} }: Ses
     window.open(new URL(sessionDeepLink(session.id), window.location.href).toString(), "_blank", "noopener");
   }, [session.id]);
   const handleRowClick = useCallback((event: MouseEvent<HTMLDivElement>) => {
-    if (mutations.confirmDelete || mutations.renaming || swipe.consumeClick()) return;
+    if (mutations.confirmDelete || mutations.renaming || showPinColorPicker || swipe.consumeClick()) return;
     if (!isMobile && !session.transient && !isPlainActivation(event)) {
       event.preventDefault();
       openInNewTab();
       return;
     }
     onClick();
-  }, [isMobile, mutations.confirmDelete, mutations.renaming, onClick, openInNewTab, session.transient, swipe]);
+  }, [isMobile, mutations.confirmDelete, mutations.renaming, onClick, openInNewTab, session.transient, showPinColorPicker, swipe]);
   const handleRowAuxClick = useCallback((event: MouseEvent<HTMLDivElement>) => {
     if (event.button !== 1 || isMobile || session.transient || mutations.confirmDelete || mutations.renaming) return;
     event.preventDefault();
@@ -353,11 +394,13 @@ export function SessionItem({ session, status, mobile, actions, tree = {} }: Ses
         onMouseLeave={() => { if (!isMobile) setHovered(false); }}
         style={{ width: "100%", height: ITEM_HEIGHT, boxSizing: "border-box", display: "flex", position: "relative", zIndex: 1, alignItems: "center", paddingLeft: depth > 0 ? depth * 12 + 14 : 14, paddingRight: isPinned ? 32 : 8, cursor: mutations.confirmDelete || mutations.renaming ? "default" : "pointer", background: mutations.confirmDelete ? "rgba(239,68,68,0.06)" : isSelected ? "var(--bg-selected)" : hovered ? "var(--bg-hover)" : isMobile ? "var(--bg-panel)" : "transparent", borderLeft: mutations.confirmDelete ? "2px solid #ef4444" : isSelected ? "2px solid var(--accent)" : "2px solid transparent", transform: isMobile ? `translateX(${swipe.offset}px)` : "none", transition: swipe.dragging ? "none" : "background 0.1s, transform 0.18s ease-out", touchAction: isMobile ? "pan-y" : "auto", willChange: isMobile ? "transform" : "auto", opacity: mutations.deleting ? 0.5 : 1, gap: 6, overflow: "hidden" }}
       >
-        {isPinned && <span data-session-pin-marker aria-hidden="true" style={{ position: "absolute", top: 0, right: 0, width: 24, height: 16, display: "flex", alignItems: "center", justifyContent: "center", background: "#eab308", borderBottomLeftRadius: 5, color: "#713f12", boxShadow: "0 1px 2px rgba(161,98,7,0.24)", pointerEvents: "none", zIndex: 3 }}><PinIcon size={12} strokeWidth={2.4} aria-hidden="true" style={{ transform: "rotate(45deg)" }} /></span>}
+        {isPinned && <button type="button" data-session-pin-marker title={t("sidebar.pinColor")} aria-label={t("sidebar.pinColor")} aria-expanded={showPinColorPicker} onClick={(event) => { event.stopPropagation(); setPinColorPickerOpen((open) => !open); }} style={{ position: "absolute", top: 0, right: 0, width: 24, height: 16, display: "flex", alignItems: "center", justifyContent: "center", padding: 0, border: "none", background: pinColorStyle.background, borderBottomLeftRadius: 5, color: pinColorStyle.foreground, boxShadow: "0 1px 2px rgba(0,0,0,0.24)", cursor: "pointer", zIndex: 3 }}><PinIcon size={12} strokeWidth={2.4} aria-hidden="true" style={{ transform: "rotate(45deg)" }} /></button>}
         {mutations.deleteStep ? (
           <SessionDeleteConfirm title={title} step={mutations.deleteStep} onChoose={mutations.chooseDeleteMode} onConfirm={(mode) => void mutations.performDelete(mode)} onBack={mutations.backToDeleteChoice} onCancel={mutations.cancelDelete} />
         ) : mutations.renaming ? (
           <SessionRenameInput inputRef={mutations.renameInputRef} value={mutations.renameValue} onChange={mutations.setRenameValue} onCommit={() => void mutations.commitRename()} onCancel={mutations.cancelRename} />
+        ) : showPinColorPicker ? (
+          <SessionPinColorPicker selected={pinColor} onSelect={(color) => { setPinColorPickerOpen(false); onSetPinColor?.(color); }} onClose={() => setPinColorPickerOpen(false)} />
         ) : (
           <SessionRowContent
             session={session}

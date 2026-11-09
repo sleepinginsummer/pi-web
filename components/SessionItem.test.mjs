@@ -30,9 +30,9 @@ test("does not register row-level session deletion shortcuts", () => {
 test("置顶装饰标记在桌面选中和悬浮时保持置顶显示", () => {
   assert.match(source, /paddingRight: isPinned \? 32 : 8/);
   assert.match(source, /background: mutations\.confirmDelete \? "rgba\(239,68,68,0\.06\)" : isSelected/);
-  assert.match(source, /isPinned && <span data-session-pin-marker/);
+  assert.match(source, /isPinned && <button type="button" data-session-pin-marker/);
   assert.match(source, /data-session-pin-marker[\s\S]*?zIndex: 3/);
-  assert.match(source, /background: "#eab308"[\s\S]*?borderBottomLeftRadius: 5/);
+  assert.match(source, /background: pinColorStyle\.background, borderBottomLeftRadius: 5/);
   assert.match(source, /PinIcon size=\{12\}[^>]*transform: "rotate\(45deg\)"/);
   assert.match(source, /PinIcon size=\{mobile \? 17 : 14\}/);
   assert.match(source, /aria-pressed=\{tone === "pin" \? pressed : undefined\}/);

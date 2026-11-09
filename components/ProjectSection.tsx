@@ -4,6 +4,7 @@ import { useLayoutEffect, useMemo, useRef, useState, type DragEvent, type ReactN
 import type { SessionInfo } from "@/lib/types";
 import { buildSessionTree, type SessionTreeNode } from "@/lib/session-tree";
 import { SessionItem } from "./SessionItem";
+import type { SessionPinColor } from "@/lib/sidebar-preference-state";
 
 interface ProjectSectionProps {
   project: {
@@ -155,6 +156,7 @@ export interface SessionTreeSharedProps {
   startingSessions?: ReadonlyMap<string, string>;
   unreadSessionIds: Set<string>;
   pinnedSessionIds: Set<string>;
+  sessionPinColors: ReadonlyMap<string, SessionPinColor>;
   locateSessionRequest?: { sessionId: string; revision: number } | null;
   isMobile: boolean;
   openSwipeSessionId: string | null;
@@ -163,6 +165,7 @@ export interface SessionTreeSharedProps {
   onRenamed?: () => void;
   onMoveSession: (sourceId: string, targetId: string) => void;
   onTogglePinned: (sessionId: string) => void;
+  onSetPinColor: (sessionId: string, color: SessionPinColor) => void;
   onSessionDeleted?: (id: string) => void;
 }
 
@@ -311,7 +314,7 @@ function SessionTreeRow({
   collapsed: boolean;
   onToggleCollapse: () => void;
 }) {
-  const { selectedSessionId, runningSessionIds, awaitingInputSessionIds, startingSessions, unreadSessionIds, pinnedSessionIds, isMobile, openSwipeSessionId, onOpenSwipeSessionChange, onSelectSession, onRenamed, onMoveSession, onTogglePinned, onSessionDeleted } = treeProps;
+  const { selectedSessionId, runningSessionIds, awaitingInputSessionIds, startingSessions, unreadSessionIds, pinnedSessionIds, sessionPinColors, isMobile, openSwipeSessionId, onOpenSwipeSessionChange, onSelectSession, onRenamed, onMoveSession, onTogglePinned, onSetPinColor, onSessionDeleted } = treeProps;
   const hasChildren = node.children.length > 0;
   return (
     <div
@@ -342,9 +345,10 @@ function SessionTreeRow({
           startingFirstMessage: startingSessions?.get(node.session.id),
           isUnread: unreadSessionIds.has(node.session.id),
           isPinned: pinnedSessionIds.has(node.session.id),
+          pinColor: sessionPinColors.get(node.session.id),
         }}
         mobile={{ enabled: isMobile, swipeOpen: openSwipeSessionId === node.session.id, onSwipeOpenChange: (open) => onOpenSwipeSessionChange(node.session.id, open) }}
-        actions={{ onClick: () => onSelectSession(node.session), onRenamed, onDeleted: (id) => onSessionDeleted?.(id), onTogglePinned: () => onTogglePinned(node.session.id) }}
+        actions={{ onClick: () => onSelectSession(node.session), onRenamed, onDeleted: (id) => onSessionDeleted?.(id), onTogglePinned: () => onTogglePinned(node.session.id), onSetPinColor: (color) => onSetPinColor(node.session.id, color) }}
         tree={{ depth, hasChildren, collapsed, onToggleCollapse }}
       />
     </div>

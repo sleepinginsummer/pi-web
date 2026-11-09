@@ -5,6 +5,7 @@ import {
   orderProjectsByPreference,
   reconcileSessionPreferenceOrder,
   reduceSidebarPreferences,
+  type SessionPinColor,
   type SidebarPreferenceAction,
   type SidebarPreferences,
 } from "@/lib/sidebar-preference-state";
@@ -128,6 +129,11 @@ export function useSidebarPreferences(sessions: SessionInfo[], sessionsReady: bo
     return new Set(preferences.pinnedSessionIds.filter((id) => existing.has(id)));
   }, [preferences.pinnedSessionIds, sessions]);
 
+  const sessionPinColors = useMemo(
+    () => new Map(Object.entries(preferences.sessionPinColors)),
+    [preferences.sessionPinColors],
+  );
+
   const moveSession = useCallback((source: string, target: string) => {
     enqueue({ type: "move_session", source, target, visibleIds: sessionOrder });
   }, [enqueue, sessionOrder]);
@@ -135,6 +141,10 @@ export function useSidebarPreferences(sessions: SessionInfo[], sessionsReady: bo
   const toggleSessionPinned = useCallback((sessionId: string) => {
     enqueue({ type: "set_session_pinned", sessionId, pinned: !pinnedSessionIds.has(sessionId) });
   }, [enqueue, pinnedSessionIds]);
+
+  const setSessionPinColor = useCallback((sessionId: string, color: SessionPinColor) => {
+    enqueue({ type: "set_session_pin_color", sessionId, color });
+  }, [enqueue]);
 
   const getProjectOrder = useCallback(
     (projects: string[]) => orderProjectsByPreference(projects, preferences.projectOrder),
@@ -158,9 +168,11 @@ export function useSidebarPreferences(sessions: SessionInfo[], sessionsReady: bo
   return {
     sessionOrder,
     pinnedSessionIds,
+    sessionPinColors,
     getProjectOrder,
     moveSession,
     toggleSessionPinned,
+    setSessionPinColor,
     moveProject,
     removeProjects,
   };

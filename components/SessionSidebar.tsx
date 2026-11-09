@@ -320,9 +320,11 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
   const {
     sessionOrder,
     pinnedSessionIds: pinnedIds,
+    sessionPinColors,
     getProjectOrder,
     moveSession,
     toggleSessionPinned: togglePinned,
+    setSessionPinColor,
     moveProject,
     projects: knownProjects,
     addProject,
@@ -1012,6 +1014,7 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
             startingSessions,
             unreadSessionIds,
             pinnedSessionIds: pinnedIds,
+            sessionPinColors,
             locateSessionRequest,
             isMobile,
             openSwipeSessionId,
@@ -1020,6 +1023,7 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
             onRenamed: loadSessions,
             onMoveSession: moveSession,
             onTogglePinned: togglePinned,
+            onSetPinColor: setSessionPinColor,
             onSessionDeleted: (id) => {
               onSessionDeleted?.(id);
               loadSessions();

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { isSessionPinColor } from "@/lib/sidebar-preference-state";
 import {
   readSidebarPreferences,
   SidebarPreferencesConflictError,
@@ -43,6 +44,10 @@ function parseAction(value: unknown): SidebarPreferenceAction | null {
     case "set_session_pinned":
       return validString(body.sessionId, MAX_SESSION_ID_LENGTH) && typeof body.pinned === "boolean"
         ? { type: body.type, sessionId: body.sessionId, pinned: body.pinned }
+        : null;
+    case "set_session_pin_color":
+      return validString(body.sessionId, MAX_SESSION_ID_LENGTH) && isSessionPinColor(body.color)
+        ? { type: body.type, sessionId: body.sessionId, color: body.color }
         : null;
     case "remove_projects": {
       const ids = stringArray(body.ids, MAX_PROJECT_LENGTH);
