@@ -102,7 +102,7 @@ test("AppShell only orchestrates the shared system and in-app notification contr
   assert.match(appShellSource, /useBackgroundCompletionNotifications\(/);
   assert.match(backgroundCompletionSource, /for \(const sessionId of transition\.completedInBackground\)/);
   assert.match(backgroundCompletionSource, /consumeManualStopNotificationSuppression\(sessionId\)/);
-  assert.match(backgroundCompletionSource, /notifySession\(title, body, sessionId, \{ folderName: getFolderName\(sessionId\) \}\)/);
+  assert.match(backgroundCompletionSource, /notifySession\(summary\?\.title \|\| title, summary\?\.preview \|\| body, sessionId, \{ folderName: getFolderName\(sessionId\) \}\)/);
   assert.match(appShellSource, /<FloatingSessionNotifications/);
   assert.doesNotMatch(appShellSource, /useCompletionNotification\(/);
   assert.match(sessionNotificationsSource, /useCompletionNotification\(\{/);
