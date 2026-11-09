@@ -83,6 +83,7 @@ interface SkillLike {
 }
 
 interface ResourceLoaderLike {
+  getExtensions?(): { extensions: Array<{ path?: string }> };
   getSkills(): { skills: SkillLike[] };
 }
 

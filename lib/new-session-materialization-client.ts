@@ -1,5 +1,7 @@
 "use client";
 
+import { commitStagedSystemPromptAddon } from "./system-prompt-addon-client";
+
 import {
   isNewSessionMaterializationResult,
   isNewSessionRuntimeCreated,
@@ -108,7 +110,10 @@ function requestOnce(
 /** 只创建 runtime 并交付身份；与其他挂载方共用同一个创建请求。 */
 export async function createNewSessionRuntime(config: NewSessionMaterializationConfig): Promise<string> {
   const created = await requestOnce({ ...config, operation: "create" });
-  if (created.kind === "runtime-created" || created.success) return created.sessionId;
+  if (created.kind === "runtime-created" || created.success) {
+    await commitStagedSystemPromptAddon(config.cwd, created.sessionId);
+    return created.sessionId;
+  }
   throw new Error(created.error);
 }
 

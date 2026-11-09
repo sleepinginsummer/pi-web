@@ -80,6 +80,7 @@ import { isBuiltInSubagentsEnabled } from "./subagent-settings";
 import { resolveShellTools } from "./powershell-settings";
 import { CHAT_ONLY_RESOURCE_LOADER_OPTIONS, contextFilesSystemPrompt } from "./chat-only";
 import { createExactSystemPromptExtension } from "./exact-system-prompt";
+import { isSystemPromptAddonExtension, withSessionSystemPromptAddon } from "./system-prompt-addon";
 import { createPiWebBuiltinExtensions, createSubagentCodemodeExtension, createSubagentMcpExtensions } from "./builtin-extensions";
 import type { McpHost } from "./mcp-host";
 import type { DebugMcpHost, DebugSessionLifecycle, DebugWrapperSnapshot } from "./debug-types";
@@ -1482,6 +1483,12 @@ export class AgentSessionWrapper {
     }
   }
 
+  /** 面板要与实际请求一致：扩展没加载（未安装、Chat only、子代理）时不会有追加内容。 */
+  private projectSystemPromptAddon(systemPrompt: string): string {
+    const loaded = this.inner.resourceLoader?.getExtensions?.().extensions.some(isSystemPromptAddonExtension) ?? false;
+    return loaded ? withSessionSystemPromptAddon(systemPrompt, this.inner.sessionId) : systemPrompt;
+  }
+
   private async restoreShadowSessionSetting(): Promise<void> {
     const result = await restoreShadowSessionSettingSafely(this.shadowSessionSetting);
     if (!result.ok) {
@@ -1970,7 +1977,9 @@ export class AgentSessionWrapper {
           // so a session that has not sent anything yet falls back to the session getter, which
           // renders the prompt from the current options. The getter alone would drop those
           // per-run changes again once the run ends.
-          systemPrompt: this.exactSystemPrompt?.() ?? (this.inner.agent.state?.systemPrompt || this.inner.systemPrompt || ""),
+          systemPrompt: this.projectSystemPromptAddon(
+            this.exactSystemPrompt?.() ?? (this.inner.agent.state?.systemPrompt || this.inner.systemPrompt || ""),
+          ),
           thinkingLevel: this.inner.agent.state?.thinkingLevel ?? "off",
           fastEnabled: this.fastSessionSetting.current,
           fastAvailable: this.fastSessionSetting.available,

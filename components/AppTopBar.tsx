@@ -9,6 +9,7 @@ import type { TopPanel } from "@/hooks/useTopPanel";
 import type { ShadowSessionControl } from "@/lib/shadow-session-control";
 import { BranchNavigator, hasSessionBranches } from "./BranchNavigator";
 import { ShadowSessionToggle } from "./ShadowSessionToggle";
+import { SYSTEM_PROMPT_ADDON_EDITOR_ATTR, SystemPromptAddonToggle } from "./SystemPromptAddonToggle";
 import { SessionStatsButton } from "./SessionInfoControls";
 
 // app/globals.css: 36px, 44px on a phone or touch screen.
@@ -41,6 +42,7 @@ interface AppTopBarProps {
     messageCount: number;
     onAutoName: () => void;
     onHistory: () => void;
+    onSystemPromptAddonChange?: () => void;
     shadowControl: ShadowSessionControl | null;
     show: boolean;
     stats: SessionStatsInfo | null;
@@ -159,6 +161,7 @@ function SessionTopBarControls({ activePanel, hideAgents = false, hideShadow = f
             compact={navigation.isMobile}
           />
         )}
+        <SystemPromptAddonToggle scopeKey={shadow?.scopeKey ?? null} sessionId={shadow?.sessionId ?? null} onChange={session.onSystemPromptAddonChange} compact={navigation.isMobile} />
       </div>
       <IconButton active={activePanel === "debug"} label={translate("debug.title")} onClick={() => onTogglePanel("debug")} debugButton>
         <Bug size={13} aria-hidden="true" />
@@ -190,7 +193,8 @@ export function AppTopBar(props: AppTopBarProps) {
 
     const handlePointerDown = (event: PointerEvent) => {
       const toolbar = toolbarShellRef.current;
-      if (toolbar && !event.composedPath().includes(toolbar)) setMobileToolbarMoreOpen(false);
+      const inAddonEditor = event.target instanceof Element && event.target.closest(`[${SYSTEM_PROMPT_ADDON_EDITOR_ATTR}]`);
+      if (toolbar && !inAddonEditor && !event.composedPath().includes(toolbar)) setMobileToolbarMoreOpen(false);
     };
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") setMobileToolbarMoreOpen(false);

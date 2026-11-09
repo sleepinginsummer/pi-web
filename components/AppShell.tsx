@@ -328,6 +328,15 @@ export function AppShell() {
   const toolsLoaderRef = useRef<(() => Promise<ToolEntry[]>) | null>(null);
   const toolsLoadIdRef = useRef(0);
 
+  const activeTopPanelRef = useRef(activeTopPanel);
+  activeTopPanelRef.current = activeTopPanel;
+  // 面板只在打开时加载一次；打开期间改了补充提示词要重新读取。
+  const handleSystemPromptAddonChange = useCallback(() => {
+    if (activeTopPanelRef.current !== "system") return;
+    void systemPromptLoaderRef.current?.().catch((error: unknown) => {
+      console.error("加载系统提示词失败:", error);
+    });
+  }, []);
   const handleSystemPromptLoaderChange = useCallback((loader: (() => Promise<void>) | null) => {
     systemPromptLoadIdRef.current += 1;
     systemPromptLoaderRef.current = loader;
@@ -1240,6 +1249,7 @@ export function AppShell() {
             messageCount: selectedSession?.messageCount ?? 0,
             onAutoName: () => void handleAutoName(),
             onHistory: handleViewFullHistory,
+            onSystemPromptAddonChange: handleSystemPromptAddonChange,
             shadowControl: activeShadowSessionControl,
             show: showChat,
             stats: sessionStats,
