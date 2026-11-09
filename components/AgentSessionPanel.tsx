@@ -139,6 +139,8 @@ export function statusColor(status: SubagentSessionStatus): string {
   return "var(--text-dim)";
 }
 
+const CONFIRM_BUTTON = { height: 30, padding: "0 9px", borderRadius: 6, fontSize: 12, flexShrink: 0, whiteSpace: "nowrap" } as const;
+
 function DeleteConfirm({
   label,
   deleteLabel,
@@ -163,12 +165,12 @@ function DeleteConfirm({
 
   return (
     <>
-      <span className="session-tree-confirm-text">{label}</span>
-      <button type="button" className="session-tree-confirm-delete" onClick={onConfirm}>
+      <span title={label} style={{ flex: 1, minWidth: 0, fontSize: 12, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
+      <button type="button" onClick={onConfirm} style={{ ...CONFIRM_BUTTON, display: "inline-flex", alignItems: "center", gap: 4, background: "#ef4444", border: "none", color: "#fff", fontWeight: 600 }}>
         <Trash2 size={12} aria-hidden="true" />
         {deleteLabel}
       </button>
-      <button ref={cancelRef} type="button" className="session-tree-confirm-cancel" onClick={onCancel}>
+      <button ref={cancelRef} type="button" onClick={onCancel} style={{ ...CONFIRM_BUTTON, background: "var(--bg)", border: "1px solid var(--border)", color: "var(--text-muted)", fontWeight: 500 }}>
         {cancelLabel}
       </button>
     </>
