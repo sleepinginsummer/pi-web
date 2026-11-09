@@ -880,7 +880,7 @@ export const enLocale: LocalePlugin = {
     "chat.attachImage": "Attach image",
     "chat.imageAttachmentTooLarge": "This image is {size} MB. The per-image limit is {max} MB.",
     "chat.imageAttachmentLimit": "A message can include at most {max} images.",
-    "chat.imageAttachmentReadFailed": "The image could not be read. Please try again.",
+    "chat.imageAttachmentReadFailed": "The image could not be read. Take a screenshot instead, or save it as a file and add that.",
     "chat.dismissImageAttachmentError": "Dismiss image attachment error",
     "chat.selectionActions": "Selected text actions",
     "chat.quoteSelection": "Quote",

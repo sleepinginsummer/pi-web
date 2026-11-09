@@ -28,6 +28,7 @@ import { DismissButton } from "./DismissButton";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useEnterSendMode } from "@/hooks/useEnterSendMode";
 import { useI18n } from "@/hooks/useI18n";
+import { readClipboardImageFiles } from "@/lib/clipboard-image";
 import { useOptimisticInputSubmission, type OptimisticInputSnapshot } from "@/hooks/useOptimisticInputSubmission";
 import { ModelPicker, type ModelPickerOption } from "./ModelPicker";
 import { InputControls } from "./InputControls";
@@ -692,7 +693,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     },
   }));
 
-  const processImageFiles = useCallback(async (files: File[]) => {
+  const processImageFiles = useCallback(async (files: File[], options?: { clipboardFallback?: boolean }) => {
     if (compact) return;
     const remaining = Math.max(
       0,
@@ -716,8 +717,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (!acceptedImageFiles.length) return;
     pendingImageCountRef.current += acceptedImageFiles.length;
     try {
-      const newImages = await Promise.all(
-        acceptedImageFiles.map(
+      const readImages = (imagesToRead: File[]) => Promise.all(
+        imagesToRead.map(
           (file) =>
             new Promise<AttachedImage>((resolve, reject) => {
               const reader = new FileReader();
@@ -732,6 +733,25 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             })
         )
       );
+      let newImages: AttachedImage[];
+      try {
+        newImages = await readImages(acceptedImageFiles);
+      } catch (error) {
+        if (!options?.clipboardFallback) throw error;
+        // 粘贴得到的 File 可能指向其他应用的受保护文件，改取剪贴板里的图片数据。
+        const clipboardFiles = await readClipboardImageFiles();
+        const usableFiles = clipboardFiles.filter((file) => file.size <= MAX_ATTACHED_IMAGE_BYTES);
+        if (!usableFiles.length) {
+          const oversizedFile = clipboardFiles[0];
+          if (!oversizedFile) throw error;
+          setImageAttachmentError(t("chat.imageAttachmentTooLarge", {
+            size: (oversizedFile.size / (1024 * 1024)).toFixed(1),
+            max: MAX_ATTACHED_IMAGE_BYTES / (1024 * 1024),
+          }));
+          return;
+        }
+        newImages = await readImages(usableFiles.slice(0, acceptedImageFiles.length));
+      }
       setAttachedImages((prev) => {
         const accepted = newImages.slice(0, Math.max(0, MAX_ATTACHED_IMAGES - prev.length));
         newImages.slice(accepted.length).forEach(revokeImagePreview);
@@ -1395,7 +1415,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (imageItems.length) {
       e.preventDefault();
       const files = imageItems.map((item) => item.getAsFile()).filter((f): f is File => f !== null);
-      processImageFiles(files);
+      void processImageFiles(files, { clipboardFallback: true });
       return;
     }
     const pastedText = e.clipboardData?.getData("text/plain") ?? "";

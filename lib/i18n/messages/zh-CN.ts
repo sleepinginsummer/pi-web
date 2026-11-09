@@ -883,7 +883,7 @@ export const zhCNLocale: LocalePlugin = {
     "chat.attachImage": "附加图片",
     "chat.imageAttachmentTooLarge": "图片大小为 {size} MB，超过单张 {max} MB 上限。",
     "chat.imageAttachmentLimit": "一条消息最多可附加 {max} 张图片。",
-    "chat.imageAttachmentReadFailed": "图片读取失败，请重试。",
+    "chat.imageAttachmentReadFailed": "图片读取失败，请改用截图，或保存为文件后再添加。",
     "chat.dismissImageAttachmentError": "关闭图片附件错误提示",
     "chat.selectionActions": "选中文字的操作",
     "chat.quoteSelection": "引用",
