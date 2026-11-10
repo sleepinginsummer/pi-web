@@ -1683,7 +1683,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
           widgets={displayExtensionWidgets}
           onCommand={handleSend}
           commandsDisabled={sessionBusy}
-          leading={<DevServersShelf cwd={messageCwd} onOpenPreview={onOpenServerPreview} />}
+          leading={<DevServersShelf cwd={messageCwd} sessionId={session?.id} onOpenPreview={onOpenServerPreview} />}
         />
       </div>
       </>

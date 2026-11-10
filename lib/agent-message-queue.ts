@@ -35,3 +35,29 @@ export function recallAgentMessageQueue(session: { agent: object; clearQueue(): 
   session.clearQueue();
   return queue;
 }
+
+export type QueuedCustomMessage = {
+  customType: string;
+  content: unknown;
+  display?: boolean;
+  details?: unknown;
+};
+
+/**
+ * Custom messages of the given types waiting in the SDK's queues. The recall above projects
+ * only user messages, so a wake message queued by pi-web (a scheduled task, a background
+ * command's result) would otherwise vanish with clearQueue(): it is written to the session
+ * file only when it is delivered. Read before clearing, without await in between.
+ */
+export function readQueuedCustomMessages(agent: object, customTypes: ReadonlySet<string>): QueuedCustomMessage[] {
+  const queues = agent as {
+    steeringQueue?: { messages?: AgentMessage[] };
+    followUpQueue?: { messages?: AgentMessage[] };
+  };
+  const messages = [...(queues.steeringQueue?.messages ?? []), ...(queues.followUpQueue?.messages ?? [])];
+  return messages.flatMap((message) => {
+    const custom = message as unknown as { role?: string } & QueuedCustomMessage;
+    if (custom.role !== "custom" || !customTypes.has(custom.customType)) return [];
+    return [{ customType: custom.customType, content: custom.content, display: custom.display, details: custom.details }];
+  });
+}

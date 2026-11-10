@@ -7,7 +7,8 @@ import { resolve } from "path";
 import type { AgentRuntimeSnapshot, AgentRuntimeState } from "./agent-state";
 import { isDeepStrictEqual } from "util";
 import { validateAgentImages } from "./image-attachments";
-import { readAgentMessageQueue, recallAgentMessageQueue } from "./agent-message-queue";
+import { readAgentMessageQueue, readQueuedCustomMessages, recallAgentMessageQueue, type QueuedCustomMessage } from "./agent-message-queue";
+import { WAKE_MESSAGE_TYPES } from "./wake-message-types";
 import type { QueuedMessage, QueuedMessages } from "./queued-messages";
 import { expandMultiSkillCommand } from "./multi-skill-command";
 import { invalidateModelsCache, updateCachedDefaultModel } from "./models-cache";
@@ -18,7 +19,7 @@ import { cacheSessionPath, catalogFirstMessage, getLatestModelChange, invalidate
 import { SessionDiskInspector, type SessionDiskFreshness, type SessionSelfAuthoredRewrite } from "./session-disk-freshness";
 import { isolateSessionEntryPersistence } from "./session-message-persistence";
 import { canRunWithExternalSessionChange } from "./session-write-policy";
-import { restoreShadowSessionSettingSafely, ShadowSessionSetting } from "./shadow-session-setting";
+import { isShadowMindSource, restoreShadowSessionSettingSafely, ShadowSessionSetting } from "./shadow-session-setting";
 import { parseShadowMindToggleCommand, SHADOW_MIND_SESSION_STATE } from "./shadow-session-protocol";
 import { createClonedSession, createForkedSession } from "./session-fork";
 import { generateTitleForSessionFile } from "./session-file-title";
@@ -26,6 +27,10 @@ import { findDeferredModel, findDeferredStartupModel, rememberProviderModels } f
 import { isBlockingExtensionUiRequest } from "./extension-ui-queue";
 import { createDevServerExtension } from "./dev-server-extension";
 import { isDevServersEnabled } from "./dev-server-settings";
+import { createBackgroundCommandExtension } from "./background-command-extension";
+import { isBackgroundCommandsEnabled } from "./background-command-settings";
+import { createScheduledTaskExtension } from "./scheduled-task-extension";
+import { isScheduledTasksEnabled } from "./scheduled-task-settings";
 import {
   createProjectCommandBashExtension,
   createProjectCommandBashOperations,
@@ -563,6 +568,7 @@ export class AgentSessionWrapper {
         if (!context) throw new Error("当前 Pi SDK 不支持扩展命令上下文");
         return context;
       },
+      onApplied: (enabled) => this.syncShadowMindTools(enabled),
     });
     this.fastSessionSetting = new FastSessionSetting({
       entries: sessionEntries,
@@ -1024,10 +1030,45 @@ export class AgentSessionWrapper {
     this.emit({ type: "queue_update", ...this.mergedQueuedMessages() });
   }
 
+  /**
+   * pi-web 的唤醒消息（定时任务、后台命令结果）在送达前只存在于 SDK 队列里，清空队列会让它们
+   * 永久丢失。清空前取出，清空后以不触发回合的方式追加进会话：会话文件里留下记录、聊天里可见，
+   * 下次发送时模型能在上下文里看到；Stop 的意图（不再继续运行）不受影响。
+   */
+  private takeQueuedWakeMessages(): QueuedCustomMessage[] {
+    try {
+      return readQueuedCustomMessages(this.inner.agent, WAKE_MESSAGE_TYPES);
+    } catch {
+      return [];
+    }
+  }
+
+  private keepWakeMessages(messages: QueuedCustomMessage[], reason: "stop" | "clear"): void {
+    for (const message of messages) {
+      const note = reason === "stop"
+        ? "(The user pressed Stop before this was delivered; it is kept here and no turn was started for it.)"
+        : "(The user cleared the queue before this was delivered; it is kept here and no turn was started for it.)";
+      const content = typeof message.content === "string" ? `${message.content}\n\n${note}` : message.content;
+      const details = message.details && typeof message.details === "object"
+        ? { ...(message.details as Record<string, unknown>), keptAfter: reason }
+        : { keptAfter: reason };
+      void this.inner.sendCustomMessage({
+        customType: message.customType,
+        content: content as string,
+        display: message.display ?? true,
+        details,
+      }, { triggerTurn: false }).catch((error: unknown) => {
+        console.warn("[pi-web] could not keep a wake message after the queue was cleared:", error instanceof Error ? error.message : error);
+      });
+    }
+  }
+
   /** Stop 已经生效，队列读取失败只保留队列行，不能让 Stop 本身报错。 */
   private recallSdkQueueAfterStop(): RecalledPrompts {
+    const wakes = this.takeQueuedWakeMessages();
     try {
       const recalled = recallAgentMessageQueue(this.inner);
+      this.keepWakeMessages(wakes, "stop");
       this.emitQueueUpdate();
       return recalled;
     } catch (error) {
@@ -1502,6 +1543,32 @@ export class AgentSessionWrapper {
   /** Apply a coding tool selection; `carry` defaults to the tools active now. */
   setActiveToolSelection(toolNames: string[], carry: readonly string[] = this.inner.getActiveToolNames()): void {
     this.inner.setActiveToolsByName(resolveActiveToolNames(this.inner, toolNames, carry));
+    // A selection carries the tools active before, so Shadow's tools could come back while it is off.
+    if (!this.shadowSessionSetting.current) this.syncShadowMindTools(false);
+  }
+
+  /**
+   * The top-bar Shadow switch also decides whether the model sees pi-shadow-mind's own tools
+   * (list_shadows, create_shadow, …): off removes them from the active tools, on adds them back.
+   * Nothing is persisted here; the switch's `pi-web-shadow-mind-state` entry is the state, and
+   * every path that rebuilds the active tools (start, reload, set_tools, tree navigation)
+   * applies it again.
+   */
+  private syncShadowMindTools(enabled: boolean): void {
+    // Chat only declares no tools, and a subagent's tools are fixed by its profile.
+    if (this.chatOnly) return;
+    if (readSubagentSessionResources(this.inner.sessionManager.getEntries() as unknown as SessionEntry[])) return;
+    const shadowTools = new Set(this.inner.getAllTools()
+      .filter((tool) => isShadowMindSource((tool as { sourceInfo?: { path?: string; source?: string } }).sourceInfo))
+      .map((tool) => tool.name));
+    if (shadowTools.size === 0) return;
+    const active = this.inner.getActiveToolNames();
+    if (enabled) {
+      const missing = [...shadowTools].filter((name) => !active.includes(name));
+      if (missing.length > 0) this.inner.setActiveToolsByName([...active, ...missing]);
+    } else if (active.some((name) => shadowTools.has(name))) {
+      this.inner.setActiveToolsByName(active.filter((name) => !shadowTools.has(name)));
+    }
   }
 
   /**
@@ -2132,7 +2199,9 @@ export class AgentSessionWrapper {
         // Full clear only: pi has no single-item dequeue, and clear+requeue
         // races against the agent loop pulling messages mid-flight. Prompts
         // parked during compaction come back too, as the TUI's clearAllQueues().
+        const wakes = this.takeQueuedWakeMessages();
         const cleared = recallAgentMessageQueue(this.inner);
+        this.keepWakeMessages(wakes, "clear");
         if (this.parkedDuringCompaction.length === 0) return cleared;
         const recalled = this.recallParkedPrompts();
         return {
@@ -3961,6 +4030,20 @@ export async function startRpcSession(
               createDevServerExtension({
                 cwd: sessionCwd,
                 isEnabled: () => isDevServersEnabled(),
+              }),
+              createBackgroundCommandExtension({
+                cwd: sessionCwd,
+                isEnabled: () => isBackgroundCommandsEnabled(),
+                shell: settingsManager,
+              }),
+              createScheduledTaskExtension({
+                cwd: sessionCwd,
+                isEnabled: () => isScheduledTasksEnabled(),
+                ensureScheduler: () => {
+                  void import("./scheduled-task-scheduler")
+                    .then(({ ensureScheduledTaskScheduler }) => ensureScheduledTaskScheduler())
+                    .catch(() => undefined);
+                },
               }),
               createSubagentExtension(
                 SUBAGENT_CONTROLLER.extensionRuntime,

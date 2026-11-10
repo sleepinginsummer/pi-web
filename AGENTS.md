@@ -90,6 +90,13 @@ app/api/
   servers/[id]/route.ts           POST { action: "stop" | "dismiss" }
   servers/[id]/logs/route.ts      GET recent output
   servers/settings/route.ts       GET/PUT Settings › General dev server switch
+  scheduled-tasks/route.ts        GET ?cwd= the project's scheduled tasks
+  scheduled-tasks/[id]/route.ts   POST { action: "pause" | "resume" | "run" | "delete" }
+  scheduled-tasks/settings/route.ts GET/PUT Settings › General scheduled task switch
+  background-commands/route.ts    GET ?cwd= the project's background commands
+  background-commands/[id]/route.ts POST { action: "stop" | "dismiss" }
+  background-commands/[id]/output/route.ts GET ?lines= latest output
+  background-commands/settings/route.ts GET/PUT Settings › General background command switch
   subagents/settings/route.ts     GET/PUT built-in subagent feature setting
   worktrees/route.ts              GET/POST/DELETE git worktrees
 
@@ -184,6 +191,8 @@ The last preset explicitly selected by the user is stored in browser `localStora
 
 ### Session-level Shadow Mind toggle
 The top bar Shadow switch controls only the current session. `lib/shadow-session-setting.ts` is the single source of truth: it persists `pi-web-shadow-mind-state` custom entries, restores disabled state after wrapper/runtime reload, serializes concurrent pause/resume requests with last-write-wins semantics, and treats a missing optional Shadow extension as unavailable instead of failing session startup. Both the top-bar control and Web `/shadow pause|resume` paths must use `set_shadow_mind_enabled`; never infer state from the extension status text or call the extension command through a second unpersisted path. Unsent sessions are keyed by cwd in `AppShell`; `lib/pending-new-session.ts` owns their reducer and exhaustive UI projection, while `lib/new-session-materialization-client.ts` deduplicates create/finalize requests across `ChatWindow` remounts. pi-web 的所有会话默认关闭 Shadow：没有 `pi-web-shadow-mind-state` entry 即关闭（`readSessionShadowMindEnabled` 和索引同口径），扩展绑定后由 wrapper 的 `restoreAfterRuntimeReset` 暂停，不写 entry、不发请求，也不让创建流程等待绑定。只有用户显式打开才发送开启请求（`shadowMindEnabled: true` -> `enableShadowAtStartup`），扩展缺失时跳过而不算初始化失败。这也改变了从未记录过开关的旧会话：它们同样按关闭处理。 Post-start failures retain the real session id and retry the idempotent `finalize-existing` operation only after canonical cwd/session identity validation.
+
+开关同时决定模型能否看到 pi-shadow-mind 自己的管理工具（`list_shadows`、`create_shadow`、`update_shadow`、`enable_shadow`、`disable_shadow`、`delete_shadow`、`get_shadow_config`、`update_shadow_config`）：`ShadowSessionSetting` 每次应用或恢复后调用 host 的 `onApplied`，wrapper 的 `syncShadowMindTools()` 按 `sourceInfo` 识别这些工具，关闭时从激活工具里移除，开启时加回；`setActiveToolSelection()` 在开关关闭时再过滤一次，所以 `set_tools`、reload、树导航都不会把它们带回来。工具可见性不单独持久化，以开关 entry 为准；扩展绑定前（`get_tools` 不触发绑定）仍显示为激活，任何 prompt 都会先等绑定。Chat only 与子代理不处理。
 
 历史开关通过 `/context` 的 `shadowMindEnabled` 返回；索引格式 3 保留整个文件最后一次有效开关，不能只读取当前页或当前分支。前端在 runtime 缺失或扩展初始化期间保留历史值、禁用交互，就绪的 runtime/SSE/用户操作优先于延迟历史响应；切换会话不得继承上一会话的开关。
 
@@ -314,6 +323,23 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 - `lib/dev-server-extension.ts` is a hidden inline extension registering `server_start` / `server_list` / `server_logs` / `server_stop`. The model learns the launch file from the tool description and `promptGuidelines` — no system-prompt edits. Start/stop re-check at call time that bash (or powershell) is active and the switch is on, so they add no capability beyond the shell tool.
 - The Settings › General switch is stored in `~/.pi/agent/pi-web-dev-servers.json`, defaults on, and fails closed on a damaged file. Off registers no tools (applies on reload) and does not stop running servers; the bottom-bar entry stays while the project has servers.
 - UI: `DevServersShelf` sits in `ExtensionStatusBar`'s `leading` slot, so it appears only in an open conversation, never on the new-session welcome page. It renders when the project has a server this pi-web process started (running or finished) or its launch file has errors (the trigger then carries a red dot); a launch file that is valid but never ran does not show it (declared servers are listed inside once it is shown). A bar with only that slot hides itself via `:has()` when the shelf renders nothing. Previews are `server:<id>` overlay tabs (`components/overlay-tabs.ts`) sharing the subagent tab slot; `DevServerViewer` frames the URL (host swapped to the page's host for LAN access, `allow-same-origin` dropped if it would share Pi Web's origin) or shows logs.
+
+### Scheduled tasks (wake a session later)
+- `lib/scheduled-task-extension.ts` 是隐藏内联扩展 `pi-web-scheduled-tasks`，与 dev server 扩展并列注册 `schedule_create` / `schedule_list` / `schedule_update` / `schedule_delete`。任务绑定创建它的会话 id（`ctx.sessionManager.getSessionId()`），工具只能读改本会话的任务；一次性任务用 `delay_seconds`（至少 60 秒）或 `at`，循环任务用 5 段 cron（服务器本地时区，`lib/cron-schedule.ts` 自实现，不引依赖）。
+- 存储在 `<agentDir>/pi-web-scheduled-tasks.json`（`lib/scheduled-tasks.ts`），每次修改都在 `withPrivateFileLock()` 下读改写；文件损坏时另存 `.corrupt-*` 并从空开始。触发前先“认领”：写入 lastRun 并把 cron 推到下一次（一次性任务结束），再投递，投递中崩溃不会循环重发；停机错过的多次触发合并为一次。恢复暂停的 cron 任务从当前时间算下一次，不补触发。
+- 调度器在 pi-web 进程里，不在会话里（`lib/scheduled-task-scheduler.ts`）：`instrumentation-node.ts` 启动时拉起，API 路由和扩展也会调用幂等的 `ensureScheduledTaskScheduler()`；`globalThis` 只保留一个 interval，每次模块加载替换 `tick`，HMR 后跑的是新代码。投递走共用的 `lib/session-wake.ts`（见下节）。会话不存在时任务记错误并停用；外部改写过的运行中会话不投递。
+- 投递方式 `delivery` 默认 `followUp`；只有一次性任务可以选 `steer`，cron 任务一律 followUp（避免反复打断长时间工作），任务改成 cron 时清掉已存的 steer。
+- 设置 › 常规 的开关存 `~/.pi/agent/pi-web-scheduled-task-settings.json`，默认开，文件损坏按关闭处理。关闭后调度器立即停止触发（任务保留），工具在会话重载后移除。
+- 界面：`DevServersShelf` 同时列出当前项目（按 cwd）所有会话的任务，当前会话排前并高亮，可立即运行、暂停/恢复、删除；入口在有服务器或有任务时出现。`pi-web:scheduled-task` 消息是回合锚点（`isMessageGroupAnchor`），与子代理回报一样开启新一轮显示。
+
+### 唤醒会话与后台命令
+- `lib/session-wake.ts` 是服务端唤醒会话的唯一入口（定时任务和后台命令共用）：wrapper 已回收就 `startRpcSession()` 重新打开，`waitUntilReady()` 后用 `sendCustomMessage(..., { deliverAs, triggerTurn: true })` 投递带 `display: true` 的自定义消息。`followUp` 等本轮全部做完，`steer` 在当前工具调用后插入；空闲会话两者都直接开新一轮。等回合开始最多 2 秒即视为投递成功，之后的失败走 `onLateError`。`SessionWakeError.permanent` 表示会话已不存在。
+- 排队中的唤醒消息只在送达时才写进会话文件，而 `recallAgentMessageQueue()` 只投影 user 消息。所以 Stop 和 `clear_queue` 在清空前用 `readQueuedCustomMessages()` 取出 `WAKE_MESSAGE_TYPES`（`lib/wake-message-types.ts`）的消息，清空后以 `sendCustomMessage(..., { triggerTurn: false })` 追加进会话：写入文件、聊天可见、下次发送时在上下文里，内容末尾注明未投递的原因，`details.keptAfter` 为 `"stop"` 或 `"clear"`，不会开新一轮。运行中清空时 SDK 推迟到本轮结束再追加。
+- steer 与会话结束的竞争不需要处理：每轮结束时 agent 循环先检查 steer 再检查 follow-up，末轮之后剩下的消息由 SDK 的运行后续跑消费；空闲会话收到 steer 与 follow-up 都直接开新一轮。只有 Stop 会跳过续跑，由上一条兜底。
+- 后台命令：`lib/background-command-extension.ts` 是隐藏内联扩展 `pi-web-background-commands`，注册 `bash_background` / `bash_background_output` / `bash_background_stop`，和 `server_start` 一样要求 bash（或 powershell）处于激活状态。进程由 `lib/background-commands.ts` 持有（`globalThis.__piWebBackgroundCommands`，只在内存里，pi-web 重启即停止并遗忘），通过 `createProjectCommandBashOperations()` 执行，shell、环境变量、`shellCommandPrefix` 与 bash 工具一致，停止时由 pi 的本地执行器杀进程树。
+- 退出时唤醒会话并附上退出码和最后 40 行输出；`delivery: "auto"`（默认）失败用 steer、成功用 followUp，也可显式指定。AI 自己 `bash_background_stop` 的命令不唤醒，用户在面板里停止的会以 followUp 告知。`check_in_seconds`（至少 60）在运行期间按间隔以 followUp 唤醒并附最近输出，最多 12 次，之后只在退出时唤醒。同一命令的唤醒串行，`notifyError` 记录最近一次唤醒失败并在面板中显示。
+- 扩展列表在 `startRpcSession()` 创建 wrapper 时确定，`reload` 不会加入新增的内联扩展：已打开的会话要等 wrapper 重建（新会话或空闲回收后重开）才有这些工具。
+- 设置 › 常规 的开关存 `~/.pi/agent/pi-web-background-command-settings.json`，默认开，损坏按关闭处理；关闭不影响正在运行的命令。左下角 `DevServersShelf` 第三栏列出当前项目的后台命令，可展开输出、停止和移除。
 
 ### Built-in subagents
 - The global `builtInEnabled` switch is persisted in `~/.pi/agent/agents/settings.json` and defaults to `false` when the file or field is absent. Malformed settings fail closed; atomic updates preserve unknown fields.

@@ -3,7 +3,9 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import { browserServerUrl, isDevServerActive, useDevServers } from "@/hooks/useDevServers";
-import type { DevServerSnapshot } from "@/lib/types";
+import { isScheduledTaskPending, useScheduledTasks } from "@/hooks/useScheduledTasks";
+import { useBackgroundCommandOutput, useBackgroundCommands } from "@/hooks/useBackgroundCommands";
+import type { BackgroundCommandSnapshot, DevServerSnapshot, ScheduledTask } from "@/lib/types";
 
 function hostLabel(url: string | undefined): string {
   if (!url) return "";
@@ -27,18 +29,132 @@ const iconProps = {
   "aria-hidden": true,
 };
 
+function shortTime(ms: number): string {
+  const date = new Date(ms);
+  const sameDay = date.toDateString() === new Date().toDateString();
+  return sameDay
+    ? date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
+    : date.toLocaleString(undefined, { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+function elapsed(from: number, to: number): string {
+  const seconds = Math.max(0, Math.round((to - from) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  return minutes < 60 ? `${minutes}m${String(seconds % 60).padStart(2, "0")}s` : `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, "0")}m`;
+}
+
+/** The current time, ticking every second while `enabled`. */
+function useNow(enabled: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!enabled) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [enabled]);
+  return now;
+}
+
+function BackgroundCommandRow({
+  command,
+  own,
+  busy,
+  onStop,
+  onDismiss,
+}: {
+  command: BackgroundCommandSnapshot;
+  own: boolean;
+  busy: boolean;
+  onStop: () => void;
+  onDismiss: () => void;
+}) {
+  const { t } = useI18n();
+  const [expanded, setExpanded] = useState(false);
+  const active = command.status === "running" || command.status === "stopping";
+  const lines = useBackgroundCommandOutput(expanded ? command.id : null, active);
+  const now = useNow(active);
+  const time = elapsed(command.startedAt, command.endedAt ?? Math.max(now, command.startedAt));
+  const state = command.status === "running"
+    ? t("bg.running", { time })
+    : command.status === "stopping"
+      ? t("bg.stopping")
+      : command.status === "stopped"
+        ? t("bg.stopped")
+        : command.status === "exited"
+          ? t("bg.exited", { time })
+          : command.error
+            ? t("bg.failedToRun")
+            : t("bg.failed", { code: String(command.exitCode ?? "?"), time });
+  const dot = command.status === "exited" || command.status === "stopped" ? "stopped" : command.status;
+  return (
+    <li className={`background-command-item${own ? " is-own" : ""}`}>
+      <div className={`dev-server-row scheduled-task-row is-${dot}${own ? " is-own" : ""}`}>
+        <span className="dev-server-dot" aria-hidden="true" />
+        <span className="dev-server-name" title={command.command}>
+          {command.label ?? command.command}
+          {command.notifyError && <span className="scheduled-task-owner is-error">{t("bg.notifyFailed", { error: command.notifyError })}</span>}
+        </span>
+        <span className="dev-server-meta">{state}</span>
+        <span className="dev-server-actions">
+          <button
+            type="button"
+            className={`dev-server-action${expanded ? " is-active" : ""}`}
+            aria-expanded={expanded}
+            title={t("bg.output")}
+            aria-label={`${t("bg.output")} ${command.label ?? command.command}`}
+            onClick={() => setExpanded((value) => !value)}
+          >
+            <svg {...iconProps}><path d="M4 6h16M4 12h16M4 18h10" /></svg>
+          </button>
+          {active ? (
+            <button
+              type="button"
+              className="dev-server-action is-danger"
+              disabled={busy || command.status === "stopping"}
+              title={t("bg.stop")}
+              aria-label={`${t("bg.stop")} ${command.label ?? command.command}`}
+              onClick={onStop}
+            >
+              <svg {...iconProps}><rect x="6" y="6" width="12" height="12" rx="1.5" /></svg>
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="dev-server-action"
+              disabled={busy}
+              title={t("bg.dismiss")}
+              aria-label={`${t("bg.dismiss")} ${command.label ?? command.command}`}
+              onClick={onDismiss}
+            >
+              <svg {...iconProps}><path d="M6 6l12 12M18 6L6 18" /></svg>
+            </button>
+          )}
+        </span>
+      </div>
+      {expanded && (
+        <pre className="background-command-output">
+          {`$ ${command.command}\n`}
+          {lines === null ? "…" : lines.length ? lines.join("\n") : t("bg.noOutput")}
+        </pre>
+      )}
+    </li>
+  );
+}
+
 /**
- * The bottom bar's dev server entry: a trigger like an extension widget's,
- * opening the project's server list. Shown once the project has a server this
- * pi-web process started (running or finished) or a launch file that failed to
- * parse; declared servers that never ran are listed inside it but do not make
- * it appear.
+ * The bottom bar's dev server, scheduled task and background command entry: a trigger like an
+ * extension widget's, opening the project's lists. Shown once the project has
+ * a server this pi-web process started (running or finished), a launch file
+ * that failed to parse, a scheduled task or a background command; declared
+ * servers that never ran are listed inside it but do not make it appear.
  */
 export function DevServersShelf({
   cwd,
+  sessionId,
   onOpenPreview,
 }: {
   cwd: string | null | undefined;
+  sessionId?: string | null;
   onOpenPreview?: (serverId: string, label: string) => void;
 }) {
   const { t } = useI18n();
@@ -46,6 +162,8 @@ export function DevServersShelf({
   const rootRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
   const { data, error, pending, start, stop, dismiss } = useDevServers(cwd);
+  const scheduled = useScheduledTasks(cwd);
+  const background = useBackgroundCommands(cwd);
 
   useEffect(() => {
     if (!open) return;
@@ -63,21 +181,109 @@ export function DevServersShelf({
     };
   }, [open]);
 
-  if (!data) return null;
-  const servers = data.servers;
+  if (!data && !scheduled.data && !background.data) return null;
+  const servers = data?.servers ?? [];
+  const launchErrors = data?.errors ?? [];
   const activeNames = new Set(servers.filter(isDevServerActive).map((server) => server.name));
-  const declared = data.enabled ? data.configs.filter((config) => !activeNames.has(config.name)) : [];
-  // 只有本进程启动过的服务器或启动配置错误才显示入口；仅声明过 launch 配置不显示。
-  if (servers.length === 0 && data.errors.length === 0) return null;
+  const declared = data?.enabled ? data.configs.filter((config) => !activeNames.has(config.name)) : [];
+  // 当前会话的任务排在前面，其余按下次触发时间（接口已排序）。
+  const tasks = [...(scheduled.data?.tasks ?? [])]
+    .sort((a, b) => Number(b.sessionId === sessionId) - Number(a.sessionId === sessionId));
+  // 只有本进程启动过的服务器、启动配置错误或定时任务才显示入口；仅声明过 launch 配置不显示。
+  const showServers = servers.length > 0 || launchErrors.length > 0;
+  const commands = [...(background.data?.commands ?? [])]
+    .sort((a, b) => Number(b.sessionId === sessionId) - Number(a.sessionId === sessionId));
+  if (!showServers && tasks.length === 0 && commands.length === 0) return null;
+  const runningCommandCount = commands.filter((command) => command.status === "running" || command.status === "stopping").length;
 
   const runningCount = servers.filter(isDevServerActive).length;
+  const pendingTaskCount = scheduled.data?.enabled ? tasks.filter(isScheduledTaskPending).length : 0;
   // 启动配置有问题时入口带告警红点，读屏用带错误的文案，不占用运行计数。
-  const hasErrors = data.errors.length > 0;
-  const label = hasErrors
+  const hasErrors = launchErrors.length > 0 || tasks.some((task) => task.lastStatus === "error" && isScheduledTaskPending(task));
+  const serverLabel = launchErrors.length > 0
     ? t("servers.triggerErrors")
     : runningCount > 0
       ? t("servers.triggerLabel", { count: runningCount })
       : t("servers.title");
+  const label = [
+    showServers ? serverLabel : "",
+    tasks.length > 0 ? t("tasks.triggerLabel", { count: pendingTaskCount }) : "",
+    commands.length > 0 ? t("bg.triggerLabel", { count: runningCommandCount }) : "",
+  ].filter(Boolean).join("; ");
+  const triggerText = [
+    showServers ? t("servers.trigger") : "",
+    tasks.length > 0 ? t("tasks.trigger") : "",
+    commands.length > 0 ? t("bg.trigger") : "",
+  ].filter(Boolean).join(" · ");
+
+  const renderTask = (task: ScheduledTask) => {
+    const live = isScheduledTaskPending(task);
+    const status = task.lastStatus === "error" && live ? "failed" : live ? (scheduled.data?.enabled ? "running" : "stopped") : "stopped";
+    const busy = scheduled.pending.has(task.id);
+    const own = task.sessionId === sessionId;
+    const schedule = (task.schedule.kind === "cron" ? task.schedule.expression : t("tasks.once"))
+      + (task.delivery === "steer" ? ` · ${t("tasks.steer")}` : "");
+    const state = task.nextRunAt === null
+      ? t("tasks.finished")
+      : !task.enabled
+        ? t("tasks.paused")
+        : t("tasks.next", { time: shortTime(task.nextRunAt) });
+    const owner = own ? t("tasks.thisSession") : task.sessionLabel ?? task.sessionId.slice(0, 8);
+    const title = [
+      task.prompt,
+      `${owner}`,
+      task.lastStatus === "error" && task.lastError ? t("tasks.lastFailed", { error: task.lastError }) : "",
+    ].filter(Boolean).join("\n\n");
+    return (
+      <li key={task.id} className={`dev-server-row scheduled-task-row is-${status}${own ? " is-own" : ""}`}>
+        <span className="dev-server-dot" aria-hidden="true" />
+        <span className="dev-server-name" title={title}>
+          {task.name}
+          <span className="scheduled-task-owner">{owner}</span>
+        </span>
+        <span className="dev-server-meta" title={task.lastError}>{schedule} · {state}</span>
+        <span className="dev-server-actions">
+          <button
+            type="button"
+            className="dev-server-action"
+            disabled={busy || !scheduled.data?.enabled}
+            title={t("tasks.runNow")}
+            aria-label={`${t("tasks.runNow")} ${task.name}`}
+            onClick={() => void scheduled.act(task.id, "run")}
+          >
+            <svg {...iconProps}><path d="M7 5l12 7-12 7z" /></svg>
+          </button>
+          {task.nextRunAt !== null && (
+            <button
+              type="button"
+              className="dev-server-action"
+              disabled={busy}
+              title={task.enabled ? t("tasks.pause") : t("tasks.resume")}
+              aria-label={`${task.enabled ? t("tasks.pause") : t("tasks.resume")} ${task.name}`}
+              onClick={() => void scheduled.act(task.id, task.enabled ? "pause" : "resume")}
+            >
+              {task.enabled
+                ? <svg {...iconProps}><path d="M9 5v14M15 5v14" /></svg>
+                : <svg {...iconProps}><path d="M12 7v5l3 2" /><circle cx="12" cy="12" r="9" /></svg>}
+            </button>
+          )}
+          <button
+            type="button"
+            className="dev-server-action is-danger"
+            disabled={busy}
+            title={t("tasks.delete")}
+            aria-label={`${t("tasks.delete")} ${task.name}`}
+            onClick={() => {
+              if (tasks.length === 1 && !showServers && commands.length === 0) setOpen(false);
+              void scheduled.act(task.id, "delete");
+            }}
+          >
+            <svg {...iconProps}><path d="M6 6l12 12M18 6L6 18" /></svg>
+          </button>
+        </span>
+      </li>
+    );
+  };
 
   const renderServer = (server: DevServerSnapshot) => {
     const active = isDevServerActive(server);
@@ -156,7 +362,8 @@ export function DevServersShelf({
     <div ref={rootRef} className="dev-servers-shelf">
       {open && (
         <div className="extension-widget-panels dev-servers-panels">
-          <section id={panelId} className="extension-widget-panel dev-servers-panel" aria-label={t("servers.title")}>
+          <section id={panelId} className="extension-widget-panel dev-servers-panel" aria-label={label}>
+            {showServers && <>
             <div className="extension-widget-panel-heading">{t("servers.title")}</div>
             {servers.length > 0 && <ul className="dev-server-list">{servers.map(renderServer)}</ul>}
             {declared.length > 0 && (
@@ -185,13 +392,38 @@ export function DevServersShelf({
                 </ul>
               </>
             )}
-            {data.errors.length > 0 && (
+            {launchErrors.length > 0 && (
               <div className="dev-server-errors" role="note">
                 <div className="dev-server-subheading">{t("servers.launchErrors")}</div>
-                {data.errors.map((item) => <div key={item}>{item}</div>)}
+                {launchErrors.map((item) => <div key={item}>{item}</div>)}
               </div>
             )}
             {error && <p role="alert" className="dev-server-error">{error}</p>}
+            </>}
+            {tasks.length > 0 && <>
+              <div className={`extension-widget-panel-heading${showServers ? " scheduled-tasks-heading" : ""}`}>{t("tasks.title")}</div>
+              <ul className="dev-server-list">{tasks.map(renderTask)}</ul>
+              {scheduled.error && <p role="alert" className="dev-server-error">{scheduled.error}</p>}
+            </>}
+            {commands.length > 0 && <>
+              <div className={`extension-widget-panel-heading${showServers || tasks.length > 0 ? " scheduled-tasks-heading" : ""}`}>{t("bg.title")}</div>
+              <ul className="dev-server-list">
+                {commands.map((command) => (
+                  <BackgroundCommandRow
+                    key={command.id}
+                    command={command}
+                    own={command.sessionId === sessionId}
+                    busy={background.pending.has(command.id)}
+                    onStop={() => void background.act(command.id, "stop")}
+                    onDismiss={() => {
+                      if (commands.length === 1 && !showServers && tasks.length === 0) setOpen(false);
+                      void background.act(command.id, "dismiss");
+                    }}
+                  />
+                ))}
+              </ul>
+              {background.error && <p role="alert" className="dev-server-error">{background.error}</p>}
+            </>}
           </section>
         </div>
       )}
@@ -205,8 +437,20 @@ export function DevServersShelf({
         onClick={() => setOpen((current) => !current)}
       >
         <span className="extension-widget-placement" aria-hidden="true">^</span>
-        <span className="extension-widget-key">{t("servers.trigger")}</span>
+        <span className="extension-widget-key">{triggerText}</span>
         {runningCount > 0 && <span className="dev-servers-count">{runningCount}</span>}
+        {pendingTaskCount > 0 && (
+          <span className="dev-servers-count scheduled-tasks-count">
+            <svg {...iconProps} width={9} height={9}><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>
+            {pendingTaskCount}
+          </span>
+        )}
+        {runningCommandCount > 0 && (
+          <span className="dev-servers-count scheduled-tasks-count">
+            <svg {...iconProps} width={9} height={9}><path d="M5 7l5 5-5 5M12 17h7" /></svg>
+            {runningCommandCount}
+          </span>
+        )}
         {hasErrors && <span className="dev-servers-error-dot" aria-hidden="true" />}
       </button>
     </div>

@@ -93,6 +93,12 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
   const [devServersEnabled, setDevServersEnabled] = useState<boolean | null>(null);
   const [devServersSaving, setDevServersSaving] = useState(false);
   const [devServersError, setDevServersError] = useState<string | null>(null);
+  const [scheduledTasksEnabled, setScheduledTasksEnabled] = useState<boolean | null>(null);
+  const [scheduledTasksSaving, setScheduledTasksSaving] = useState(false);
+  const [scheduledTasksError, setScheduledTasksError] = useState<string | null>(null);
+  const [backgroundCommandsEnabled, setBackgroundCommandsEnabled] = useState<boolean | null>(null);
+  const [backgroundCommandsSaving, setBackgroundCommandsSaving] = useState(false);
+  const [backgroundCommandsError, setBackgroundCommandsError] = useState<string | null>(null);
   const [webAuthEnabled, setWebAuthEnabled] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const [logoutError, setLogoutError] = useState("");
@@ -182,6 +188,82 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
       setDevServersError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setDevServersSaving(false);
+    }
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetch("/api/scheduled-tasks/settings")
+      .then(async (response) => {
+        const data = await response.json() as { enabled?: boolean; error?: string };
+        if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
+        if (!cancelled) setScheduledTasksEnabled(data.enabled === true);
+      })
+      .catch((cause) => {
+        if (!cancelled) setScheduledTasksError(cause instanceof Error ? cause.message : String(cause));
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Like the dev server switch: the scheduler follows it at once, the open session is reloaded for the tools.
+  const toggleScheduledTasks = async (enabled: boolean) => {
+    setScheduledTasksSaving(true);
+    setScheduledTasksError(null);
+    try {
+      const response = await fetch("/api/scheduled-tasks/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      });
+      const data = await response.json() as { enabled?: boolean; error?: string };
+      if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
+      setScheduledTasksEnabled(data.enabled === true);
+      if (sessionId) {
+        await sendAgentCommand(sessionId, { type: "reload" });
+        onSessionReloaded();
+      }
+    } catch (cause) {
+      setScheduledTasksError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setScheduledTasksSaving(false);
+    }
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetch("/api/background-commands/settings")
+      .then(async (response) => {
+        const data = await response.json() as { enabled?: boolean; error?: string };
+        if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
+        if (!cancelled) setBackgroundCommandsEnabled(data.enabled === true);
+      })
+      .catch((cause) => {
+        if (!cancelled) setBackgroundCommandsError(cause instanceof Error ? cause.message : String(cause));
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Like the dev server switch: the open session is reloaded for the tool; running commands keep running.
+  const toggleBackgroundCommands = async (enabled: boolean) => {
+    setBackgroundCommandsSaving(true);
+    setBackgroundCommandsError(null);
+    try {
+      const response = await fetch("/api/background-commands/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      });
+      const data = await response.json() as { enabled?: boolean; error?: string };
+      if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
+      setBackgroundCommandsEnabled(data.enabled === true);
+      if (sessionId) {
+        await sendAgentCommand(sessionId, { type: "reload" });
+        onSessionReloaded();
+      }
+    } catch (cause) {
+      setBackgroundCommandsError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBackgroundCommandsSaving(false);
     }
   };
 
@@ -435,6 +517,38 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
         </div>
         <p id="settings-dev-servers-description" className="settings-general-description">{t("settings.devServersDescription")}</p>
         {devServersError && <p role="alert" className="settings-general-error">{devServersError}</p>}
+      </section>
+
+      <section className="settings-general-section">
+        <h3 className="settings-general-heading">{t("settings.scheduledTasks")}</h3>
+        <div className="settings-shell-option">
+          <span>{t("settings.scheduledTasksToggle")}</span>
+          <ConfigSwitch
+            checked={scheduledTasksEnabled === true}
+            loading={(scheduledTasksEnabled === null && !scheduledTasksError) || scheduledTasksSaving}
+            label={t("settings.scheduledTasksToggle")}
+            describedBy="settings-scheduled-tasks-description"
+            onChange={(enabled) => void toggleScheduledTasks(enabled)}
+          />
+        </div>
+        <p id="settings-scheduled-tasks-description" className="settings-general-description">{t("settings.scheduledTasksDescription")}</p>
+        {scheduledTasksError && <p role="alert" className="settings-general-error">{scheduledTasksError}</p>}
+      </section>
+
+      <section className="settings-general-section">
+        <h3 className="settings-general-heading">{t("settings.backgroundCommands")}</h3>
+        <div className="settings-shell-option">
+          <span>{t("settings.backgroundCommandsToggle")}</span>
+          <ConfigSwitch
+            checked={backgroundCommandsEnabled === true}
+            loading={(backgroundCommandsEnabled === null && !backgroundCommandsError) || backgroundCommandsSaving}
+            label={t("settings.backgroundCommandsToggle")}
+            describedBy="settings-background-commands-description"
+            onChange={(enabled) => void toggleBackgroundCommands(enabled)}
+          />
+        </div>
+        <p id="settings-background-commands-description" className="settings-general-description">{t("settings.backgroundCommandsDescription")}</p>
+        {backgroundCommandsError && <p role="alert" className="settings-general-error">{backgroundCommandsError}</p>}
       </section>
 
       <section className="settings-general-section">

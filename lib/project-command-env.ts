@@ -14,7 +14,7 @@ const HOST_EXTENSION_PATH = `<inline:${HOST_EXTENSION_NAME}>`;
 const ABORT_SETTLE_GRACE_MS = 1000;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
-type ProjectShellSettings = {
+export type ProjectShellSettings = {
   getShellCommandPrefix(): string | undefined;
   getShellPath(): string | undefined;
 };

@@ -8,10 +8,14 @@ type ShadowExtensionCommand = {
   handler: (args: string, context: ExtensionCommandContext) => Promise<void>;
 };
 
-export function isShadowMindCommand(command: Pick<ShadowExtensionCommand, "name" | "sourceInfo">): boolean {
-  if (command.name !== "shadow") return false;
-  const provenance = `${command.sourceInfo?.path ?? ""} ${command.sourceInfo?.source ?? ""}`.toLowerCase();
+/** Whether a command or tool comes from the pi-shadow-mind package. */
+export function isShadowMindSource(sourceInfo: { path?: string; source?: string } | undefined): boolean {
+  const provenance = `${sourceInfo?.path ?? ""} ${sourceInfo?.source ?? ""}`.toLowerCase();
   return provenance.includes("pi-shadow-mind");
+}
+
+export function isShadowMindCommand(command: Pick<ShadowExtensionCommand, "name" | "sourceInfo">): boolean {
+  return command.name === "shadow" && isShadowMindSource(command.sourceInfo);
 }
 
 export type ShadowSessionSettingHost = {
@@ -19,6 +23,11 @@ export type ShadowSessionSettingHost = {
   appendState: (enabled: boolean) => void;
   commands: () => readonly ShadowExtensionCommand[];
   createCommandContext: () => ExtensionCommandContext;
+  /**
+   * Called after every apply or restore with the state now in effect, so the
+   * host can show or hide the extension's own tools to match. Must not throw.
+   */
+  onApplied?: (enabled: boolean) => void;
 };
 
 /** 将持久化会话状态与 Shadow 扩展实例保持一致。 */
@@ -70,7 +79,13 @@ export class ShadowSessionSetting {
   }
 
   private enqueue(task: () => Promise<void> = () => this.applyDesired()): Promise<void> {
-    this.queue = this.queue.catch(() => undefined).then(task);
+    this.queue = this.queue.catch(() => undefined).then(task).finally(() => {
+      try {
+        this.host.onApplied?.(this.applied);
+      } catch {
+        // Tool visibility follows on the next apply; it must not fail the toggle.
+      }
+    });
     return this.queue;
   }
 

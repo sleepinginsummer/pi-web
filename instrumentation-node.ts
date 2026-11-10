@@ -26,4 +26,13 @@ export function registerNodeInstrumentation(): void {
   // it (bin/browser-opener.js), and the routes reuse Node's cached module.
   // A failure is left for the routes' own import to report.
   import("@earendil-works/pi-coding-agent").catch(() => {});
+
+  // Scheduled tasks must fire with no page open, including right after a
+  // restart (overdue tasks catch up once). The routes and the extension call
+  // the same idempotent start, which installs their current tick on HMR.
+  import("@/lib/scheduled-task-scheduler")
+    .then(({ ensureScheduledTaskScheduler }) => ensureScheduledTaskScheduler())
+    .catch((error: unknown) => {
+      console.warn("[pi-web] scheduled task scheduler did not start:", error instanceof Error ? error.message : error);
+    });
 }

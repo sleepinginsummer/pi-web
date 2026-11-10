@@ -477,3 +477,65 @@ export interface DevServerListResponse {
   configs: DevServerConfigSummary[];
   errors: string[];
 }
+
+export type ScheduledTaskSchedule =
+  | { kind: "once"; at: number }
+  | { kind: "cron"; expression: string };
+
+/** A scheduled task (lib/scheduled-tasks.ts): wakes `sessionId` with `prompt` when due. */
+export interface ScheduledTask {
+  id: string;
+  sessionId: string;
+  cwd: string;
+  /** Session title or first message when the task was created, for the list. */
+  sessionLabel?: string;
+  name: string;
+  prompt: string;
+  schedule: ScheduledTaskSchedule;
+  enabled: boolean;
+  /** How a busy session receives the task. Missing means followUp; cron tasks are always followUp. */
+  delivery?: "followUp" | "steer";
+  /** Epoch ms of the next fire; null once a one-shot task has fired. */
+  nextRunAt: number | null;
+  lastRunAt?: number;
+  lastStatus?: "ok" | "error";
+  lastError?: string;
+  runCount: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type BackgroundCommandStatus = "running" | "stopping" | "exited" | "failed" | "stopped";
+export type BackgroundCommandDelivery = "auto" | "followUp" | "steer";
+
+/** A shell command pi-web runs for a session in the background (lib/background-commands.ts). */
+export interface BackgroundCommandSnapshot {
+  id: string;
+  sessionId: string;
+  cwd: string;
+  command: string;
+  label?: string;
+  status: BackgroundCommandStatus;
+  exitCode?: number | null;
+  error?: string;
+  startedAt: number;
+  endedAt?: number;
+  /** Who stopped it, when it was stopped. */
+  stoppedBy?: "agent" | "user";
+  delivery: BackgroundCommandDelivery;
+  checkInSeconds?: number;
+  checkIns: number;
+  /** When the session was last woken for this command, and how that went. */
+  notifiedAt?: number;
+  notifyError?: string;
+}
+
+export interface BackgroundCommandListResponse {
+  enabled: boolean;
+  commands: BackgroundCommandSnapshot[];
+}
+
+export interface ScheduledTaskListResponse {
+  enabled: boolean;
+  tasks: ScheduledTask[];
+}

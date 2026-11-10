@@ -78,6 +78,8 @@ export function isMessageGroupAnchor(message: { role?: AgentMessage["role"]; cus
       message.customType === "compaction"
       || message.customType === "pi-web:subagent-notification"
       || message.customType === "subagent-notification"
+      || message.customType === "pi-web:scheduled-task"
+      || message.customType === "pi-web:background-command"
     ));
 }
 
