@@ -1445,6 +1445,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     setSlashMenuOpen(false);
   }, [compact, processImageFiles]);
 
+  // The loader's identity follows session state and changes while the palette
+  // is open. Read it through a ref: as a dependency it re-ran the effect below,
+  // which reset the highlighted command to the first one and scrolled the
+  // palette back to the top mid-scroll.
+  const loadSlashCommandsRef = useRef(onLoadSlashCommands);
+  useEffect(() => { loadSlashCommandsRef.current = onLoadSlashCommands; }, [onLoadSlashCommands]);
+
   useEffect(() => {
     if (slashQuery === null) {
       setSlashMenuOpen(false);
@@ -1454,13 +1461,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     }
     setSlashMenuOpen(true);
     setSlashActiveIndex(0);
-    if (!slashCommandsRequestedRef.current && onLoadSlashCommands) {
+    const load = loadSlashCommandsRef.current;
+    if (!slashCommandsRequestedRef.current && load) {
       slashCommandsRequestedRef.current = true;
-      Promise.resolve(onLoadSlashCommands()).catch(() => {
+      Promise.resolve(load()).catch(() => {
         slashCommandsRequestedRef.current = false;
       });
     }
-  }, [slashQuery, onLoadSlashCommands]);
+  }, [slashQuery]);
 
   // Lazy-load skill dormancy (disable-model-invocation) each time the slash
   // palette opens, so toggles made in the skills panel are reflected on the
