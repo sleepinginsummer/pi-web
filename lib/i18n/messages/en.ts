@@ -972,6 +972,7 @@ export const enLocale: LocalePlugin = {
     "chat.builtInTools": "{count} built-in tools",
     "chat.allBuiltInTools": "All built-in tools",
     "chat.changeReasoning": "Change reasoning level: {level}",
+    "chat.configuredTools": "Follow settings.json",
     "chat.changeReasoningLabel": "Change reasoning level",
     "chat.currentReasoning": "Current reasoning level: {level}",
     "chat.fast": "Fast",

@@ -238,6 +238,8 @@ const ToolPresetControl = memo(function ToolPresetControl({ isMobile, toolPreset
                       const isActive = (toolPreset ?? "default") === preset;
                       let desc: string;
                       if (label === "off") desc = t("chat.noTools");
+                      // configured 不钉死工具列表，由 settings.json 的 defaultTools 解析
+                      else if (label === "configured") desc = t("chat.configuredTools");
                       else if (label === "read-only") desc = t("chat.readOnlyTools", { count: 4 });
                       else if (label === "default") desc = t("chat.builtInTools", { count: 4 });
                       else desc = t("chat.allBuiltInTools");

@@ -975,6 +975,7 @@ export const zhCNLocale: LocalePlugin = {
     "chat.builtInTools": "{count} 个内置工具",
     "chat.allBuiltInTools": "全部内置工具",
     "chat.changeReasoning": "更改推理级别：{level}",
+    "chat.configuredTools": "跟随 settings.json",
     "chat.changeReasoningLabel": "更改推理级别",
     "chat.currentReasoning": "当前推理级别：{level}",
     "chat.fast": "Fast",
