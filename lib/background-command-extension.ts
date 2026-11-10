@@ -54,12 +54,18 @@ export function createBackgroundCommandExtension(options: {
 
 Optional check_in_seconds (at least ${MIN_CHECK_IN_SECONDS}) also wakes you at that interval while the command is still running, with its latest output, so a hung command does not go unnoticed.
 
-delivery decides how the result reaches you if you are busy at that moment: "auto" (default) interrupts after your current tool calls when the command failed and waits until you finish your current work when it succeeded; "steer" always interrupts; "followUp" always waits. An idle session starts a new turn either way.`,
+delivery decides how the result reaches you if you are busy at that moment: "auto" (default) interrupts after your current tool calls when the command failed and waits until you finish your current work when it succeeded; "steer" always interrupts; "followUp" always waits. An idle session starts a new turn either way.
+
+pi-web keeps only the latest 256 KB of output in memory, and loses it when pi-web restarts. To keep the full output, write it to a file in the command and keep the real exit code:
+  set -o pipefail; npm test 2>&1 | tee /tmp/unit-tests.log
+To be woken when a line appears instead of when a process exits, run a second command that exits on the first match; the first one keeps running:
+  tail -n +1 -F /tmp/server.log | grep -m1 -E 'ready|listening|error'`,
         promptSnippet: "Run a slow shell command in the background and get woken when it exits",
         promptGuidelines: [
           "For commands that take more than a minute or two (full test suites, builds, installs), use bash_background instead of bash, then end your turn or continue with independent work; you will be woken with the result.",
           "Do not poll bash_background_output in a loop or sleep while waiting; the exit message arrives on its own.",
           "Set check_in_seconds for commands that might hang.",
+          "When the full output or a specific line matters, write the output to a file with tee (after set -o pipefail), or wait for the line with a second bash_background running tail -F | grep -m1.",
         ],
         parameters: Type.Object({
           command: Type.String({ description: "The shell command, run like the bash tool in the project directory." }),

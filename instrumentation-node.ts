@@ -27,6 +27,13 @@ export function registerNodeInstrumentation(): void {
   // A failure is left for the routes' own import to report.
   import("@earendil-works/pi-coding-agent").catch(() => {});
 
+  // Background commands left running by the previous process are reported as interrupted.
+  import("@/lib/background-commands")
+    .then(({ recoverBackgroundCommands }) => { recoverBackgroundCommands(); })
+    .catch((error: unknown) => {
+      console.warn("[pi-web] background command recovery failed:", error instanceof Error ? error.message : error);
+    });
+
   // Scheduled tasks must fire with no page open, including right after a
   // restart (overdue tasks catch up once). The routes and the extension call
   // the same idempotent start, which installs their current tick on HMR.

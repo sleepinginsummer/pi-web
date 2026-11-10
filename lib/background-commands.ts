@@ -1,4 +1,8 @@
 import { randomBytes } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { writePrivateFileAtomicSync } from "./atomic-file";
 import { createProjectCommandBashOperations, type ProjectShellSettings } from "./project-command-env";
 import type { WakeDelivery, WakeSessionInput } from "./session-wake";
 import { BACKGROUND_COMMAND_MESSAGE_TYPE } from "./wake-message-types";
@@ -12,8 +16,11 @@ import type { BackgroundCommandDelivery, BackgroundCommandSnapshot } from "./typ
  * through lib/session-wake.ts.
  *
  * Commands run through the same shell, environment and command prefix as the
- * bash tool (createProjectCommandBashOperations). They live in memory only: a
- * pi-web restart stops them and forgets them.
+ * bash tool (createProjectCommandBashOperations). Output lives in memory; the
+ * command list is also kept in `<agentDir>/pi-web-background-commands.json`. A
+ * pi-web shutdown kills every running command's process tree, and the next
+ * start marks those commands interrupted and wakes their sessions, so a model
+ * told "you will be woken" is never left waiting for a wake that cannot come.
  */
 
 export { BACKGROUND_COMMAND_MESSAGE_TYPE };
@@ -42,14 +49,87 @@ declare global {
   var __piWebBackgroundCommands: Map<string, CommandRecord> | undefined;
 }
 
+export function getBackgroundCommandStorePath(agentDir = getAgentDir()): string {
+  return join(agentDir, "pi-web-background-commands.json");
+}
+
+function readStoredSnapshots(path: string): BackgroundCommandSnapshot[] {
+  if (!existsSync(path)) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as { commands?: unknown };
+    if (!Array.isArray(parsed.commands)) return [];
+    return parsed.commands.filter((item): item is BackgroundCommandSnapshot => {
+      const snapshot = item as BackgroundCommandSnapshot;
+      return Boolean(snapshot) && typeof snapshot.id === "string" && typeof snapshot.sessionId === "string"
+        && typeof snapshot.cwd === "string" && typeof snapshot.command === "string" && typeof snapshot.startedAt === "number";
+    });
+  } catch (error) {
+    console.warn("[pi-web] background command list is unreadable, starting empty:", error instanceof Error ? error.message : error);
+    return [];
+  }
+}
+
+/** Write the command list; best-effort, a failed write only loses the restart report. */
+function persist(): void {
+  const commands = globalThis.__piWebBackgroundCommands;
+  if (!commands) return;
+  const path = getBackgroundCommandStorePath();
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    writePrivateFileAtomicSync(path, JSON.stringify({
+      version: 1,
+      commands: [...commands.values()].map((record) => record.snapshot),
+    }, null, 2));
+  } catch (error) {
+    console.warn("[pi-web] could not save the background command list:", error instanceof Error ? error.message : error);
+  }
+}
+
+function emptyRecord(snapshot: BackgroundCommandSnapshot): CommandRecord {
+  return {
+    snapshot,
+    lines: [],
+    logChars: 0,
+    partial: "",
+    abort: new AbortController(),
+    checkInTimer: null,
+    wakeChain: Promise.resolve(),
+  };
+}
+
 function registry(): Map<string, CommandRecord> {
   if (!globalThis.__piWebBackgroundCommands) {
-    globalThis.__piWebBackgroundCommands = new Map();
+    const commands = new Map<string, CommandRecord>();
+    globalThis.__piWebBackgroundCommands = commands;
+    // Stopping a command kills its process group synchronously (pi's killProcessTree), so
+    // this runs to the end even inside `exit`.
     process.once("exit", () => {
-      for (const record of globalThis.__piWebBackgroundCommands!.values()) record.abort.abort();
+      for (const record of commands.values()) record.abort.abort();
     });
+    const interrupted: CommandRecord[] = [];
+    for (const snapshot of readStoredSnapshots(getBackgroundCommandStorePath())) {
+      const record = emptyRecord(snapshot);
+      if (isBackgroundCommandActive(snapshot.status)) {
+        snapshot.status = "interrupted";
+        snapshot.endedAt = Date.now();
+        interrupted.push(record);
+      }
+      commands.set(snapshot.id, record);
+    }
+    if (interrupted.length > 0) {
+      persist();
+      for (const record of interrupted) reportInterrupted(record);
+    }
   }
   return globalThis.__piWebBackgroundCommands;
+}
+
+/**
+ * Load the list kept from the previous pi-web process. Running commands from
+ * then are marked interrupted and their sessions are woken. Called at startup.
+ */
+export function recoverBackgroundCommands(): number {
+  return registry().size;
 }
 
 export function isBackgroundCommandActive(status: BackgroundCommandSnapshot["status"]): boolean {
@@ -119,6 +199,8 @@ export function describeBackgroundCommand(snapshot: BackgroundCommandSnapshot, n
       ? "stopping"
       : snapshot.status === "stopped"
         ? `stopped by the ${snapshot.stoppedBy ?? "user"} after ${elapsed}`
+        : snapshot.status === "interrupted"
+          ? `was interrupted by a pi-web restart after ${elapsed}`
         : snapshot.error
           ? `failed to run: ${snapshot.error}`
           : `exited with code ${snapshot.exitCode ?? "unknown"} after ${elapsed}`;
@@ -160,11 +242,21 @@ function wake(record: CommandRecord, content: string, delivery: WakeDelivery, ki
       });
       snapshot.notifiedAt = Date.now();
       delete snapshot.notifyError;
+      persist();
     } catch (error) {
       snapshot.notifyError = error instanceof Error ? error.message : String(error);
       console.warn("[pi-web] background command wake failed", { commandId: snapshot.id, error: snapshot.notifyError });
+      persist();
     }
   });
+}
+
+function reportInterrupted(record: CommandRecord): void {
+  const content = [
+    `⚠️ ${describeBackgroundCommand(record.snapshot)}`,
+    "pi-web restarted while it was running, so it was stopped and did not finish. Its output from before the restart is gone. Run it again if you still need the result.",
+  ].join("\n\n");
+  wake(record, content, "followUp", "exit");
 }
 
 function checkIn(record: CommandRecord): void {
@@ -204,6 +296,7 @@ function finish(record: CommandRecord, result: { exitCode: number | null } | { e
     snapshot.status = result.exitCode === 0 ? "exited" : "failed";
   }
   pruneFinished();
+  persist();
   // The agent stopped it itself and already knows.
   if (snapshot.stoppedBy === "agent") return;
   const lead = snapshot.status === "exited" ? "✅" : snapshot.status === "stopped" ? "⏹" : "❌";
@@ -256,16 +349,9 @@ export function startBackgroundCommand(input: StartBackgroundCommandInput): Back
     ...(checkInSeconds ? { checkInSeconds } : {}),
     checkIns: 0,
   };
-  const record: CommandRecord = {
-    snapshot,
-    lines: [],
-    logChars: 0,
-    partial: "",
-    abort: new AbortController(),
-    checkInTimer: null,
-    wakeChain: Promise.resolve(),
-  };
+  const record = emptyRecord(snapshot);
   registry().set(snapshot.id, record);
+  persist();
 
   const prefix = input.shell?.getShellCommandPrefix();
   const operations = createProjectCommandBashOperations({ shellPath: input.shell?.getShellPath() });
@@ -305,12 +391,26 @@ export function stopBackgroundCommand(id: string, by: "agent" | "user"): Backgro
     record.snapshot.status = "stopping";
     record.snapshot.stoppedBy = by;
     record.abort.abort();
+    persist();
   }
   return { ...record.snapshot };
+}
+
+/** A permanently deleted session's commands: stopped without a wake, since nothing is left to tell. */
+export function stopBackgroundCommandsForSession(sessionId: string): number {
+  let stopped = 0;
+  for (const record of registry().values()) {
+    if (record.snapshot.sessionId !== sessionId || !isBackgroundCommandActive(record.snapshot.status)) continue;
+    stopBackgroundCommand(record.snapshot.id, "agent");
+    stopped += 1;
+  }
+  return stopped;
 }
 
 export function dismissBackgroundCommand(id: string): boolean {
   const record = registry().get(id);
   if (!record || isBackgroundCommandActive(record.snapshot.status)) return false;
-  return registry().delete(id);
+  registry().delete(id);
+  persist();
+  return true;
 }

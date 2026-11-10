@@ -505,7 +505,7 @@ export interface ScheduledTask {
   updatedAt: number;
 }
 
-export type BackgroundCommandStatus = "running" | "stopping" | "exited" | "failed" | "stopped";
+export type BackgroundCommandStatus = "running" | "stopping" | "exited" | "failed" | "stopped" | "interrupted";
 export type BackgroundCommandDelivery = "auto" | "followUp" | "steer";
 
 /** A shell command pi-web runs for a session in the background (lib/background-commands.ts). */

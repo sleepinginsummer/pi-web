@@ -1,3 +1,5 @@
+import { deleteScheduledTasksForSession } from "@/lib/scheduled-tasks";
+import { stopBackgroundCommandsForSession } from "@/lib/background-commands";
 import { NextResponse } from "next/server";
 import { existsSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
@@ -424,6 +426,17 @@ export async function DELETE(
       await removeSidebarPreferenceIds({ sessionIds: [...deletedSessionIds] });
     } catch (error) {
       console.error("清理已删除会话的侧边栏偏好失败", error);
+    }
+    if (mode === "permanent") {
+      // 永久删除后没有会话可以唤醒：一并删除其定时任务、停止其后台命令。归档可恢复，保留不动。
+      for (const deletedId of deletedSessionIds) {
+        try {
+          await deleteScheduledTasksForSession(deletedId);
+          stopBackgroundCommandsForSession(deletedId);
+        } catch (error) {
+          console.error("清理已删除会话的定时任务或后台命令失败", error);
+        }
+      }
     }
     invalidateSessionListCache();
     if (trashedName) queueTrashSessionTitle(trashedName);

@@ -80,12 +80,14 @@ function BackgroundCommandRow({
       ? t("bg.stopping")
       : command.status === "stopped"
         ? t("bg.stopped")
+        : command.status === "interrupted"
+          ? t("bg.interrupted")
         : command.status === "exited"
           ? t("bg.exited", { time })
           : command.error
             ? t("bg.failedToRun")
             : t("bg.failed", { code: String(command.exitCode ?? "?"), time });
-  const dot = command.status === "exited" || command.status === "stopped" ? "stopped" : command.status;
+  const dot = command.status === "exited" || command.status === "stopped" ? "stopped" : command.status === "interrupted" ? "failed" : command.status;
   return (
     <li className={`background-command-item${own ? " is-own" : ""}`}>
       <div className={`dev-server-row scheduled-task-row is-${dot}${own ? " is-own" : ""}`}>
