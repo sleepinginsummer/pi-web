@@ -3,6 +3,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import type { ExtensionWidgetItem } from "@/lib/types";
+import { AnsiText } from "./AnsiText";
 
 const DEFAULT_EXPANDED_LINE_LIMIT = 3;
 const UPDATE_PULSE_MS = 1100;
@@ -94,7 +95,7 @@ export function ExtensionWidgetShelf({ widgets }: { widgets: ExtensionWidgetItem
             aria-live="polite"
           >
             <div className="extension-widget-panel-heading">{expanded.key}</div>
-            <pre className="extension-widget-content">{expanded.lines.join("\n")}</pre>
+            <pre className="extension-widget-content"><AnsiText text={expanded.lines.join("\n")} /></pre>
           </section>
         </div>
       )}
