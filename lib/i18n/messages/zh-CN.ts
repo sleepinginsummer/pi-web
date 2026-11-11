@@ -654,6 +654,8 @@ export const zhCNLocale: LocalePlugin = {
     "sidebar.awaitingInput": "Agent 正在等待你的输入",
     "sidebar.agentAwaitingInput": "Agent 等待你的输入",
     "sidebar.newActivity": "有新活动",
+    "sidebar.backgroundCommandsRunning": "{count} 个后台命令运行中",
+    "sidebar.nextScheduledTask": "下次定时任务：{time}",
     "sidebar.newSessionActivity": "会话有新活动",
     "sidebar.deleteSession": "删除 {title}？",
     "sidebar.rename": "重命名",

@@ -652,6 +652,8 @@ export const enLocale: LocalePlugin = {
     "sidebar.awaitingInput": "Agent waiting for your input",
     "sidebar.agentAwaitingInput": "Agent waiting for your input",
     "sidebar.newActivity": "New activity",
+    "sidebar.backgroundCommandsRunning": "{count} background command(s) running",
+    "sidebar.nextScheduledTask": "Next scheduled task: {time}",
     "sidebar.newSessionActivity": "New session activity",
     "sidebar.deleteSession": "Delete {title}?",
     "sidebar.rename": "Rename",

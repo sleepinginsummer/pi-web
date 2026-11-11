@@ -1,5 +1,6 @@
 "use client";
 
+import type { BackgroundActivityMap } from "@/hooks/useRunningSessions";
 import { stabilizeStringSet } from "@/lib/stable-string-set";
 import { useEffect, useState, useCallback, useMemo, useRef, type ReactNode } from "react";
 import type { SessionInfo, WorktreeState } from "@/lib/types";
@@ -132,6 +133,8 @@ interface Props {
   runningSessionIds: ReadonlySet<string>;
   /** 运行中但停在扩展对话框上、等待用户输入的会话。 */
   awaitingInputSessionIds?: ReadonlySet<string>;
+  /** 后台命令与待触发定时任务，按会话 id；与运行中分开显示。 */
+  backgroundActivity?: BackgroundActivityMap;
   startingSessions?: ReadonlyMap<string, string>;
   runningSessionTransitions: RunningSessionTransitionEvent;
   locateSessionRequest?: { sessionId: string; revision: number } | null;
@@ -306,7 +309,7 @@ function PiWebTitle() {
 }
 const EMPTY_SESSION_ID_SET: ReadonlySet<string> = new Set();
 
-export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, selectedSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, runningSessionIds, awaitingInputSessionIds = EMPTY_SESSION_ID_SET, startingSessions, runningSessionTransitions, locateSessionRequest, selectedCwd: selectedCwdProp, onCwdChange, worktreeState = null, onOpenFile, onOpenTerminal, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onSessionsChange }: Props) {
+export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, selectedSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, runningSessionIds, awaitingInputSessionIds = EMPTY_SESSION_ID_SET, backgroundActivity, startingSessions, runningSessionTransitions, locateSessionRequest, selectedCwd: selectedCwdProp, onCwdChange, worktreeState = null, onOpenFile, onOpenTerminal, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onSessionsChange }: Props) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
   const {
@@ -1011,6 +1014,7 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
             selectedSessionId,
             runningSessionIds,
             awaitingInputSessionIds,
+            backgroundActivity,
             startingSessions,
             unreadSessionIds,
             pinnedSessionIds: pinnedIds,

@@ -7,6 +7,7 @@ import {
   getStartingRpcSessions,
 } from "@/lib/rpc-manager";
 import { listSessionCompletionSummaries } from "@/lib/session-completion-summaries";
+import { listSessionBackgroundActivity } from "@/lib/session-background-activity";
 import { getSessionIdsWithUnsettledSubagentRuns } from "@/lib/subagent-runtime";
 
 export const dynamic = "force-dynamic";
@@ -25,6 +26,8 @@ export async function GET() {
       completionNotificationSuppressedSessionIds: getCompletionNotificationSuppressedRpcSessionIds(),
       subagentsActiveSessionIds: getSessionIdsWithUnsettledSubagentRuns(),
       completionSummaries: listSessionCompletionSummaries(),
+      // Background commands and pending scheduled tasks: shown apart from running, never notified.
+      backgroundActivity: listSessionBackgroundActivity(),
     },
     { headers: { "Cache-Control": "no-store" } },
   );

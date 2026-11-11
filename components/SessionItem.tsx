@@ -25,6 +25,10 @@ interface SessionItemStatus {
   isRunning?: boolean;
   /** 运行停在扩展对话框上，需要用户作答；仍属于运行中。 */
   isAwaitingInput?: boolean;
+  /** 这个会话启动的、仍在运行的后台命令数；不算 agent 运行中。 */
+  backgroundCommands?: number;
+  /** 最近一次待触发定时任务的时间（毫秒），没有则为 null。 */
+  nextScheduledTaskAt?: number | null;
   /** 首条消息还在等待初始化：这一行显示“创建会话中”。 */
   startingFirstMessage?: string;
   isUnread?: boolean;
@@ -159,6 +163,71 @@ function AwaitingInputSessionIndicator() {
   );
 }
 
+/**
+ * 后台命令运行中：与 agent 运行中区分——灰色、虚线、慢速旋转。
+ * agent 自己在跑时不单独显示，只在运行图标角上加一个灰点（BackgroundCommandBadge）。
+ */
+function BackgroundCommandSessionIndicator({ count }: { count: number }) {
+  const { t } = useI18n();
+  const label = t("sidebar.backgroundCommandsRunning", { count });
+  return (
+    <span data-session-indicator="background-command" title={label} aria-label={label} style={{ width: 14, height: 14, display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0, color: "var(--text-muted)" }}>
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><g><circle cx="12" cy="12" r="8.5" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeDasharray="3.5 4.4" /><animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="2.6s" repeatCount="indefinite" /></g></svg>
+    </span>
+  );
+}
+
+function BackgroundCommandBadge({ count, children }: { count: number; children: ReactNode }) {
+  const { t } = useI18n();
+  if (count <= 0) return <>{children}</>;
+  return (
+    <span title={t("sidebar.backgroundCommandsRunning", { count })} style={{ position: "relative", display: "inline-flex", flexShrink: 0 }}>
+      {children}
+      <span data-session-indicator="background-command-badge" aria-hidden="true" style={{ position: "absolute", right: -2, bottom: -1, width: 5, height: 5, borderRadius: "50%", background: "var(--text-muted)", boxShadow: "0 0 0 1.5px var(--bg-panel)" }} />
+    </span>
+  );
+}
+
+/** 有待触发的定时任务：静态时钟，不加动画——此刻没有东西在跑。 */
+function ScheduledTaskSessionIndicator({ at }: { at: number }) {
+  const { t } = useI18n();
+  const label = t("sidebar.nextScheduledTask", { time: formatScheduledTime(at) });
+  return (
+    <span data-session-indicator="scheduled-task" title={label} aria-label={label} style={{ width: 14, height: 14, display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0, color: "var(--text-dim)" }}>
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>
+    </span>
+  );
+}
+
+function formatScheduledTime(at: number): string {
+  const date = new Date(at);
+  const now = new Date();
+  const time = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return date.toDateString() === now.toDateString() ? time : `${date.toLocaleDateString([], { month: "numeric", day: "numeric" })} ${time}`;
+}
+
+/**
+ * 同一位置只显示一个状态，优先级：等待输入 > agent 运行中 > 后台命令 > 未读 > 待触发定时任务 > 修改时间。
+ * agent 运行或等待输入时若还有后台命令，在图标角上加灰点。定时任务排在未读之后：它只是在等。
+ */
+function SessionStatusIndicator({ modified, isRunning, isAwaitingInput, backgroundCommands, nextScheduledTaskAt, isUnread }: {
+  modified: string;
+  isRunning?: boolean;
+  isAwaitingInput?: boolean;
+  backgroundCommands: number;
+  nextScheduledTaskAt: number | null;
+  isUnread?: boolean;
+}) {
+  if (isRunning && isAwaitingInput) return <BackgroundCommandBadge count={backgroundCommands}><AwaitingInputSessionIndicator /></BackgroundCommandBadge>;
+  if (isRunning) return <BackgroundCommandBadge count={backgroundCommands}><RunningSessionIndicator /></BackgroundCommandBadge>;
+  if (backgroundCommands > 0) return <BackgroundCommandSessionIndicator count={backgroundCommands} />;
+  if (isUnread) return <UnreadSessionIndicator />;
+  if (nextScheduledTaskAt !== null) {
+    return <><ScheduledTaskSessionIndicator at={nextScheduledTaskAt} /><span title={modified}>{formatRelativeTime(modified)}</span></>;
+  }
+  return <span title={modified}>{formatRelativeTime(modified)}</span>;
+}
+
 function UnreadSessionIndicator() {
   const { t } = useI18n();
   return (
@@ -271,7 +340,7 @@ function SessionRowContent({ session, view, actions }: {
   session: SessionInfo;
   view: {
     title: string;
-    status: Required<Pick<SessionItemStatus, "isSelected" | "isPinned">> & Pick<SessionItemStatus, "isRunning" | "isAwaitingInput" | "isUnread" | "startingFirstMessage">;
+    status: Required<Pick<SessionItemStatus, "isSelected" | "isPinned">> & Pick<SessionItemStatus, "isRunning" | "isAwaitingInput" | "backgroundCommands" | "nextScheduledTaskAt" | "isUnread" | "startingFirstMessage">;
     isMobile: boolean;
     hovered: boolean;
     tree: Required<Pick<SessionItemTreeState, "depth" | "hasChildren" | "collapsed">>;
@@ -284,7 +353,7 @@ function SessionRowContent({ session, view, actions }: {
   };
 }) {
   const { status, isMobile, hovered, tree } = view;
-  const { isSelected, isRunning, isAwaitingInput, isUnread, isPinned, startingFirstMessage } = status;
+  const { isSelected, isRunning, isAwaitingInput, backgroundCommands = 0, nextScheduledTaskAt = null, isUnread, isPinned, startingFirstMessage } = status;
   const { depth, hasChildren, collapsed } = tree;
   const { onToggleCollapse, onTogglePinned, onRename, onDelete } = actions;
   const { t } = useI18n();
@@ -300,7 +369,7 @@ function SessionRowContent({ session, view, actions }: {
         <div title={title} style={{ display: "flex", alignItems: "center", gap: 5, minWidth: 0, color: "var(--text)", fontSize: 12, fontWeight: isSelected ? 500 : 400, lineHeight: 1.4 }}><span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{title}</span></div>
         <div style={{ marginTop: 2, display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
           <div style={{ display: "flex", flex: 1, alignItems: "center", gap: 8, minWidth: 0, overflow: "hidden", color: "var(--text-dim)", fontSize: 11, whiteSpace: "nowrap" }}>
-            {isRunning && isAwaitingInput ? <AwaitingInputSessionIndicator /> : isRunning ? <RunningSessionIndicator /> : isUnread ? <UnreadSessionIndicator /> : <span title={session.modified}>{formatRelativeTime(session.modified)}</span>}
+            <SessionStatusIndicator modified={session.modified} isRunning={isRunning} isAwaitingInput={isAwaitingInput} backgroundCommands={backgroundCommands} nextScheduledTaskAt={nextScheduledTaskAt} isUnread={isUnread} />
             <span>{t("sidebar.messagesCount", { count: session.messageCount })}</span>
             {session.currentBranch && (
               <span title={`${session.isWorktree ? "Worktree" : "当前分支"}: ${session.currentBranch}\n${session.cwd}`} style={{ display: "flex", alignItems: "center", gap: 3, color: "var(--accent)", minWidth: 0, overflow: "hidden" }}>
@@ -327,7 +396,7 @@ function SessionRowContent({ session, view, actions }: {
 }
 
 export function SessionItem({ session, status, mobile, actions, tree = {} }: SessionItemProps) {
-  const { isSelected, isRunning, isAwaitingInput, startingFirstMessage, isUnread, isPinned = false, pinColor = DEFAULT_SESSION_PIN_COLOR } = status;
+  const { isSelected, isRunning, isAwaitingInput, backgroundCommands, nextScheduledTaskAt, startingFirstMessage, isUnread, isPinned = false, pinColor = DEFAULT_SESSION_PIN_COLOR } = status;
   const { enabled: isMobile, swipeOpen, onSwipeOpenChange } = mobile;
   const { onClick, onRenamed, onDeleted, onTogglePinned, onSetPinColor } = actions;
   const { depth = 0, hasChildren = false, collapsed = false, onToggleCollapse } = tree;
@@ -406,7 +475,7 @@ export function SessionItem({ session, status, mobile, actions, tree = {} }: Ses
             session={session}
             view={{
               title,
-              status: { isSelected, isRunning, isAwaitingInput, startingFirstMessage, isUnread, isPinned },
+              status: { isSelected, isRunning, isAwaitingInput, backgroundCommands, nextScheduledTaskAt, startingFirstMessage, isUnread, isPinned },
               isMobile,
               hovered,
               tree: { depth, hasChildren, collapsed },

@@ -483,7 +483,7 @@ export function AppShell() {
   const handleSearchTargetHandled = useCallback((target: { sessionId: string; entryId: string }) => {
     setSearchTarget((current) => current?.sessionId === target.sessionId && current.entryId === target.entryId ? null : current);
   }, []);
-  const { runningSessionIds, awaitingInputSessionIds, startingSessions, subagentsActiveSessionIds, sessionListVersion, getCompletionSummary } = useRunningSessions();
+  const { runningSessionIds, awaitingInputSessionIds, startingSessions, subagentsActiveSessionIds, backgroundActivity, sessionListVersion, getCompletionSummary } = useRunningSessions();
   const runningSessionTransitions = useRunningSessionTransitions(runningSessionIds, selectedSession?.id ?? null, subagentsActiveSessionIds);
   // The debug panel's reader of the chat's own state: kept in a ref, so registering renders
   // nothing, and read only by the open panel (DebugPanel), never on AppShell's renders.
@@ -1001,6 +1001,7 @@ export function AppShell() {
         onSessionDeleted={handleSessionDeleted}
         runningSessionIds={runningSessionIds}
         awaitingInputSessionIds={awaitingInputSessionIds}
+        backgroundActivity={backgroundActivity}
         startingSessions={startingSessions}
         runningSessionTransitions={runningSessionTransitions}
         locateSessionRequest={notificationSessionLocateRequest}

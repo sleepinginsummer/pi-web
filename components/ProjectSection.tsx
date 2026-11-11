@@ -1,5 +1,6 @@
 "use client";
 
+import type { BackgroundActivityMap } from "@/hooks/useRunningSessions";
 import { useLayoutEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
 import type { SessionInfo } from "@/lib/types";
 import { buildSessionTree, type SessionTreeNode } from "@/lib/session-tree";
@@ -153,6 +154,7 @@ export interface SessionTreeSharedProps {
   selectedSessionId: string | null;
   runningSessionIds: ReadonlySet<string>;
   awaitingInputSessionIds?: ReadonlySet<string>;
+  backgroundActivity?: BackgroundActivityMap;
   startingSessions?: ReadonlyMap<string, string>;
   unreadSessionIds: Set<string>;
   pinnedSessionIds: Set<string>;
@@ -314,8 +316,9 @@ function SessionTreeRow({
   collapsed: boolean;
   onToggleCollapse: () => void;
 }) {
-  const { selectedSessionId, runningSessionIds, awaitingInputSessionIds, startingSessions, unreadSessionIds, pinnedSessionIds, sessionPinColors, isMobile, openSwipeSessionId, onOpenSwipeSessionChange, onSelectSession, onRenamed, onMoveSession, onTogglePinned, onSetPinColor, onSessionDeleted } = treeProps;
+  const { selectedSessionId, runningSessionIds, awaitingInputSessionIds, backgroundActivity, startingSessions, unreadSessionIds, pinnedSessionIds, sessionPinColors, isMobile, openSwipeSessionId, onOpenSwipeSessionChange, onSelectSession, onRenamed, onMoveSession, onTogglePinned, onSetPinColor, onSessionDeleted } = treeProps;
   const hasChildren = node.children.length > 0;
+  const background = backgroundActivity?.get(node.session.id);
   return (
     <div
       onDragStart={(event) => {
@@ -342,6 +345,8 @@ function SessionTreeRow({
           isSelected: node.session.id === selectedSessionId,
           isRunning: runningSessionIds.has(node.session.id),
           isAwaitingInput: awaitingInputSessionIds?.has(node.session.id) ?? false,
+          backgroundCommands: background?.commands ?? 0,
+          nextScheduledTaskAt: background?.nextTaskAt ?? null,
           startingFirstMessage: startingSessions?.get(node.session.id),
           isUnread: unreadSessionIds.has(node.session.id),
           isPinned: pinnedSessionIds.has(node.session.id),

@@ -4,6 +4,18 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { noteRunningPoll } from "@/lib/page-debug";
 import { stabilizeStringSet } from "@/lib/stable-string-set";
 import type { SessionCompletionSummary } from "@/lib/session-completion-summaries";
+import type { SessionBackgroundActivity } from "@/lib/session-background-activity";
+
+export type BackgroundActivityMap = ReadonlyMap<string, SessionBackgroundActivity>;
+
+/** 内容不变时复用原 Map，轮询不重渲染整棵侧栏。 */
+function stabilizeBackgroundActivity(current: BackgroundActivityMap, entries: SessionBackgroundActivity[]): BackgroundActivityMap {
+  const same = current.size === entries.length && entries.every((entry) => {
+    const previous = current.get(entry.sessionId);
+    return previous !== undefined && previous.commands === entry.commands && previous.nextTaskAt === entry.nextTaskAt;
+  });
+  return same ? current : new Map(entries.map((entry) => [entry.sessionId, entry]));
+}
 
 const RUNNING_SESSIONS_POLL_MS = 2500;
 
@@ -16,6 +28,8 @@ export function useRunningSessions() {
   const [startingSessions, setStartingSessions] = useState<ReadonlyMap<string, string>>(() => new Map());
   // Sessions whose subagents can still report back with a run there: not done yet (#1434).
   const [subagentsActiveSessionIds, setSubagentsActiveSessionIds] = useState<Set<string>>(() => new Set());
+  // 后台命令与待触发定时任务：侧栏单独显示，不参与运行中、完成通知和未读。
+  const [backgroundActivity, setBackgroundActivity] = useState<BackgroundActivityMap>(() => new Map());
   const [sessionListVersion, setSessionListVersion] = useState<number | null>(null);
   // 放在 ref 里：只有完成通知读取，轮询不应因此重渲染。
   const completionSummariesRef = useRef<ReadonlyMap<string, SessionCompletionSummary>>(new Map());
@@ -69,12 +83,14 @@ export function useRunningSessions() {
           subagentsActiveSessionIds?: string[];
           sessionListVersion?: number;
           completionSummaries?: SessionCompletionSummary[];
+          backgroundActivity?: SessionBackgroundActivity[];
         };
         answeredAt = Date.now();
         if (stopped || controller !== current) return;
         // 先于集合提交：集合变化触发的完成通知要读到同一次响应的摘要。
         completionSummariesRef.current = new Map((data.completionSummaries ?? []).map((summary) => [summary.sessionId, summary]));
         commitSnapshot(data.runningSessionIds ?? [], data.awaitingInputSessionIds ?? [], data.subagentsActiveSessionIds ?? []);
+        setBackgroundActivity((previous) => stabilizeBackgroundActivity(previous, data.backgroundActivity ?? []));
         const starting = data.startingSessions ?? [];
         // 内容不变时保持引用稳定，轮询不重渲染整棵侧栏。
         setStartingSessions((previous) => previous.size === starting.length
@@ -112,5 +128,5 @@ export function useRunningSessions() {
     };
   }, [commitSnapshot]);
 
-  return { runningSessionIds, awaitingInputSessionIds, startingSessions, subagentsActiveSessionIds, sessionListVersion, getCompletionSummary };
+  return { runningSessionIds, awaitingInputSessionIds, startingSessions, subagentsActiveSessionIds, backgroundActivity, sessionListVersion, getCompletionSummary };
 }
