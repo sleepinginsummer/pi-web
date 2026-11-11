@@ -28,7 +28,7 @@ import { DismissButton } from "./DismissButton";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useEnterSendMode } from "@/hooks/useEnterSendMode";
 import { useI18n } from "@/hooks/useI18n";
-import { readClipboardImageFiles } from "@/lib/clipboard-image";
+import { readClipboardImageFiles, readServerClipboardImageFiles } from "@/lib/clipboard-image";
 import { useOptimisticInputSubmission, type OptimisticInputSnapshot } from "@/hooks/useOptimisticInputSubmission";
 import { ModelPicker, type ModelPickerOption } from "./ModelPicker";
 import { InputControls } from "./InputControls";
@@ -739,7 +739,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       } catch (error) {
         if (!options?.clipboardFallback) throw error;
         // 粘贴得到的 File 可能指向其他应用的受保护文件，改取剪贴板里的图片数据。
-        const clipboardFiles = await readClipboardImageFiles();
+        let clipboardFiles = await readClipboardImageFiles();
+        // 浏览器也读不到时（如微信只放沙盒文件 URL 与 TIFF），请本机服务读取系统剪贴板。
+        if (!clipboardFiles.length) clipboardFiles = await readServerClipboardImageFiles();
         const usableFiles = clipboardFiles.filter((file) => file.size <= MAX_ATTACHED_IMAGE_BYTES);
         if (!usableFiles.length) {
           const oversizedFile = clipboardFiles[0];

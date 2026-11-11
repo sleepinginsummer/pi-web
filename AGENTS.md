@@ -71,6 +71,7 @@ app/api/
   auth/login/[provider]/route.ts  GET OAuth/device-code SSE | POST manual code
   auth/logout/[provider]/route.ts POST OAuth logout
   auth/providers/route.ts         GET OAuth and API-key provider lists
+  clipboard-image/route.ts        POST read this machine's clipboard image as PNG (loopback only; WeChat paste fallback)
   cwd/validate/route.ts           POST validate/select a cwd
   default-cwd/route.ts            POST create ~/pi-cwd-YYYYMMDD
   files/[...path]/route.ts        GET file contents for viewer

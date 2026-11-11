@@ -30,3 +30,26 @@ export async function readClipboardImageFiles(
     return [];
   }
 }
+
+type FetchLike = (input: string, init?: RequestInit) => Promise<Pick<Response, "ok" | "status" | "blob">>;
+
+/**
+ * 请求同一台机器上的 pi-web 服务读取系统剪贴板图片。
+ *
+ * 微信在 macOS 上只放沙盒文件 URL 和 TIFF 数据，浏览器两种途径都读不到；服务端可以让系统转成 PNG。
+ * 页面不在本机访问、平台不支持或剪贴板没有图片时返回空数组。
+ */
+export async function readServerClipboardImageFiles(
+  fetchImpl: FetchLike = (input, init) => fetch(input, init),
+): Promise<File[]> {
+  try {
+    const response = await fetchImpl("/api/clipboard-image", { method: "POST", cache: "no-store" });
+    if (!response.ok || response.status === 204) return [];
+    const blob = await response.blob();
+    if (!blob.size) return [];
+    return [new File([blob], "clipboard.png", { type: "image/png" })];
+  } catch (error) {
+    console.warn("通过服务端读取剪贴板图片失败", error);
+    return [];
+  }
+}
