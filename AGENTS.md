@@ -298,6 +298,7 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 - `/api/files` is intentionally not a general filesystem browser. Allowed roots come from session cwds, their resolved project roots, `~/pi-cwd-*`, and roots explicitly added with `allowFileRoot()`.
 - `/api/cwd/validate`, `/api/default-cwd`, and `/api/worktrees` call `allowFileRoot()` when they make a new location browsable.
 - Allowed roots are stored slash-normalized, but that is a Set-key convention, not a correctness requirement: `isPathWithinRoots()` (`lib/path-security.ts`, the single implementation behind `isFilePathAllowed()`) re-resolves and case-folds both sides, so either path form authorizes correctly. Keep that one implementation — it is the security boundary.
+- 正文中的本地媒体 URL 由 `MarkdownBody` 携带当前 `sessionId`，项目目录外的文件（如 `/tmp` 截图）由文件 API 核验会话历史中的精确引用。`ChatWindow → StreamingReply → MessageView → TextBlock` 的流式路径和历史消息路径都必须传递该 ID；不能通过放开整个临时目录绕过授权。
 
 ### 上游合并取舍（v0.13–v0.15）
 - 隐藏页释放 SSE（#1328）未移植：fork 的 SSE broker 已解决连接数问题。但上游让 SSE 不再保活（#1445），页面续租是会话存活的唯一来源，`useAgentSession` 必须继续每 30 秒 POST `/lease`。调试面板的 SSE 一栏因此显示“尚无连接”，属预期。

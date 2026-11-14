@@ -1335,6 +1335,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                     toolResults={toolResults}
                     modelNames={modelState.names}
                     cwd={messageCwd}
+                    sessionId={session?.id ?? sessionIdRef.current ?? undefined}
                     onOpenFile={onOpenFile}
                     onOpenSubagent={onOpenSubagent}
                     visibleBlockOffset={visibleBlockOffset}

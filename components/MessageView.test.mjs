@@ -13,6 +13,8 @@ const jiti = createJiti(import.meta.url, {
 });
 const { CompactionSummaryDetails, MessageView, ThinkingBlock, formatToolDuration, getTokenEstimateText, getToolCallInputText, replaceUserMessageText } = await jiti.import("./MessageView.tsx");
 const { I18nProvider } = await jiti.import("@/hooks/useI18n");
+const { StreamingReply } = await jiti.import("./StreamingReply.tsx");
+const { createStreamingStore } = await jiti.import("../lib/streaming-message.ts");
 const { splitFinalAssistantBlocks } = await jiti.import("../lib/message-display.ts");
 const { clearExpandedToolCalls, setToolCallExpanded } = await jiti.import("../lib/tool-call-expansion.ts");
 const source = await readFile(new URL("./MessageView.tsx", import.meta.url), "utf8");
@@ -26,6 +28,24 @@ function renderMessage(message, props = {}) {
     ),
   );
 }
+
+test("历史回复和流式回复把会话 ID 传给本地正文图片", () => {
+  const sessionId = "01a1d7e2-ba81-70dd-bc02-ce2a84d02a3b";
+  const message = {
+    role: "assistant",
+    content: [{ type: "text", text: "![二维码](/tmp/tencent-location-login-qr.png)" }],
+  };
+  const store = createStreamingStore();
+  store.dispatch({ type: "snapshot", message });
+  const streamingHtml = renderToStaticMarkup(React.createElement(I18nProvider, null,
+    React.createElement(StreamingReply, {
+      store, sessionId, cwd: "/project", messageRef: { current: null }, toolResults: new Map(), modelNames: {},
+    }),
+  ));
+  for (const html of [renderMessage(message, { sessionId, cwd: "/project" }), streamingHtml]) {
+    assert.ok(html.includes('src="/api/files/tmp/tencent-location-login-qr.png?type=read&amp;sessionId=' + sessionId + '"'));
+  }
+});
 
 test("updates a reused message when its written files change", () => {
   const props = { message: { role: "assistant", content: [] } };

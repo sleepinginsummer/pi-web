@@ -47,6 +47,7 @@ interface MarkdownBodyProps {
   className?: string;
   isStreaming?: boolean;
   cwd?: string;
+  sessionId?: string;
   onOpenFile?: (filePath: string, page?: number) => void;
   /** A document reader's own links: relative paths and `#headings` stay in the reader. */
   onNavigateLink?: (href: string) => void;
@@ -60,14 +61,16 @@ function MarkdownImage({
   src,
   alt,
   cwd,
+  sessionId,
   ...props
-}: ComponentProps<"img"> & ExtraProps & { cwd?: string }) {
+}: ComponentProps<"img"> & ExtraProps & { cwd?: string; sessionId?: string }) {
   const insideLink = useContext(MarkdownLinkContext);
   delete props.node;
   const href = typeof src === "string" ? src : undefined;
   const filePath = href ? resolveLocalFileHref(href, cwd) : null;
+  // 项目目录外的图片（如 /tmp 截图）需要会话 ID，供文件 API 核验历史引用。
   const mediaSrc = filePath
-    ? `/api/files/${encodeFilePathForApi(filePath)}?type=read`
+    ? `/api/files/${encodeFilePathForApi(filePath)}?type=read${sessionId ? `&sessionId=${encodeURIComponent(sessionId)}` : ""}`
     : href;
   // `![](take.wav)` is how a model shows a sound or clip it made, and an <img>
   // cannot play it. The file API already streams both with range requests.
@@ -137,7 +140,7 @@ function renderListItems(children: ReactNode, ordered: boolean, start = 1) {
 }
 
 // 整体 memo：父组件因无关状态重渲染时，相同正文不再重新解析。
-export const MarkdownBody = memo(function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile, onNavigateLink, keepLineBreaks, keepTextLayout }: MarkdownBodyProps) {
+export const MarkdownBody = memo(function MarkdownBody({ children, className, isStreaming, cwd, sessionId, onOpenFile, onNavigateLink, keepLineBreaks, keepTextLayout }: MarkdownBodyProps) {
   const normalizedMarkdown = useMemo(() => normalizeDisplayMath(children), [children]);
   // 回调和配置都通过 ref 读取，让 components 只随 cwd / 流式状态 / 是否有打开文件
   // 能力变化，块级 memo 才能在上游回调换身份时依然命中。
@@ -237,7 +240,7 @@ export const MarkdownBody = memo(function MarkdownBody({ children, className, is
       );
     },
     img(props) {
-      return <MarkdownImage cwd={cwd} {...props} />;
+      return <MarkdownImage cwd={cwd} sessionId={sessionId} {...props} />;
     },
     div({ node, children, ...props }) {
       const source = node?.properties?.dataMathSource;
@@ -255,7 +258,7 @@ export const MarkdownBody = memo(function MarkdownBody({ children, className, is
         </div>
       );
     },
-  }), [cwd, hasOnNavigateLink, hasOnOpenFile, isStreaming, openFile]);
+  }), [cwd, sessionId, hasOnNavigateLink, hasOnOpenFile, isStreaming, openFile]);
 
   const renderConfig = useMemo<MarkdownRenderConfig>(() => ({
     remarkPlugins: keepTextLayout ? markdownTextLayoutRemarkPlugins : keepLineBreaks ? markdownUserRemarkPlugins : markdownRemarkPlugins,

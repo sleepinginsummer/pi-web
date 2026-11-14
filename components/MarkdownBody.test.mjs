@@ -299,6 +299,17 @@ test("opens markdown images in the shared image preview", () => {
   assert.match(remoteHtml, /<img[^>]+src="https:\/\/example\.com\/logo\.png"/);
 });
 
+test("本地图片携带会话授权，远程图片不附带会话 ID", () => {
+  const sessionId = "01a1d7e2-ba81-70dd-bc02-ce2a84d02a3b";
+  const markdown = "![二维码](/tmp/tencent-location-login-qr.png)\n\n![远程](https://example.com/logo.png)\n\n尾部";
+  for (const isStreaming of [false, true]) {
+    const html = renderMarkdown(markdown, { sessionId, isStreaming });
+    assert.ok(html.includes('src="/api/files/tmp/tencent-location-login-qr.png?type=read&amp;sessionId=' + sessionId + '"'));
+    assert.ok(html.includes('src="https://example.com/logo.png"'));
+    assert.doesNotMatch(html, /sessionId="/);
+  }
+});
+
 test("keeps linked markdown images as links instead of nested preview buttons", () => {
   const html = renderMarkdown("[![diagram](docs/tmp/diagram.png)](https://example.com/docs)");
 

@@ -814,7 +814,7 @@ function AssistantMessageView({
 
 function BlockView({ block, searchTarget, toolResults, isStreaming, streamingDuration, toolCallDurations, cwd, onOpenFile, onOpenSubagent, sessionId, entryId, blockIndex }: { block: AssistantContentBlock; searchTarget?: boolean; toolResults?: Map<string, ToolResultMessage>; isStreaming?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; onOpenSubagent?: (sessionId: string, label: string) => void; sessionId?: string; entryId?: string; blockIndex: number }) {
   if (block.type === "text") {
-    return <div data-search-target={searchTarget || undefined}><TextBlock block={block as TextContent} isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile} /></div>;
+    return <div data-search-target={searchTarget || undefined}><TextBlock block={block as TextContent} isStreaming={isStreaming} cwd={cwd} sessionId={sessionId} onOpenFile={onOpenFile} /></div>;
   }
   if (block.type === "image") {
     return <ImageBlock block={block as ImageContent} />;
@@ -831,7 +831,7 @@ function BlockView({ block, searchTarget, toolResults, isStreaming, streamingDur
   return null;
 }
 
-function TextBlock({ block, isStreaming, cwd, onOpenFile }: { block: TextContent; isStreaming?: boolean; cwd?: string; onOpenFile?: (filePath: string) => void }) {
+function TextBlock({ block, isStreaming, cwd, sessionId, onOpenFile }: { block: TextContent; isStreaming?: boolean; cwd?: string; sessionId?: string; onOpenFile?: (filePath: string) => void }) {
   // 普通文本始终读当前块；只有按需加载的完整正文进入 state，避免稳定块 key 冻结流式内容。
   const [loaded, setLoaded] = useState<{ url: string; text: string } | null>(null);
   const fullContentLoaded = loaded !== null && loaded.url === block.deferredUrl;
@@ -849,7 +849,7 @@ function TextBlock({ block, isStreaming, cwd, onOpenFile }: { block: TextContent
     }).catch((cause) => setError(String(cause))).finally(() => setLoading(false));
   };
   return <>
-    <SafeMarkdownBody isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile}>{text}</SafeMarkdownBody>
+    <SafeMarkdownBody isStreaming={isStreaming} cwd={cwd} sessionId={sessionId} onOpenFile={onOpenFile}>{text}</SafeMarkdownBody>
     {block.deferredUrl && !fullContentLoaded && (
       <button type="button" onClick={load} disabled={loading} style={{ padding: 0, border: 0, background: "none", color: "var(--accent)", cursor: loading ? "default" : "pointer", fontSize: 11 }}>
         {loading ? "loading..." : "view full content"}
