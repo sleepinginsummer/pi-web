@@ -10,7 +10,7 @@ import { TrashSessionActions, trashButtonStyle } from "./TrashSessionActions";
 import { ProcessDetailsGroup } from "./ProcessDetailsGroup";
 import { getTurnDurationMs } from "@/lib/turn-duration";
 import { buildMessageRenderGroups } from "@/lib/message-render-groups";
-import { collapsesProcessDetails, countToolCallBlocks, getDisplayableAssistantBlocks, isHiddenCustomMessage, isMessageGroupAnchor } from "@/lib/message-display";
+import { countToolCallBlocks, getDisplayableAssistantBlocks, isHiddenCustomMessage, isMessageGroupAnchor } from "@/lib/message-display";
 import { getFinalAnswerViews } from "@/lib/turn-views";
 import type { AgentMessage, AssistantMessage, SessionContext, ToolResultMessage } from "@/lib/types";
 import type { TrashedSession } from "@/lib/trash";
@@ -144,7 +144,7 @@ export function TrashSessionDetail({ session, onClose, onRestored, onRenamed }: 
                     messageCount={process.length}
                     toolCallCount={process.reduce((count, { message }) => count + (message.role === "assistant" ? countToolCallBlocks(message.content) : 0), 0)}
                     durationMs={anchor ? getTurnDurationMs(messages, group.start, group.end) : undefined}
-                    defaultExpanded={!collapsesProcessDetails(views?.answer ?? null)}
+                    defaultExpanded={false}
                     t={t}
                     renderChildren={() => <>{process.map(({ message, index }) => renderMessage(message, index))}</>}
                   /> }
