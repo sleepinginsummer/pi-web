@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import { ConfigButton, ConfigEmptyState, ConfigPanelShell, ConfigSectionTitle } from "./SettingsUi";
+import { copyText } from "@/lib/clipboard";
 
 interface SecretRow {
   name: string;
@@ -29,7 +30,7 @@ const inputStyle = {
   fontSize: 13,
 } as const;
 
-/** Settings › Vault: names only. There is deliberately no way to read a value back here. */
+/** 保管库设置：默认只加载元数据，用户主动查看时才请求单条原文。 */
 export function SecretVaultConfig({ onClose }: { onClose: () => void }) {
   const { t } = useI18n();
   const [secrets, setSecrets] = useState<SecretRow[] | null>(null);
@@ -40,11 +41,13 @@ export function SecretVaultConfig({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirming, setConfirming] = useState<string | null>(null);
+  const [revealed, setRevealed] = useState<{ name: string; value: string; copied: boolean } | null>(null);
 
   const apply = useCallback(async (response: Response) => {
     const data = await response.json() as { secrets?: SecretRow[]; error?: string };
     if (!response.ok || !data.secrets) throw new Error(data.error ?? t("vault.loadFailed"));
     setSecrets(data.secrets);
+    setRevealed(null);
   }, [t]);
 
   useEffect(() => {
@@ -106,6 +109,38 @@ export function SecretVaultConfig({ onClose }: { onClose: () => void }) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const reveal = async (target: string) => {
+    setBusy(true);
+    setError(null);
+    setRevealed(null);
+    try {
+      const response = await fetch("/api/secret-vault/reveal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({ name: target }),
+      });
+      const data = await response.json() as { value?: string; error?: string };
+      if (!response.ok || typeof data.value !== "string") throw new Error(data.error ?? t("vault.revealFailed"));
+      setRevealed({ name: target, value: data.value, copied: false });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("vault.revealFailed"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const copyRevealed = async () => {
+    if (!revealed) return;
+    const current = revealed;
+    try {
+      await copyText(current.value);
+      setRevealed((previous) => previous === current ? { ...current, copied: true } : previous);
+    } catch {
+      setError(t("vault.copyFailed"));
     }
   };
 
@@ -180,12 +215,26 @@ export function SecretVaultConfig({ onClose }: { onClose: () => void }) {
                   </>
                 ) : (
                   <>
+                    <ConfigButton disabled={busy} onClick={() => revealed?.name === secret.name ? setRevealed(null) : void reveal(secret.name)}>{t(revealed?.name === secret.name ? "vault.hide" : "vault.reveal")}</ConfigButton>
                     <ConfigButton disabled={busy} onClick={() => setEdit({ name: secret.name, field: "remark", draft: secret.remark ?? "" })}>{t("vault.editRemark")}</ConfigButton>
                     <ConfigButton disabled={busy} onClick={() => setEdit({ name: secret.name, field: "rename", draft: secret.name })}>{t("vault.rename")}</ConfigButton>
                     <ConfigButton disabled={busy} onClick={() => setConfirming(secret.name)}>{t("vault.remove")}</ConfigButton>
                   </>
                 )}
               </div>
+              {revealed?.name === secret.name && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  <textarea
+                    readOnly
+                    aria-label={t("vault.valueLabel")}
+                    value={revealed.value}
+                    autoComplete="off"
+                    spellCheck={false}
+                    style={{ ...inputStyle, minHeight: 72, fontFamily: "var(--font-mono, monospace)", resize: "vertical" }}
+                  />
+                  <div><ConfigButton onClick={() => void copyRevealed()}>{t(revealed.copied ? "vault.copied" : "vault.copy")}</ConfigButton></div>
+                </div>
+              )}
               {edit?.name === secret.name && (
                 <form onSubmit={submitEdit} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                   <input

@@ -15,6 +15,15 @@ function sessionDirForCwd(cwd: string): string {
 // trashSessionFile 写入的文件名前缀：ISO 时间戳（: 和 . 替换为 -），如 2025-07-31T16-35-00-000Z_
 const TRASH_PREFIX_RE = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z_/;
 
+/** 删除时间编码在文件名前缀中，不能使用改名后会变化的 mtime。 */
+function parseTrashDeletedTime(fileName: string): number | null {
+  if (!TRASH_PREFIX_RE.test(fileName)) return null;
+  const stamp = fileName.slice(0, 24);
+  const iso = `${stamp.slice(0, 13)}:${stamp.slice(14, 16)}:${stamp.slice(17, 19)}.${stamp.slice(20)}`;
+  const time = Date.parse(iso);
+  return Number.isFinite(time) ? time : null;
+}
+
 export interface TrashedSession {
   /** 回收站内文件名（含删除时间戳前缀） */
   fileName: string;
@@ -23,10 +32,15 @@ export interface TrashedSession {
   sessionId: string;
   /** 会话原所在目录（来自 session header） */
   cwd: string;
-  /** 会话标题：首条 user 消息文本 */
+  /** 会话标题：优先使用显式名称，否则使用首条 user 消息文本 */
   title: string;
   /** 最后更新时间（文件 mtime，rename 进回收站不会改变它） */
   modified: number;
+  /** 原始文件位置与回收站位置。 */
+  originalPath: string;
+  trashPath: string;
+  created: number | null;
+  deleted: number | null;
 }
 
 export function getTrashDir(): string {
@@ -144,6 +158,10 @@ export function listTrashedSessions(): TrashedSession[] {
         cwd: header.cwd ?? "",
         title: readTrashedSessionName(filePath) ?? readTrashedTitle(filePath, header.cwd || fileName),
         modified: stat.mtimeMs,
+        originalPath: join(sessionDirForCwd(header.cwd), fileName.replace(TRASH_PREFIX_RE, "")),
+        trashPath: filePath,
+        created: Number.isFinite(Date.parse(header.timestamp)) ? Date.parse(header.timestamp) : null,
+        deleted: parseTrashDeletedTime(fileName),
       });
     } catch {
       // 跳过无法读取的文件
@@ -159,6 +177,7 @@ export function assertTrashFileName(fileName: string): void {
     throw new Error("Invalid trash file name");
   }
 }
+
 
 /** 将回收站中的会话恢复到原会话目录（~/.pi/agent/sessions/<编码cwd>/），还原原始文件名。 */
 export function restoreTrashedSession(fileName: string): { restoredPath: string; sessionId: string } {

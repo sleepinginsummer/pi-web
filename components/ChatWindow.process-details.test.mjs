@@ -4,6 +4,7 @@ import test from "node:test";
 import { createJiti } from "jiti";
 
 const source = await readFile(new URL("./ChatWindow.tsx", import.meta.url), "utf8");
+const processSource = await readFile(new URL("./ProcessDetailsGroup.tsx", import.meta.url), "utf8");
 const { buildMessageRenderGroups } = await createJiti(import.meta.url).import("../lib/message-render-groups.ts");
 
 test("历史页从轮次中途开始时仍将前缀处理消息分为一组", () => {
@@ -22,7 +23,7 @@ test("历史页从轮次中途开始时仍将前缀处理消息分为一组", ()
 });
 
 test("无最终答复的结束轮次默认展开处理过程", () => {
-  assert.match(source, /const \[expanded, setExpanded\] = useState\(defaultExpanded\)/);
+  assert.match(processSource, /const \[expanded, setExpanded\] = useState\(defaultExpanded\)/);
   assert.match(source, /<ProcessDetailsGroup[\s\S]*?defaultExpanded=\{!answered\}/);
   assert.match(source, /const answered = collapsesProcessDetails\(finalAnswerMessage\);/);
   assert.match(source, /key=\{answered \? "answered" : "unanswered"\}/);

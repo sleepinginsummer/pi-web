@@ -740,6 +740,8 @@ export function getSessionSettings(entries: SessionEntry[], leafId?: string | nu
 }
 
 export interface BuildSessionContextOptions {
+  /** 回收站阅读完整历史，不应用面向模型的压缩裁剪。 */
+  fullHistory?: boolean;
   deferThinking?: boolean;
   deferToolResultImages?: boolean;
   tail?: number;
@@ -773,6 +775,20 @@ function collectShadowRunMetadata(entries: SessionEntry[]): ReadonlyMap<string, 
   return metadata;
 }
 
+/** 只沿当前叶子的祖先链读取，避免把其它分支拼进历史。 */
+function readFullBranchEntries(entries: SessionEntry[], leafId?: string | null): PiSessionEntry[] {
+  const byId = new Map(entries.map((entry) => [entry.id, entry]));
+  let current = leafId ? byId.get(leafId) : entries.at(-1);
+  const branch: SessionEntry[] = [];
+  const visited = new Set<string>();
+  while (current && !visited.has(current.id)) {
+    visited.add(current.id);
+    branch.push(current);
+    current = current.parentId ? byId.get(current.parentId) : undefined;
+  }
+  return branch.reverse() as unknown as PiSessionEntry[];
+}
+
 export function buildSessionContext(
   entries: SessionEntry[],
   leafId?: string | null,
@@ -785,16 +801,18 @@ export function buildSessionContext(
   for (const e of sliced) byId.set(e.id, e);
 
   const piEntries = sliced as unknown as PiSessionEntry[];
-  const contextEntries = piBuildContextEntries(
-    piEntries,
-    leafId,
-    byId as unknown as Map<string, PiSessionEntry>,
-  );
+  const contextEntries = options.fullHistory
+    ? readFullBranchEntries(sliced, leafId)
+    : piBuildContextEntries(
+      piEntries,
+      leafId,
+      byId as unknown as Map<string, PiSessionEntry>,
+    );
   // SDK 上下文会过滤扩展 custom 条目；将当前压缩边界之后的可见 Shadow 事件
   // 按原始分支位置补回，避免升级 SDK 后生命周期卡片从历史记录中消失。
   const contextEntryIds = new Set(contextEntries.map((entry) => entry.id));
   const latestCompactionIndex = sliced.findLastIndex((entry) => entry.type === "compaction");
-  const visibleCustomEntries = sliced.filter((entry, index) => (
+  const visibleCustomEntries = options.fullHistory ? [] : sliced.filter((entry, index) => (
     index > latestCompactionIndex
     && !contextEntryIds.has(entry.id)
     && entry.type === "custom"

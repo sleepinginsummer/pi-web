@@ -1,158 +1,163 @@
 "use client";
-// 回收站会话详情弹窗：只读展示已删除会话的完整对话内容，支持直接恢复。
-import { useEffect, useMemo, useState } from "react";
+
+// 回收站展示当前分支的完整历史；工具过程按回合折叠，阅读导航复用主聊天大纲。
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useI18n } from "@/hooks/useI18n";
-import { formatRelativeTime } from "@/lib/i18n/format";
 import { MessageView } from "./MessageView";
-import type { AgentMessage, SessionContext, ToolResultMessage } from "@/lib/types";
+import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
+import { TrashSessionActions, trashButtonStyle } from "./TrashSessionActions";
+import { ProcessDetailsGroup } from "./ProcessDetailsGroup";
+import { getTurnDurationMs } from "@/lib/turn-duration";
+import { buildMessageRenderGroups } from "@/lib/message-render-groups";
+import { collapsesProcessDetails, countToolCallBlocks, getDisplayableAssistantBlocks, isHiddenCustomMessage, isMessageGroupAnchor } from "@/lib/message-display";
+import { getFinalAnswerViews } from "@/lib/turn-views";
+import type { AgentMessage, AssistantMessage, SessionContext, ToolResultMessage } from "@/lib/types";
 import type { TrashedSession } from "@/lib/trash";
 
 interface Props {
   session: TrashedSession;
   onClose: () => void;
-  /** 恢复成功后回调（侧边栏刷新 + 面板移除该项） */
   onRestored: () => void;
+  onRenamed: (session: TrashedSession) => void;
 }
 
-export function TrashSessionDetail({ session, onClose, onRestored }: Props) {
+const noStreamingMessage = () => null;
+const noRevealHistory = () => {};
+
+export function TrashSessionDetail({ session, onClose, onRestored, onRenamed }: Props) {
   const { t, locale } = useI18n();
+  const zh = locale.startsWith("zh");
   const [context, setContext] = useState<SessionContext | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [restoring, setRestoring] = useState(false);
+  const [showOutline, setShowOutline] = useState(true);
   const [portalTarget, setPortalTarget] = useState<HTMLElement | null>(null);
+  const scrollContainer = useRef<HTMLDivElement>(null);
 
+  useEffect(() => { setPortalTarget(document.body); }, []);
   useEffect(() => {
-    setPortalTarget(document.body);
-  }, []);
-
-  // 加载会话内容（完整加载，不含 defer 标记，详情弹窗无流式补载通道）
-  useEffect(() => {
-    let cancelled = false;
+    const controller = new AbortController();
     setContext(null);
     setError(null);
-    fetch(`/api/trash/${encodeURIComponent(session.fileName)}/content`)
-      .then(async (r) => {
-        const data = await r.json() as { context?: SessionContext; error?: string };
-        if (!r.ok) throw new Error(data.error ?? `HTTP ${r.status}`);
-        if (!cancelled) setContext(data.context ?? null);
+    fetch(`/api/trash/${encodeURIComponent(session.fileName)}/content`, { signal: controller.signal })
+      .then(async (response) => {
+        const data = await response.json() as { context?: SessionContext; error?: string };
+        if (!response.ok || !data.context) throw new Error(data.error ?? `HTTP ${response.status}`);
+        if (!controller.signal.aborted) setContext(data.context);
       })
-      .catch((e) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      .catch((error) => {
+        if (!controller.signal.aborted) setError(error instanceof Error ? error.message : String(error));
       });
-    return () => { cancelled = true; };
+    return () => controller.abort();
   }, [session.fileName]);
 
-  // Esc 关闭（TrashPanel 的 Esc 处理已排除详情打开状态，避免同时关闭两层）
   useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
+    const handler = (event: KeyboardEvent) => { if (event.key === "Escape" && !restoring) onClose(); };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [onClose]);
+  }, [onClose, restoring]);
 
-  // 与 ChatWindow 一致：toolResult 挂到对应 toolCall 下渲染，最后一条 assistant 消息显示时间戳
-  const { messages, toolResults, assistantTimestampIndices } = useMemo(() => {
-    const msgs = context?.messages ?? [];
-    const results = new Map<string, ToolResultMessage>();
-    const timestamps = new Set<number>();
-    let lastAssistantIndex = -1;
-    msgs.forEach((m, idx) => {
-      if (m.role === "toolResult") {
-        results.set((m as ToolResultMessage).toolCallId, m as ToolResultMessage);
-      }
-      if (m.role === "user") {
-        if (lastAssistantIndex >= 0) timestamps.add(lastAssistantIndex);
-        lastAssistantIndex = -1;
-      } else if (m.role === "assistant") {
-        lastAssistantIndex = idx;
-      }
+  const { messages, toolResults, groups, finalViews } = useMemo(() => {
+    const messages = context?.messages ?? [];
+    const toolResults = new Map<string, ToolResultMessage>();
+    for (const message of messages) {
+      if (message.role === "toolResult") toolResults.set(message.toolCallId, message);
+    }
+    const { groups } = buildMessageRenderGroups(messages, {
+      isAnchor: isMessageGroupAnchor,
+      findFinalAssistantIndex: (items, start, end) => {
+        for (let index = end - 1; index > start; index--) {
+          if (items[index].role === "assistant") return index;
+        }
+        return -1;
+      },
+      busy: false, lastAnchorIndex: -1,
     });
-    if (lastAssistantIndex >= 0) timestamps.add(lastAssistantIndex);
-    return { messages: msgs, toolResults: results, assistantTimestampIndices: timestamps };
+    const cache = new WeakMap();
+    const finalViews = new Map(groups.flatMap((group) => group.finalAssistantIdx < 0 ? [] : [[
+      group.finalAssistantIdx, getFinalAnswerViews(cache, messages[group.finalAssistantIdx] as AssistantMessage),
+    ] as const]));
+    return { messages, toolResults, groups, finalViews };
   }, [context]);
+  // 大纲的 ref 索引只计用户锚点与 assistant，工具结果不占位。
+  const refIndices = useMemo(() => {
+    let next = 0;
+    return messages.map((message) => isMessageGroupAnchor(message) || message.role === "assistant" ? next++ : -1);
+  }, [messages]);
+  const messageRefs = useMessageRefs(refIndices.filter((index) => index >= 0).length);
 
   const handleRestore = async () => {
     setRestoring(true);
     setError(null);
     try {
-      const res = await fetch(`/api/trash/${encodeURIComponent(session.fileName)}`, { method: "POST" });
-      const data = await res.json() as { error?: string };
-      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+      const response = await fetch(`/api/trash/${encodeURIComponent(session.fileName)}`, { method: "POST" });
+      const data = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
       onRestored();
       onClose();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setRestoring(false);
-    }
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error));
+    } finally { setRestoring(false); }
   };
+
+  const renderMessage = (message: AgentMessage, index: number, final = false) => (
+    <div key={context?.entryIds[index] ?? index} data-entry-id={context?.entryIds[index]}
+      ref={(element) => { if (refIndices[index] >= 0) messageRefs.current[refIndices[index]] = element; }}>
+      <MessageView message={message} toolResults={toolResults} cwd={session.cwd} showTimestamp={final}
+        prevTimestamp={index > 0 ? messages[index - 1].timestamp : undefined} />
+    </div>
+  );
 
   if (!portalTarget) return null;
   return createPortal(
-    <div
-      style={{ position: "fixed", inset: 0, zIndex: 1150, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}
-      onClick={(e) => { if (e.target === e.currentTarget && !restoring) onClose(); }}
-    >
-      <div style={{
-        width: 860, maxWidth: "100%", height: "min(82vh, 760px)",
-        display: "flex", flexDirection: "column", overflow: "hidden",
-        background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 10,
-        boxShadow: "0 24px 64px rgba(0,0,0,0.35)",
-      }}>
-        {/* Header */}
-        <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={session.title}>
-              {t("trash.detail")} — {session.title}
-            </div>
-            <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={session.cwd}>
-              {session.cwd} · {t("trash.updatedAt", { time: formatRelativeTime(new Date(session.modified), locale) })}
-            </div>
-          </div>
-          <button onClick={() => void handleRestore()} disabled={restoring} style={{
-            display: "flex", alignItems: "center", gap: 4, height: 28, padding: "0 12px", flexShrink: 0,
-            background: "var(--bg-hover)", border: "1px solid var(--border)", borderRadius: 6,
-            color: "var(--accent)", cursor: restoring ? "default" : "pointer", fontSize: 12, fontWeight: 600, opacity: restoring ? 0.6 : 1,
-          }}>
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-              <polyline points="1 4 1 10 7 10" />
-              <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
-            </svg>
-            {t("trash.restore")}
-          </button>
-          <button onClick={onClose} disabled={restoring} style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 20, lineHeight: 1, padding: "2px 6px", flexShrink: 0 }}>×</button>
+    <div style={{ position: "fixed", inset: 0, zIndex: 1150, background: "rgba(0,0,0,.45)", display: "flex", alignItems: "center", justifyContent: "center", padding: "min(3vw, 24px)" }}
+      onClick={(event) => { if (event.target === event.currentTarget && !restoring) onClose(); }}>
+      <div className="chat-content" role="dialog" aria-modal="true" aria-label={session.title} style={{ width: 1100, maxWidth: "100%", height: "90dvh", display: "flex", flexDirection: "column", overflow: "hidden", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8, padding: "12px 16px", borderBottom: "1px solid var(--border)" }}>
+          <strong style={{ flex: "1 1 180px", minWidth: 0, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 14 }} title={session.title}>{session.title}</strong>
+          <TrashSessionActions session={session} onRenamed={onRenamed} disabled={restoring} />
+          <button style={trashButtonStyle} aria-pressed={showOutline} onClick={() => setShowOutline(!showOutline)}>{zh ? "大纲" : "Outline"}</button>
+          <button style={trashButtonStyle} disabled={restoring} onClick={() => void handleRestore()}>{t("trash.restore")}</button>
+          <button style={trashButtonStyle} disabled={restoring} aria-label={zh ? "关闭" : "Close"} onClick={onClose}>×</button>
         </div>
-
-        {/* Error */}
-        {error && (
-          <div style={{ padding: "6px 16px", fontSize: 12, color: "#ef4444", background: "rgba(239,68,68,0.08)", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
-            {error}
+        {error && <div role="alert" style={{ padding: "8px 16px", color: "#ef4444", fontSize: 12 }}>{error}</div>}
+        <div style={{ position: "relative", flex: 1, minHeight: 0, display: "flex" }}>
+          <div ref={scrollContainer} className="scrollbar-subtle" style={{ flex: 1, minWidth: 0, overflowX: "hidden", overflowY: "auto", padding: "16px", scrollbarGutter: "stable" }}>
+            <div style={{ maxWidth: "var(--chat-content-max-width, 820px)", margin: "0 auto" }}>
+            {context === null && !error ? <div style={{ padding: 18 }}>{t("i18n.loading")}</div>
+              : messages.length === 0 ? <div style={{ padding: 18 }}>{t("trash.detailEmpty")}</div>
+              : groups.map((group) => {
+                const anchor = isMessageGroupAnchor(messages[group.start]);
+                const views = finalViews.get(group.finalAssistantIdx);
+                const processStart = anchor ? group.start + 1 : group.start;
+                const process = [] as { message: AgentMessage; index: number }[];
+                for (let index = processStart; index < group.end; index++) {
+                  const message = index === group.finalAssistantIdx ? views!.process : messages[index];
+                  if (message.role === "toolResult" || isHiddenCustomMessage(message)) continue;
+                  if (message.role === "assistant" && getDisplayableAssistantBlocks(message).length === 0) continue;
+                  process.push({ message, index });
+                }
+                return <div key={context?.entryIds[group.start] ?? group.start}>
+                  {anchor && renderMessage(messages[group.start], group.start)}
+                  {process.length > 0 && <ProcessDetailsGroup
+                    messageCount={process.length}
+                    toolCallCount={process.reduce((count, { message }) => count + (message.role === "assistant" ? countToolCallBlocks(message.content) : 0), 0)}
+                    durationMs={anchor ? getTurnDurationMs(messages, group.start, group.end) : undefined}
+                    defaultExpanded={!collapsesProcessDetails(views?.answer ?? null)}
+                    t={t}
+                    renderChildren={() => <>{process.map(({ message, index }) => renderMessage(message, index))}</>}
+                  /> }
+                  {views?.answer && renderMessage(views.answer, group.finalAssistantIdx, true)}
+                </div>;
+              })}
+            </div>
           </div>
-        )}
-
-        {/* Body: messages */}
-        <div style={{ flex: 1, overflowY: "auto", padding: "16px 0" }}>
-          {context === null && !error ? (
-            <div style={{ padding: "24px 18px", color: "var(--text-dim)", fontSize: 12 }}>{t("i18n.loading")}</div>
-          ) : messages.length === 0 ? (
-            <div style={{ padding: "24px 18px", color: "var(--text-dim)", fontSize: 12 }}>{t("trash.detailEmpty")}</div>
-          ) : (
-            messages.map((m, idx) => (
-              <MessageView
-                key={idx}
-                message={m}
-                toolResults={toolResults}
-                cwd={session.cwd}
-                showTimestamp={assistantTimestampIndices.has(idx)}
-                prevTimestamp={idx > 0 ? (messages[idx - 1] as AgentMessage & { timestamp?: number }).timestamp : undefined}
-              />
-            ))
-          )}
+          {showOutline && context && <ChatMinimap messages={messages} entryIds={context.entryIds}
+            getStreamingMessage={noStreamingMessage} isStreaming={false} scrollContainer={scrollContainer}
+            messageRefs={messageRefs} onRevealHistory={noRevealHistory} turnsBefore={0} />}
         </div>
       </div>
-    </div>,
-    portalTarget,
+    </div>, portalTarget,
   );
 }

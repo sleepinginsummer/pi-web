@@ -30,6 +30,7 @@ import { useEnterSendMode } from "@/hooks/useEnterSendMode";
 import { useI18n } from "@/hooks/useI18n";
 import { readClipboardImageFiles, readServerClipboardImageFiles } from "@/lib/clipboard-image";
 import { useOptimisticInputSubmission, type OptimisticInputSnapshot } from "@/hooks/useOptimisticInputSubmission";
+import { prependSubmittedInput } from "@/lib/optimistic-input-submission";
 import { ModelPicker, type ModelPickerOption } from "./ModelPicker";
 import { InputControls } from "./InputControls";
 import { ImagePreview } from "./ImagePreview";
@@ -46,6 +47,7 @@ export interface AttachedImage {
 interface Props {
   // 返回 false 表示当前状态未接收消息，保留草稿避免用户输入丢失。
   onSend: (message: string, images?: AttachedImage[]) => boolean | void | Promise<boolean | void>;
+  sendError?: string | null;
   onAbort: () => void;
   onQueuedSubmit?: (message: string, mode: "steer" | "followUp", images?: AttachedImage[]) => Promise<boolean>;
   /** Sends the draft to a new side chat instead of the running agent. */
@@ -472,7 +474,7 @@ export function ModelDataDiagnosticBanner({ diagnostics }: { diagnostics?: Model
   return <ModelNoticeBanner tone="warning" title={t("chat.modelDataWarning")} body={messages.join("\n")} />;
 }
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onAbort, onSideChat, onQueuedSubmit, isStreaming, creationSettingsLocked = false, extensionsInitializing = false, modelState, modelActions, missingCwd, allModelList, onLoadAllModels,
+  onSend, sendError, onAbort, onSideChat, onQueuedSubmit, isStreaming, creationSettingsLocked = false, extensionsInitializing = false, modelState, modelActions, missingCwd, allModelList, onLoadAllModels,
   onCompact, onAbortCompaction, isCompacting, compactError, onDismissCompactError, compactResult, toolPreset, onToolPresetChange,
   retryInfo, queuedMessages, inputHistory = [], onRecallQueue,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
@@ -816,12 +818,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   const canRestoreSubmittedInput = useCallback((snapshot: OptimisticInputSnapshot<AttachedImage>) => (
     draftKeyRef.current === snapshot.draftKey
-    && !valueRef.current.trim()
-    && attachedImagesRef.current.length === 0
-    && textAttachmentRef.current === null
   ), []);
 
-  const restoreSubmittedInput = useCallback((snapshot: OptimisticInputSnapshot<AttachedImage>) => {
+  const restoreSubmittedInput = useCallback((submitted: OptimisticInputSnapshot<AttachedImage>) => {
+    const snapshot = prependSubmittedInput(submitted, {
+      value: valueRef.current,
+      images: attachedImagesRef.current,
+      textAttachment: textAttachmentRef.current,
+      draftKey: draftKeyRef.current ?? null,
+    });
     valueRef.current = snapshot.value;
     attachedImagesRef.current = snapshot.images;
     textAttachmentRef.current = snapshot.textAttachment;
@@ -856,11 +861,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   const discardSubmittedInput = useCallback((snapshot: OptimisticInputSnapshot<AttachedImage>) => {
     if (snapshot.draftKey && draftKeyRef.current !== snapshot.draftKey) {
-      setDraft(snapshot.draftKey, {
-        value: snapshot.value,
-        images: snapshot.images.map(imageToDraftImage),
-        textAttachment: snapshot.textAttachment ?? undefined,
+      const current = getDraft(snapshot.draftKey);
+      const restored = prependSubmittedInput({ ...snapshot, images: snapshot.images.map(imageToDraftImage) }, {
+        draftKey: snapshot.draftKey,
+        value: current?.value ?? "",
+        images: current?.images ?? [],
+        textAttachment: current?.textAttachment ?? null,
       });
+      setDraft(snapshot.draftKey, { ...restored, textAttachment: restored.textAttachment ?? undefined });
     }
     releaseSubmittedImages(snapshot.images);
   }, [releaseSubmittedImages]);
@@ -1572,6 +1580,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       <div style={{ ...(compact ? undefined : { display: "flex", flexDirection: "column", minHeight: 0, width: "100%" }), maxWidth: "var(--chat-content-max-width, 820px)", margin: "0 auto" }}>
         <MissingCwdBanner cwd={missingCwd} />
         {!compact && <ModelErrorBanner error={modelError} />}
+        {sendError && <ModelNoticeBanner tone="error" title={t("chat.sendFailed")} body={sendError} />}
         {!compact && <ModelScopeWarningBanner warnings={modelScopeWarnings} />}
         {!compact && <ModelDataDiagnosticBanner diagnostics={modelDataDiagnostics} />}
         {showImageUnsupportedWarning && (() => {

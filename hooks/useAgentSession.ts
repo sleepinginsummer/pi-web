@@ -579,6 +579,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     renewStartedAt: null, inFlightSince: null, requests: 0, unanswered: 0, errors: 0, last: null,
   });
   const [promptMissingCwd, setPromptMissingCwd] = useState<string | null>(null);
+  const [submissionError, setSubmissionError] = useState<{ navigationKey: number; message: string } | null>(null);
+  const sendError = submissionError?.navigationKey === navigationKey ? submissionError.message : null;
   // 服务端 agent_settled/prompt_done 的 aborted：任一客户端停止的运行都不算完成。
   const lastRunAbortedRef = useRef(false);
 
@@ -1752,12 +1754,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (sameText > pending.sameTextAfterSend) return;
     }
     restoreSubmission(pending.message, pending.images, pending.draftKey);
+    setSubmissionError({ navigationKey, message: translate(reread && !pending.command && start === reread.entryIds.length
+      ? "chat.sendNotReceived" : "chat.sendUnconfirmed") });
     // A failed read leaves the view stale: the bubble stays with "could not confirm".
     if (reread) dropUnconfirmedBubble(pending);
     addNotice(reread && !pending.command && start === reread.entryIds.length
       ? { type: "error", message: translate("chat.sendNotReceived") }
       : { type: "warning", message: translate("chat.sendUnconfirmed") });
-  }, [addNotice, dropUnconfirmedBubble, restoreSubmission, translate]);
+  }, [addNotice, dropUnconfirmedBubble, navigationKey, restoreSubmission, translate]);
   // The hook unmounts (a session switch) with a send still unconfirmed: nothing
   // here will settle it, so its text goes back unless one of the run's events
   // cleared the record. With the stream closed, a prompt that did arrive is
@@ -2438,6 +2442,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!trimmedMessage && !images?.length) return false;
     // UI 状态可能晚于异步扩展启动的 agent_start；此时不可吞掉用户输入。
     if (agentRunningRef.current || bashRunningRef.current) return false;
+    setSubmissionError(null);
     const activeCwd = session?.cwd ?? newSessionCwd;
     if (activeCwd) {
       // 分支信息只影响侧栏展示，不应阻塞会话创建、SSE 建连和首条 prompt。
@@ -2652,6 +2657,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
       }
       const detail = e instanceof Error ? e.message : String(e);
+      if (isNavigationActive(navigationKey)) setSubmissionError({ navigationKey, message: detail });
       if (!(e instanceof AgentCommandError && e.missingCwd)) addNotice({ type: "error", message: `消息发送失败，输入已保留：${detail}` });
       optimisticUserMessageKeyRef.current = null;
       setAgentRunning(false);
@@ -3557,7 +3563,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // 保持同一对象引用，下游 memo 组件（ChatInput/MessageView）才能跳过渲染。
   return useMemo(() => ({
     // State
-    data: details, loading, error, activeLeafId, messages, entryIds, messageKeys, streamingStore,
+    data: details, loading, error, sendError, activeLeafId, messages, entryIds, messageKeys, streamingStore,
     historyCursor: historyPage.sid === sessionIdRef.current ? historyPage.oldestEntryId : null,
     hasEarlierMessages: historyPage.sid === sessionIdRef.current && historyPage.hasMore,
     loadingEarlierMessages: historyPage.sid === sessionIdRef.current && historyPage.loading,
@@ -3587,7 +3593,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleAgentEventRef,
   }), [
     missingCwd,
-    details, loading, error, activeLeafId, messages, entryIds, messageKeys, streamingStore, historyPage,
+    details, loading, error, sendError, activeLeafId, messages, entryIds, messageKeys, streamingStore, historyPage,
     agentRunning, modelViewState, modelViewActions, toolPreset,
     retryInfo, contextUsage, systemPrompt, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,

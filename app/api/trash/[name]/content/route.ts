@@ -23,9 +23,9 @@ export async function GET(
     return NextResponse.json({ error: "Trash session not found" }, { status: 404 });
   }
   try {
-    // 回收站文件是完整会话文件，与正常会话走同一套上下文构建逻辑
+    // 阅读完整分支历史；模型上下文的压缩裁剪会丢掉早期问题，不能用于回收站预览。
     const sm = SessionManager.open(filePath);
-    const context = buildSessionContext(sm.getEntries() as never);
+    const context = buildSessionContext(sm.getEntries() as never, sm.getLeafId(), { fullHistory: true });
     return NextResponse.json({ context });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });

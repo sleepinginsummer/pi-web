@@ -5,6 +5,19 @@ export type OptimisticInputSnapshot<TImage> = {
   draftKey: string | null;
 };
 
+/** 失败内容放在等待期间的新草稿之前，文字与附件都不能因输入框非空而丢失。 */
+export function prependSubmittedInput<TImage>(
+  submitted: OptimisticInputSnapshot<TImage>,
+  current: OptimisticInputSnapshot<TImage>,
+): OptimisticInputSnapshot<TImage> {
+  return {
+    draftKey: current.draftKey,
+    value: [submitted.value, current.value].filter((text) => text.length > 0).join("\n\n"),
+    images: [...submitted.images, ...current.images],
+    textAttachment: [submitted.textAttachment, current.textAttachment].filter((text) => text != null).join("\n\n") || null,
+  };
+}
+
 export type SubmissionResult = boolean | void | Promise<boolean | void>;
 
 export type OptimisticInputSubmissionOptions<TImage> = {

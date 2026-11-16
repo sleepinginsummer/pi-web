@@ -5,12 +5,9 @@ import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 /**
- * pi-web's side of the pi-secret-vault extension's encrypted vault.
- *
- * The file format, lock and Keychain item are the contract in that extension's `src/store.ts`;
- * a running session notices changes by the file's signature on its next hook. Settings lists names
- * and metadata, and no route returns a value. The only decryption is inside renameSecret, because
- * the name is bound into the ciphertext; the value is re-encrypted there and goes nowhere else.
+ * 与 pi-secret-vault 扩展共用加密格式、文件锁和钥匙串条目。
+ * 列表只返回元数据；用户主动查看时由受登录保护的 reveal 接口读取单条原文。
+ * 重命名需要重新加密，因为密文的附加认证数据绑定了名字。
  */
 const VAULT_VERSION = 1;
 const KEYCHAIN_SERVICE = "pi-secret-vault";
@@ -161,7 +158,20 @@ export class InvalidRemarkError extends Error {}
 export function listSecrets(dir = defaultVaultDir()): SecretVaultEntry[] {
   return Object.entries(readVault(dir).records)
     .map(([name, record]) => ({ name, addedAt: record.addedAt, source: record.source, length: record.length, ...(record.remark ? { remark: record.remark } : {}) }))
-    .sort((a, b) => a.name.localeCompare(b.name));
+    .sort((a, b) => b.addedAt - a.addedAt || a.name.localeCompare(b.name));
+}
+
+/** 仅供用户主动查看的接口调用；不创建密钥，也不修改保险库。 */
+export function revealSecret(name: string, dir = defaultVaultDir(), keys = providerFor(dir)): string | undefined {
+  if (!SECRET_NAME_RE.test(name)) throw new Error("Invalid secret name");
+  const record = readVault(dir).records[name];
+  if (!record) return undefined;
+  const key = keys.read();
+  if (!key) throw new Error("The vault has records but its key is gone");
+  const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(record.iv, "base64"));
+  decipher.setAAD(aad(name));
+  decipher.setAuthTag(Buffer.from(record.tag, "base64"));
+  return Buffer.concat([decipher.update(Buffer.from(record.ct, "base64")), decipher.final()]).toString("utf8");
 }
 
 function aad(name: string): Buffer {

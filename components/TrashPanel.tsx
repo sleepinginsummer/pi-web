@@ -5,6 +5,7 @@ import { useI18n } from "@/hooks/useI18n";
 import { formatRelativeTime } from "@/lib/i18n/format";
 import type { TrashedSession } from "@/lib/trash";
 import { TrashSessionDetail } from "./TrashSessionDetail";
+import { TrashSessionActions } from "./TrashSessionActions";
 
 interface Props {
   onClose: () => void;
@@ -122,6 +123,10 @@ export function TrashPanel({ onClose, onRestored }: Props) {
     }
   };
 
+  const handleRenamed = (session: TrashedSession) => {
+    setSessions((previous) => previous?.map((item) => item.fileName === session.fileName ? session : item) ?? previous);
+    setDetailSession((previous) => previous?.fileName === session.fileName ? session : previous);
+  };
   const toggleDir = useCallback((cwd: string) => {
     setCollapsedDirs((prev) => {
       const next = new Set(prev);
@@ -245,6 +250,7 @@ export function TrashPanel({ onClose, onRestored }: Props) {
                       onPurgeCancel={() => setConfirmPurge(null)}
                       onPurgeConfirm={() => handlePurge(s)}
                       onOpenDetail={() => setDetailSession(s)}
+                      onRenamed={handleRenamed}
                       t={t}
                     />
                   ))}
@@ -287,6 +293,7 @@ export function TrashPanel({ onClose, onRestored }: Props) {
       {detailSession && (
         <TrashSessionDetail
           session={detailSession}
+          onRenamed={handleRenamed}
           onClose={() => setDetailSession(null)}
           onRestored={() => {
             setSessions((prev) => prev?.filter((x) => x.fileName !== detailSession.fileName) ?? prev);
@@ -301,7 +308,7 @@ export function TrashPanel({ onClose, onRestored }: Props) {
 
 function TrashItem({
   session, busy, confirmPurge, updatedAt,
-  onRestore, onPurgeClick, onPurgeCancel, onPurgeConfirm, onOpenDetail, t,
+  onRestore, onPurgeClick, onPurgeCancel, onPurgeConfirm, onOpenDetail, onRenamed, t,
 }: {
   session: TrashedSession;
   busy: boolean;
@@ -314,6 +321,7 @@ function TrashItem({
   onPurgeConfirm: () => void;
   /** 点击会话行打开详情弹窗 */
   onOpenDetail: () => void;
+  onRenamed: (session: TrashedSession) => void;
   t: ReturnType<typeof useI18n>["t"];
 }) {
   const [hovered, setHovered] = useState(false);
@@ -366,6 +374,7 @@ function TrashItem({
           </div>
 
           {/* Actions */}
+          <TrashSessionActions session={session} onRenamed={onRenamed} disabled={busy} />
           <button onClick={(e) => { e.stopPropagation(); onRestore(); }} disabled={busy} title={t("trash.restore")} style={{
             display: "flex", alignItems: "center", justifyContent: "center", gap: 4,
             height: 26, padding: "0 10px",
