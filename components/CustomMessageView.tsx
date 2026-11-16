@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import { copyText } from "@/lib/clipboard";
+import { collapsesCustomMessageContent } from "@/lib/message-display";
 import type { CustomMessage, ImageContent } from "@/lib/types";
 import { MarkdownBody } from "./MarkdownBody";
 import { formatMessageTime, getMessageImages, getMessageText, MessageImage } from "./MessageContentPrimitives";
@@ -16,8 +17,9 @@ interface Props {
 /** 渲染扩展自定义消息，并在该边界内适配扩展专属展示协议。 */
 export function CustomMessageView({ message, cwd, onOpenFile }: Props) {
   const { t } = useI18n();
-  // 与 pi TUI 一致，展示的自定义消息默认展开；display:false 的消息在上层直接跳过。
-  const [contentExpanded, setContentExpanded] = useState(true);
+  // 与 pi TUI 一致，展示的自定义消息默认展开；只有定时任务、后台命令这类反复出现
+  // 且正文很长的唤醒消息默认折叠成预览。display:false 的消息在上层直接跳过。
+  const [contentExpanded, setContentExpanded] = useState(() => !collapsesCustomMessageContent(message.customType));
   const [detailsExpanded, setDetailsExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
   const rawText = getMessageText(message.content);

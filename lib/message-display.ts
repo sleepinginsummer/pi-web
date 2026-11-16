@@ -1,5 +1,6 @@
 import { getImageSource } from "./image-content";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, ToolCallContent } from "./types";
+import { WAKE_MESSAGE_TYPES } from "./wake-message-types";
 
 interface DisplayOptions {
   isStreaming?: boolean;
@@ -78,9 +79,16 @@ export function isMessageGroupAnchor(message: { role?: AgentMessage["role"]; cus
       message.customType === "compaction"
       || message.customType === "pi-web:subagent-notification"
       || message.customType === "subagent-notification"
-      || message.customType === "pi-web:scheduled-task"
-      || message.customType === "pi-web:background-command"
+      || WAKE_MESSAGE_TYPES.has(message.customType ?? "")
     ));
+}
+
+/**
+ * 定时任务与后台命令的唤醒消息反复出现且正文很长（提示词、命令和最后一段输出），
+ * 信息流里默认折叠成一行预览；其它自定义消息照旧展开。
+ */
+export function collapsesCustomMessageContent(customType: string | undefined): boolean {
+  return WAKE_MESSAGE_TYPES.has(customType ?? "");
 }
 
 export function isDisplayableAssistantBlock(
