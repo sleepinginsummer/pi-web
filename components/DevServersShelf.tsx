@@ -6,6 +6,8 @@ import { browserServerUrl, isDevServerActive, useDevServers } from "@/hooks/useD
 import { isScheduledTaskPending, useScheduledTasks } from "@/hooks/useScheduledTasks";
 import { useBackgroundCommandOutput, useBackgroundCommands } from "@/hooks/useBackgroundCommands";
 import type { BackgroundCommandSnapshot, DevServerSnapshot, ScheduledTask } from "@/lib/types";
+import { sessionDeepLink } from "@/lib/session-links";
+import { samePortablePath } from "@/lib/path-equality";
 
 function hostLabel(url: string | undefined): string {
   if (!url) return "";
@@ -35,6 +37,11 @@ function shortTime(ms: number): string {
   return sameDay
     ? date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
     : date.toLocaleString(undefined, { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+/** 时间同时保留完整日期，避免跨天任务只显示时分造成歧义。 */
+function TaskTime({ value, label }: { value: number; label: string }) {
+  const date = new Date(value);
+  return <time className="scheduled-task-owner" dateTime={date.toISOString()} title={date.toLocaleString()}>{label} {date.toLocaleString(undefined, { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}</time>;
 }
 
 function elapsed(from: number, to: number): string {
@@ -94,6 +101,8 @@ function BackgroundCommandRow({
         <span className="dev-server-dot" aria-hidden="true" />
         <span className="dev-server-name" title={command.command}>
           {command.label ?? command.command}
+          {!own && <a className="scheduled-task-session-link" href={sessionDeepLink(command.sessionId)}>{command.sessionId.slice(0, 8)} ↗</a>}
+          <TaskTime value={command.startedAt} label={t("tasks.startedAt")} />
           {command.notifyError && <span className="scheduled-task-owner is-error">{t("bg.notifyFailed", { error: command.notifyError })}</span>}
         </span>
         <span className="dev-server-meta">{state}</span>
@@ -188,14 +197,14 @@ export function DevServersShelf({
   const launchErrors = data?.errors ?? [];
   const activeNames = new Set(servers.filter(isDevServerActive).map((server) => server.name));
   const declared = data?.enabled ? data.configs.filter((config) => !activeNames.has(config.name)) : [];
-  // 当前会话的任务排在前面，其余按下次触发时间（接口已排序）。
-  const tasks = [...(scheduled.data?.tasks ?? [])]
-    .sort((a, b) => Number(b.sessionId === sessionId) - Number(a.sessionId === sessionId));
-  // 只有本进程启动过的服务器、启动配置错误或定时任务才显示入口；仅声明过 launch 配置不显示。
+  // 当前会话保持在上方，其他会话仅取同目录记录，避免混入其他 worktree。
+  const tasks = (scheduled.data?.tasks ?? []).filter((task) => task.sessionId === sessionId);
+  const commands = (background.data?.commands ?? []).filter((command) => command.sessionId === sessionId);
+  const otherTasks = (scheduled.data?.tasks ?? []).filter((task) => task.sessionId !== sessionId && cwd != null && samePortablePath(task.cwd, cwd));
+  const otherCommands = (background.data?.commands ?? []).filter((command) => command.sessionId !== sessionId && cwd != null && samePortablePath(command.cwd, cwd));
+  const otherCount = otherTasks.length + otherCommands.length;
   const showServers = servers.length > 0 || launchErrors.length > 0;
-  const commands = [...(background.data?.commands ?? [])]
-    .sort((a, b) => Number(b.sessionId === sessionId) - Number(a.sessionId === sessionId));
-  if (!showServers && tasks.length === 0 && commands.length === 0) return null;
+  if (!showServers && tasks.length === 0 && commands.length === 0 && otherCount === 0) return null;
   const runningCommandCount = commands.filter((command) => command.status === "running" || command.status === "stopping").length;
 
   const runningCount = servers.filter(isDevServerActive).length;
@@ -211,11 +220,13 @@ export function DevServersShelf({
     showServers ? serverLabel : "",
     tasks.length > 0 ? t("tasks.triggerLabel", { count: pendingTaskCount }) : "",
     commands.length > 0 ? t("bg.triggerLabel", { count: runningCommandCount }) : "",
+    otherCount > 0 ? t("tasks.otherSessions", { count: otherCount }) : "",
   ].filter(Boolean).join("; ");
   const triggerText = [
     showServers ? t("servers.trigger") : "",
     tasks.length > 0 ? t("tasks.trigger") : "",
     commands.length > 0 ? t("bg.trigger") : "",
+    otherCount > 0 ? t("tasks.otherSessions", { count: otherCount }) : "",
   ].filter(Boolean).join(" · ");
 
   const renderTask = (task: ScheduledTask) => {
@@ -241,7 +252,8 @@ export function DevServersShelf({
         <span className="dev-server-dot" aria-hidden="true" />
         <span className="dev-server-name" title={title}>
           {task.name}
-          <span className="scheduled-task-owner">{owner}</span>
+          {own ? <span className="scheduled-task-owner">{owner}</span> : <a className="scheduled-task-session-link" href={sessionDeepLink(task.sessionId)}>{owner} ↗</a>}
+          <TaskTime value={task.createdAt} label={t("tasks.createdAt")} />
         </span>
         <span className="dev-server-meta" title={task.lastError}>{schedule} · {state}</span>
         <span className="dev-server-actions">
@@ -276,7 +288,7 @@ export function DevServersShelf({
             title={t("tasks.delete")}
             aria-label={`${t("tasks.delete")} ${task.name}`}
             onClick={() => {
-              if (tasks.length === 1 && !showServers && commands.length === 0) setOpen(false);
+              if (tasks.length + otherTasks.length === 1 && !showServers && commands.length + otherCommands.length === 0) setOpen(false);
               void scheduled.act(task.id, "delete");
             }}
           >
@@ -287,6 +299,19 @@ export function DevServersShelf({
     );
   };
 
+  const renderCommand = (command: BackgroundCommandSnapshot) => (
+    <BackgroundCommandRow
+      key={command.id}
+      command={command}
+      own={command.sessionId === sessionId}
+      busy={background.pending.has(command.id)}
+      onStop={() => void background.act(command.id, "stop")}
+      onDismiss={() => {
+        if (commands.length + otherCommands.length === 1 && !showServers && tasks.length + otherTasks.length === 0) setOpen(false);
+        void background.act(command.id, "dismiss");
+      }}
+    />
+  );
   const renderServer = (server: DevServerSnapshot) => {
     const active = isDevServerActive(server);
     const busy = pending.has(server.id) || server.status === "stopping";
@@ -410,22 +435,25 @@ export function DevServersShelf({
             {commands.length > 0 && <>
               <div className={`extension-widget-panel-heading${showServers || tasks.length > 0 ? " scheduled-tasks-heading" : ""}`}>{t("bg.title")}</div>
               <ul className="dev-server-list">
-                {commands.map((command) => (
-                  <BackgroundCommandRow
-                    key={command.id}
-                    command={command}
-                    own={command.sessionId === sessionId}
-                    busy={background.pending.has(command.id)}
-                    onStop={() => void background.act(command.id, "stop")}
-                    onDismiss={() => {
-                      if (commands.length === 1 && !showServers && tasks.length === 0) setOpen(false);
-                      void background.act(command.id, "dismiss");
-                    }}
-                  />
-                ))}
+                {commands.map(renderCommand)}
               </ul>
               {background.error && <p role="alert" className="dev-server-error">{background.error}</p>}
             </>}
+            {otherCount > 0 && (
+              <details key={sessionId} className="other-session-tasks">
+                <summary className="extension-widget-panel-heading">{t("tasks.otherSessions", { count: otherCount })}</summary>
+                {otherTasks.length > 0 && <>
+                  <div className="dev-server-subheading">{t("tasks.title")}</div>
+                  <ul className="dev-server-list">{otherTasks.map(renderTask)}</ul>
+                  {scheduled.error && <p role="alert" className="dev-server-error">{scheduled.error}</p>}
+                </>}
+                {otherCommands.length > 0 && <>
+                  <div className="dev-server-subheading">{t("bg.title")}</div>
+                  <ul className="dev-server-list">{otherCommands.map(renderCommand)}</ul>
+                  {background.error && <p role="alert" className="dev-server-error">{background.error}</p>}
+                </>}
+              </details>
+            )}
           </section>
         </div>
       )}

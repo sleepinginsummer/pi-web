@@ -332,7 +332,7 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 - 调度器在 pi-web 进程里，不在会话里（`lib/scheduled-task-scheduler.ts`）：`instrumentation-node.ts` 启动时拉起，API 路由和扩展也会调用幂等的 `ensureScheduledTaskScheduler()`；`globalThis` 只保留一个 interval，每次模块加载替换 `tick`，HMR 后跑的是新代码。投递走共用的 `lib/session-wake.ts`（见下节）。会话不存在时任务记错误并停用；外部改写过的运行中会话不投递。
 - 投递方式 `delivery` 默认 `followUp`；只有一次性任务可以选 `steer`，cron 任务一律 followUp（避免反复打断长时间工作），任务改成 cron 时清掉已存的 steer。
 - 设置 › 常规 的开关存 `~/.pi/agent/pi-web-scheduled-task-settings.json`，默认开，文件损坏按关闭处理。关闭后调度器立即停止触发（任务保留），工具在会话重载后移除。
-- 界面：`DevServersShelf` 同时列出当前项目（按 cwd）所有会话的任务，当前会话排前并高亮，可立即运行、暂停/恢复、删除；入口在有服务器或有任务时出现。`pi-web:scheduled-task` 消息是回合锚点（`isMessageGroupAnchor`），与子代理回报一样开启新一轮显示。
+- 界面：`DevServersShelf` 上方列出绑定到当前会话的任务，同目录其他会话的记录放在下方默认收起的“其他会话”区域，展开后可通过会话链接跳转；任务显示创建时间，入口计数与告警只按当前会话筛选，可立即运行、暂停/恢复、删除；入口在有服务器或有任务时出现。`pi-web:scheduled-task` 消息是回合锚点（`isMessageGroupAnchor`），与子代理回报一样开启新一轮显示。
 
 ### 唤醒会话与后台命令
 - `lib/session-wake.ts` 是服务端唤醒会话的唯一入口（定时任务和后台命令共用）：wrapper 已回收就 `startRpcSession()` 重新打开，`waitUntilReady()` 后用 `sendCustomMessage(..., { deliverAs, triggerTurn: true })` 投递带 `display: true` 的自定义消息。`followUp` 等本轮全部做完，`steer` 在当前工具调用后插入；空闲会话两者都直接开新一轮。等回合开始最多 2 秒即视为投递成功，之后的失败走 `onLateError`。`SessionWakeError.permanent` 表示会话已不存在。
@@ -342,9 +342,9 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 - 后台命令：`lib/background-command-extension.ts` 是隐藏内联扩展 `pi-web-background-commands`，注册 `bash_background` / `bash_background_output` / `bash_background_stop`，和 `server_start` 一样要求 bash（或 powershell）处于激活状态。进程由 `lib/background-commands.ts` 持有（`globalThis.__piWebBackgroundCommands`），输出只在内存里（最近 256 KB）；命令列表另存 `<agentDir>/pi-web-background-commands.json`。pi-web 退出时 `exit` 处理器中止所有命令，pi 的 `killProcessTree` 同步杀进程组（SIGKILL 杀掉 pi-web 本身时可能留下孤儿进程）。下次启动 `instrumentation-node.ts` 调 `recoverBackgroundCommands()`：上次仍在运行的命令标为 `interrupted`，以 followUp 唤醒对应会话说明已中断、需要时重跑，状态落盘后不会重复报告。通过 `createProjectCommandBashOperations()` 执行，shell、环境变量、`shellCommandPrefix` 与 bash 工具一致，停止时由 pi 的本地执行器杀进程树。
 - 退出时唤醒会话并附上退出码和最后 40 行输出；`delivery: "auto"`（默认）失败用 steer、成功用 followUp，也可显式指定。AI 自己 `bash_background_stop` 的命令不唤醒，用户在面板里停止的会以 followUp 告知。`check_in_seconds`（至少 60）在运行期间按间隔以 followUp 唤醒并附最近输出，最多 12 次，之后只在退出时唤醒。同一命令的唤醒串行，`notifyError` 记录最近一次唤醒失败并在面板中显示。
 - 内联扩展列表在 `startRpcSession()` 创建 wrapper 时确定。正式环境每个 wrapper 都由当前运行的代码创建，开关在 factory 内检查，所以切换开关后 `reload` 即可生效；只有开发时 HMR 改了扩展列表，已存活的 wrapper 才拿不到新扩展，需新开会话或等回收后重开。
-- 左下角面板按项目归类（`lib/project-scope.ts` 的 `filterToProject()`）：同一仓库的主检出、各 worktree 和子目录的任务与后台命令显示在一起。永久删除会话（`DELETE ?mode=permanent`）时删除其定时任务、停止其后台命令且不唤醒；归档可恢复，保留不动。
+- 列表 API 按项目返回记录（`lib/project-scope.ts` 的 `filterToProject()`），左下角面板再分成当前会话与同目录其他会话；其他 worktree 和子目录的记录不进入“其他会话”折叠区。永久删除会话（`DELETE ?mode=permanent`）时删除其定时任务、停止其后台命令且不唤醒；归档可恢复，保留不动。
 - `lib/session-wake.integration.test.mjs` 用本地 OpenAI 兼容假服务覆盖“无存活 wrapper 时唤醒重新打开会话并跑一轮”；种子 assistant 消息必须带 `usage`，否则 SDK 读取上一轮用量会报错。
-- 设置 › 常规 的开关存 `~/.pi/agent/pi-web-background-command-settings.json`，默认开，损坏按关闭处理；关闭不影响正在运行的命令。左下角 `DevServersShelf` 第三栏列出当前项目的后台命令，可展开输出、停止和移除。
+- 设置 › 常规 的开关存 `~/.pi/agent/pi-web-background-command-settings.json`，默认开，损坏按关闭处理；关闭不影响正在运行的命令。左下角 `DevServersShelf` 上方列出当前会话启动的后台命令，同目录其他会话的命令放在“其他会话”折叠区并提供归属会话链接；均显示启动时间，入口计数只统计当前会话，可展开输出、停止和移除。
 
 ### Built-in subagents
 - The global `builtInEnabled` switch is persisted in `~/.pi/agent/agents/settings.json` and defaults to `false` when the file or field is absent. Malformed settings fail closed; atomic updates preserve unknown fields.
