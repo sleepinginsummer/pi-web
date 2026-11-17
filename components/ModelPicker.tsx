@@ -259,7 +259,7 @@ export const ModelPicker = memo(function ModelPicker({
     : {
         display: "flex", alignItems: "center", gap: 6, justifyContent: "flex-start",
         padding: isMobile ? "4px 10px" : "8px 12px", height: isMobile ? 40 : 32,
-        width: isMobile ? "100%" : undefined, maxWidth: isMobile ? "100%" : 220,
+        width: isMobile ? "100%" : undefined, maxWidth: "100%", minWidth: 0,
         overflow: "hidden", background: open ? "var(--bg-hover)" : "none",
         border: "none", borderRadius: 9, color: "var(--text-muted)",
         cursor: locked ? "not-allowed" : "pointer", fontSize: 12,

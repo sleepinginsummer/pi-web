@@ -2080,7 +2080,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         }}>
 
           {/* LEFT: attach + model selector (idle) or steer/followup toggle (streaming) */}
-          <div style={{ flex: isMobile ? "1 1 auto" : "0 0 auto", minWidth: 0, display: "flex", alignItems: "center", gap: 2 }}>
+          <div style={{ flex: isMobile ? "1 1 auto" : "0 1 auto", minWidth: 0, display: "flex", alignItems: "center", gap: 2 }}>
             {/* 图片附件按钮：用 <label htmlFor> 原生触发，避免 JS click() 在移动端被浏览器拦截 */}
             <label
               htmlFor="chat-attach-input"
