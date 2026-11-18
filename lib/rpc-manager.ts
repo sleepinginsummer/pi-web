@@ -4118,8 +4118,8 @@ export async function startRpcSession(
         : {
             extensionFactories: [
               ...(builtins?.extensions ?? []),
-              createObserverChecklistExtension(() => observerWrapperRef.current?.sessionObserver),
               createReadOnlyMcpPolicyExtension(),
+              createObserverChecklistExtension(() => observerWrapperRef.current?.sessionObserver),
               createProjectCommandBashExtension({
                 cwd: sessionCwd,
                 settings: settingsManager,
