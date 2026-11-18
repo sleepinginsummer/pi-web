@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { useI18n } from "@/hooks/useI18n";
+import { useIsMobile } from "@/hooks/useIsMobile";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { SessionObserverSettingsDialog } from "./SessionObserverSettingsDialog";
 import type { SessionObserverState } from "@/lib/session-observer-protocol";
@@ -17,6 +18,14 @@ export function SessionObserverPanel({ sessionId, cwd, onClose }: {
   onClose: () => void;
 }) {
   const { t } = useI18n();
+  const mobile = useIsMobile();
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!mobile || !dialog) return;
+    dialog.showModal();
+    return () => { dialog.close(); };
+  }, [mobile]);
   const [state, setState] = useState<SessionObserverState | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<"read" | "write" | null>(null);
@@ -66,8 +75,8 @@ export function SessionObserverPanel({ sessionId, cwd, onClose }: {
   }
 
 
-  return (
-    <aside id="session-observer-panel" aria-label={t("observer.label")} className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-[var(--bg-panel)] shadow-lg">
+  const content = (
+    <aside className="observer-panel flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-[var(--bg-panel)] shadow-lg" id="session-observer-panel" aria-label={t("observer.label")}>
       <header className="flex items-center gap-2 border-b border-border p-3">
         <h2 className="mr-auto text-sm font-medium">{t("observer.label")}</h2>
         <button type="button" aria-haspopup="dialog" className={actionStyle} disabled={!state || busy} onClick={() => { setSaveFailed(false); setSettingsOpen(true); }}>
@@ -113,4 +122,20 @@ export function SessionObserverPanel({ sessionId, cwd, onClose }: {
       )}
     </aside>
   );
+  return mobile ? (
+    <dialog
+      ref={dialogRef}
+      aria-label={t("observer.label")}
+      className="observer-mobile-dialog"
+      onKeyDown={(event) => {
+        if (event.key !== "Escape") return;
+        event.stopPropagation();
+        event.preventDefault();
+        onClose();
+      }}
+      onCancel={(event) => { event.stopPropagation(); event.preventDefault(); onClose(); }}
+    >
+      {content}
+    </dialog>
+  ) : content;
 }

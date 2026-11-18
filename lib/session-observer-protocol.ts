@@ -3,8 +3,13 @@ import { applyObserverEdit, type ObserverEdit, type ObserverItem } from "./obser
 import type { ThinkingLevel } from "./thinking-levels";
 
 export const SESSION_OBSERVER_ENTRY = "pi-web:session-observer";
+export const DEFAULT_OBSERVER_INTERVAL = 6;
 
-export type ObserverModelPreferences = { model: SelectedModel | null; thinkingLevel: ThinkingLevel | null };
+export function isObserverInterval(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
+}
+
+export type ObserverModelPreferences = { model: SelectedModel | null; thinkingLevel: ThinkingLevel | null; interval?: number };
 export type ObserverSettings = ObserverModelPreferences & { enabled: boolean };
 export type ObserverSummary = { throughId: string; text: string };
 
@@ -15,6 +20,7 @@ export type ObserverRecord =
   | { kind: "note"; note: { id: string; title: string } }
   | { kind: "feedback"; noteId: string; feedback: { kind: string } }
   | { kind: "checklist"; edits: ObserverEdit[] }
+  | { kind: "checked"; throughId: string; edits: ObserverEdit[] }
   | { kind: "summary"; summary: ObserverSummary };
 
 type ObserverEntry = { type: string; customType?: string; data?: unknown };
@@ -50,7 +56,7 @@ export function readObserverState(
   let items: ObserverItem[] = [];
   for (const entry of branch) {
     const record = observerRecord(entry, sessionId);
-    if (record?.kind === "checklist") items = record.edits.reduce(applyObserverEdit, items);
+    if (record?.kind === "checklist" || record?.kind === "checked") items = record.edits.reduce(applyObserverEdit, items);
     // 旧提醒直接显示为清单项，已了解的提醒恢复为已完成。
     if (record?.kind === "note") items.push({ id: record.note.id, title: record.note.title, done: false, priority: "normal" });
     if (record?.kind === "feedback" && record.feedback.kind === "known") {

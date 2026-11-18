@@ -27,6 +27,7 @@ import { generateTitleForSessionFile } from "./session-file-title";
 import { findDeferredModel, findDeferredStartupModel, rememberProviderModels } from "./deferred-provider-models";
 import { ObserverContextOverflow, SessionObserver } from "./session-observer";
 import { createObserverChecklistExtension } from "./observer-checklist-extension";
+import { isObserverInterval } from "./session-observer-protocol";
 import { isThinkingLevel } from "./thinking-levels";
 import { isBlockingExtensionUiRequest } from "./extension-ui-queue";
 import { createDevServerExtension } from "./dev-server-extension";
@@ -881,6 +882,10 @@ export class AgentSessionWrapper {
         if (!this.lastAgentEndWillRetry) this.recordCompletionSummary();
       }
       if (event.type === "agent_settled") {
+        const lastAssistant = this.lastAgentEndMessages?.findLast((message) => (message as AgentEndMessageLike | null)?.role === "assistant") as AgentEndMessageLike | undefined;
+        if (!this.aborting && !this.lastRunAborted && !this.lastAgentEndWillRetry && lastAssistant?.stopReason === "stop") {
+          this.observerInstance?.runSettled();
+        }
         this.maybeAutoContinueUnfinishedTool();
         // 会话第一轮结束后自动生成标题（文件级独立 services，不与主 agent 争用 transport）
         this.maybeAutoTitleSession();
@@ -2221,9 +2226,11 @@ export class AgentSessionWrapper {
       case "save_session_observer_settings": {
         const { model, thinkingLevel } = command;
         const enabled = this.sessionObserver.snapshot().enabled;
+        const interval = command.interval === undefined ? this.sessionObserver.snapshot().preferences.interval : command.interval;
+        if (interval !== undefined && !isObserverInterval(interval)) throw new Error("Invalid observer interval");
         if (thinkingLevel !== null && !isThinkingLevel(thinkingLevel)) throw new Error("Invalid observer thinking level");
         if (model === null && thinkingLevel === null) {
-          return this.sessionObserver.saveSettings({ enabled, model: null, thinkingLevel: null });
+          return this.sessionObserver.saveSettings({ enabled, model: null, thinkingLevel: null, interval });
         }
         if (typeof model !== "object" || model === null || !("provider" in model) || !("modelId" in model)
             || typeof model.provider !== "string" || typeof model.modelId !== "string") {
@@ -2240,7 +2247,7 @@ export class AgentSessionWrapper {
             throw new Error("Observer model does not support this thinking level");
           }
         }
-        return this.sessionObserver.saveSettings({ enabled, model: { provider, modelId }, thinkingLevel });
+        return this.sessionObserver.saveSettings({ enabled, model: { provider, modelId }, thinkingLevel, interval });
       }
       case "edit_session_observer_checklist":
         return this.sessionObserver.editChecklist(command);

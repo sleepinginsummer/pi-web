@@ -332,6 +332,7 @@ export const enLocale: LocalePlugin = {
     "observer.label": "Observer",
     "observer.model": "Model",
     "observer.thinking": "Thinking level",
+    "observer.interval": "Check interval (model steps)",
     "observer.followSession": "Follow session",
     "observer.modelsUnavailable": "Could not load Pi models.",
     "observer.settings": "Observer settings",

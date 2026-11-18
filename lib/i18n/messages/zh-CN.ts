@@ -332,6 +332,7 @@ export const zhCNLocale: LocalePlugin = {
     "observer.label": "观察",
     "observer.model": "模型",
     "observer.thinking": "思考强度",
+    "observer.interval": "检查间隔（模型步骤）",
     "observer.followSession": "跟随会话",
     "observer.modelsUnavailable": "无法读取 Pi 模型。",
     "observer.settings": "观察设置",

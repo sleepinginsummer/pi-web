@@ -3,7 +3,7 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import type { ModelsData, SelectedModel } from "@/lib/model-types";
-import type { ObserverModelPreferences } from "@/lib/session-observer-protocol";
+import { DEFAULT_OBSERVER_INTERVAL, isObserverInterval, type ObserverModelPreferences } from "@/lib/session-observer-protocol";
 import { isThinkingLevel, type ThinkingLevel } from "@/lib/thinking-levels";
 
 const selectStyle = "w-full min-w-0 rounded border border-border bg-[var(--bg-panel)] px-3 py-2 text-sm disabled:opacity-60";
@@ -25,6 +25,7 @@ export function SessionObserverSettingsDialog({ cwd, initialSettings, busy, fail
   const dialogRef = useRef<HTMLDialogElement>(null);
   const titleId = useId();
   const [draft, setDraft] = useState(initialSettings);
+  const [interval, setIntervalDraft] = useState(String(initialSettings.interval ?? DEFAULT_OBSERVER_INTERVAL));
   const [catalog, setCatalog] = useState<ModelsData | null>(null);
   const [catalogFailed, setCatalogFailed] = useState(false);
 
@@ -69,15 +70,21 @@ export function SessionObserverSettingsDialog({ cwd, initialSettings, busy, fail
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    if (!busy) onSave(draft);
+    if (!busy && isObserverInterval(Number(interval))) onSave({ ...draft, interval: Number(interval) });
   }
 
   return (
     <dialog
       ref={dialogRef}
       aria-labelledby={titleId}
-      className="fixed inset-0 m-auto max-h-[calc(100%-2rem)] w-[min(26rem,calc(100%-2rem))] overflow-auto rounded-lg border border-border bg-[var(--bg-panel)] text-[var(--text)] shadow-xl backdrop:bg-black/40"
-      onCancel={(event) => { event.preventDefault(); if (!busy) onCancel(); }}
+      className="observer-settings-dialog fixed inset-0 m-auto max-h-[calc(100%-2rem)] w-[min(26rem,calc(100%-2rem))] overflow-auto rounded-lg border border-border bg-[var(--bg-panel)] text-[var(--text)] shadow-xl backdrop:bg-black/40"
+      onKeyDown={(event) => {
+        if (event.key !== "Escape") return;
+        event.stopPropagation();
+        event.preventDefault();
+        if (!busy) onCancel();
+      }}
+      onCancel={(event) => { event.stopPropagation(); event.preventDefault(); if (!busy) onCancel(); }}
     >
       <form onSubmit={submit} className="space-y-4 p-4">
         <h2 id={titleId} className="font-medium">{t("observer.settings")}</h2>
@@ -99,6 +106,10 @@ export function SessionObserverSettingsDialog({ cwd, initialSettings, busy, fail
             {level && !levels.includes(level) && <option value={level} disabled>{t(thinkingLabels[level])}</option>}
             {levels.map((option) => <option key={option} value={option}>{t(thinkingLabels[option])}</option>)}
           </select>
+        </label>
+        <label className="grid gap-1 text-sm">
+          {t("observer.interval")}
+          <input className={selectStyle} type="number" inputMode="numeric" min={1} step={1} required disabled={busy} value={interval} onChange={(event) => setIntervalDraft(event.target.value)} />
         </label>
         {catalogFailed && <p role="status" className="text-xs text-text-muted">{t("observer.modelsUnavailable")}</p>}
         {failed && <p role="alert" className="text-sm text-red-400">{t("observer.saveFailed")}</p>}
