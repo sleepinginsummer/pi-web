@@ -1323,11 +1323,6 @@ export function AppShell() {
                   session={selectedSession}
                   observerPanel={observerPanelOpen ? {
                     onClose: () => setObserverPanelSessionId(null),
-                    onDiscuss: (card) => {
-                      const feedback = card.feedback.map((item) => item.text ?? translate(item.kind === "known" ? "observer.known" : item.kind === "expired" ? "observer.expired" : "observer.dismissed"));
-                      chatInputRef.current?.insertText([translate("observer.discussionIntro"), card.title, card.detail, ...feedback].join("\n\n") + "\n");
-                      if (isMobile) setObserverPanelSessionId(null);
-                    },
                   } : undefined}
                   searchTarget={searchTarget?.sessionId === selectedSession?.id ? searchTarget : null}
                   onSearchTargetHandled={handleSearchTargetHandled}

@@ -252,6 +252,7 @@ try {
     page.setDefaultTimeout(30_000);
     const errors = [];
     const olderPages = [];
+    const olderResponses = new Map();
     const isOlderContextResponse = (response) => {
       const url = new URL(response.url());
       return url.pathname === `/api/sessions/${LONG}/context` && url.searchParams.has("before");
@@ -260,6 +261,10 @@ try {
     page.on("console", (event) => { if (event.type() === "error") errors.push(event.text()); });
     page.on("response", (response) => {
       if (response.url().startsWith(base) && response.status() >= 500) errors.push(`${response.status()} ${response.url()}`);
+      if (isOlderContextResponse(response)) {
+        const before = new URL(response.url()).searchParams.get("before");
+        olderResponses.set(before, response);
+      }
     });
     // Next dev cold-compiles the page and state route independently; allow both before judging hydration.
     const stateReady = page.waitForResponse(
@@ -342,6 +347,18 @@ try {
       assert.equal(pageData.status, 200);
       assert.match(pageData.beforeId, /^e\d+$/);
       const before = Number(pageData.beforeId.slice(1));
+      // 两次手动滚动之间可能还有哨兵预取，逐页校验实际拿到的响应。
+      while (oldest !== undefined && before < oldest) {
+        const intermediate = olderResponses.get(`e${oldest}`);
+        assert.ok(intermediate, `缺少历史分页 e${oldest}`);
+        assert.equal(intermediate.status(), 200);
+        const { context } = await intermediate.json();
+        const start = oldest - context.entryIds.length;
+        assert.ok(start < oldest);
+        assert.deepEqual(context.entryIds, ids(start, oldest));
+        assert.equal(context.oldestEntryId, `e${start}`);
+        oldest = start;
+      }
       if (oldest !== undefined) assert.equal(before, oldest);
       const older = pageData.context;
       const pageStart = before - older.entryIds.length;

@@ -61,7 +61,6 @@ import { getFinalAnswerViews, keepWrittenFiles, type FinalAnswerViews } from "@/
 import { getFileName } from "@/lib/file-paths";
 import { NoticeShelf } from "./NoticeShelf";
 import { SessionObserverPanel } from "./SessionObserverPanel";
-import type { ObserverCard } from "@/lib/session-observer-protocol";
 import { buildQuotedSelection } from "@/lib/quoted-selection";
 
 const MAX_MOUNTED_HISTORY_GROUPS = 160;
@@ -70,7 +69,7 @@ interface Props {
   navigationKey: number;
   isNavigationActive: (key: number) => boolean;
   session: SessionInfo | null;
-  observerPanel?: { onClose: () => void; onDiscuss: (card: ObserverCard) => void };
+  observerPanel?: { onClose: () => void };
   searchTarget?: { sessionId: string; entryId: string; blockIndex?: number } | null;
   onSearchTargetHandled?: (target: { sessionId: string; entryId: string }) => void;
   initialScrollPosition?: ChatReadingPosition | null;

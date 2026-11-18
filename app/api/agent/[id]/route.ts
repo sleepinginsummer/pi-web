@@ -26,7 +26,7 @@ function shouldInvalidateSessionList(commandType: string): boolean {
     "get_session_stats",
     "save_session_observer_settings",
     "set_session_observer_enabled",
-    "submit_session_observer_feedback",
+    "edit_session_observer_checklist",
   ]).has(commandType);
 }
 

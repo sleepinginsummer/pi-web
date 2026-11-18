@@ -1,5 +1,5 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { clampThinkingLevel, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
+import { clampThinkingLevel, getSupportedThinkingLevels, isContextOverflow } from "@earendil-works/pi-ai";
 import { createAgentSessionFromServices, createAgentSessionServices, getAgentDir, initTheme, SessionManager, SettingsManager, Theme, type ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { randomUUID } from "crypto";
@@ -25,7 +25,8 @@ import { parseShadowMindToggleCommand, SHADOW_MIND_SESSION_STATE } from "./shado
 import { createClonedSession, createForkedSession } from "./session-fork";
 import { generateTitleForSessionFile } from "./session-file-title";
 import { findDeferredModel, findDeferredStartupModel, rememberProviderModels } from "./deferred-provider-models";
-import { SessionObserver } from "./session-observer";
+import { ObserverContextOverflow, SessionObserver } from "./session-observer";
+import { createObserverChecklistExtension } from "./observer-checklist-extension";
 import { isThinkingLevel } from "./thinking-levels";
 import { isBlockingExtensionUiRequest } from "./extension-ui-queue";
 import { createDevServerExtension } from "./dev-server-extension";
@@ -594,7 +595,7 @@ export class AgentSessionWrapper {
       manager: this.inner.sessionManager,
       canWrite: () => this.isAlive() && this.diskFreshness() === "current",
       append: (type, data) => { this.inner.sessionManager.appendCustomEntry(type, data); },
-      request: async (preferences, prompt, evidence, signal) => {
+      model: (preferences) => {
         const runtime = this.inner.modelRuntime as ModelRuntime;
         const current = this.inner.model;
         const model = preferences.model
@@ -604,17 +605,26 @@ export class AgentSessionWrapper {
         const currentLevel = this.inner.agent.state?.thinkingLevel;
         const requested = preferences.thinkingLevel ?? (isThinkingLevel(currentLevel) ? currentLevel : "off");
         const level = clampThinkingLevel(model, requested);
-        const response = await runtime.streamSimple(model, {
-          messages: [
-            { role: "system", content: prompt, timestamp: Date.now() },
-            { role: "user", content: evidence, timestamp: Date.now() },
-          ],
-          tools: [],
-        }, { signal, maxTokens: 2048, maxRetries: 0, toolChoice: "none", reasoning: level === "off" ? undefined : level }).result();
-        if (response.stopReason !== "stop" || response.content.some((block) => block.type === "toolCall")) {
-          throw new Error("Observer request did not return a complete text response");
-        }
-        return response.content.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n");
+        const maxTokens = Math.min(2048, model.maxTokens, Math.floor(model.contextWindow / 4));
+        // 预留输出和协议开销，历史文本使用偏保守的中英混合字符预算。
+        const inputBudget = Math.min(18_000, Math.floor((model.contextWindow - maxTokens - 512) / 3));
+        return {
+          inputBudget,
+          request: async (prompt, evidence, signal) => {
+            const response = await runtime.streamSimple(model, {
+              messages: [
+                { role: "system", content: prompt, timestamp: Date.now() },
+                { role: "user", content: evidence, timestamp: Date.now() },
+              ],
+              tools: [],
+            }, { signal, maxTokens, maxRetries: 0, toolChoice: "none", reasoning: level === "off" ? undefined : level }).result();
+            if (isContextOverflow(response, model.contextWindow)) throw new ObserverContextOverflow();
+            if (response.stopReason !== "stop" || response.content.some((block) => block.type === "toolCall")) {
+              throw new Error("Observer request did not return a complete text response");
+            }
+            return response.content.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n");
+          },
+        };
       },
     });
   }
@@ -845,7 +855,6 @@ export class AgentSessionWrapper {
         this.persistPendingSession();
       }
       if (event.type === "agent_start") {
-        this.observerInstance?.startRun();
         this.lastRunAborted = false;
         forgetSessionCompletionSummary(this.sessionId);
       }
@@ -2233,8 +2242,8 @@ export class AgentSessionWrapper {
         }
         return this.sessionObserver.saveSettings({ enabled, model: { provider, modelId }, thinkingLevel });
       }
-      case "submit_session_observer_feedback":
-        return this.sessionObserver.feedback(command.noteId, command.kind, command.text);
+      case "edit_session_observer_checklist":
+        return this.sessionObserver.editChecklist(command);
       case "set_shadow_mind_enabled": {
         const enabled = await this.shadowSessionSetting.setEnabled(command.enabled === true);
         return { enabled };
@@ -4052,6 +4061,7 @@ export async function startRpcSession(
     // extension: it may read the session's context files, which exist only
     // after the session is created, so the getter is filled in below.
     const exactSystemPromptRef: { current?: () => string } = {};
+    let observerWrapper: AgentSessionWrapper | undefined;
     const exactSystemPromptExtension = createExactSystemPromptExtension(() => exactSystemPromptRef.current?.());
     // codemode, tool-search, and mcp, as the pi CLI loads them, and the host that decides
     // which MCP servers the session connects (ADR 0006).
@@ -4108,6 +4118,7 @@ export async function startRpcSession(
         : {
             extensionFactories: [
               ...(builtins?.extensions ?? []),
+              createObserverChecklistExtension(() => observerWrapper?.sessionObserver),
               createReadOnlyMcpPolicyExtension(),
               createProjectCommandBashExtension({
                 cwd: sessionCwd,
@@ -4309,6 +4320,7 @@ export async function startRpcSession(
     if (!sessionFile && options.observerEnabled) {
       wrapper.sessionObserver.saveSettings({ enabled: true, model: null, thinkingLevel: null });
     }
+    observerWrapper = wrapper;
     registerRpcWrapper(wrapper);
     if (fastEnabled !== undefined) {
       try {
