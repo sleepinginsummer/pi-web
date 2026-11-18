@@ -4061,7 +4061,7 @@ export async function startRpcSession(
     // extension: it may read the session's context files, which exist only
     // after the session is created, so the getter is filled in below.
     const exactSystemPromptRef: { current?: () => string } = {};
-    let observerWrapper: AgentSessionWrapper | undefined;
+    const observerWrapperRef: { current?: AgentSessionWrapper } = {};
     const exactSystemPromptExtension = createExactSystemPromptExtension(() => exactSystemPromptRef.current?.());
     // codemode, tool-search, and mcp, as the pi CLI loads them, and the host that decides
     // which MCP servers the session connects (ADR 0006).
@@ -4118,7 +4118,7 @@ export async function startRpcSession(
         : {
             extensionFactories: [
               ...(builtins?.extensions ?? []),
-              createObserverChecklistExtension(() => observerWrapper?.sessionObserver),
+              createObserverChecklistExtension(() => observerWrapperRef.current?.sessionObserver),
               createReadOnlyMcpPolicyExtension(),
               createProjectCommandBashExtension({
                 cwd: sessionCwd,
@@ -4320,7 +4320,7 @@ export async function startRpcSession(
     if (!sessionFile && options.observerEnabled) {
       wrapper.sessionObserver.saveSettings({ enabled: true, model: null, thinkingLevel: null });
     }
-    observerWrapper = wrapper;
+    observerWrapperRef.current = wrapper;
     registerRpcWrapper(wrapper);
     if (fastEnabled !== undefined) {
       try {
