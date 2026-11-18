@@ -44,12 +44,13 @@ const sharedProps = {
   onNotificationToggle() {},
 };
 
-function renderControls(isMobile) {
+function renderControls(isMobile, overrides = {}) {
   return renderToStaticMarkup(
     React.createElement(I18nProvider, null,
       React.createElement(InputControls, {
         ...sharedProps,
         isMobile,
+        ...overrides,
       })),
   );
 }
@@ -73,20 +74,15 @@ test("mobile controls expose the closed menu trigger", () => {
 
   assert.match(html, /aria-label="More controls"/);
   assert.match(html, /aria-expanded="false"/);
-  assert.match(html, /class="mobile-controls-menu"/);
-  assert.match(html, /display:none/);
+  assert.doesNotMatch(html, /class="mobile-controls-menu"/);
 });
 
-test("open mobile menu renders its slots, row break, and close control without clipping", () => {
+test("open mobile menu groups model actions and preferences", () => {
   const html = renderOpenMobileMenu();
-  const menuTag = html.match(/<div class="mobile-controls-menu"[^>]+>/)?.[0] ?? "";
-
-  assert.match(menuTag, /display:flex/);
-  assert.match(menuTag, /flex-wrap:wrap/);
-  assert.doesNotMatch(menuTag, /overflow/);
+  assert.match(html, /class="mobile-controls-menu" role="group"/);
   assert.match(html, /role="switch"/);
   assert.match(html, />Fast<\/span>/);
-  assert.match(html, /data-controls-row-break="true"/);
+  assert.ok(html.indexOf('class="mobile-controls-actions"') < html.indexOf('class="mobile-controls-preferences"'));
   assert.match(html, /aria-label="Collapse controls"/);
 });
 
@@ -96,4 +92,11 @@ test("Fast switch renders for an available desktop model", () => {
   assert.match(html, /role="switch"/);
   assert.match(html, /aria-checked="false"/);
   assert.match(html, />Fast<\/span>/);
+});
+
+
+test("stop remains directly available during a mobile run", () => {
+  const html = renderControls(true, { isStreaming: true });
+  assert.match(html, /class="mobile-composer-stop"/);
+  assert.doesNotMatch(html, /class="mobile-controls-menu"/);
 });

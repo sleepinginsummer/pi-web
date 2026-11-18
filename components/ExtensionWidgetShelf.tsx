@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useId, useRef, useState } from "react";
+import { ChevronUp } from "lucide-react";
 import { useI18n } from "@/hooks/useI18n";
 import type { ExtensionWidgetItem } from "@/lib/types";
 import { AnsiText } from "./AnsiText";
@@ -30,7 +31,7 @@ function getInitialExpandedKey(widgets: ExtensionWidgetItem[]): string | null {
   ))?.key ?? null;
 }
 
-export function ExtensionWidgetShelf({ widgets, left = false }: { widgets: ExtensionWidgetItem[]; left?: boolean }) {
+export function ExtensionWidgetShelf({ widgets, left = false, compactLabel }: { widgets: ExtensionWidgetItem[]; left?: boolean; compactLabel?: string }) {
   const { t } = useI18n();
   const idPrefix = useId();
   const rootRef = useRef<HTMLDivElement>(null);
@@ -127,7 +128,7 @@ export function ExtensionWidgetShelf({ widgets, left = false }: { widgets: Exten
           const lineLabel = widget.lines.length === 1
             ? t("chat.extensionWidgetLine")
             : t("chat.extensionWidgetLines", { count: widget.lines.length });
-          const label = `${widget.key}, ${lineLabel}, ${placement}`;
+          const label = `${compactLabel ? t(compactLabel) : widget.key}, ${lineLabel}, ${placement}`;
 
           return expandable ? (
             <button
@@ -142,8 +143,8 @@ export function ExtensionWidgetShelf({ widgets, left = false }: { widgets: Exten
               onClick={() => toggle(widget.key)}
             >
               <span className="extension-widget-update-pulse" aria-hidden="true" />
-              <span className="extension-widget-placement" aria-hidden="true">{widget.placement === "belowEditor" ? "v" : "^"}</span>
-              <span className="extension-widget-key">{widget.key}</span>
+              <span className="extension-widget-placement" aria-hidden="true">{compactLabel ? <ChevronUp size={12} /> : widget.placement === "belowEditor" ? "v" : "^"}</span>
+              <span className="extension-widget-key">{compactLabel ? t(compactLabel) : widget.key}</span>
             </button>
           ) : (
             <div

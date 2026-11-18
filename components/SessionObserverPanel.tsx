@@ -6,6 +6,7 @@ import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { SessionObserverSettingsDialog } from "./SessionObserverSettingsDialog";
+import { SessionObserverHistory } from "./SessionObserverHistory";
 import type { SessionObserverState } from "@/lib/session-observer-protocol";
 
 const actionStyle = "rounded border border-border px-2 py-1 text-xs hover:bg-[var(--bg-selected)] disabled:opacity-50";
@@ -17,7 +18,7 @@ export function SessionObserverPanel({ sessionId, cwd, onClose }: {
   cwd: string;
   onClose: () => void;
 }) {
-  const { t } = useI18n();
+  const { locale, t } = useI18n();
   const mobile = useIsMobile();
   const dialogRef = useRef<HTMLDialogElement>(null);
   useEffect(() => {
@@ -31,6 +32,7 @@ export function SessionObserverPanel({ sessionId, cwd, onClose }: {
   const [error, setError] = useState<"read" | "write" | null>(null);
   const mutation = useRef({ pending: false, revision: 0 });
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
   const [saveFailed, setSaveFailed] = useState(false);
 
   useEffect(() => {
@@ -84,7 +86,19 @@ export function SessionObserverPanel({ sessionId, cwd, onClose }: {
         </button>
         <button type="button" aria-label={t("observer.close")} title={t("observer.close")} className="rounded p-1.5 hover:bg-[var(--bg-selected)]" onClick={onClose}><X size={16} /></button>
       </header>
+      {state && (
+        <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-2 text-xs text-text-muted">
+          <div>
+            <span>{t("observer.cost")}</span>{" "}
+            <span className="whitespace-nowrap tabular-nums">{state.costUsd == null ? "—" : new Intl.NumberFormat(locale, { style: "currency", currency: "USD", maximumFractionDigits: 8 }).format(state.costUsd)}</span>
+          </div>
+          <button type="button" aria-pressed={showHistory} className={`${actionStyle} shrink-0`} onClick={() => setShowHistory((visible) => !visible)}>
+            {t(showHistory ? "observer.historyBack" : "observer.history")}
+          </button>
+        </div>
+      )}
       <div className="scrollbar-subtle flex-1 space-y-3 overflow-y-auto p-3">
+        {showHistory ? <SessionObserverHistory key={sessionId} sessionId={sessionId} /> : <>
         {error && <p role="alert" className="text-xs text-red-400">{t("observer.error")}</p>}
         {!state && !error && <p role="status" className="text-xs text-text-muted">{t("observer.loading")}</p>}
         {state?.checking && <p role="status" className="text-xs text-text-muted">{t("observer.checking")}</p>}
@@ -102,6 +116,7 @@ export function SessionObserverPanel({ sessionId, cwd, onClose }: {
             ))}
           </ul>
         )}
+        </>}
       </div>
       {settingsOpen && state && (
         <SessionObserverSettingsDialog

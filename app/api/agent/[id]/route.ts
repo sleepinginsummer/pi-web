@@ -12,7 +12,7 @@ import {
   startRpcSession,
 } from "@/lib/rpc-manager";
 import { cwdMissingBody, missingCwdFromBody } from "@/lib/missing-cwd";
-import { readObserverEnabled, readObserverState } from "@/lib/session-observer-protocol";
+import { readObserverEnabled, readObserverHistory, readObserverState } from "@/lib/session-observer-protocol";
 
 /**
  * 会话列表只依赖会话文件中的持久化数据。查询类命令不需要淘汰缓存，
@@ -105,19 +105,25 @@ export async function POST(
     }
 
     if (body.type === "get_session_observer") {
+      const history = body.history === true;
+      const before = body.before;
+      if (history && before !== undefined && typeof before !== "string") {
+        return NextResponse.json({ error: "Invalid observer history cursor" }, { status: 400 });
+      }
+      const cursor = typeof before === "string" ? before : undefined;
       if (current?.isAlive() && currentFreshness === "current") {
-        if (body.enabledOnly === true) {
-          const enabled = readObserverEnabled(current.inner.sessionManager.getEntries(), id);
-          return NextResponse.json({ success: true, data: { enabled } });
-        }
-        return NextResponse.json({ success: true, data: current.sessionObserver.snapshot() });
+        const entries = current.inner.sessionManager.getEntries();
+        const data = history ? readObserverHistory(id, entries, cursor)
+          : body.enabledOnly === true ? { enabled: readObserverEnabled(entries, id) }
+          : current.sessionObserver.snapshot();
+        return NextResponse.json({ success: true, data });
       }
       const filePath = await resolveSessionPath(id);
       if (!filePath) return NextResponse.json({ error: "Session not found" }, { status: 404 });
       const manager = openSessionManager(filePath);
       const entries = manager.getEntries();
-      const data = body.enabledOnly === true
-        ? { enabled: readObserverEnabled(entries, id) }
+      const data = history ? readObserverHistory(id, entries, cursor)
+        : body.enabledOnly === true ? { enabled: readObserverEnabled(entries, id) }
         : readObserverState(id, entries, manager.getBranch());
       return NextResponse.json({ success: true, data });
     }

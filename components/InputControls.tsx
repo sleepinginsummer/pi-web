@@ -5,7 +5,7 @@ import { InputControlsMenu } from "./InputControlsMenu";
 import { useI18n } from "@/hooks/useI18n";
 import type { ModelSelectionViewActions, ModelSelectionViewState } from "@/lib/model-selection-types";
 import { THINKING_LEVEL_OPTIONS, type ThinkingLevelOption } from "@/lib/thinking-levels";
-import { Zap } from "lucide-react";
+import { Ellipsis, Zap } from "lucide-react";
 import type { ToolPreset } from "@/lib/tool-presets";
 import { TOOL_PRESET_VALUES } from "@/lib/tool-presets";
 import { useRunEndStrayClick } from "@/lib/run-end-click";
@@ -317,6 +317,7 @@ const RunControls = memo(function RunControls({ isMobile, isStreaming, showLabel
                     e.currentTarget.style.color = isCompacting ? "#ef4444" : "var(--text-muted)";
                   }}
                    title={isCompacting ? t("chat.stopCompaction") : t("chat.compactContext")}
+                   className={isMobile && isCompacting ? "mobile-composer-stop" : undefined}
                    aria-label={isCompacting ? t("chat.stopCompaction") : t("chat.compactContext")}
                 >
                   {isCompacting ? (
@@ -335,7 +336,7 @@ const RunControls = memo(function RunControls({ isMobile, isStreaming, showLabel
               <>
                 <button
                 onClick={onAbort}
-                 title={t("chat.stopAgent")}
+                 title={t("chat.stopAgent")} aria-label={t("chat.stopAgent")} className={isMobile ? "mobile-composer-stop" : undefined}
                 style={{
                   display: "flex", alignItems: "center", gap: 6,
                   padding: "8px 14px",
@@ -355,7 +356,7 @@ const RunControls = memo(function RunControls({ isMobile, isStreaming, showLabel
                 <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
                   <rect x="1.5" y="1.5" width="7" height="7" rx="1.5" fill="currentColor" />
                 </svg>
-                 {t("chat.stop")}
+                 {showLabel && t("chat.stop")}
               </button>
               </>
             )}
@@ -502,12 +503,12 @@ export const InputControls = memo(function InputControls({
   const [controlsMenuOpen, setControlsMenuOpen] = useState(false);
   const controlsMenuRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    const handleOutsideClick = (event: MouseEvent) => {
+    const handleOutsideClick = (event: PointerEvent) => {
       const target = event.target as Node;
       if (controlsMenuRef.current && !controlsMenuRef.current.contains(target)) setControlsMenuOpen(false);
     };
-    document.addEventListener("mousedown", handleOutsideClick);
-    return () => document.removeEventListener("mousedown", handleOutsideClick);
+    document.addEventListener("pointerdown", handleOutsideClick);
+    return () => document.removeEventListener("pointerdown", handleOutsideClick);
   }, []);
 
   useEffect(() => {
@@ -525,51 +526,20 @@ export const InputControls = memo(function InputControls({
             position: "relative",
             marginLeft: isMobile ? 0 : "auto",
           }}>
+            {isMobile && (isStreaming || isCompacting) && (
+              <RunControls isMobile isStreaming={isStreaming} showLabel={false} onCompact={onCompact}
+                onAbortCompaction={onAbortCompaction} isCompacting={isCompacting} onAbort={onAbort} isStrayClick={isStrayClick} />
+            )}
             {isMobile && (
-              <button
-                type="button"
-                 title={controlsMenuOpen ? undefined : t("chat.moreControls")}
-                 aria-label={t("chat.moreControls")}
-                aria-expanded={controlsMenuOpen}
-                aria-hidden={controlsMenuOpen || undefined}
-                tabIndex={controlsMenuOpen ? -1 : undefined}
-                onClick={() => setControlsMenuOpen(true)}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  width: "100%",
-                  height: 32,
-                  padding: "8px 10px",
-                  background: "none",
-                  border: "none",
-                  borderRadius: 9,
-                  color: "var(--text-muted)",
-                  cursor: controlsMenuOpen ? "default" : "pointer",
-                  fontSize: 12,
-                  fontWeight: 500,
-                  visibility: controlsMenuOpen ? "hidden" : "visible",
-                  pointerEvents: controlsMenuOpen ? "none" : "auto",
-                  transition: "background 0.12s, color 0.12s",
-                }}
-                onMouseEnter={(e) => {
-                  if (controlsMenuOpen) return;
-                  e.currentTarget.style.background = "var(--bg-hover)";
-                  e.currentTarget.style.color = "var(--text)";
-                }}
-                onMouseLeave={(e) => {
-                  if (controlsMenuOpen) return;
-                  e.currentTarget.style.background = "none";
-                  e.currentTarget.style.color = "var(--text-muted)";
-                }}
-              >
-                {t("chat.moreControls")}
+              <button type="button" className="mobile-composer-more" aria-label={t("chat.moreControls")}
+                aria-expanded={controlsMenuOpen} onClick={() => setControlsMenuOpen((open) => !open)}>
+                <Ellipsis size={17} aria-hidden="true" />{t("chat.mobileMore")}
               </button>
             )}
             <InputControlsMenu
               isMobile={isMobile}
               isOpen={controlsMenuOpen}
-              onClose={() => setControlsMenuOpen(false)}
+              onClose={() => { setControlsMenuOpen(false); controlsMenuRef.current?.querySelector<HTMLButtonElement>(".mobile-composer-more")?.focus(); }}
               modelControls={(!isMobile || controlsMenuOpen) ? (
                 <>
                   <ThinkingControl isMobile={isMobile} modelState={modelState} isStreaming={isStreaming} onChange={onThinkingLevelChange} />
@@ -577,7 +547,7 @@ export const InputControls = memo(function InputControls({
                   {!isStreaming && <ToolPresetControl isMobile={isMobile} toolPreset={toolPreset} onChange={onToolPresetChange} isStrayClick={isStrayClick} />}
                 </>
               ) : null}
-              runControls={(
+              runControls={(!isMobile || (!isStreaming && !isCompacting)) ? (
                 <RunControls
                   isMobile={isMobile}
                   isStreaming={isStreaming}
@@ -588,7 +558,7 @@ export const InputControls = memo(function InputControls({
                   onAbort={onAbort}
                   isStrayClick={isStrayClick}
                 />
-              )}
+              ) : null}
               preferenceControls={(
                 <PreferenceToggles
                   isMobile={isMobile}

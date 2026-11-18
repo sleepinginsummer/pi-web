@@ -27,7 +27,7 @@ import { generateTitleForSessionFile } from "./session-file-title";
 import { findDeferredModel, findDeferredStartupModel, rememberProviderModels } from "./deferred-provider-models";
 import { ObserverContextOverflow, SessionObserver } from "./session-observer";
 import { createObserverChecklistExtension } from "./observer-checklist-extension";
-import { isObserverInterval } from "./session-observer-protocol";
+import { isObserverInterval, SESSION_OBSERVER_ENTRY, type ObserverInteraction } from "./session-observer-protocol";
 import { isThinkingLevel } from "./thinking-levels";
 import { isBlockingExtensionUiRequest } from "./extension-ui-queue";
 import { createDevServerExtension } from "./dev-server-extension";
@@ -606,24 +606,71 @@ export class AgentSessionWrapper {
         const currentLevel = this.inner.agent.state?.thinkingLevel;
         const requested = preferences.thinkingLevel ?? (isThinkingLevel(currentLevel) ? currentLevel : "off");
         const level = clampThinkingLevel(model, requested);
-        const maxTokens = Math.min(2048, model.maxTokens, Math.floor(model.contextWindow / 4));
-        // 预留输出和协议开销，历史文本使用偏保守的中英混合字符预算。
-        const inputBudget = Math.min(18_000, Math.floor((model.contextWindow - maxTokens - 512) / 3));
+        // 推理模型可能从同一个输出额度扣除思考和正文。按强度留出更多空间。
+        const outputBudget = level === "off" ? 2048 : level === "minimal" || level === "low" ? 4096 : 8192;
+        // Pi 的请求层会给上下文留 4096 token。观察员按同一模型窗口预算输入和回复。
+        const usableContext = Math.max(0, model.contextWindow - 4096);
+        const maxTokens = Math.min(outputBudget, model.maxTokens, Math.floor(usableContext / 4));
+        const inputBudget = usableContext - maxTokens;
         return {
           inputBudget,
-          request: async (prompt, evidence, signal) => {
-            const response = await runtime.streamSimple(model, {
-              messages: [
-                { role: "system", content: prompt, timestamp: Date.now() },
-                { role: "user", content: evidence, timestamp: Date.now() },
-              ],
-              tools: [],
-            }, { signal, maxTokens, maxRetries: 0, toolChoice: "none", reasoning: level === "off" ? undefined : level }).result();
-            if (isContextOverflow(response, model.contextWindow)) throw new ObserverContextOverflow();
-            if (response.stopReason !== "stop" || response.content.some((block) => block.type === "toolCall")) {
-              throw new Error("Observer request did not return a complete text response");
+          request: async (prompt, evidence, signal, phase) => {
+            const startedAt = Date.now();
+            let output: ObserverInteraction["output"] = [];
+            let status = "error";
+            let failure: ObserverInteraction["failure"];
+            let costUsd: number | null = null;
+            try {
+              const response = await runtime.streamSimple(model, {
+                messages: [
+                  { role: "system", content: prompt, timestamp: Date.now() },
+                  { role: "user", content: evidence, timestamp: Date.now() },
+                ],
+                tools: [],
+              }, { signal, maxTokens, maxRetries: 0, toolChoice: "none", reasoning: level === "off" ? undefined : level }).result();
+              const cost = response.usage.cost.total;
+              if (response.usage.totalTokens > 0 && Number.isFinite(cost) && cost >= 0) costUsd = cost;
+              output = response.content.map((block) => {
+                if (block.type === "text") return { type: block.type, text: block.text };
+                if (block.type === "thinking") return { type: block.type, text: block.thinking };
+                return { type: block.type, text: JSON.stringify({ name: block.name, arguments: block.arguments }) };
+              });
+              status = response.stopReason;
+              if (isContextOverflow(response, model.contextWindow)) {
+                status = "contextOverflow";
+                throw new ObserverContextOverflow();
+              }
+              if (response.stopReason === "length" || (response.stopReason === "error" && /cut at its length|whole output spent on reasoning/i.test(response.errorMessage ?? ""))) {
+                failure = "outputLimit";
+              } else if (response.content.some((block) => block.type === "toolCall")) {
+                failure = "toolCall";
+              } else if (response.stopReason === "error") {
+                failure = "provider";
+              }
+              if (response.stopReason !== "stop" || failure) {
+                throw new Error("Observer request did not return a complete text response");
+              }
+              return response.content.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n");
+            } catch (error) {
+              if (signal.reason instanceof DOMException && signal.reason.name === "TimeoutError") failure = "timeout";
+              else if (!signal.aborted && status === "error") failure ??= "provider";
+              throw error;
+            } finally {
+              // 交互记录只用于查看。写入失败不能改变观察请求的返回值或重试行为。
+              try {
+                if (this.isAlive() && this.diskFreshness() === "current") {
+                  const interaction: ObserverInteraction = {
+                    phase, startedAt, model: { provider: model.provider, modelId: model.id }, thinkingLevel: level,
+                    prompt, input: evidence, output, status: signal.aborted ? "aborted" : status, ...(failure && { failure }), costUsd,
+                  };
+                  this.inner.sessionManager.appendCustomEntry(SESSION_OBSERVER_ENTRY, {
+                    version: 1, sessionId: this.sessionId, kind: "interaction", interaction,
+                  });
+                }
+              } catch {
+                console.warn("[pi-web] 无法保存观察交互记录", { sessionId: this.sessionId });
+              }
             }
-            return response.content.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n");
           },
         };
       },

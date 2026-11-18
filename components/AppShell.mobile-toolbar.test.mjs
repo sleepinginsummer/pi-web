@@ -5,22 +5,14 @@ import test from "node:test";
 const topBarSource = await readFile(new URL("./AppTopBar.tsx", import.meta.url), "utf8");
 const appShellSource = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
 const topPanelSource = await readFile(new URL("../hooks/useTopPanel.ts", import.meta.url), "utf8");
-const mobileHookSource = await readFile(new URL("../hooks/useIsMobile.ts", import.meta.url), "utf8");
+const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
 const sidebarSource = await readFile(new URL("./SessionSidebar.tsx", import.meta.url), "utf8");
 
-test("keeps actions inline above the narrow-phone breakpoint", () => {
-  assert.match(mobileHookSource, /NARROW_MOBILE_QUERY = "\(max-width: 480px\)"/);
-  assert.match(topBarSource, /const isNarrowMobile = useIsNarrowMobile\(\);/);
-  assert.match(topBarSource, /navigation\.isMobile && !isNarrowMobile \? "auto" : "hidden"/);
-  assert.match(topBarSource, /navigation\.isMobile && isNarrowMobile \? \(/);
-});
-
-test("uses a compact narrow-phone action layer", () => {
-  assert.match(topBarSource, /data-mobile-toolbar=\{navigation\.isMobile \? "true" : undefined\}/);
-  assert.match(topBarSource, /data-mobile-toolbar-actions="true"/);
-  assert.match(topBarSource, /position: "absolute", inset: 0/);
-  assert.match(topBarSource, /<MoreHorizontal[\s\S]*?<SessionTopBarControls[\s\S]*?<X/);
-  assert.doesNotMatch(topBarSource, /AppearanceControls|toggleTheme|common\.language/);
+test("places mobile actions in a scrollable vertical menu below the toolbar", () => {
+  assert.match(topBarSource, /navigation.isMobile && session.show && mobileToolbarMoreOpen/);
+  assert.match(topBarSource, /<MoreHorizontal[\s\S]*?className="mobile-top-bar-menu"[\s\S]*?stacked/);
+  assert.match(css, /\.mobile-top-bar-menu\s*\{[^}]*position: absolute[^}]*overflow-y: auto/);
+  assert.match(css, /\.mobile-top-bar-menu-rows\s*\{[^}]*flex-direction: column/);
 });
 
 // 系统配色监听只在 useTheme 被挂载时存在；AppShell 是唯一全程存活的位置，
@@ -30,13 +22,8 @@ test("keeps the system theme subscription mounted at the app root", () => {
   assert.match(appShellSource, /useTheme\(\);/);
 });
 
-test("keeps Shadow outside the narrow-phone action layer", () => {
-  const layerStart = topBarSource.indexOf('data-mobile-toolbar-actions="true"');
-  const layerEnd = topBarSource.indexOf("</div>", layerStart);
-  assert.ok(layerStart > 0 && layerEnd > layerStart);
-  assert.match(topBarSource.slice(0, layerStart), /<ShadowSessionToggle/);
-  assert.doesNotMatch(topBarSource.slice(layerStart, layerEnd), /<ShadowSessionToggle/);
-  assert.match(topBarSource.slice(layerStart, layerEnd), /hideShadow/);
+test("keeps session switches together after the core actions", () => {
+  assert.match(topBarSource, /showLabel=\{stacked\}[\s\S]*?<ShadowSessionToggle[\s\S]*?<SystemPromptAddonToggle[\s\S]*?<ObserverTopBarToggle/);
 });
 
 test("only renders optional Agents and branch actions when available", () => {
@@ -53,23 +40,12 @@ test("positions the Agents panel at the left and delegates session selection", (
   assert.match(appShellSource, /onSelectSession=\{handleSelectSession\}/);
 });
 
-test("hides the file slot from pointer and accessibility interaction while covered", () => {
-  assert.match(topBarSource, /aria-hidden=\{mobileToolbarMoreOpen \? true : undefined\}/);
-  assert.match(topBarSource, /visibility: mobileToolbarMoreOpen \? "hidden" : "visible"/);
-  assert.match(topBarSource, /pointerEvents: mobileToolbarMoreOpen \? "none" : "auto"/);
-});
 
-test("closes the action layer on outside click, Escape, layout, and identity changes", () => {
-  assert.match(topBarSource, /event\.composedPath\(\)\.includes\(toolbar\)/);
-  assert.match(topBarSource, /document\.addEventListener\("pointerdown", handlePointerDown, true\)/);
-  assert.match(topBarSource, /event\.key === "Escape"/);
-  assert.match(topBarSource, /\[isNarrowMobile, navigation\.isMobile, session\.identityKey\]/);
-});
-
-test("keeps expanded actions open until an explicit close condition", () => {
-  assert.match(topBarSource, /onClick=\{\(\) => setMobileToolbarMoreOpen\(true\)\}/);
-  assert.match(topBarSource, /label=\{translate\("chat\.close"\)\} onClick=\{\(\) => setMobileToolbarMoreOpen\(false\)\}/);
-  assert.doesNotMatch(topPanelSource, /setMobileToolbarMoreOpen/);
+test("closes the menu on outside click, Escape, layout, and identity changes", () => {
+  assert.ok(topBarSource.includes("event.composedPath().includes(toolbar)"));
+  assert.ok(topBarSource.includes('document.addEventListener("pointerdown", handlePointerDown, true)'));
+  assert.ok(topBarSource.includes('event.key !== "Escape"'));
+  assert.ok(topBarSource.includes("[navigation.isMobile, session.identityKey]"));
 });
 
 test("places mobile trust warnings below the toolbar", () => {

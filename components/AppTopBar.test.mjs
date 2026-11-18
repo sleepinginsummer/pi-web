@@ -73,16 +73,10 @@ function renderTopBar(isMobile) {
   );
 }
 
-test("medium mobile top bar renders semantic icons in a horizontally scrollable action region", () => {
+test("mobile toolbar shows More and keeps secondary controls collapsed", () => {
   const html = renderTopBar(true);
-
-  assert.match(html, /class="app-top-bar"/);
-  assert.match(html, /overflow-x:auto/);
-  assert.match(html, /touch-action:pan-x/);
-  assert.match(html, /lucide-history/);
-  assert.match(html, /lucide-sparkles/);
-  assert.match(html, /lucide-scroll-text/);
-  assert.doesNotMatch(html, />62%/);
+  assert.match(html, /class="mobile-top-bar-more" aria-expanded="false"/);
+  assert.doesNotMatch(html, /Full history|Generate title|aria-label="System"|overflow-x:auto/);
 });
 
 test("file panel action is a non-scrolling end slot outside the top-bar action region", () => {

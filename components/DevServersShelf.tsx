@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useId, useRef, useState } from "react";
+import { Activity, ChevronUp } from "lucide-react";
 import { useI18n } from "@/hooks/useI18n";
 import { browserServerUrl, isDevServerActive, useDevServers } from "@/hooks/useDevServers";
 import { isScheduledTaskPending, useScheduledTasks } from "@/hooks/useScheduledTasks";
@@ -163,9 +164,11 @@ export function DevServersShelf({
   cwd,
   sessionId,
   onOpenPreview,
+  isMobile = false,
 }: {
   cwd: string | null | undefined;
   sessionId?: string | null;
+  isMobile?: boolean;
   onOpenPreview?: (serverId: string, label: string) => void;
 }) {
   const { t } = useI18n();
@@ -462,20 +465,24 @@ export function DevServersShelf({
         className={`extension-widget-trigger dev-servers-trigger${open ? " is-expanded" : ""}`}
         aria-expanded={open}
         aria-controls={open ? panelId : undefined}
-        aria-label={label}
+        aria-label={isMobile ? `${t("servers.activity")} · ${label}` : label}
         title={label}
         onClick={() => setOpen((current) => !current)}
       >
         <span className="extension-widget-placement" aria-hidden="true">^</span>
         <span className="extension-widget-key">{triggerText}</span>
-        {runningCount > 0 && <span className="dev-servers-count">{runningCount}</span>}
-        {pendingTaskCount > 0 && (
+        <span className="mobile-activity-label" aria-hidden="true"><Activity size={15} />{t("servers.activity")}<ChevronUp className="mobile-activity-chevron" size={12} /></span>
+        {isMobile && runningCount + pendingTaskCount + runningCommandCount > 0 && (
+          <span className="dev-servers-count mobile-activity-count" aria-hidden="true">{runningCount + pendingTaskCount + runningCommandCount}</span>
+        )}
+        {!isMobile && runningCount > 0 && <span className="dev-servers-count">{runningCount}</span>}
+        {!isMobile && pendingTaskCount > 0 && (
           <span className="dev-servers-count scheduled-tasks-count">
             <svg {...iconProps} width={9} height={9}><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>
             {pendingTaskCount}
           </span>
         )}
-        {runningCommandCount > 0 && (
+        {!isMobile && runningCommandCount > 0 && (
           <span className="dev-servers-count scheduled-tasks-count">
             <svg {...iconProps} width={9} height={9}><path d="M5 7l5 5-5 5M12 17h7" /></svg>
             {runningCommandCount}

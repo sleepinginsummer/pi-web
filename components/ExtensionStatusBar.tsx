@@ -1,6 +1,8 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { ChevronUp, Puzzle } from "lucide-react";
+import { useI18n } from "@/hooks/useI18n";
 import { stripAnsi } from "@/lib/ansi";
 import { AnsiText } from "./AnsiText";
 import type { ExtensionStatusItem, ExtensionWidgetItem } from "@/lib/types";
@@ -62,12 +64,53 @@ export function buildExtensionStatusCells(statuses: ExtensionStatusItem[]): Stat
   return cells;
 }
 
+function MobileExtensionStatus({ widgets, statuses }: { widgets: ExtensionWidgetItem[]; statuses: ReactNode }) {
+  const { t } = useI18n();
+  const id = useId();
+  const root = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    function closeOutside(event: PointerEvent) {
+      if (event.target instanceof Node && !root.current?.contains(event.target)) setOpen(false);
+    }
+    document.addEventListener("pointerdown", closeOutside);
+    return () => document.removeEventListener("pointerdown", closeOutside);
+  }, [open]);
+
+  return (
+    <div ref={root} className="mobile-extension-status" onKeyDown={(event) => {
+      if (!open || event.key !== "Escape") return;
+      event.stopPropagation();
+      setOpen(false);
+      root.current?.querySelector("button")?.focus();
+    }}>
+      <button type="button" className="extension-widget-trigger" aria-expanded={open} aria-controls={open ? id : undefined} onClick={() => setOpen(!open)}>
+        <Puzzle size={15} aria-hidden="true" />{t("chat.extensionStatus")}<ChevronUp size={12} aria-hidden="true" />
+      </button>
+      {open && (
+        <div className="extension-widget-panels">
+          <section id={id} className="extension-widget-panel mobile-extension-panel" aria-label={t("chat.extensionStatus")}>
+            {statuses}
+            {widgets.map((widget) => (
+              <div key={widget.key}>
+                <div className="extension-widget-panel-heading">{widget.key}</div>
+                <pre className="extension-widget-content"><AnsiText text={widget.lines.join("\n")} /></pre>
+              </div>
+            ))}
+          </section>
+        </div>
+      )}
+    </div>
+  );
+}
 export function ExtensionStatusBar({
   statuses,
   widgets = [],
   onCommand,
   commandsDisabled = false,
   leading,
+  isMobile = false,
 }: {
   statuses: ExtensionStatusItem[];
   widgets?: ExtensionWidgetItem[];
@@ -80,6 +123,7 @@ export function ExtensionStatusBar({
    * itself with CSS (:has) instead of returning null.
    */
   leading?: ReactNode;
+  isMobile?: boolean;
 }) {
   const cells = buildExtensionStatusCells(statuses);
   if (cells.length === 0 && widgets.length === 0 && !leading) return null;
@@ -123,12 +167,18 @@ export function ExtensionStatusBar({
   return (
     <div
       className={`extension-status-bar${widgets.length > 0 ? " has-widgets" : ""}${cells.length === 0 && widgets.length === 0 ? " has-only-leading" : ""}${cells.length > 0 ? " has-statuses" : ""}${hasCommands ? " has-commands" : ""}`}
-      style={{ display: "flex", alignItems: "center", flexShrink: 0, minWidth: 0, height: 36, padding: "0 12px", borderTop: "1px solid var(--border)", background: "transparent" }}
+      style={{ display: "flex", alignItems: "center", flexShrink: 0, minWidth: 0, ...(isMobile ? {} : { height: 36, padding: "0 12px" }), borderTop: "1px solid var(--border)", background: "transparent" }}
     >
       {leading}
-      {todo && <ExtensionWidgetShelf widgets={[todo]} left />}
-      {otherWidgets.length > 0 && <ExtensionWidgetShelf widgets={otherWidgets} />}
-      {statusLine}
+      {todo && <ExtensionWidgetShelf widgets={[todo]} left compactLabel={isMobile ? "chat.todos" : undefined} />}
+      {isMobile ? (
+        (otherWidgets.length > 0 || statusLine) && <MobileExtensionStatus widgets={otherWidgets} statuses={statusLine} />
+      ) : (
+        <>
+          {otherWidgets.length > 0 && <ExtensionWidgetShelf widgets={otherWidgets} />}
+          {statusLine}
+        </>
+      )}
     </div>
   );
 }
