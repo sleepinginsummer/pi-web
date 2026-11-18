@@ -1,4 +1,5 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import { clampThinkingLevel, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { createAgentSessionFromServices, createAgentSessionServices, getAgentDir, initTheme, SessionManager, SettingsManager, Theme, type ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { randomUUID } from "crypto";
@@ -24,6 +25,8 @@ import { parseShadowMindToggleCommand, SHADOW_MIND_SESSION_STATE } from "./shado
 import { createClonedSession, createForkedSession } from "./session-fork";
 import { generateTitleForSessionFile } from "./session-file-title";
 import { findDeferredModel, findDeferredStartupModel, rememberProviderModels } from "./deferred-provider-models";
+import { SessionObserver } from "./session-observer";
+import { isThinkingLevel } from "./thinking-levels";
 import { isBlockingExtensionUiRequest } from "./extension-ui-queue";
 import { createDevServerExtension } from "./dev-server-extension";
 import { isDevServersEnabled } from "./dev-server-settings";
@@ -320,6 +323,7 @@ export interface RpcSessionStartOptions {
   allowInitialModelFallback?: boolean;
   thinkingLevel?: ThinkingLevel;
   fastEnabled?: boolean;
+  observerEnabled?: boolean;
 }
 
 interface RpcStartupTimings {
@@ -502,6 +506,7 @@ export class AgentSessionWrapper {
   private autoTitleTriggered = false;
   private readonly shadowSessionSetting: ShadowSessionSetting;
   private readonly fastSessionSetting: FastSessionSetting;
+  private observerInstance?: SessionObserver;
   private fastRuntimeSnapshot: FastRuntimeSnapshot;
   private fastRuntimeGeneration = 0;
   private readonly exactSystemPrompt?: () => string;
@@ -579,6 +584,37 @@ export class AgentSessionWrapper {
         const entryId = this.inner.sessionManager.appendCustomEntry(FAST_SESSION_STATE, { enabled });
         const entry = this.inner.sessionManager.getEntry(entryId);
         if (entry) this.emit({ type: "entry_appended", entry });
+      },
+    });
+  }
+
+  get sessionObserver(): SessionObserver {
+    return this.observerInstance ??= new SessionObserver({
+      sessionId: this.sessionId,
+      manager: this.inner.sessionManager,
+      canWrite: () => this.isAlive() && this.diskFreshness() === "current",
+      append: (type, data) => { this.inner.sessionManager.appendCustomEntry(type, data); },
+      request: async (preferences, prompt, evidence, signal) => {
+        const runtime = this.inner.modelRuntime as ModelRuntime;
+        const current = this.inner.model;
+        const model = preferences.model
+          ? runtime.getModel(preferences.model.provider, preferences.model.modelId)
+          : current && runtime.getModel(current.provider, current.id);
+        if (!model) throw new Error("Observer model unavailable");
+        const currentLevel = this.inner.agent.state?.thinkingLevel;
+        const requested = preferences.thinkingLevel ?? (isThinkingLevel(currentLevel) ? currentLevel : "off");
+        const level = clampThinkingLevel(model, requested);
+        const response = await runtime.streamSimple(model, {
+          messages: [
+            { role: "system", content: prompt, timestamp: Date.now() },
+            { role: "user", content: evidence, timestamp: Date.now() },
+          ],
+          tools: [],
+        }, { signal, maxTokens: 2048, maxRetries: 0, toolChoice: "none", reasoning: level === "off" ? undefined : level }).result();
+        if (response.stopReason !== "stop" || response.content.some((block) => block.type === "toolCall")) {
+          throw new Error("Observer request did not return a complete text response");
+        }
+        return response.content.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n");
       },
     });
   }
@@ -785,6 +821,7 @@ export class AgentSessionWrapper {
 
   start(): void {
     this.startedAt = Date.now();
+    if (typeof this.inner.sessionManager?.getEntries === "function") void this.sessionObserver;
     this.unsubscribe = this.inner.subscribe((event: AgentEvent) => {
       this.lastEventType = typeof event.type === "string" ? event.type : null;
       this.lastEventAt = Date.now();
@@ -808,10 +845,22 @@ export class AgentSessionWrapper {
         this.persistPendingSession();
       }
       if (event.type === "agent_start") {
+        this.observerInstance?.startRun();
         this.lastRunAborted = false;
         forgetSessionCompletionSummary(this.sessionId);
       }
       if (event.type === "agent_settled") this.lastRunAborted = event.aborted === true;
+      if (event.type === "turn_end" && !this.aborting) {
+        const message = event.message as { role?: string; stopReason?: string } | undefined;
+        if (message?.role === "assistant" && message.stopReason !== "error" && message.stopReason !== "aborted") {
+          try {
+            this.observerInstance?.turnCompleted();
+          } catch {
+            console.warn("[pi-web] 会话观察准备失败", { sessionId: this.sessionId });
+          }
+        }
+      }
+      if (event.type === "compaction_start" || event.type === "auto_compaction_start") this.observerInstance?.cancel();
       if (event.type === "agent_end") {
         invalidateSessionListCache();
         // Every tool call of the run has finished; nothing is left to replay.
@@ -1582,8 +1631,10 @@ export class AgentSessionWrapper {
     targetId: string,
     options: { summarize?: boolean },
   ): Promise<{ cancelled: boolean }> {
+    this.observerInstance?.cancel();
     const activeBefore = this.inner.getActiveToolNames();
     const result = await this.inner.navigateTree(targetId, options);
+    if (!result.cancelled) this.observerInstance?.restoreStepCount();
     if (result.cancelled || this.chatOnly) return { cancelled: result.cancelled };
 
     const entries = this.inner.sessionManager.getEntries() as unknown as SessionEntry[];
@@ -1977,6 +2028,7 @@ export class AgentSessionWrapper {
 
       case "abort": {
         if (this.aborting) return null;
+        this.observerInstance?.cancel();
         this.aborting = true;
         this.forceShutdownOnIdle = true;
         this.resetIdleTimer();
@@ -2060,6 +2112,7 @@ export class AgentSessionWrapper {
       }
 
       case "set_model": {
+        this.observerInstance?.cancel();
         const { provider, modelId } = command as { provider: string; modelId: string };
         return this.enqueueModelPreference(async () => {
           const selected = await this.selectRuntimeModel(provider, modelId);
@@ -2151,6 +2204,37 @@ export class AgentSessionWrapper {
         });
       }
 
+      case "set_session_observer_enabled": {
+        const { enabled } = command;
+        if (typeof enabled !== "boolean") throw new Error("Invalid observer switch");
+        return this.sessionObserver.saveSettings({ ...this.sessionObserver.snapshot().preferences, enabled });
+      }
+      case "save_session_observer_settings": {
+        const { model, thinkingLevel } = command;
+        const enabled = this.sessionObserver.snapshot().enabled;
+        if (thinkingLevel !== null && !isThinkingLevel(thinkingLevel)) throw new Error("Invalid observer thinking level");
+        if (model === null && thinkingLevel === null) {
+          return this.sessionObserver.saveSettings({ enabled, model: null, thinkingLevel: null });
+        }
+        if (typeof model !== "object" || model === null || !("provider" in model) || !("modelId" in model)
+            || typeof model.provider !== "string" || typeof model.modelId !== "string") {
+          throw new Error("Invalid observer model");
+        }
+        const { provider, modelId } = model;
+        const previous = this.sessionObserver.snapshot().preferences;
+        // 模型下架后仍能关闭观察或保留原选择，只有修改模型组合时校验目录。
+        if (provider !== previous.model?.provider || modelId !== previous.model?.modelId || thinkingLevel !== previous.thinkingLevel) {
+          const runtime = this.inner.modelRuntime as ModelRuntime;
+          const selected = runtime.getModel(provider, modelId) ?? findDeferredModel(runtime, provider, modelId);
+          if (!selected) throw new Error("Observer model unavailable");
+          if (thinkingLevel !== null && !getSupportedThinkingLevels(selected).includes(thinkingLevel)) {
+            throw new Error("Observer model does not support this thinking level");
+          }
+        }
+        return this.sessionObserver.saveSettings({ enabled, model: { provider, modelId }, thinkingLevel });
+      }
+      case "submit_session_observer_feedback":
+        return this.sessionObserver.feedback(command.noteId, command.kind, command.text);
       case "set_shadow_mind_enabled": {
         const enabled = await this.shadowSessionSetting.setEnabled(command.enabled === true);
         return { enabled };
@@ -2278,6 +2362,7 @@ export class AgentSessionWrapper {
       }
 
       case "reload": {
+        this.observerInstance?.cancel();
         // A reload invalidates the extension ctx the running turn still holds,
         // and the turn dies at its next extension hook (#1172). pi refuses too.
         if (this.isSessionRunningForReplacement()) {
@@ -2393,6 +2478,7 @@ export class AgentSessionWrapper {
   destroy(): void {
     if (!this._alive) return;
     this._alive = false;
+    this.observerInstance?.cancel();
     clearAttentionSession(this.sessionId);
     this.closingAt ??= Date.now();
     this.disposeMcpHost();
@@ -4220,6 +4306,9 @@ export async function startRpcSession(
         ...(chatOnlyExtensionModel ? { chatOnlyExtensionModel } : {}),
       },
     );
+    if (!sessionFile && options.observerEnabled) {
+      wrapper.sessionObserver.saveSettings({ enabled: true, model: null, thinkingLevel: null });
+    }
     registerRpcWrapper(wrapper);
     if (fastEnabled !== undefined) {
       try {

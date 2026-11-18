@@ -3065,6 +3065,30 @@ span.token.table {
   width: 100%;
 }
 
+/* 提示占据最上方空间。观察面板使用剩余高度，消息列宽度由原布局决定。 */
+.notice-shelf-overlay:has(.session-observer-overlay) {
+  inset: 8px auto 8px 8px;
+  margin-left: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.notice-shelf-overlay:has(.session-observer-overlay) > .notice-shelf {
+  flex: 0 0 auto;
+  position: relative;
+  z-index: 1;
+}
+
+.session-observer-overlay {
+  width: min(304px, 100%);
+  max-height: 520px;
+  min-height: 0;
+  flex: 1 1 auto;
+  pointer-events: auto;
+}
+
 .notice-shelf {
   display: flex;
   min-width: 0;
@@ -3205,7 +3229,8 @@ span.token.table {
 .dev-servers-shelf { display: flex; flex: 0 0 auto; align-items: center; }
 .dev-servers-trigger .dev-servers-count { min-width: 14px; padding: 0 4px; border-radius: 7px; background: var(--accent); color: var(--bg); font-size: 10px; line-height: 14px; text-align: center; }
 .dev-servers-trigger .dev-servers-error-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: #ef4444; }
-.dev-servers-panels { left: 12px; right: auto; }
+.extension-widget-panels-left { left: 12px; right: auto; }
+.extension-widget-left-shelf { display: flex; flex: 0 0 auto; align-items: center; }
 .dev-servers-panel { width: min(420px, calc(100vw - 24px)); }
 .dev-server-list { list-style: none; margin: 0; padding: 4px 0; }
 .dev-server-row { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 2px 9px; font-size: 12px; }

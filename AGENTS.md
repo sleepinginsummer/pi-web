@@ -202,6 +202,12 @@ The top bar Shadow switch controls only the current session. `lib/shadow-session
 ### 新会话首条消息由服务端接管
 扩展 `session_start` 可能要很久（建索引、等审批），这段等待不能押在页面请求上，否则切换页面就会放弃发送、会话也不在侧栏。`staged` 状态发送首条消息时，`useAgentSession` 只等创建 runtime，随后 `POST /api/agent/new`（`operation: "submit-first-prompt"`）立即返回；`AgentSessionWrapper.submitFirstPrompt()` 先写入会话文件，把消息放进 `parkedDuringCompaction` 作为队列行（Stop、移回、`get_state` 都复用这条路径），再在后台无期限等待绑定和初始化，完成后走普通 `send({ type: "prompt" })`，所以 MCP 准备等都照常执行。同一 wrapper 只接受一次，响应丢失后的重试不会重复发送。初始化失败时消息留在队列行并广播 `prompt_error`，不静默丢弃。发送途中已切走时调用 `onSessionCreatedInBackground`：只清理待创建状态并刷新侧栏，不把用户拉回；只有用户又回到了同目录的新会话页才进入该会话。`/api/agent/running` 的 `startingSessions` 驱动侧栏“创建会话中”。这里不能调 `set_tools`：创建时已带同样的工具集，而运行中切工具会被拒绝。
 
+### 内置会话观察员
+
+顶栏“观察”在瀑布流左侧打开悬浮面板，与 tips 共用浮层且 tips 优先占据顶部空间。顶栏开关默认关闭，新会话可在发送首条消息前预设，创建 runtime 时写入该会话。已有会话切换后立即保存。模型和思考强度在独立弹窗中编辑，点击保存后生效；收起面板后观察仍可运行。每六个完成的模型步骤尝试一次独立、无工具的请求，输入为有长度上限的近期对话和反馈。提示挂起时跳过检查，用户继续发送两条消息后将未处理的提示标为过期；连续忽略会降低检查频率。
+
+开关、模型与思考强度、提醒和反馈通过运行中的 SessionManager 写入 `pi-web:session-observer` 自定义 entry。开关和模型偏好按整个会话恢复，模型与思考强度默认跟随主会话，提醒和反馈按活动分支读取，均不进入主模型的上下文。后台结果写回前校验会话文件和触发时的 leaf，关闭、切分支和 Stop 时取消请求。
+
 ### 顶栏补充提示词
 `lib/system-prompt-addon.ts`：`<agentDir>/pi-web-system-prompt-addon.json` 只存新会话的默认内容；会话开始（首条消息或第一次在该会话操作）时复制到 `pi-web-system-prompt-addon-sessions/<id>.json`，此后开关（默认关闭）和内容只读写这份快照，全局和其他会话的修改都影响不到它。在会话里把内容改成新的非空文本时同时更新默认内容（清空或未改动不更新），只影响之后的新会话。不写会话 JSONL。未创建的新会话把开关按 cwd 暂存在页面（`lib/system-prompt-addon-client.ts`），`createNewSessionRuntime` 拿到真实 id 后先写入再返回，首条消息不会抢在开关之前。
 
@@ -333,6 +339,7 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 - 投递方式 `delivery` 默认 `followUp`；只有一次性任务可以选 `steer`，cron 任务一律 followUp（避免反复打断长时间工作），任务改成 cron 时清掉已存的 steer。
 - 设置 › 常规 的开关存 `~/.pi/agent/pi-web-scheduled-task-settings.json`，默认开，文件损坏按关闭处理。关闭后调度器立即停止触发（任务保留），工具在会话重载后移除。
 - 界面：`DevServersShelf` 上方列出绑定到当前会话的任务，同目录其他会话的记录放在下方默认收起的“其他会话”区域，展开后可通过会话链接跳转；任务显示创建时间，入口计数与告警只按当前会话筛选，可立即运行、暂停/恢复、删除；入口在有服务器或有任务时出现。`pi-web:scheduled-task` 消息是回合锚点（`isMessageGroupAnchor`），与子代理回报一样开启新一轮显示。
+- `rpiv-todos` 在同一状态栏的左侧打开，和定时任务共用弹窗定位。待办取运行时 widget 或当前会话的历史快照，其他扩展 widget 沿用右侧弹窗。
 
 ### 唤醒会话与后台命令
 - `lib/session-wake.ts` 是服务端唤醒会话的唯一入口（定时任务和后台命令共用）：wrapper 已回收就 `startRpcSession()` 重新打开，`waitUntilReady()` 后用 `sendCustomMessage(..., { deliverAs, triggerTurn: true })` 投递带 `display: true` 的自定义消息。`followUp` 等本轮全部做完，`steer` 在当前工具调用后插入；空闲会话两者都直接开新一轮。等回合开始最多 2 秒即视为投递成功，之后的失败走 `onLateError`。`SessionWakeError.permanent` 表示会话已不存在。

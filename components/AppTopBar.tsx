@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
-import { Bot, Bug, History, MoreHorizontal, ScrollText, Sparkles, Wrench, X } from "lucide-react";
+import { Bot, Bug, Eye, History, MoreHorizontal, ScrollText, Sparkles, Wrench, X } from "lucide-react";
 import { useIsNarrowMobile } from "@/hooks/useIsMobile";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { SessionTreeNode } from "@/lib/types";
@@ -9,6 +9,7 @@ import type { TopPanel } from "@/hooks/useTopPanel";
 import type { ShadowSessionControl } from "@/lib/shadow-session-control";
 import { BranchNavigator, hasSessionBranches } from "./BranchNavigator";
 import { ShadowSessionToggle } from "./ShadowSessionToggle";
+import { DraftObserverSessionToggle, ObserverSessionToggle } from "./ObserverSessionToggle";
 import { SYSTEM_PROMPT_ADDON_EDITOR_ATTR, SystemPromptAddonToggle } from "./SystemPromptAddonToggle";
 import { SessionStatsButton } from "./SessionInfoControls";
 
@@ -43,6 +44,8 @@ interface AppTopBarProps {
     onAutoName: () => void;
     onHistory: () => void;
     onSystemPromptAddonChange?: () => void;
+    observerPanel?: { sessionId: string; open: boolean; toggle: () => void };
+    observerDraft?: { cwd: string; sessionId: string | null; busy: boolean };
     shadowControl: ShadowSessionControl | null;
     show: boolean;
     stats: SessionStatsInfo | null;
@@ -104,6 +107,21 @@ function AgentsButton({ activePanel, onTogglePanel, session, translate }: Pick<A
   );
 }
 
+function DebugTopBarButton({ activePanel, onTogglePanel, translate }: Pick<AppTopBarProps, "activePanel" | "onTogglePanel" | "translate">) {
+  return (
+    <IconButton active={activePanel === "debug"} label={translate("debug.title")} onClick={() => onTogglePanel("debug")} debugButton>
+      <Bug size={13} aria-hidden="true" />
+    </IconButton>
+  );
+}
+function ObserverTopBarToggle({ session, compact }: { session: AppTopBarProps["session"]; compact: boolean }) {
+  const sessionId = session.observerPanel?.sessionId ?? session.observerDraft?.sessionId;
+  if (sessionId) {
+    return <ObserverSessionToggle key={sessionId} sessionId={sessionId} compact={compact} showLabel={!session.observerPanel && !compact} />;
+  }
+  const draft = session.observerDraft;
+  return draft ? <DraftObserverSessionToggle cwd={draft.cwd} disabled={draft.busy} compact={compact} /> : null;
+}
 function SessionTopBarControls({ activePanel, hideAgents = false, hideShadow = false, hideStats = false, locale, navigation, onTogglePanel, session, translate }: Pick<AppTopBarProps, "activePanel" | "navigation" | "onTogglePanel" | "session" | "translate"> & { hideAgents?: boolean; hideShadow?: boolean; hideStats?: boolean; locale: string }) {
   if (!session.show) return null;
   const hasMessages = session.hasPersistedSession && (
@@ -152,6 +170,7 @@ function SessionTopBarControls({ activePanel, hideAgents = false, hideShadow = f
         <button type="button" onClick={() => onTogglePanel("tools")} title={translate("tools.title")} aria-label={translate("tools.title")} aria-pressed={activePanel === "tools"} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: navigation.isMobile ? ICON_BUTTON_SIZE : undefined, height: "100%", padding: navigation.isMobile ? 0 : "0 12px", background: activePanel === "tools" ? "var(--bg-selected)" : "none", border: 0, borderRight: "1px solid var(--border)", color: "var(--text-muted)", cursor: "pointer" }}>
           {navigation.isMobile ? <Wrench size={15} aria-hidden="true" /> : translate("tools.label")}
         </button>
+        {!hideShadow && <DebugTopBarButton {...{ activePanel, onTogglePanel, translate }} />}
         {!hideShadow && (
           <ShadowSessionToggle
             enabled={shadow?.enabled ?? true}
@@ -162,10 +181,27 @@ function SessionTopBarControls({ activePanel, hideAgents = false, hideShadow = f
           />
         )}
         <SystemPromptAddonToggle scopeKey={shadow?.scopeKey ?? null} sessionId={shadow?.sessionId ?? null} onChange={session.onSystemPromptAddonChange} compact={navigation.isMobile} />
+        {(session.observerPanel || session.observerDraft) && (
+          <div className="flex shrink-0 items-stretch border-r border-border">
+            {session.observerPanel && (
+              <button
+                type="button"
+                onClick={session.observerPanel.toggle}
+                aria-expanded={session.observerPanel.open}
+                aria-controls={session.observerPanel.open ? "session-observer-panel" : undefined}
+                aria-label={translate("observer.label")}
+                title={translate("observer.label")}
+                className="flex shrink-0 items-center justify-center gap-1.5 px-3 text-text-muted hover:bg-[var(--bg-selected)] aria-expanded:bg-[var(--bg-selected)]"
+                style={{ width: navigation.isMobile ? ICON_BUTTON_SIZE : undefined, paddingInline: navigation.isMobile ? 0 : undefined }}
+              >
+                <Eye size={15} aria-hidden="true" />
+                {!navigation.isMobile && translate("observer.label")}
+              </button>
+            )}
+            <ObserverTopBarToggle session={session} compact={navigation.isMobile} />
+          </div>
+        )}
       </div>
-      <IconButton active={activePanel === "debug"} label={translate("debug.title")} onClick={() => onTogglePanel("debug")} debugButton>
-        <Bug size={13} aria-hidden="true" />
-      </IconButton>
       {!hideStats && (
         <SessionStatsButton
           active={activePanel === "session"}
@@ -237,6 +273,7 @@ export function AppTopBar(props: AppTopBarProps) {
           </IconButton>
           {navigation.isMobile && isNarrowMobile ? (
             <>
+              {session.show && <DebugTopBarButton {...{ activePanel, onTogglePanel, translate }} />}
               {session.show && (
                 <ShadowSessionToggle
                   enabled={shadow?.enabled ?? true}
@@ -246,6 +283,7 @@ export function AppTopBar(props: AppTopBarProps) {
                   compact
                 />
               )}
+              {session.show && !mobileToolbarMoreOpen && <ObserverTopBarToggle session={session} compact />}
               <div style={{ position: "relative", display: "flex", flex: "1 1 auto", alignItems: "stretch", minWidth: 0, height: "100%" }}>
                 {!mobileToolbarMoreOpen && (
                   <>

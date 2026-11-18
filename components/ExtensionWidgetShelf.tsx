@@ -30,12 +30,13 @@ function getInitialExpandedKey(widgets: ExtensionWidgetItem[]): string | null {
   ))?.key ?? null;
 }
 
-export function ExtensionWidgetShelf({ widgets }: { widgets: ExtensionWidgetItem[] }) {
+export function ExtensionWidgetShelf({ widgets, left = false }: { widgets: ExtensionWidgetItem[]; left?: boolean }) {
   const { t } = useI18n();
   const idPrefix = useId();
+  const rootRef = useRef<HTMLDivElement>(null);
   const previousWidgetsRef = useRef<Map<string, string[]> | null>(null);
   const pulseTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
-  const [expandedKey, setExpandedKey] = useState<string | null>(() => getInitialExpandedKey(widgets));
+  const [expandedKey, setExpandedKey] = useState<string | null>(() => left ? null : getInitialExpandedKey(widgets));
   const [updatingKeys, setUpdatingKeys] = useState<ReadonlySet<string>>(() => new Set());
 
   useEffect(() => {
@@ -77,17 +78,32 @@ export function ExtensionWidgetShelf({ widgets }: { widgets: ExtensionWidgetItem
     pulseTimersRef.current.clear();
   }, []);
 
+  useEffect(() => {
+    if (!left || expandedKey === null) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Node && !rootRef.current?.contains(event.target)) setExpandedKey(null);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setExpandedKey(null);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [left, expandedKey]);
   if (widgets.length === 0) return null;
 
-  const expanded = widgets.find((widget) => widget.key === expandedKey && widget.lines.length > 1);
+  const expanded = widgets.find((widget) => widget.key === expandedKey && (left || widget.lines.length > 1));
   const expandedIndex = expanded ? widgets.findIndex((widget) => widget.key === expanded.key) : -1;
   const expandedPanelId = expandedIndex >= 0 ? `${idPrefix}-panel-${expandedIndex}` : undefined;
   const toggle = (key: string) => setExpandedKey((current) => current === key ? null : key);
 
-  return (
+  const shelf = (
     <>
       {expanded && (
-        <div className="extension-widget-panels">
+        <div className={`extension-widget-panels${left ? " extension-widget-panels-left" : ""}`}>
           <section
             id={expandedPanelId}
             className="extension-widget-panel"
@@ -101,7 +117,7 @@ export function ExtensionWidgetShelf({ widgets }: { widgets: ExtensionWidgetItem
       )}
       <div className="extension-widget-triggers" aria-label={t("chat.extensionWidgets")}>
         {widgets.map((widget, index) => {
-          const expandable = widget.lines.length > 1;
+          const expandable = left || widget.lines.length > 1;
           const isExpanded = expandable && expanded?.key === widget.key;
           const triggerId = `${idPrefix}-trigger-${index}`;
           const panelId = `${idPrefix}-panel-${index}`;
@@ -146,4 +162,5 @@ export function ExtensionWidgetShelf({ widgets }: { widgets: ExtensionWidgetItem
       </div>
     </>
   );
+  return left ? <div ref={rootRef} className="extension-widget-left-shelf">{shelf}</div> : shelf;
 }

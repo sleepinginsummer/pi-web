@@ -388,7 +388,7 @@ export function DevServersShelf({
   return (
     <div ref={rootRef} className="dev-servers-shelf">
       {open && (
-        <div className="extension-widget-panels dev-servers-panels">
+        <div className="extension-widget-panels extension-widget-panels-left">
           <section id={panelId} className="extension-widget-panel dev-servers-panel" aria-label={label}>
             {showServers && <>
             <div className="extension-widget-panel-heading">{t("servers.title")}</div>

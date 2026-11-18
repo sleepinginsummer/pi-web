@@ -60,6 +60,8 @@ import { extractTurnWrittenFiles, type WrittenFile } from "@/lib/turn-written-fi
 import { getFinalAnswerViews, keepWrittenFiles, type FinalAnswerViews } from "@/lib/turn-views";
 import { getFileName } from "@/lib/file-paths";
 import { NoticeShelf } from "./NoticeShelf";
+import { SessionObserverPanel } from "./SessionObserverPanel";
+import type { ObserverCard } from "@/lib/session-observer-protocol";
 import { buildQuotedSelection } from "@/lib/quoted-selection";
 
 const MAX_MOUNTED_HISTORY_GROUPS = 160;
@@ -68,6 +70,7 @@ interface Props {
   navigationKey: number;
   isNavigationActive: (key: number) => boolean;
   session: SessionInfo | null;
+  observerPanel?: { onClose: () => void; onDiscuss: (card: ObserverCard) => void };
   searchTarget?: { sessionId: string; entryId: string; blockIndex?: number } | null;
   onSearchTargetHandled?: (target: { sessionId: string; entryId: string }) => void;
   initialScrollPosition?: ChatReadingPosition | null;
@@ -238,7 +241,7 @@ function LiveProcessDetailsGroup({ hiddenCount, renderAll, renderRecent, t }: { 
   );
 }
 
-export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSession, onDebugSnapshotReaderChange, navigationKey, isNavigationActive, session, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, newSessionCwd, newSessionWorktrees, pendingNewSessionControl, onPendingNewSessionEvent, notificationController, onAgentEnd, onSessionCreated, onSessionCreatedInBackground, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onShadowMindControlChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenSettings, onContextUsageChange, onOpenFile, onFilesUploaded, onOpenSubagent, onOpenServerPreview, onToolEnd, onNewSessionCwdChange, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed }: Props) {
+export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSession, onDebugSnapshotReaderChange, navigationKey, isNavigationActive, session, observerPanel, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, newSessionCwd, newSessionWorktrees, pendingNewSessionControl, onPendingNewSessionEvent, notificationController, onAgentEnd, onSessionCreated, onSessionCreatedInBackground, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onShadowMindControlChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenSettings, onContextUsageChange, onOpenFile, onFilesUploaded, onOpenSubagent, onOpenServerPreview, onToolEnd, onNewSessionCwdChange, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed }: Props) {
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio, holdAudio } = useAudio();
   const {
@@ -1173,6 +1176,11 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
             onToggleExpanded={setNoticeExpanded}
             floating
           />
+          {observerPanel && session && (
+            <div className="session-observer-overlay">
+              <SessionObserverPanel key={session.id} sessionId={session.id} cwd={session.cwd} {...observerPanel} />
+            </div>
+          )}
         </div>
         <div
           ref={scrollContainerRef}

@@ -1,5 +1,7 @@
 import type { ExtensionWidgetItem } from "./types";
 
+export const TODO_WIDGET_KEY = "rpiv-todos";
+
 export type TodoWidgetTaskStatus = "pending" | "in_progress" | "completed";
 
 export interface TodoWidgetTask {
@@ -37,7 +39,7 @@ export function createTodoWidget(tasks: readonly TodoWidgetTask[]): ExtensionWid
   });
 
   return {
-    key: "rpiv-todos",
+    key: TODO_WIDGET_KEY,
     lines,
     placement: "aboveEditor",
   };
@@ -48,7 +50,7 @@ export function withTodoWidget(
   widgets: ExtensionWidgetItem[],
   tasks: readonly TodoWidgetTask[],
 ): ExtensionWidgetItem[] {
-  if (widgets.some((widget) => widget.key === "rpiv-todos")) return widgets;
+  if (widgets.some((widget) => widget.key === TODO_WIDGET_KEY)) return widgets;
   const todoWidget = createTodoWidget(tasks);
   return todoWidget ? [...widgets, todoWidget] : widgets;
 }

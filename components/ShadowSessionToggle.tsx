@@ -3,6 +3,7 @@
 import { memo } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import type { ShadowSessionControl } from "@/lib/shadow-session-control";
+import { SessionSwitchTrack } from "./SessionSwitchTrack";
 
 export const ShadowSessionToggle = memo(function ShadowSessionToggle({
   enabled,
@@ -61,30 +62,7 @@ export const ShadowSessionToggle = memo(function ShadowSessionToggle({
         <path d="M8 11c-2 1-3 3-3 5M10 12c-1 2-1 4 0 6M14 12c1 2 1 4 0 6M16 11c2 1 3 3 3 5" />
       </svg>
       {!compact && <span>{t("shadow.label")}</span>}
-      <span
-        aria-hidden="true"
-        style={{
-          position: "relative",
-          width: 24,
-          height: 14,
-          borderRadius: 999,
-          background: enabled ? "var(--accent)" : "var(--border)",
-          opacity: pending ? 0.55 : 1,
-          transition: "background 0.15s, opacity 0.15s",
-        }}
-      >
-        <span style={{
-          position: "absolute",
-          top: 2,
-          left: enabled ? 12 : 2,
-          width: 10,
-          height: 10,
-          borderRadius: "50%",
-          background: "var(--bg-panel)",
-          boxShadow: "0 1px 2px rgba(0,0,0,0.22)",
-          transition: "left 0.15s",
-        }} />
-      </span>
+      <SessionSwitchTrack checked={enabled} pending={pending} />
     </button>
   );
 });

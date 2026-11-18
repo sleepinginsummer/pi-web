@@ -58,7 +58,7 @@ import {
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
 } from "@/lib/panel-layout";
-import { DEFAULT_PENDING_NEW_SESSION_CONTROL, type PendingNewSessionControl } from "@/lib/pending-new-session";
+import { DEFAULT_PENDING_NEW_SESSION_CONTROL, selectPendingNewSession, type PendingNewSessionControl } from "@/lib/pending-new-session";
 import type { ChatInputHandle } from "./ChatInput";
 import { AppTopPanels } from "./AppTopPanels";
 import { getLastSettingsSection, settingsSectionRequiresProject, type SettingsSection } from "@/lib/settings-navigation";
@@ -107,6 +107,7 @@ export function AppShell() {
   }, []);
   const [searchTarget, setSearchTarget] = useState<{ sessionId: string; entryId: string; blockIndex?: number } | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(() => !initialNavigation.sidebarCollapsed);
+  const [observerPanelSessionId, setObserverPanelSessionId] = useState<string | null>(null);
   const desktopSidebarOpenRef = useRef(!initialNavigation.sidebarCollapsed);
   const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([]);
   const [activeTerminalTabId, setActiveTerminalTabId] = useState<string | null>(null);
@@ -953,7 +954,9 @@ export function AppShell() {
   const pendingNewSessionControl: PendingNewSessionControl = effectiveNewSessionCwd
     ? (pendingNewSessions.get(effectiveNewSessionCwd) ?? DEFAULT_PENDING_NEW_SESSION_CONTROL)
     : DEFAULT_PENDING_NEW_SESSION_CONTROL;
+  const observerDraftView = selectPendingNewSession(pendingNewSessionControl);
   const showChat = selectedSession !== null || effectiveNewSessionCwd !== null;
+  const observerPanelOpen = Boolean(selectedSession && observerPanelSessionId === selectedSession.id);
   const projectTrustCwd = selectedSession?.cwd ?? effectiveNewSessionCwd;
   // While restoring initial session from URL, don't show the placeholder
   const showPlaceholder = initialSessionRestored && !showChat;
@@ -1250,6 +1253,16 @@ export function AppShell() {
             messageCount: selectedSession?.messageCount ?? 0,
             onAutoName: () => void handleAutoName(),
             onHistory: handleViewFullHistory,
+            observerPanel: selectedSession ? {
+              sessionId: selectedSession.id,
+              open: observerPanelOpen,
+              toggle: () => setObserverPanelSessionId(observerPanelOpen ? null : selectedSession.id),
+            } : undefined,
+            observerDraft: !selectedSession && effectiveNewSessionCwd ? {
+              cwd: effectiveNewSessionCwd,
+              sessionId: observerDraftView.transportSessionId,
+              busy: observerDraftView.busy,
+            } : undefined,
             onSystemPromptAddonChange: handleSystemPromptAddonChange,
             shadowControl: activeShadowSessionControl,
             show: showChat,
@@ -1303,50 +1316,58 @@ export function AppShell() {
         {/* Chat content */}
         <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
           {showChat ? (
-      <ChatWindow
-              key={sessionKey}
-              navigationKey={sessionKey}
-              isNavigationActive={isNavigationActive}
-              session={selectedSession}
-              searchTarget={searchTarget?.sessionId === selectedSession?.id ? searchTarget : null}
-              onSearchTargetHandled={handleSearchTargetHandled}
-              initialScrollPosition={selectedSession ? sessionScrollPositionsRef.current.get(selectedSession.id) ?? null : null}
-              onScrollPositionChange={handleSessionScrollPositionChange}
-              newSessionCwd={effectiveNewSessionCwd}
-              newSessionWorktrees={effectiveNewSessionCwd && worktreeState?.worktrees.some((worktree) => worktree.path === effectiveNewSessionCwd)
-                ? worktreeState.worktrees
-                : []}
-              pendingNewSessionControl={pendingNewSessionControl}
-              onPendingNewSessionEvent={dispatchPendingNewSession}
-              notificationController={notificationController}
-              onNewSessionCwdChange={updateDraftCwd}
-              onAgentEnd={handleAgentEnd}
-              onSessionCreated={handleSessionCreated}
-              onSessionCreatedInBackground={handleSessionCreatedInBackground}
-              onSessionListRefresh={requestAgentSessionListRefresh}
-              onSessionForked={handleSessionForked}
-              onSideSession={handleSideSession}
-              modelsRefreshKey={modelsRefreshKey}
-              chatInputRef={chatInputRef}
-              onBranchDataChange={handleBranchDataChange}
-              onSystemPromptChange={handleSystemPromptChange}
-              onDebugSnapshotReaderChange={handleDebugSnapshotReaderChange}
-        onSystemPromptLoaderChange={handleSystemPromptLoaderChange}
-        onToolsLoaderChange={handleToolsLoaderChange}
-              onShadowMindControlChange={handleShadowMindControlChange}
-              onSessionStatsChange={handleSessionStatsChange}
-              onSessionStatsPanelOpen={openSessionStatsPanel}
-              onOpenSettings={openSettingsSection}
-              onContextUsageChange={handleContextUsageChange}
-              onOpenFile={handleOpenLinkedFile}
-              onFilesUploaded={handleExplorerRefresh}
-              onOpenSubagent={handleOpenSubagentTab}
-              onOpenServerPreview={handleOpenServerPreview}
-              onToolEnd={handleToolEnd}
-              quoteSelectionEnabled={quoteSelectionEnabled}
-              initialPrompt={pendingQuotePrompt && pendingQuotePrompt.sessionId === selectedSession?.id ? pendingQuotePrompt.text : undefined}
-              onInitialPromptConsumed={handleInitialQuotePromptConsumed}
-            />
+                <ChatWindow
+                  key={sessionKey}
+                  navigationKey={sessionKey}
+                  isNavigationActive={isNavigationActive}
+                  session={selectedSession}
+                  observerPanel={observerPanelOpen ? {
+                    onClose: () => setObserverPanelSessionId(null),
+                    onDiscuss: (card) => {
+                      const feedback = card.feedback.map((item) => item.text ?? translate(item.kind === "known" ? "observer.known" : item.kind === "expired" ? "observer.expired" : "observer.dismissed"));
+                      chatInputRef.current?.insertText([translate("observer.discussionIntro"), card.title, card.detail, ...feedback].join("\n\n") + "\n");
+                      if (isMobile) setObserverPanelSessionId(null);
+                    },
+                  } : undefined}
+                  searchTarget={searchTarget?.sessionId === selectedSession?.id ? searchTarget : null}
+                  onSearchTargetHandled={handleSearchTargetHandled}
+                  initialScrollPosition={selectedSession ? sessionScrollPositionsRef.current.get(selectedSession.id) ?? null : null}
+                  onScrollPositionChange={handleSessionScrollPositionChange}
+                  newSessionCwd={effectiveNewSessionCwd}
+                  newSessionWorktrees={effectiveNewSessionCwd && worktreeState?.worktrees.some((worktree) => worktree.path === effectiveNewSessionCwd)
+                    ? worktreeState.worktrees
+                    : []}
+                  pendingNewSessionControl={pendingNewSessionControl}
+                  onPendingNewSessionEvent={dispatchPendingNewSession}
+                  notificationController={notificationController}
+                  onNewSessionCwdChange={updateDraftCwd}
+                  onAgentEnd={handleAgentEnd}
+                  onSessionCreated={handleSessionCreated}
+                  onSessionCreatedInBackground={handleSessionCreatedInBackground}
+                  onSessionListRefresh={requestAgentSessionListRefresh}
+                  onSessionForked={handleSessionForked}
+                  onSideSession={handleSideSession}
+                  modelsRefreshKey={modelsRefreshKey}
+                  chatInputRef={chatInputRef}
+                  onBranchDataChange={handleBranchDataChange}
+                  onSystemPromptChange={handleSystemPromptChange}
+                  onDebugSnapshotReaderChange={handleDebugSnapshotReaderChange}
+                  onSystemPromptLoaderChange={handleSystemPromptLoaderChange}
+                  onToolsLoaderChange={handleToolsLoaderChange}
+                  onShadowMindControlChange={handleShadowMindControlChange}
+                  onSessionStatsChange={handleSessionStatsChange}
+                  onSessionStatsPanelOpen={openSessionStatsPanel}
+                  onOpenSettings={openSettingsSection}
+                  onContextUsageChange={handleContextUsageChange}
+                  onOpenFile={handleOpenLinkedFile}
+                  onFilesUploaded={handleExplorerRefresh}
+                  onOpenSubagent={handleOpenSubagentTab}
+                  onOpenServerPreview={handleOpenServerPreview}
+                  onToolEnd={handleToolEnd}
+                  quoteSelectionEnabled={quoteSelectionEnabled}
+                  initialPrompt={pendingQuotePrompt && pendingQuotePrompt.sessionId === selectedSession?.id ? pendingQuotePrompt.text : undefined}
+                  onInitialPromptConsumed={handleInitialQuotePromptConsumed}
+                />
           ) : initialCwdStatus === "validating" ? (
             <div
               role="status"

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
-import { invalidateSessionListCache, resolveSessionPath } from "@/lib/session-reader";
+import { invalidateSessionListCache, openSessionManager, resolveSessionPath } from "@/lib/session-reader";
 import { sessionExternalWritePayload } from "@/lib/session-external-write";
 import { canRunWithExternalSessionChange } from "@/lib/session-write-policy";
 import {
@@ -12,6 +12,7 @@ import {
   startRpcSession,
 } from "@/lib/rpc-manager";
 import { cwdMissingBody, missingCwdFromBody } from "@/lib/missing-cwd";
+import { readObserverEnabled, readObserverState } from "@/lib/session-observer-protocol";
 
 /**
  * 会话列表只依赖会话文件中的持久化数据。查询类命令不需要淘汰缓存，
@@ -23,6 +24,9 @@ function shouldInvalidateSessionList(commandType: string): boolean {
     "get_tools",
     "get_commands",
     "get_session_stats",
+    "save_session_observer_settings",
+    "set_session_observer_enabled",
+    "submit_session_observer_feedback",
   ]).has(commandType);
 }
 
@@ -87,7 +91,8 @@ export async function POST(
 
     // 运行中仍允许 Stop 和只读状态命令；不可确认完整性的文件禁止再写入。
     const current = getRpcSession(id);
-    if (current?.isAlive() && current.diskFreshness() !== "current") {
+    const currentFreshness = current?.isAlive() ? current.diskFreshness() : null;
+    if (current?.isAlive() && currentFreshness !== "current") {
       if (!current.isRunning() && current.evictIfDiskAhead()) {
         // 空闲 wrapper 已淘汰，后续从最新磁盘状态启动。
       } else if (!canRunWithExternalSessionChange(body.type)) {
@@ -99,6 +104,23 @@ export async function POST(
       }
     }
 
+    if (body.type === "get_session_observer") {
+      if (current?.isAlive() && currentFreshness === "current") {
+        if (body.enabledOnly === true) {
+          const enabled = readObserverEnabled(current.inner.sessionManager.getEntries(), id);
+          return NextResponse.json({ success: true, data: { enabled } });
+        }
+        return NextResponse.json({ success: true, data: current.sessionObserver.snapshot() });
+      }
+      const filePath = await resolveSessionPath(id);
+      if (!filePath) return NextResponse.json({ error: "Session not found" }, { status: 404 });
+      const manager = openSessionManager(filePath);
+      const entries = manager.getEntries();
+      const data = body.enabledOnly === true
+        ? { enabled: readObserverEnabled(entries, id) }
+        : readObserverState(id, entries, manager.getBranch());
+      return NextResponse.json({ success: true, data });
+    }
     if (body.type === "set_tools") {
       const existing = getRpcSession(id);
       const filePath = existing?.sessionFile || await resolveSessionPath(id) || undefined;

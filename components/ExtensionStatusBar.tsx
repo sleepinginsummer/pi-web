@@ -5,6 +5,7 @@ import { stripAnsi } from "@/lib/ansi";
 import { AnsiText } from "./AnsiText";
 import type { ExtensionStatusItem, ExtensionWidgetItem } from "@/lib/types";
 import { ExtensionWidgetShelf } from "./ExtensionWidgetShelf";
+import { TODO_WIDGET_KEY } from "@/lib/todo-widget";
 
 /**
  * `ctx.ui.setStatus("command:/mode toggle", "Build")` shows "Build" as a button
@@ -83,6 +84,8 @@ export function ExtensionStatusBar({
   const cells = buildExtensionStatusCells(statuses);
   if (cells.length === 0 && widgets.length === 0 && !leading) return null;
 
+  const todo = widgets.find((widget) => widget.key === TODO_WIDGET_KEY);
+  const otherWidgets = todo ? widgets.filter((widget) => widget !== todo) : widgets;
   const hasCommands = cells.some((cell) => cell.kind === "command");
   const plainStatusLine = cells
     .map((cell) => (cell.kind === "text" ? stripAnsi(cell.text) : cell.label))
@@ -123,7 +126,8 @@ export function ExtensionStatusBar({
       style={{ display: "flex", alignItems: "center", flexShrink: 0, minWidth: 0, height: 36, padding: "0 12px", borderTop: "1px solid var(--border)", background: "transparent" }}
     >
       {leading}
-      {widgets.length > 0 && <ExtensionWidgetShelf widgets={widgets} />}
+      {todo && <ExtensionWidgetShelf widgets={[todo]} left />}
+      {otherWidgets.length > 0 && <ExtensionWidgetShelf widgets={otherWidgets} />}
       {statusLine}
     </div>
   );

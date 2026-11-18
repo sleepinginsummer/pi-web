@@ -102,7 +102,7 @@ export async function POST(req: Request) {
     }
 
     // Use a one-time key so startRpcSession's lock doesn't conflict with real session ids
-    const { operation = "create", sessionId, operationId, provider, modelId, toolNames, thinkingLevel, fastEnabled, shadowMindEnabled, ...promptCommand } = command as { operation?: unknown; sessionId?: unknown; operationId?: unknown; provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: unknown; fastEnabled?: unknown; shadowMindEnabled?: unknown; [key: string]: unknown };
+    const { operation = "create", sessionId, operationId, provider, modelId, toolNames, thinkingLevel, fastEnabled, shadowMindEnabled, observerEnabled, ...promptCommand } = command as { operation?: unknown; sessionId?: unknown; operationId?: unknown; provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: unknown; fastEnabled?: unknown; shadowMindEnabled?: unknown; [key: string]: unknown };
     if (operation !== "create" && operation !== "finalize-existing" && operation !== "submit-first-prompt") {
       throw new Error(`Invalid new-session operation: ${String(operation)}`);
     }
@@ -119,12 +119,16 @@ export async function POST(req: Request) {
     if (shadowMindEnabled !== undefined && typeof shadowMindEnabled !== "boolean") {
       throw new Error("shadowMindEnabled must be a boolean");
     }
+    if (observerEnabled !== undefined && typeof observerEnabled !== "boolean") {
+      throw new Error("observerEnabled must be a boolean");
+    }
 
     const startOptions: MaterializationStartOptions = {
       ...(toolNames ? { toolNames } : {}),
       ...(provider && modelId ? { initialModel: { provider, modelId } } : {}),
       ...(explicitThinkingLevel ? { thinkingLevel: explicitThinkingLevel } : {}),
       ...(typeof fastEnabled === "boolean" ? { fastEnabled } : {}),
+      ...(operation === "create" && observerEnabled === true ? { observerEnabled: true } : {}),
     };
     const requestedSessionId = typeof sessionId === "string" ? sessionId : undefined;
 

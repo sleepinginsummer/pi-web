@@ -20,6 +20,25 @@ const NEW_SESSION_REQUEST_TIMEOUT_MS = 30_000;
  */
 const creationOperations = new Map<string, string>();
 
+const stagedObserverCwds = new Set<string>();
+const stagedObserverListeners = new Set<() => void>();
+
+export function isObserverStaged(cwd: string): boolean {
+  return stagedObserverCwds.has(cwd);
+}
+
+export function subscribeToStagedObserver(listener: () => void): () => void {
+  stagedObserverListeners.add(listener);
+  return () => { stagedObserverListeners.delete(listener); };
+}
+
+export function setObserverStaged(cwd: string, enabled: boolean): void {
+  if (enabled === stagedObserverCwds.has(cwd)) return;
+  if (enabled) stagedObserverCwds.add(cwd);
+  else stagedObserverCwds.delete(cwd);
+  for (const listener of stagedObserverListeners) listener();
+}
+
 function creationOperationId(cwd: string): string {
   const existing = creationOperations.get(cwd);
   if (existing) return existing;
@@ -31,6 +50,7 @@ function creationOperationId(cwd: string): string {
 /** 仅供测试隔离模块级创建意图。 */
 export function resetCreationOperationsForTests(): void {
   creationOperations.clear();
+  stagedObserverCwds.clear();
 }
 
 type NewSessionMaterializationConfig = {
@@ -70,6 +90,7 @@ async function requestNewSessionMaterialization(
         operation: request.operation,
         ...(request.operation === "finalize-existing" ? { sessionId: request.sessionId } : {}),
         ...(request.operation === "create" ? { operationId: creationOperationId(request.cwd) } : {}),
+        ...(request.operation === "create" && isObserverStaged(request.cwd) ? { observerEnabled: true } : {}),
         type: "ensure_session",
         ...(request.toolNames !== undefined ? { toolNames: request.toolNames } : {}),
         ...(request.shadowMindEnabled ? { shadowMindEnabled: true } : {}),
@@ -187,6 +208,7 @@ export function releaseNewSessionMaterialization(cwd: string): void {
   materializations.delete(`create:${cwd}`);
   // 终态（会话已接管或显式放弃）后才允许下一次创建意图使用新的 operationId。
   creationOperations.delete(cwd);
+  setObserverStaged(cwd, false);
   for (const key of materializations.keys()) {
     if (key.startsWith(`finalize:${cwd}:`)) materializations.delete(key);
   }
