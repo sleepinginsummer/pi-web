@@ -6,6 +6,11 @@ import { sendAgentCommand } from "@/lib/agent-client";
 import { isObserverStaged, setObserverStaged, subscribeToStagedObserver } from "@/lib/new-session-materialization-client";
 import { SessionSwitchTrack } from "./SessionSwitchTrack";
 
+async function observerEnabled(sessionId: string, command: Record<string, unknown>): Promise<boolean> {
+  const result = await sendAgentCommand<{ enabled: boolean } | undefined>(sessionId, command);
+  if (typeof result?.enabled !== "boolean") throw new Error("Invalid observer state response");
+  return result.enabled;
+}
 export function ObserverSessionToggle({ sessionId, compact, showLabel = false }: { sessionId: string; compact: boolean; showLabel?: boolean }) {
   const { t } = useI18n();
   const [enabled, setEnabled] = useState<boolean | null>(null);
@@ -14,8 +19,8 @@ export function ObserverSessionToggle({ sessionId, compact, showLabel = false }:
 
   useEffect(() => {
     let active = true;
-    void sendAgentCommand<{ enabled: boolean }>(sessionId, { type: "get_session_observer", enabledOnly: true }).then(
-      (state) => { if (active) setEnabled(state.enabled); },
+    void observerEnabled(sessionId, { type: "get_session_observer", enabledOnly: true }).then(
+      (state) => { if (active) setEnabled(state); },
       () => { if (active) setFailed(true); },
     );
     return () => { active = false; };
@@ -29,8 +34,8 @@ export function ObserverSessionToggle({ sessionId, compact, showLabel = false }:
       const command = enabled === null
         ? { type: "get_session_observer", enabledOnly: true }
         : { type: "set_session_observer_enabled", enabled: !enabled };
-      const state = await sendAgentCommand<{ enabled: boolean }>(sessionId, command);
-      setEnabled(state.enabled);
+      const state = await observerEnabled(sessionId, command);
+      setEnabled(state);
     } catch {
       setFailed(true);
     } finally {
