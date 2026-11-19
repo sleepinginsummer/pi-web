@@ -2208,7 +2208,19 @@ pre, code {
   margin: 0 0 6px -6px;
 }
 
+.new-session-versions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
 @media (max-width: 640px) {
+  .new-session-versions {
+    display: none;
+  }
+
   .new-session-brand {
     margin-bottom: 16px;
   }
