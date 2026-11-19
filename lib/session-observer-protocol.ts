@@ -22,33 +22,41 @@ export type ObserverRecord =
   | { kind: "checklist"; edits: ObserverEdit[] }
   | { kind: "checked"; throughId: string; edits: ObserverEdit[] }
   | { kind: "summary"; summary: ObserverSummary }
-  | { kind: "interaction"; interaction: ObserverInteraction };
+  | { kind: "interaction"; interaction: StoredObserverInteraction };
 
+type ObserverContextUsage = { tokens: number; contextWindow: number };
 export type ObserverInteraction = {
   phase: "summary" | "check";
   startedAt: number;
   model: SelectedModel;
   thinkingLevel: ThinkingLevel;
   prompt: string;
-  input: string;
+  input: string | null;
   output: { type: "text" | "thinking" | "toolCall"; text: string }[];
+  toolResults?: { name: string; id: string; isError: boolean; text: string }[];
+  contextUsage?: ObserverContextUsage;
   status: string;
   failure?: "outputLimit" | "timeout" | "provider" | "toolCall";
   costUsd: number | null;
 };
 
+export type StoredObserverInteraction = Omit<ObserverInteraction, "input"> & (
+  | { input: string; inputRef?: never }
+  | { input?: never; inputRef: string }
+);
 export type ObserverHistoryPage = {
   interactions: (ObserverInteraction & { id: string })[];
   nextBefore: string | null;
 };
 
-type ObserverEntry = { type: string; customType?: string; data?: unknown };
+type ObserverEntry = { type: string; customType?: string; data?: unknown; timestamp?: string };
 export type SessionObserverState = {
   enabled: boolean;
   preferences: ObserverModelPreferences;
   checking: boolean;
   items: ObserverItem[];
   costUsd: number | null;
+  contextUsage?: ObserverContextUsage;
 };
 
 export function observerRecord(entry: ObserverEntry, sessionId: string): ObserverRecord | undefined {
@@ -61,12 +69,22 @@ export function observerRecord(entry: ObserverEntry, sessionId: string): Observe
 export function readObserverHistory(sessionId: string, entries: readonly (ObserverEntry & { id: string })[], before?: string): ObserverHistoryPage {
   const end = before === undefined ? entries.length : entries.findIndex(({ id }) => id === before);
   const interactions: ObserverHistoryPage["interactions"] = [];
+  let entryPositions: Map<string, number> | undefined;
   for (let i = end - 1; i >= 0; i--) {
     const entry = entries[i];
     const record = observerRecord(entry, sessionId);
     if (record?.kind !== "interaction") continue;
     if (interactions.length === 10) return { interactions, nextBefore: interactions.at(-1)?.id ?? null };
-    interactions.push({ ...record.interaction, id: entry.id });
+    const { input, inputRef, ...interaction } = record.interaction;
+    let evidence = input ?? null;
+    if (inputRef !== undefined) {
+      // 引用可以跨页，但只指向同一会话中更早、保存了原文的交互。
+      entryPositions ??= new Map(entries.map(({ id }, index) => [id, index]));
+      const position = entryPositions.get(inputRef);
+      const source = position !== undefined && position < i ? observerRecord(entries[position], sessionId) : undefined;
+      if (source?.kind === "interaction") evidence = source.interaction.input ?? null;
+    }
+    interactions.push({ ...interaction, input: evidence, id: entry.id });
   }
   return { interactions, nextBefore: null };
 }
@@ -87,11 +105,20 @@ export function readObserverState(
   checking = false,
 ): SessionObserverState {
   let items: ObserverItem[] = [];
+  let contextUsage: ObserverContextUsage | undefined;
   for (const entry of branch) {
     const record = observerRecord(entry, sessionId);
-    if (record?.kind === "checklist" || record?.kind === "checked") items = record.edits.reduce(applyObserverEdit, items);
+    if (record?.kind === "interaction" && record.interaction.contextUsage) contextUsage = record.interaction.contextUsage;
+    // 用新增记录的时间，兼容旧事项并让编辑和重排保留原时间。
+    if (record?.kind === "checklist" || record?.kind === "checked") {
+      for (const edit of record.edits) {
+        items = applyObserverEdit(items, edit.action === "add" && entry.timestamp
+          ? { ...edit, item: { ...edit.item, createdAt: entry.timestamp } }
+          : edit);
+      }
+    }
     // 旧提醒直接显示为清单项，已了解的提醒恢复为已完成。
-    if (record?.kind === "note") items.push({ id: record.note.id, title: record.note.title, done: false, priority: "normal" });
+    if (record?.kind === "note") items.push({ id: record.note.id, title: record.note.title, done: false, priority: "normal", ...(entry.timestamp && { createdAt: entry.timestamp }) });
     if (record?.kind === "feedback" && record.feedback.kind === "known") {
       const item = items.find(({ id }) => id === record.noteId);
       if (item) items = applyObserverEdit(items, { action: "update", id: item.id, patch: { done: true } });
@@ -114,5 +141,6 @@ export function readObserverState(
     checking,
     items,
     costUsd,
+    ...(contextUsage && { contextUsage }),
   };
 }

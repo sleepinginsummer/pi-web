@@ -26,9 +26,9 @@ import { parseShadowMindToggleCommand, SHADOW_MIND_SESSION_STATE } from "./shado
 import { createClonedSession, createForkedSession } from "./session-fork";
 import { generateTitleForSessionFile } from "./session-file-title";
 import { findDeferredModel, findDeferredStartupModel, rememberProviderModels } from "./deferred-provider-models";
-import { ObserverContextOverflow, SessionObserver } from "./session-observer";
+import { ObserverContextOverflow, observerModelTools, SessionObserver } from "./session-observer";
 import { createObserverChecklistExtension } from "./observer-checklist-extension";
-import { isObserverInterval, SESSION_OBSERVER_ENTRY, type ObserverInteraction } from "./session-observer-protocol";
+import { isObserverInterval, SESSION_OBSERVER_ENTRY, type ObserverInteraction, type StoredObserverInteraction } from "./session-observer-protocol";
 import { isThinkingLevel } from "./thinking-levels";
 import { isBlockingExtensionUiRequest } from "./extension-ui-queue";
 import { createDevServerExtension } from "./dev-server-extension";
@@ -652,28 +652,41 @@ export class AgentSessionWrapper {
         const usableContext = Math.max(0, model.contextWindow - 4096);
         const maxTokens = Math.min(outputBudget, model.maxTokens, Math.floor(usableContext / 4));
         const inputBudget = usableContext - maxTokens;
+        // 此传输对象只用于本轮观察，摘要请求不替换最近一次检查的原文引用。
+        let savedEvidence: { id: string; text: string } | undefined;
         return {
           inputBudget,
-          request: async (prompt, evidence, signal, phase) => {
+          request: async (prompt, evidence, signal, phase, continuation) => {
             const startedAt = Date.now();
             let output: ObserverInteraction["output"] = [];
             let status = "error";
             let failure: ObserverInteraction["failure"];
             let costUsd: number | null = null;
+            let contextUsage: ObserverInteraction["contextUsage"];
+            // 每条记录只保存这一请求新增的工具结果，之前的结果可在前面的交互中查看。
+            const lastAssistant = continuation.findLastIndex((message) => message.role === "assistant");
+            const toolResults = continuation.slice(lastAssistant + 1).flatMap((message) => message.role === "toolResult" ? [{
+              name: message.toolName, id: message.toolCallId, isError: message.isError,
+              text: message.content.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n"),
+            }] : []);
+            // 证据可能在续轮中压缩。让 SDK 按当前消息估算，避免套用旧证据的用量。
+            const evidenceTimestamp = continuation.reduce((timestamp, message) => Math.max(timestamp, message.timestamp + 1), startedAt);
             try {
               const response = await runtime.streamSimple(model, {
                 messages: [
                   { role: "system", content: prompt, timestamp: Date.now() },
-                  { role: "user", content: evidence, timestamp: Date.now() },
+                  { role: "user", content: evidence, timestamp: evidenceTimestamp },
+                  ...continuation,
                 ],
-                tools: [],
-              }, { signal, maxTokens, maxRetries: 0, toolChoice: "none", reasoning: level === "off" ? undefined : level }).result();
+                tools: phase === "check" ? observerModelTools : [],
+              }, { signal, maxTokens, maxRetries: 0, toolChoice: phase === "summary" ? "none" : undefined, reasoning: level === "off" ? undefined : level }).result();
               const cost = response.usage.cost.total;
               if (response.usage.totalTokens > 0 && Number.isFinite(cost) && cost >= 0) costUsd = cost;
+              if (response.usage.totalTokens > 0) contextUsage = { tokens: response.usage.totalTokens, contextWindow: model.contextWindow };
               output = response.content.map((block) => {
                 if (block.type === "text") return { type: block.type, text: block.text };
                 if (block.type === "thinking") return { type: block.type, text: block.thinking };
-                return { type: block.type, text: JSON.stringify({ name: block.name, arguments: block.arguments }) };
+                return { type: block.type, text: JSON.stringify({ id: block.id, name: block.name, arguments: block.arguments }) };
               });
               status = response.stopReason;
               if (isContextOverflow(response, model.contextWindow)) {
@@ -682,15 +695,15 @@ export class AgentSessionWrapper {
               }
               if (response.stopReason === "length" || (response.stopReason === "error" && /cut at its length|whole output spent on reasoning/i.test(response.errorMessage ?? ""))) {
                 failure = "outputLimit";
-              } else if (response.content.some((block) => block.type === "toolCall")) {
+              } else if (phase === "summary" && response.content.some((block) => block.type === "toolCall")) {
                 failure = "toolCall";
               } else if (response.stopReason === "error") {
                 failure = "provider";
               }
-              if (response.stopReason !== "stop" || failure) {
-                throw new Error("Observer request did not return a complete text response");
+              if ((response.stopReason !== "stop" && !(phase === "check" && response.stopReason === "toolUse")) || failure) {
+                throw new Error("Observer request did not return a complete response");
               }
-              return response.content.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n");
+              return response;
             } catch (error) {
               if (signal.reason instanceof DOMException && signal.reason.name === "TimeoutError") failure = "timeout";
               else if (!signal.aborted && status === "error") failure ??= "provider";
@@ -699,13 +712,18 @@ export class AgentSessionWrapper {
               // 交互记录只用于查看。写入失败不能改变观察请求的返回值或重试行为。
               try {
                 if (this.isAlive() && this.diskFreshness() === "current") {
-                  const interaction: ObserverInteraction = {
+                  const inputRef = phase === "check" && savedEvidence?.text === evidence
+                    && this.inner.sessionManager.getEntry(savedEvidence.id) ? savedEvidence.id : undefined;
+                  const interaction: StoredObserverInteraction = {
                     phase, startedAt, model: { provider: model.provider, modelId: model.id }, thinkingLevel: level,
-                    prompt, input: evidence, output, status: signal.aborted ? "aborted" : status, ...(failure && { failure }), costUsd,
+                    ...(inputRef ? { inputRef } : { input: evidence }),
+                    prompt, output, status: signal.aborted ? "aborted" : status, ...(failure && { failure }), costUsd,
+                    ...(contextUsage && { contextUsage }), ...(toolResults.length && { toolResults }),
                   };
-                  this.inner.sessionManager.appendCustomEntry(SESSION_OBSERVER_ENTRY, {
+                  const id = this.inner.sessionManager.appendCustomEntry(SESSION_OBSERVER_ENTRY, {
                     version: 1, sessionId: this.sessionId, kind: "interaction", interaction,
                   });
+                  if (phase === "check" && !inputRef) savedEvidence = { id, text: evidence };
                 }
               } catch {
                 console.warn("[pi-web] 无法保存观察交互记录", { sessionId: this.sessionId });

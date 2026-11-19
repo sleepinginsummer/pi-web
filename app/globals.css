@@ -3136,6 +3136,19 @@ span.token.table {
   z-index: 1;
 }
 
+.observer-checklist-item:is([data-priority="important"], [data-priority="urgent"])::before {
+  content: "";
+  position: absolute;
+  inset-inline-start: -8px;
+  top: 11px;
+  width: 2px;
+  height: 14px;
+  border-radius: 2px;
+  background: #d97706;
+}
+
+.observer-checklist-item[data-priority="urgent"]::before { background: #ef4444; }
+
 .observer-mobile-dialog {
   background: var(--bg-panel);
   color: var(--text);

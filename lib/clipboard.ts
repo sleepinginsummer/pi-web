@@ -1,11 +1,11 @@
-function copyTextFallback(text: string): void {
+function copyTextFallback(text: string, container: HTMLElement): void {
   const activeElement = document.activeElement;
   const textarea = document.createElement("textarea");
   textarea.value = text;
   textarea.style.position = "fixed";
   textarea.style.opacity = "0";
   try {
-    document.body.appendChild(textarea);
+    container.appendChild(textarea);
     textarea.select();
     if (!document.execCommand("copy")) throw new Error("Copy command was rejected");
   } finally {
@@ -16,7 +16,7 @@ function copyTextFallback(text: string): void {
   }
 }
 
-export async function copyText(text: string): Promise<void> {
+export async function copyText(text: string, container = document.body): Promise<void> {
   if (navigator.clipboard?.writeText) {
     try {
       await navigator.clipboard.writeText(text);
@@ -25,5 +25,5 @@ export async function copyText(text: string): Promise<void> {
       // 移动端长按可能已失去 Clipboard API 的瞬时授权，继续尝试兼容路径。
     }
   }
-  copyTextFallback(text);
+  copyTextFallback(text, container);
 }

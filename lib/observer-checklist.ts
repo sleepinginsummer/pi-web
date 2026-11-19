@@ -1,9 +1,9 @@
 export const OBSERVER_PRIORITIES = ["normal", "important", "urgent"] as const;
 export type ObserverPriority = typeof OBSERVER_PRIORITIES[number];
-export type ObserverItem = { id: string; title: string; done: boolean; priority: ObserverPriority };
+export type ObserverItem = { id: string; title: string; done: boolean; priority: ObserverPriority; createdAt?: string };
 export type ObserverEdit =
   | { action: "add"; item: ObserverItem }
-  | { action: "update"; id: string; patch: Partial<Omit<ObserverItem, "id">> }
+  | { action: "update"; id: string; patch: Partial<Omit<ObserverItem, "id" | "createdAt">> }
   | { action: "delete"; id: string }
   | { action: "move"; id: string; beforeId: string | null };
 
@@ -23,7 +23,7 @@ export function applyObserverEdit(items: ObserverItem[], edit: ObserverEdit): Ob
 
 export function parseObserverEdit(input: Record<string, unknown>, newId: () => string): ObserverEdit {
   const { action, id, title, done, priority, beforeId } = input;
-  const patch: Partial<Omit<ObserverItem, "id">> = {};
+  const patch: Partial<Omit<ObserverItem, "id" | "createdAt">> = {};
   if (action === "add" || action === "update") {
     if (title !== undefined) {
       if (typeof title !== "string" || !title.trim() || title.trim().length > 240) throw new Error("事项需要 1 至 240 字的标题");

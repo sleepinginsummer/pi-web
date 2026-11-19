@@ -56,7 +56,13 @@ export function SessionObserverHistory({ sessionId }: { sessionId: string }) {
             <p className="text-xs text-text-muted">{entry.model.provider}/{entry.model.modelId} · {entry.thinkingLevel} · {t("observer.historyStatus", { status: entry.status })}</p>
             {entry.failure && <p className="text-xs text-red-400">{t(`observer.failure.${entry.failure}`)}</p>}
             <section><h3 className="font-medium">{t("observer.historyPrompt")}</h3><pre className={textStyle}>{entry.prompt}</pre></section>
-            <section><h3 className="font-medium">{t("observer.historyInput")}</h3><pre className={textStyle}>{entry.input}</pre></section>
+            <section><h3 className="font-medium">{t("observer.historyInput")}</h3><pre className={textStyle}>{entry.input ?? t("observer.historyInputUnavailable")}</pre></section>
+            {entry.toolResults?.map((result) => (
+              <section key={result.id}>
+                <h3 className="font-medium">{t(result.isError ? "observer.toolError" : "observer.toolResult")} · {result.name}</h3>
+                <pre className={textStyle}>{result.text}</pre>
+              </section>
+            ))}
             <section>
               <h3 className="font-medium">{t("observer.historyOutput")}</h3>
               {entry.output.length === 0 && <p className="text-xs text-text-muted">—</p>}
