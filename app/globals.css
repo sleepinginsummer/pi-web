@@ -447,7 +447,11 @@ html.dark {
 .ansi-bright-cyan-bg { background-color: var(--ansi-bright-cyan); }
 .ansi-bright-white-bg { background-color: var(--ansi-bright-white); }
 
-/* 固定指示器占位，小圆环每 120ms 转一格，只更新 transform。 */
+/* 运行中指示器：位置固定，只让 transform 匀速转一整圈（0.8s，1.25 圈/秒）。
+   will-change: transform 提前把它提升为独立合成层：圆环的边框只光栅化一次，
+   此后每帧都由合成线程做一次 GPU 旋转，不重绘、不重排、不占主线程。
+   所以在同样的帧数下，线性旋转比原来 8 段步进（每 120ms 硬跳 45°，看着像停顿）
+   顺得多，开销并没有变大；步进反而每跳一次都要把新角度的圆环重新铺一遍。 */
 .session-running-indicator {
   display: inline-grid;
   place-items: center;
@@ -468,7 +472,10 @@ html.dark {
   to { transform: rotate(1turn); }
 }
 @media (prefers-reduced-motion: no-preference) {
-  .session-running-spinner { animation: session-running-spin .96s steps(8, end) infinite; }
+  .session-running-spinner {
+    will-change: transform;
+    animation: session-running-spin .8s linear infinite;
+  }
 }
 
 /* Scroll-edge fades: a scroller with more content past an edge fades its last

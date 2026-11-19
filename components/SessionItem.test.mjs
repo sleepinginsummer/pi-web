@@ -53,7 +53,7 @@ test("prefills rename with the displayed title and exposes the desktop context m
   assert.match(source, /onContextMenu=\{isMobile \|\| mutations\.confirmDelete \|\| mutations\.renaming \? undefined : handleContextMenu\}/);
 });
 
-test("会话运行蓝圈只做分步旋转，并尊重减少动态效果偏好", async () => {
+test("会话运行蓝圈匀速合成旋转，并尊重减少动态效果偏好", async () => {
   const runningIndicator = source.slice(source.indexOf("function RunningSessionIndicator()"), source.indexOf("function AwaitingInputSessionIndicator()"));
   const unreadIndicator = source.slice(source.indexOf("function UnreadSessionIndicator()"), source.indexOf("function SessionDeleteConfirm("));
   const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
@@ -62,7 +62,8 @@ test("会话运行蓝圈只做分步旋转，并尊重减少动态效果偏好",
   assert.doesNotMatch(runningIndicator, /<svg|<animate/);
   assert.match(css, /\.session-running-indicator\s*\{[^}]*color: var\(--ansi-blue\);/);
   assert.match(css, /@keyframes session-running-spin\s*\{\s*to\s*\{\s*transform: rotate\(1turn\);\s*\}\s*\}/);
-  assert.match(css, /@media \(prefers-reduced-motion: no-preference\)\s*\{\s*\.session-running-spinner\s*\{\s*animation: session-running-spin \.96s steps\(8, end\) infinite;/);
+  // 匀速线性旋转 + 提层：合成线程转 GPU，不重绘、不占主线程（比 8 段步进更顺且不更贵）。
+  assert.match(css, /@media \(prefers-reduced-motion: no-preference\)\s*\{\s*\.session-running-spinner\s*\{\s*will-change: transform;\s*animation: session-running-spin \.8s linear infinite;/);
   assert.doesNotMatch(unreadIndicator, /<animate|repeatCount=|session-running-spinner/);
 });
 
