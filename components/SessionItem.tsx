@@ -143,13 +143,12 @@ function RunningSessionIndicator() {
   const { t } = useI18n();
   return (
     <span role="img" title={t("sidebar.agentRunning")} aria-label={t("sidebar.agentRunning")} className="session-running-indicator">
-      <span className="session-running-ring" aria-hidden="true" />
-      <span className="session-running-dot" aria-hidden="true" />
+      <span className="session-running-spinner" aria-hidden="true" />
     </span>
   );
 }
 
-/** 与运行中指示器同位置同尺寸，只换颜色和含义：琥珀色呼吸圆点表示“需要你”。 */
+/** 与运行中指示器同位置同尺寸，用不同的颜色与动效区分：琥珀色呼吸圆点表示“需要你”。 */
 function AwaitingInputSessionIndicator() {
   const { t } = useI18n();
   return (

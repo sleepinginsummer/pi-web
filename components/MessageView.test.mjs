@@ -432,6 +432,18 @@ test("a stopped reply's mark leads its usage line instead of a line of its own",
   assert.equal(html.split(">Stopped<").length, 2);
 });
 
+test("工具运行期间点 Stop 后，空正文的中止消息仍显示标记", () => {
+  const message = {
+    role: "assistant",
+    provider: "openai",
+    model: "gpt-test",
+    content: [],
+  };
+  const stopped = renderMessage({ ...message, stopReason: "aborted" });
+  assert.equal(stopped.split(">Stopped<").length, 2);
+  assert.equal(renderMessage({ ...message, stopReason: "stop" }), "");
+});
+
 test("marks persisted assistant messages with their source entry", () => {
   const html = renderMessage({
     role: "assistant",

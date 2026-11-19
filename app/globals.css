@@ -447,37 +447,28 @@ html.dark {
 .ansi-bright-cyan-bg { background-color: var(--ansi-bright-cyan); }
 .ansi-bright-white-bg { background-color: var(--ansi-bright-white); }
 
-/* 运行中圆点保持几何尺寸固定，只让浏览器更新内圆的透明度。 */
+/* 固定指示器占位，小圆环每 120ms 转一格，只更新 transform。 */
 .session-running-indicator {
   display: inline-grid;
   place-items: center;
   width: 14px;
   height: 14px;
   flex-shrink: 0;
-  color: var(--ansi-green);
+  color: var(--ansi-blue);
 }
-.session-running-ring,
-.session-running-dot {
-  grid-area: 1 / 1;
+.session-running-spinner {
+  box-sizing: border-box;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid color-mix(in srgb, currentColor 28%, transparent);
+  border-top-color: currentColor;
   border-radius: 50%;
 }
-.session-running-ring {
-  box-sizing: border-box;
-  width: 11px;
-  height: 11px;
-  border: 1.5px solid currentColor;
-  opacity: .28;
-}
-.session-running-dot {
-  width: 6px;
-  height: 6px;
-  background: currentColor;
-}
-@keyframes session-running-breathe {
-  50% { opacity: .4; }
+@keyframes session-running-spin {
+  to { transform: rotate(1turn); }
 }
 @media (prefers-reduced-motion: no-preference) {
-  .session-running-dot { animation: session-running-breathe 2s ease-in-out infinite; }
+  .session-running-spinner { animation: session-running-spin .96s steps(8, end) infinite; }
 }
 
 /* Scroll-edge fades: a scroller with more content past an edge fades its last

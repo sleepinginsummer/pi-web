@@ -710,7 +710,7 @@ function AssistantMessageView({
       onClick: () => onFork!(entryId!),
     })] : []),
   ];
-  if (blocks.length === 0 && !isStreaming && !providerError && !truncated) return null;
+  if (blocks.length === 0 && !isStreaming && !providerError && !truncated && !aborted) return null;
 
   return (
     <div
