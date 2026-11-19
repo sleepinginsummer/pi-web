@@ -447,6 +447,39 @@ html.dark {
 .ansi-bright-cyan-bg { background-color: var(--ansi-bright-cyan); }
 .ansi-bright-white-bg { background-color: var(--ansi-bright-white); }
 
+/* 运行中圆点保持几何尺寸固定，只让浏览器更新内圆的透明度。 */
+.session-running-indicator {
+  display: inline-grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--ansi-green);
+}
+.session-running-ring,
+.session-running-dot {
+  grid-area: 1 / 1;
+  border-radius: 50%;
+}
+.session-running-ring {
+  box-sizing: border-box;
+  width: 11px;
+  height: 11px;
+  border: 1.5px solid currentColor;
+  opacity: .28;
+}
+.session-running-dot {
+  width: 6px;
+  height: 6px;
+  background: currentColor;
+}
+@keyframes session-running-breathe {
+  50% { opacity: .4; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .session-running-dot { animation: session-running-breathe 2s ease-in-out infinite; }
+}
+
 /* Scroll-edge fades: a scroller with more content past an edge fades its last
    pixels there, so a cut row or column reads as "more this way". A
    scroll-driven animation sizes each side's fade from the scroll position:
@@ -2194,7 +2227,19 @@ pre, code {
   margin: 0 0 6px -6px;
 }
 
+.new-session-versions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
 @media (max-width: 640px) {
+  .new-session-versions {
+    display: none;
+  }
+
   .new-session-brand {
     margin-bottom: 16px;
   }
@@ -3427,7 +3472,16 @@ span.token.table {
     overscroll-behavior: contain;
     border-radius: 10px;
   }
-  .mobile-extension-panel .extension-status-line { height: auto; overflow: visible; }
+  /* 展开的状态和组件输出共用面板的纵向滚动，手势可以从任一段内容开始。 */
+  .mobile-extension-panel .extension-status-line,
+  .mobile-extension-panel .extension-widget-content {
+    max-height: none;
+    overflow: visible;
+  }
+  .mobile-extension-panel .extension-status-line {
+    height: auto;
+    touch-action: auto;
+  }
   .mobile-extension-panel .extension-status-text { flex-direction: column; }
   .mobile-extension-panel .extension-status-item {
     min-height: 40px;

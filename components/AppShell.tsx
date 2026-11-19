@@ -1131,8 +1131,8 @@ export function AppShell() {
       title={rightPanelOpen ? translate("files.hidePanel") : translate("files.showPanel")}
       aria-label={rightPanelOpen ? translate("files.hidePanel") : translate("files.showPanel")}
       style={{
-        display: "flex", alignItems: "center", justifyContent: "center", flex: "0 0 36px",
-        width: 36, height: 36, padding: 0,
+        display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+        width: "var(--top-bar-height)", height: "var(--top-bar-height)", padding: 0,
         background: "var(--bg-panel)", border: "none", borderLeft: "1px solid var(--border)", borderBottom: "1px solid var(--border)",
         color: rightPanelOpen ? "var(--text)" : "var(--text-muted)",
         cursor: "pointer", transition: "color 0.12s",

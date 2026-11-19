@@ -1158,7 +1158,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                   </div>
                 )}
               </div>
-              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2, flexShrink: 0 }}>
+              <div className="new-session-versions">
                 <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
                   web <span style={{ color: "var(--text)" }}>v{process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0"}</span>
                 </span>
