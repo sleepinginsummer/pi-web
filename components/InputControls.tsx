@@ -529,6 +529,7 @@ interface InputControlsProps {
   notificationEnabled?: boolean;
   notificationPermission?: NotificationPermission | "unsupported";
   onNotificationToggle?: () => void;
+  endAction?: React.ReactNode;
 }
 
 /** 输入控制栏自行管理下拉菜单，输入文字变化时无需重建控制栏。 */
@@ -536,6 +537,7 @@ export const InputControls = memo(function InputControls({
   isMobile, isStreaming, modelState, modelActions, onThinkingLevelChange, toolPreset, customToolNames, activeBuiltinTools, onToolPresetChange,
   onCompact, onAbortCompaction, isCompacting, onAbort, soundEnabled, onSoundToggle,
   notificationEnabled, notificationPermission, onNotificationToggle,
+  endAction,
 }: InputControlsProps) {
   const { t } = useI18n();
   // Stop 在运行结束时被 Compact/工具按钮替换，结束后的短时间内的点击视为误触。
@@ -610,6 +612,7 @@ export const InputControls = memo(function InputControls({
                 />
               )}
             />
+            {endAction}
           </div>
     </>
   );

@@ -149,6 +149,7 @@ export async function POST(req: Request) {
           if (shadowMindEnabled === true) await session.enableShadowAtStartup();
         },
       });
+      promptAccepted = true;
       return NextResponse.json({
         success: true,
         kind: "first-prompt-accepted",
@@ -281,7 +282,7 @@ export async function POST(req: Request) {
   } catch (error) {
     return NextResponse.json({
       error: error instanceof Error ? error.message : String(error),
-      ...(commandType === "prompt" && !promptAccepted
+      ...((commandType === "prompt" || commandType === "submit_first_prompt") && !promptAccepted
         ? { code: "prompt_rejected", accepted: false }
         : {}),
     }, { status: 500 });

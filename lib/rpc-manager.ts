@@ -1302,7 +1302,13 @@ export class AgentSessionWrapper {
     images?: ParkedPrompt["images"];
     prepare: () => Promise<void>;
   }): void {
-    if (this.firstPromptEntry) return;
+    if (this.firstPromptEntry) {
+      // 响应丢失后只确认原消息，另一条草稿不能借用这条消息的回执。
+      if (input.message !== this.firstPromptEntry.message || !isDeepStrictEqual(input.images ?? [], this.firstPromptEntry.images ?? [])) {
+        throw new Error("This session has already accepted a different first message");
+      }
+      return;
+    }
     this.persistPendingSession();
     const token = this.pendingPrompts.begin();
     let settled = false;

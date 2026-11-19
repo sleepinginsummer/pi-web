@@ -1,6 +1,7 @@
 import { isScheduledTasksEnabled } from "./scheduled-task-settings";
 import { claimDueTasks, claimTaskNow, recordTaskResult, taskDelivery } from "./scheduled-tasks";
 import { SessionWakeError, wakeSession } from "./session-wake";
+import { deliverDueStashedMessages } from "./message-stash-delivery";
 import { SCHEDULED_TASK_MESSAGE_TYPE } from "./wake-message-types";
 import type { ScheduledTask } from "./types";
 
@@ -24,6 +25,7 @@ interface SchedulerState {
   interval: ReturnType<typeof setInterval> | null;
   tick: (() => Promise<void>) | null;
   ticking: boolean;
+  deliveringStash?: boolean;
 }
 
 declare global {
@@ -91,6 +93,12 @@ async function tick(): Promise<void> {
   current.ticking = true;
   try {
     if (!isScheduledTasksEnabled()) return;
+    if (!current.deliveringStash) {
+      current.deliveringStash = true;
+      void deliverDueStashedMessages().catch((error: unknown) => {
+        console.warn("[pi-web] 暂存库调度失败", error);
+      }).finally(() => { current.deliveringStash = false; });
+    }
     const due = await claimDueTasks();
     if (due.length > 0) await deliverAll(due);
   } catch (error) {

@@ -162,10 +162,12 @@ export async function submitNewSessionFirstPrompt(request: Pick<NewSessionMateri
         ...(request.shadowMindEnabled ? { shadowMindEnabled: true } : {}),
       }),
     });
-    const payload = await response.json() as { kind?: unknown; error?: unknown };
+    const payload = await response.json() as { kind?: unknown; error?: unknown; accepted?: unknown; code?: unknown };
     if (payload.kind === "first-prompt-accepted") return;
     // 服务端明确拒绝不必重试。
-    throw Object.assign(new Error(typeof payload.error === "string" ? payload.error : `首条消息提交失败（HTTP ${response.status}）`), { rejected: true });
+    const error = typeof payload.error === "string" ? payload.error : `首条消息提交失败（HTTP ${response.status}）`;
+    const accepted = payload.code === "prompt_rejected" && payload.accepted === false ? false : undefined;
+    throw Object.assign(new Error(error), { rejected: true, accepted });
   };
   try {
     await submit();

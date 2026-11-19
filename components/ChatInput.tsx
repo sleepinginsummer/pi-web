@@ -33,6 +33,8 @@ import { useOptimisticInputSubmission, type OptimisticInputSnapshot } from "@/ho
 import { prependSubmittedInput } from "@/lib/optimistic-input-submission";
 import { ModelPicker, type ModelPickerOption } from "./ModelPicker";
 import { InputControls } from "./InputControls";
+import { MessageStash } from "./MessageStash";
+import type { StashedContent } from "@/lib/message-stash-protocol";
 import { ImagePreview } from "./ImagePreview";
 import { useChatAppearance } from "@/hooks/useChatAppearance";
 import { useFontPreferences } from "@/hooks/useFontPreferences";
@@ -46,10 +48,10 @@ export interface AttachedImage {
 
 interface Props {
   // 返回 false 表示当前状态未接收消息，保留草稿避免用户输入丢失。
-  onSend: (message: string, images?: AttachedImage[]) => boolean | void | Promise<boolean | void>;
+  onSend: (message: string, images?: AttachedImage[], fromStash?: boolean) => boolean | void | Promise<boolean | void>;
   sendError?: string | null;
   onAbort: () => void;
-  onQueuedSubmit?: (message: string, mode: "steer" | "followUp", images?: AttachedImage[]) => Promise<boolean>;
+  onQueuedSubmit?: (message: string, mode: "steer" | "followUp", images?: AttachedImage[], fromStash?: boolean) => Promise<boolean>;
   /** Sends the draft to a new side chat instead of the running agent. */
   onSideChat?: (message: string) => void;
   isStreaming: boolean;
@@ -99,6 +101,8 @@ interface Props {
   draftKey?: string;
   /** Session working directory — enables the @ file autocomplete menu */
   cwd?: string | null;
+  stashSession?: { id: string; label: string };
+  stashSendDisabled?: boolean;
   /** 新会话可选的 worktree 列表；已有会话不显示此选择器。 */
   newSessionWorktrees?: WorktreeInfo[];
   newSessionCwd?: string | null;
@@ -514,6 +518,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   soundEnabled, onSoundToggle, onAudioUnlock, notificationEnabled, notificationPermission, onNotificationToggle,
   draftKey,
   cwd,
+  stashSession, stashSendDisabled,
   newSessionWorktrees,
   newSessionCwd,
   onNewSessionCwdChange,
@@ -876,6 +881,26 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       textareaAtMaxHeightRef.current = false;
     }
   }, [clearImages, draftKey]);
+
+  async function saveCurrentToStash(save: (draft: StashedContent) => Promise<unknown>) {
+    const key = draftKeyRef.current;
+    const value = textareaRef.current?.value ?? valueRef.current;
+    const images = attachedImagesRef.current;
+    const attachment = textAttachmentRef.current;
+    if (!value.trim() && !images.length && !attachment) throw new Error(t("stash.emptyDraft"));
+    const text = attachment ? [value, `<attached_text filename="pasted-text.txt">\n${attachment}\n</attached_text>`].filter(Boolean).join("\n\n") : value;
+    await save({ text, images: images.map(imageToDraftImage) });
+    // 等待存盘时，切换会话或继续打字的用户仍保留他们新的草稿。
+    if (draftKeyRef.current === key && textareaRef.current?.value === value && attachedImagesRef.current === images
+      && textAttachmentRef.current === attachment && pendingImageCountRef.current === 0) clearInput();
+  }
+
+  async function sendFromStash(draft: StashedContent, mode: "send" | "steer" | "followUp") {
+    const images = draft.images.map(draftImageToAttachedImage);
+    onAudioUnlock?.();
+    if (mode === "send") return await onSend(draft.text, images, true) === true;
+    return await onQueuedSubmit?.(draft.text, mode, images, true) ?? false;
+  }
 
   const canRestoreSubmittedInput = useCallback((snapshot: OptimisticInputSnapshot<AttachedImage>) => (
     draftKeyRef.current === snapshot.draftKey
@@ -2214,6 +2239,16 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
           <InputControls
             isMobile={isMobile}
+            endAction={cwd && !missingCwd && !extensionUiOpen ? <MessageStash
+              key={draftKey ?? cwd}
+              cwd={cwd}
+              mobile={isMobile}
+              hasDraft={Boolean(value.trim() || attachedImages.length || textAttachment)}
+              session={stashSession}
+              sendMode={stashSendDisabled || extensionsInitializing ? "unavailable" : onQueuedSubmit ? "running" : isStreaming ? "unavailable" : "idle"}
+              onSaveDraft={saveCurrentToStash}
+              onSendDraft={sendFromStash}
+            /> : null}
             isStreaming={isStreaming}
             modelState={modelState}
             modelActions={modelActions}

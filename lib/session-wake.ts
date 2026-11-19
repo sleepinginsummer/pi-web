@@ -30,7 +30,7 @@ export class SessionWakeError extends Error {
   }
 }
 
-async function openSession(sessionId: string): Promise<AgentSessionWrapper> {
+export async function openSessionForDelivery(sessionId: string): Promise<AgentSessionWrapper> {
   let session = getRpcSession(sessionId);
   if (session?.isAlive() && session.diskFreshness() !== "current") {
     if (session.isRunning() || !session.evictIfDiskAhead()) {
@@ -60,7 +60,7 @@ export interface WakeSessionInput {
 /** Resolves once the turn started or the message was queued; throws SessionWakeError or the SDK's error. */
 export async function wakeSession(input: WakeSessionInput): Promise<void> {
   if (!existsSync(input.cwd)) throw new SessionWakeError(`the project directory ${input.cwd} no longer exists`);
-  const session = await openSession(input.sessionId);
+  const session = await openSessionForDelivery(input.sessionId);
   await session.waitUntilReady();
   if (!session.isAlive()) throw new SessionWakeError("the session closed before the message could be delivered");
   const delivery = session.inner.sendCustomMessage({

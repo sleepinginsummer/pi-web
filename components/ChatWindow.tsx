@@ -1007,6 +1007,8 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
       onNotificationToggle={onNotificationToggle}
       draftKey={session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : undefined)}
       cwd={session?.cwd ?? newSessionCwd}
+      stashSession={session ? { id: session.id, label: session.name || session.firstMessage || session.id } : undefined}
+      stashSendDisabled={Boolean(editEntryId)}
       onAttachFiles={onAttachFiles}
       newSessionWorktrees={!session ? newSessionWorktrees : undefined}
       newSessionCwd={!session ? newSessionCwd : undefined}

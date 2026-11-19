@@ -1368,11 +1368,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return [];
   }, [setToolPresetState]);
 
-  const promoteNewSession = useCallback((messageCount = 0, firstMessage = "(no messages)") => {
+  const promoteNewSession = useCallback((messageCount = 0, firstMessage = "(no messages)", fromStash = false) => {
     const sid = sessionIdRef.current;
     if (!isNew || !newSessionCwd || !sid || newSessionPromotedRef.current) return;
     newSessionPromotedRef.current = true;
-    // 父级升级会改变 draftKey；先同步清空，避免旧输入在 key 切换副作用中回写临时草稿。
+    // 暂存库发送的是另一条消息，原输入需随新会话一起迁移。
+    if (fromStash) {
+      const draft = getDraft(`new:${newSessionCwd}`);
+      if (draft) setDraft(sid, prependChatDraft(draft, getDraft(sid) ?? { value: "", images: [] }));
+    }
     opts.chatInputRef?.current?.clearAcceptedPrompt();
     onSessionCreated?.({
       id: sid,
@@ -2583,7 +2587,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [addNotice, cancelEventStreamGrace, clearAskQuestionnaire, closeEvents, markPromptLanded, onSessionEnded, opts.chatInputRef, consumeShadowEntry, dispatch, enqueueStreamDelta, enterMainRun, flushStreamDeltas, handleExtensionUiRequest, isNew, loadCompactedSession, loadSession, modelSelectionActions, newSessionCwd, onPendingNewSessionEvent, onSessionListRefresh, onToolEnd, reconcileAgentState, refreshContextUsage, resetStreamDeltas, scheduleContextRefresh, scheduleEventStreamClose, streamingStore]);
   handleAgentEventRef.current = handleAgentEvent;
 
-  const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
+  const handleSend = useCallback(async (message: string, images?: AttachedImage[], fromStash = false) => {
     if (!isNavigationActive(navigationKey)) return false;
     backfillRequestRef.current.controller?.abort();
     backfillRequestRef.current.generation += 1;
@@ -2592,7 +2596,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const trimmedMessage = message.trim();
     if (!trimmedMessage && !images?.length) return false;
     // UI 状态可能晚于异步扩展启动的 agent_start；此时不可吞掉用户输入。
-    const isBashCommand = !images?.length && trimmedMessage.startsWith("!");
+    const isBashCommand = !fromStash && !images?.length && trimmedMessage.startsWith("!");
     if (isBashCommand && bashRunningRef.current) {
       addNotice({ type: "warning", message: translate("chat.bashAlreadyRunning") });
       return false;
@@ -2662,6 +2666,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
     let sentSessionId: string | null = null;
     let promptRequestStarted = false;
+    let firstPromptRequestStarted = false;
 
     try {
       if (isNew && newSessionCwd && pendingControlKind === "staged") {
@@ -2694,6 +2699,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             sentSessionId = sid;
             await ensureEventsConnected(sid);
           }
+          firstPromptRequestStarted = true;
           await submitNewSessionFirstPrompt({ cwd, sessionId: sid, message, images: piImages, shadowMindEnabled });
         } catch (error) {
           onPendingNewSessionEvent(cwd, { type: "POST_START_FAIL", sessionId: sid, error: error instanceof Error ? error.message : String(error) });
@@ -2706,7 +2712,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
         // 消息现在是队列行，真正发出时才进入对话。
         dropOptimisticUserMessage();
-        promoteNewSession(0, message);
+        promoteNewSession(0, message, fromStash);
         void loadTools(sid);
         void fetchRuntimeState(sid, new AbortController().signal).then((snapshot) => {
           if (sessionIdRef.current === sid) applyRuntimeState(snapshot.state);
@@ -2732,11 +2738,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           await ensureEventsConnected(sid);
           if (!isNavigationActive(navigationKey)) throw new Error("会话已切换，消息未发送");
           promptRequestStarted = true;
-          const queuedAck = await sendAgentCommand<{ queued?: boolean }>(sid, {
+          const queuedAck = await sendAgentCommand<AgentSubmitAcknowledgement & { enabled?: boolean }>(sid, {
             type: "prompt",
             message,
             ...(piImages?.length ? { images: piImages } : {}),
           });
+          if (fromStash && !queuedAck?.accepted && typeof queuedAck?.enabled !== "boolean") throw new Error(translate("chat.sendUnconfirmed"));
           if (queuedAck?.queued) dropOptimisticUserMessage();
           try {
             const runtimeState = await sendAgentCommand<AgentRuntimeState>(sid, { type: "get_state" });
@@ -2746,7 +2753,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           } catch (preferenceError) {
             console.error("[pi-web] 获取思考强度实际值失败:", preferenceError);
           }
-          promoteNewSession(1, message);
+          promoteNewSession(1, message, fromStash);
         }
       } else if (session) {
         const sid = requestSessionId;
@@ -2758,11 +2765,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           throw new Error("会话已切换，消息未发送");
         }
         promptRequestStarted = true;
-        const queuedAck = await sendAgentCommand<{ queued?: boolean }>(sid, {
+        const queuedAck = await sendAgentCommand<AgentSubmitAcknowledgement & { enabled?: boolean }>(sid, {
           type: "prompt",
           message,
           ...(piImages?.length ? { images: piImages } : {}),
         });
+        if (fromStash && !queuedAck?.accepted && typeof queuedAck?.enabled !== "boolean") throw new Error(translate("chat.sendUnconfirmed"));
         if (queuedAck?.queued) dropOptimisticUserMessage();
       }
       setPromptMissingCwd(null);
@@ -2774,9 +2782,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // A failed prompt POST is ambiguous: the server may have accepted it
       // before the response connection was lost. Keep SSE alive until the
       // server confirms idle so a real run cannot continue unseen.
-      if (promptRequestStarted && sentSessionId && !isPromptRejectedError(e)) {
+      if (promptRequestStarted && sentSessionId && !isPromptRejectedError(e) && !(fromStash && e instanceof AgentCommandError && e.accepted === false)) {
         // 请求已发出但响应失败时，服务端可能已受理：气泡保留到服务端确认 idle，
         // 只有确认未收到时才把文字还回输入框，绝不重发（#1432）。
+        if (fromStash) {
+          // 暂存库保留原消息，避免对账时再复制一份到输入框。
+          dropOptimisticUserMessage();
+          void reconcileAgentState(sentSessionId, promptRunId);
+          throw e;
+        }
         if (landedPromptRunIdRef.current !== promptRunId) {
           unconfirmedSendRef.current = {
             runId: promptRunId,
@@ -2818,9 +2832,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setAgentPhase(null);
       resetStreamDeltas();
       dispatch({ type: "end" });
+      if (fromStash && firstPromptRequestStarted && (e as { accepted?: boolean } | null)?.accepted !== false) throw e;
       return false;
     }
-  }, [addNotice, applyRuntimeState, closeEvents, dispatch, displayModel, displayModelFastAvailable, editEntryId, ensureEventsConnected, ensureNewSession, enterMainRun, fastEnabled, loadTools, onPendingNewSessionEvent, onSessionCreatedInBackground, pendingSessionView, toolPreset, customToolNames, isNavigationActive, isNew, navigationKey, newSessionCwd, newSessionModel, pendingControlKind, promoteNewSession, reconcileAgentState, requestScrollPosition, resetStreamDeltas, session, setEdit]);
+  }, [addNotice, applyRuntimeState, closeEvents, dispatch, displayModel, displayModelFastAvailable, editEntryId, ensureEventsConnected, ensureNewSession, enterMainRun, fastEnabled, loadTools, onPendingNewSessionEvent, onSessionCreatedInBackground, pendingSessionView, toolPreset, customToolNames, isNavigationActive, isNew, navigationKey, newSessionCwd, newSessionModel, pendingControlKind, promoteNewSession, reconcileAgentState, requestScrollPosition, resetStreamDeltas, session, setEdit, translate]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
     if (bashRunningRef.current) return false;
@@ -3300,6 +3315,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     message: string,
     mode: "steer" | "followUp",
     images?: AttachedImage[],
+    fromStash = false,
   ): Promise<boolean> => {
     if (!isNavigationActive(navigationKey)) return false;
     const sid = sessionIdRef.current;
@@ -3333,6 +3349,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return true;
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
+      if (fromStash && !(error instanceof AgentCommandError && (error.accepted === false || error.status === 404 || error.status === 413))) throw error;
       addNotice({ type: "error", message: `消息发送失败，输入已保留：${detail}` });
       return false;
     }
