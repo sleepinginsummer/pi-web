@@ -341,10 +341,10 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 ### 上游 v0.16–v0.17 的合并
 
 - 侧栏沿用项目排序、会话 Pin、回收站和虚拟列表。共用会话选择入口负责请求滚动定位。侧聊搜索只扫描分叉边界后的正文，点结果会打开父会话和右侧聊天。Agents 条在主聊天切到家族成员时出现，也可在浏览器锁定显示。
-- 已读记录按会话写入 `pi-web-session-read-receipts.json`，沿用私有文件锁。`POST /api/sessions/[id]/read` 以服务端时间记账，现有运行轮询分发记录。只有可见、聚焦且有近期操作的页面上报。本地未读标记仍保留在浏览器。
+- 已读记录按会话写入 `pi-web-session-read-receipts.json`，沿用私有文件锁。`POST /api/sessions/[id]/read` 以服务端时间记账，现有运行轮询分发记录。只有可见、聚焦且有近期操作的页面上报。当前会话由运行转入空闲时按结束轮次上报，等到页面重新满足关注条件再补报。本地未读标记仍保留在浏览器。
 - 新会话继续先交付 runtime id 再处理扩展初始化。扩展加载错误可重放，延迟切模仍走可重试的单一任务。`!` 命令边执行边发送输出，先询问 `user_bash` 扩展，运行中的队列及附件继续由 fork 的队列协议处理。Stop 先移回尚未进入执行批次的队列，再等待 SDK 结束，避免停止时模型消费后续消息。
 - 扩展唤醒可另起一轮，聊天和索引分页共用 `getTurnAnchors` 规则。索引格式 4 只存轮次判断所需的角色、停止原因和自定义消息类型，不复制正文。
-- 手动压缩完成后保留输入框，通过新压缩卡片的 entryId 定位。历史缓存已收到 304 确认时直接使用该版本；定位侧聊搜索结果时先挂载目标所在的历史窗口，再滚到命中的正文块。
+- 手动压缩完成后保留输入框，通过新压缩卡片的 entryId 定位。历史缓存已收到 304 确认时直接使用该版本；侧聊搜索先查活动分支，找不到命中时走普通分支导航；目标历史窗口挂载后再滚到命中的正文块。
 ### Secret vault (pi-secret-vault extension)
 - 存储和遮蔽在扩展里，pi-web 只有界面：`lib/secret-vault.ts` 按扩展 `src/store.ts` 的磁盘约定（AES-256-GCM、record 绑定名字的 AAD、mkdir 锁、钥匙串条目）读写 `<agentDir>/pi-secret-vault/vault.json`，运行中的会话靠文件签名在下一个钩子同步。`/api/secret-vault` 仅返回元数据，按 `addedAt` 倒序、同时间按名称排序；用户点击“查看”时，`POST /api/secret-vault/reveal` 复用 proxy 登录态和同源校验，通过 `revealSecret` 解密单条原文，响应始终 `no-store`，不重复输入密码。前端一次只显示一条并支持复制，隐藏、成功修改记录或卸载面板时清除原文，不持久化到浏览器存储。`renameSecret` 仍因名字绑定密文而重新加密。改格式要两边一起改并升 `version`。
 - `remark` 是记录上的可选明文字段（单行、最多 200 字，写场景、URL 和所需用户名），会经 `sec_list` 发给模型。旧读取方能忽略它，所以没有升 `version`；替换值和改名都必须保留它。人可以在设置页改，模型通过 `sec_remark` / `sec_request` 改，后者每次都会通知用户。两边都拒绝疑似凭证，只有扩展会比对已存的值；`sec_remark` 和 `sec_request` 的参数不展开 `{{sec:NAME}}`，否则真实值会写进明文 remark。

@@ -273,7 +273,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
     isNew, creationSettingsLocked, scrollPositionRequest,
     activeToolResults, toolClocks, editEntryId, handleEditContent, cancelEdit, addNotice,
     sessionIdRef,
-    handleSend, handleAbort, startSideChat, handleFork, loadEarlierMessages,
+    handleSend, handleAbort, startSideChat, handleFork, handleNavigate, loadEarlierMessages,
     handleCompact, handleQueuedSubmit, handleAbortCompaction, dismissCompactError,
     handleRecallQueue,
     handleBuiltinSlashCommand,
@@ -558,7 +558,10 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
   const historyGroupWindowRef = useRef({ start: 0, end: 0, total: 0, entryGroups: new Map<string, number>() });
   const messageContentRef = useRef<HTMLDivElement | null>(null);
   const prevScrollDistanceRef = useRef<number | null>(null);
-  const searchLoadRef = useRef(false);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const searchTargetRef = useRef(searchTarget);
+  searchTargetRef.current = searchTarget;
+  const searchBranchAttemptRef = useRef<Props["searchTarget"]>(null);
   const restoreLoadPositionRef = useRef<Extract<ChatReadingPosition, { atBottom: false }> | null>(null);
   const pendingScrollRestoreRef = useRef(pendingScrollRestore);
   const historyCursorRef = useRef(historyCursor);
@@ -680,7 +683,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
   }, [entryIds, pendingScrollRestore, restoreAnchorReadyFor, scrollToElement, scrollToLatest, searchTarget, visibleCount]);
 
   useEffect(() => {
-    if (!searchTarget || loading || searchLoadRef.current) return;
+    if (!searchTarget || loading || searchLoading) return;
     if (entryIds.includes(searchTarget.entryId)) {
       const { entryGroups, total } = historyGroupWindowRef.current;
       const groupIndex = entryGroups.get(searchTarget.entryId);
@@ -689,17 +692,25 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
       setPendingSearchScroll(searchTarget);
       return;
     }
-    if (sessionBusy || loadingEarlierMessages || !hasEarlierMessages) {
-      if (!sessionBusy && !loadingEarlierMessages) onSearchTargetHandled?.(searchTarget);
+    if (sessionBusy || isCompacting || loadingEarlierMessages) return;
+    if (hasEarlierMessages) {
+      setSearchLoading(true);
+      void loadEarlierMessages().then((loaded) => {
+        if (!loaded && searchTargetRef.current === searchTarget) onSearchTargetHandled?.(searchTarget);
+      }).finally(() => setSearchLoading(false));
       return;
     }
-    searchLoadRef.current = true;
-    void loadEarlierMessages().then((loaded) => {
-      if (!loaded) onSearchTargetHandled?.(searchTarget);
-    }).finally(() => {
-      searchLoadRef.current = false;
-    });
-  }, [entryIds, hasEarlierMessages, loadEarlierMessages, loading, loadingEarlierMessages, messages.length, onSearchTargetHandled, renderWindowKey, searchTarget, sessionBusy]);
+    if (session?.relation?.kind !== "side" || searchBranchAttemptRef.current === searchTarget) {
+      onSearchTargetHandled?.(searchTarget);
+      return;
+    }
+    // 搜索会返回侧聊旧分支的命中。沿活动分支翻到头后，切到目标所在的分支再定位。
+    searchBranchAttemptRef.current = searchTarget;
+    setSearchLoading(true);
+    void handleNavigate(searchTarget.entryId).then((loaded) => {
+      if (!loaded && searchTargetRef.current === searchTarget) onSearchTargetHandled?.(searchTarget);
+    }).finally(() => setSearchLoading(false));
+  }, [entryIds, handleNavigate, hasEarlierMessages, isCompacting, loadEarlierMessages, loading, loadingEarlierMessages, onSearchTargetHandled, renderWindowKey, searchLoading, searchTarget, session?.relation?.kind, sessionBusy]);
 
   useEffect(() => {
     if (!pendingSearchScroll || pendingSearchScroll !== searchTarget) return;

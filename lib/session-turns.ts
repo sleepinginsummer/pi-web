@@ -33,11 +33,10 @@ export function turnAnchorShape(entry: { type?: unknown; message?: unknown; summ
 
 /** 分页在当前页之前的轮次数，连同跨页边界触发新一轮的扩展消息。 */
 export function countTurnsBefore<T extends Pick<SessionEntry, "id" | "parentId">>(
-  records: readonly T[],
+  byId: ReadonlyMap<string, T>,
   page: readonly T[],
   shape: (record: T) => TurnAnchorMessage | null,
 ): number {
-  const byId = new Map(records.map((record) => [record.id, record]));
   const above: TurnAnchorMessage[] = [];
   let cursor = byId.get(page[0]?.parentId ?? "");
   while (cursor) {

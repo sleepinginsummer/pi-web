@@ -2944,8 +2944,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (result?.cancelled) return false;
       }
       if (navigationGenerationRef.current.get(sid) !== generation || sessionIdRef.current !== sid) return false;
-      await loadContext(sid, leafId);
-      return sessionIdRef.current === sid;
+      const loaded = await loadContext(sid, leafId);
+      return loaded && navigationGenerationRef.current.get(sid) === generation && sessionIdRef.current === sid;
     }).catch((error) => {
       if (navigationGenerationRef.current.get(sid) === generation) console.error("Failed to navigate session:", error);
       return false;
@@ -3758,7 +3758,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // Refs
     sessionIdRef, eventSourceRef,
     // Actions
-    handleSend, handleAbort, startSideChat, handleFork, loadEarlierMessages,
+    handleSend, handleAbort, startSideChat, handleFork, handleNavigate, loadEarlierMessages,
     handleCompact, handleQueuedSubmit, handleAbortCompaction, dismissCompactError,
     handleRecallQueue,
     handleBuiltinSlashCommand,
@@ -3782,7 +3782,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     agentPhase, completion,
     activeToolResults, toolClocks, editEntryId, handleEditContent, cancelEdit, addNotice, shadowReportStatuses,
     sessionIdRef, eventSourceRef,
-    handleSend, handleAbort, handleFork, loadEarlierMessages,
+    handleSend, handleAbort, handleFork, handleNavigate, loadEarlierMessages,
     handleCompact, handleQueuedSubmit, handleAbortCompaction, dismissCompactError,
     handleRecallQueue,
     handleBuiltinSlashCommand,

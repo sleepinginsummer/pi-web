@@ -497,7 +497,7 @@ export function AppShell() {
     handleSelectSession(session, isRestore);
   }, [handleSelectSession]);
   const handleSearchTargetHandled = useCallback((target: { sessionId: string; entryId: string }) => {
-    setSearchTarget((current) => current?.sessionId === target.sessionId && current.entryId === target.entryId ? null : current);
+    setSearchTarget((current) => current === target ? null : current);
   }, []);
   const { runningSessionIds, awaitingInputSessionIds, startingSessions, subagentsActiveSessionIds, backgroundActivity, sessionListVersion, getCompletionSummary, readAt, getUnreadMarkTime } = useRunningSessions();
   const runningSessionTransitions = useRunningSessionTransitions(runningSessionIds, selectedSession?.id ?? null, subagentsActiveSessionIds);

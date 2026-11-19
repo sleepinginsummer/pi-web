@@ -18,10 +18,10 @@ afterEach(cleanup);
 
 const source = await readFile(new URL("./ChatWindow.tsx", import.meta.url), "utf8");
 // 保留生产代码中的 effect 顺序，覆盖活动 leaf 变化与新定位请求同时提交的情况。
-const anchorEffects = source.slice(
-  source.indexOf("const previousLeafIdRef = useRef"),
-  source.indexOf("  useEffect(() => {\n    if (!searchTarget || loading || searchLoadRef.current)"),
-);
+const anchorEffectsStart = source.indexOf("const previousLeafIdRef = useRef");
+const anchorEffectsEnd = source.indexOf("  useEffect(() => {\n    if (!searchTarget || loading", anchorEffectsStart);
+assert.ok(anchorEffectsStart >= 0 && anchorEffectsEnd > anchorEffectsStart);
+const anchorEffects = source.slice(anchorEffectsStart, anchorEffectsEnd);
 const compiled = ts.transpileModule(anchorEffects, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
 }).outputText;

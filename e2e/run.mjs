@@ -120,6 +120,8 @@ try {
       data: { version: 1, parentSessionId: RICH, createdAt: timestamp } },
     message("inherited", "side-meta", "user", "E2E inherited-only question"),
     { type: "custom_message", customType: "pi-web:side-boundary", id: "side-boundary", parentId: "inherited", timestamp, content: "Side chat boundary", display: false },
+    message("side-old-question", "side-boundary", "user", "Previous side chat question"),
+    message("side-old-hit", "side-old-question", "assistant", [{ type: "text", text: "The first block is unrelated." }, { type: "text", text: "The archived alloy recommendation is ready." }]),
     message("side-question", "side-boundary", "user", sideQuestion),
     message("side-reply", "side-question", "assistant", "The copper cooling calculation is complete."),
   ], RICH);
@@ -645,6 +647,13 @@ try {
       await page.locator("#file-panel [data-entry-id='side-question']").first().waitFor({ state: "visible" });
       await page.waitForURL((url) => url.searchParams.get("session") === RICH);
       console.log("PASS: a multi-term side chat result opens the parent and reveals the hit in the panel");
+      await page.getByRole("searchbox", { name: "Search all conversations..." }).fill("archived alloy");
+      await page.getByRole("button", { name: /Side chat of Render.*archived alloy/ }).click();
+      const sidePanel = page.locator("#file-panel");
+      await sidePanel.getByText("The archived alloy recommendation is ready.", { exact: true }).waitFor();
+      assert.equal(await sidePanel.getByText(sideQuestion, { exact: true }).count(), 0);
+      assert.equal((await api(`/api/sessions/${SIDE}/context`)).leafId, "side-old-hit");
+      console.log("PASS: a side chat search opens the inactive branch and reveals the matched block");
     }
     assert.deepEqual(errors, [], `Browser errors at width ${viewport.width}`);
     console.log(`PASS: ${viewport.width}px browser pagination, branch, markdown, code, tool call, and compaction navigation`);

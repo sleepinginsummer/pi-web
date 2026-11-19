@@ -399,7 +399,7 @@ export async function readIndexedContextPage(
       const record = byId.get(entryId);
       if (!record) return 0;
       const page = oldest < 0 ? [record] : selected.slice(oldest);
-      return countTurnsBefore(index.records, page, (entry) => entry.turn ?? null);
+      return countTurnsBefore(byId, page, (entry) => entry.turn ?? null);
     },
     settings: { thinkingLevel: thinkingLevel ?? "off", model: model ?? null },
     // 与 wrapper 的 getEntries() 一致：开关属于整个会话，不随分支或分页回退。

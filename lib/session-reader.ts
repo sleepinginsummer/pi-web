@@ -857,7 +857,11 @@ export function buildSessionContext(
   const oldestCursorEntry = oldestReturnedEntry ?? sliced[0];
   const hasMore = Boolean(tail && tail > 0 && oldestCursorEntry?.parentId);
   // 当前页之上的轮次数：minimap 从会话第一轮开始编号，加载更早页时编号不变（#791）。
-  const turnsBefore = hasMore && oldestCursorEntry ? countTurnsBefore(entries, sliced.slice(sliced.indexOf(oldestCursorEntry)), turnAnchorShape) : 0;
+  const turnsBefore = hasMore && oldestCursorEntry ? countTurnsBefore(
+    new Map(entries.map((entry) => [entry.id, entry])),
+    sliced.slice(sliced.indexOf(oldestCursorEntry)),
+    turnAnchorShape,
+  ) : 0;
 
   return {
     messages,

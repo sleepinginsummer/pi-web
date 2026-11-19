@@ -1,8 +1,8 @@
 "use client";
 
 import type { BackgroundActivityMap } from "@/hooks/useRunningSessions";
-import { needsRead, parseUnreadMarks, sameMarksOr, serializeUnreadMarks, UNREAD_SESSIONS_STORAGE_KEY, withoutReadMarks } from "@/lib/unread-markers";
-import { isPageAttended, subscribePageAttention } from "@/lib/user-attention";
+import { parseUnreadMarks, sameMarksOr, serializeUnreadMarks, UNREAD_SESSIONS_STORAGE_KEY, withoutReadMarks } from "@/lib/unread-markers";
+import { useSessionReadReceipt } from "@/hooks/useSessionReadReceipt";
 import { useEffect, useState, useCallback, useMemo, useRef, type ReactNode } from "react";
 import type { SessionInfo, WorktreeState } from "@/lib/types";
 import { isHiddenRelation } from "@/lib/session-family";
@@ -342,7 +342,6 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
   const [fileManagerError, setFileManagerError] = useState<string | null>(null);
   const [unreadMarks, setUnreadMarks] = useState(loadUnreadMarks);
   const unreadSessionIds = useMemo(() => new Set(unreadMarks.keys()), [unreadMarks]);
-  const lastReadRequestRef = useRef<{ sessionId: string; modified: string | undefined } | null>(null);
   const unreadRevisionRef = useRef(0);
   const explorerRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fileExplorerRef = useRef<FileExplorerHandle>(null);
@@ -520,32 +519,14 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
     setUnreadMarks((previous) => withoutReadMarks(previous, readAt));
   }, [readAt]);
 
-  useEffect(() => {
-    if (!selectedSessionId || runningSessionIds.has(selectedSessionId)) return;
-    const modified = selectedSession?.id === selectedSessionId ? selectedSession.modified : undefined;
-    const sendRead = () => {
-      if (!isPageAttended()) return;
-      const last = lastReadRequestRef.current;
-      const marked = unreadMarks.has(selectedSessionId);
-      if (!marked && last?.sessionId === selectedSessionId && last.modified === modified) return;
-      const known = Object.hasOwn(readAt, selectedSessionId) ? readAt[selectedSessionId] : undefined;
-      if (!needsRead({ readAt: known, modifiedMs: modified ? Date.parse(modified) : undefined, marked, pending: false })) return;
-      const request = { sessionId: selectedSessionId, modified };
-      if (last?.sessionId === selectedSessionId && last.modified === modified) return;
-      lastReadRequestRef.current = request;
-      void fetch(`/api/sessions/${encodeURIComponent(selectedSessionId)}/read`, { method: "POST" })
-        .then((response) => {
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        })
-        .catch((error) => {
-          if (lastReadRequestRef.current === request) lastReadRequestRef.current = null;
-          console.error("[pi-web] 更新会话已读失败", error);
-        });
-    };
-    const unsubscribe = subscribePageAttention(sendRead);
-    sendRead();
-    return unsubscribe;
-  }, [readAt, runningSessionIds, selectedSession?.id, selectedSession?.modified, selectedSessionId, unreadMarks]);
+  useSessionReadReceipt(
+    selectedSessionId,
+    selectedSessionId !== null && runningSessionIds.has(selectedSessionId),
+    allSessions.find((session) => session.id === selectedSessionId)?.modified
+      ?? (selectedSession?.id === selectedSessionId ? selectedSession?.modified : undefined),
+    selectedSessionId && Object.hasOwn(readAt, selectedSessionId) ? readAt[selectedSessionId] : undefined,
+    selectedSessionId !== null ? unreadMarks.get(selectedSessionId) : undefined,
+  );
 
   useEffect(() => {
     if (explorerRefreshKey !== undefined) setExplorerKey((k) => k + 1);
