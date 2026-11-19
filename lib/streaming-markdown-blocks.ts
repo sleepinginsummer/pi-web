@@ -137,6 +137,7 @@ function advanceStructure(
 function scanStreamingMarkdown(source: string): StreamScanResult {
   const lines = source.split("\n");
   const cuts: number[] = [];
+  let hasDefinition = false;
   let structure: BlockStructure = null;
   let lastNonBlank: string | null = null;
   /** 当前挂起的顶层空行段结束偏移；-1 表示没有候选切点。 */
@@ -164,11 +165,13 @@ function scanStreamingMarkdown(source: string): StreamScanResult {
       blankRunEnd = -1;
     }
 
+    // 引用式链接和脚注可跨段。遇到真正的定义后回到整篇解析，围栏仍可走纯文本路径。
+    if (!structure && LINK_DEFINITION_PATTERN.test(line)) hasDefinition = true;
     structure = advanceStructure(structure, line, lineStart, nextLineStart);
     lastNonBlank = line;
   }
 
-  return { cuts, structure };
+  return { cuts: hasDefinition ? [] : cuts, structure };
 }
 
 function assembleSplit(source: string, scan: StreamScanResult): StreamingMarkdownSplit {

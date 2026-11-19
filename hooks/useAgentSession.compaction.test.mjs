@@ -108,7 +108,7 @@ test("SSE 手动压缩完成保留卡片定位，自动压缩不抢位置", () =
   );
   const calls = [];
   const handleEvent = new Function(
-    "event", "sessionIdRef", "loadCompactedSession", "setIsCompacting", "setCompactError", "setCompactResult", "readCompactResult",
+    "event", "sessionIdRef", "loadCompactedSession", "setIsCompacting", "setCompactError", "setCompactResult", "readCompactResult", "setRetryInfo",
     ts.transpileModule(`switch (event.type) { ${eventBranch} }`, {
       compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
     }).outputText,
@@ -116,7 +116,7 @@ test("SSE 手动压缩完成保留卡片定位，自动压缩不抢位置", () =
   for (const reason of ["manual", "auto"]) {
     handleEvent(
       { type: "compaction_end", reason, aborted: false }, { current: "session" },
-      (...args) => calls.push(args), () => {}, () => {}, () => {}, () => null,
+      (...args) => calls.push(args), () => {}, () => {}, () => {}, () => null, () => {},
     );
   }
   assert.deepEqual(calls, [["session", true], ["session", false]]);

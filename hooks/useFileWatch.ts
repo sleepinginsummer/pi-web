@@ -1,8 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { createStreamSource } from "@/lib/sse-broker-client";
+import { createStreamSource, STREAM_CLOSED } from "@/lib/sse-broker-client";
 import { getFileApiUrl } from "@/lib/file-paths";
+import { FILE_WATCH_HEARTBEAT_MS } from "@/lib/file-version";
 
 /**
  * 同一个标签页里最多同时保持几条文件 watch 连接。
@@ -130,6 +131,8 @@ export function useFileWatch({
   validateSize,
 }: FileWatchOptions): FileWatchState {
   const [watching, setWatching] = useState(false);
+  const [watchAttempt, setWatchAttempt] = useState(0);
+  const watchFailuresRef = useRef(0);
   const [bust, setBust] = useState(0);
   const [size, setSize] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -222,7 +225,9 @@ export function useFileWatch({
         if (typeof next.size === "number" && !applySizeRef.current(next.size)) return;
         if (typeof next.version !== "string") throw new Error("文件元数据缺少版本");
         if (fileVersionRef.current === next.version) return;
+        const previousVersion = fileVersionRef.current;
         fileVersionRef.current = next.version;
+        if (previousVersion === undefined) return;
         onResetRef.current?.();
         setBust((value) => value + 1);
       })
@@ -238,7 +243,25 @@ export function useFileWatch({
   useEffect(() => {
     if (!granted || !enabled || visible === false) return;
     const es = createStreamSource(getFileApiUrl(filePath, "watch", sourceSessionId), 1);
+    let staleTimer: ReturnType<typeof setTimeout> | undefined;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    const reopen = () => {
+      if (retryTimer) return;
+      clearTimeout(staleTimer);
+      es.close();
+      setWatching(false);
+      const delay = Math.min(1_000 * 2 ** watchFailuresRef.current++, FILE_WATCH_HEARTBEAT_MS);
+      retryTimer = setTimeout(() => setWatchAttempt((attempt) => attempt + 1), delay);
+    };
+    const seenTraffic = () => {
+      clearTimeout(staleTimer);
+      staleTimer = setTimeout(reopen, FILE_WATCH_HEARTBEAT_MS * 2.5);
+    };
+    es.addEventListener("ping", seenTraffic);
+    seenTraffic();
     const syncConnectedMeta = () => {
+      watchFailuresRef.current = 0;
+      seenTraffic();
       setWatching(true);
       // watcher 就绪后补读快照，闭合暂停期间的变更空档。
       syncMeta();
@@ -247,6 +270,7 @@ export function useFileWatch({
     // 同源其它窗口仍持有上游时，broker 的重新挂接不会重发 connected。
     es.onNeedsReplay = syncConnectedMeta;
     es.addEventListener("change", (event) => {
+      seenTraffic();
       syncRequestRef.current += 1;
       try {
         const data = JSON.parse((event as MessageEvent).data) as { size?: number; version?: string | null };
@@ -262,16 +286,21 @@ export function useFileWatch({
       setError(null);
       setBust((value) => value + 1);
     });
-    const markDisconnected = () => setWatching(false);
+    const markDisconnected = () => {
+      setWatching(false);
+      if (es.readyState === STREAM_CLOSED) reopen();
+    };
     es.addEventListener("error", markDisconnected);
     es.onerror = markDisconnected;
 
     return () => {
+      clearTimeout(staleTimer);
+      clearTimeout(retryTimer);
       syncRequestRef.current += 1;
       es.close();
       setWatching(false);
     };
-  }, [granted, enabled, visible, filePath, sourceSessionId, syncMeta]);
+  }, [granted, enabled, visible, filePath, sourceSessionId, syncMeta, watchAttempt]);
 
   return { watching, bust, size, error };
 }

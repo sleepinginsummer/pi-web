@@ -109,6 +109,7 @@ test("only completed assistant messages trigger an immediate usage read", () => 
       flushStreamDeltas() {}, isNew: false, completedDetachedSubagentIds: () => [],
       pendingDetachedSubagentIdsRef: { current: new Set() }, normalizeAssistantMessage: (message) => message,
       normalizeToolCalls: (message) => message, userMessageKey: () => "user", setMessages() {}, dispatch() {}, setAgentPhase() {},
+      setToolClocks() {}, withoutToolClock: (clocks) => clocks,
       refreshContextUsage: (sid) => reads.push(sid),
     });
     assert.deepEqual(reads, role === "assistant" ? ["a"] : []);
@@ -124,6 +125,7 @@ test("each event stream connection reads usage, since connecting resumes an idle
       event: { type: "connected", sessionId: sid ?? "pending", isStreaming },
       sessionIdRef: { current: sid }, sdkAgentActiveRef: { current: false }, agentRunningRef: { current: false },
       dispatch() {}, cancelEventStreamGrace() {}, setAgentRunning() {}, setAgentPhase() {},
+      setToolClocks() {}, endedToolClocks: (value) => value,
       // fork 的 connected 分支还会同步扩展弹窗并采用运行中的会话。
       setExtensionDialog() {}, setExtensionCustomUi() {}, extensionDialogRef: { current: null }, enterMainRun() {},
       refreshContextUsage: (id) => reads.push(id),

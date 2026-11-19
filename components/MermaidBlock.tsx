@@ -1,6 +1,6 @@
 "use client";
 
-import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
+import { lazy, memo, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 import { useTheme } from "@/hooks/useTheme";
 import { useI18n } from "@/hooks/useI18n";
 import { copyText } from "@/lib/clipboard";
@@ -311,6 +311,43 @@ interface CodeBlockProps {
 }
 
 
+/** Lines per piece of a streaming fence. */
+const STREAM_CHUNK_LINES = 64;
+
+/** A finished piece of a streaming fence: same text, so React leaves it alone. */
+const FrozenCodeChunk = memo(function FrozenCodeChunk({ text }: { text: string }) {
+  return <span className="markdown-code-stream-chunk is-frozen">{text}</span>;
+});
+
+/**
+ * A streaming fence's text in pieces of STREAM_CHUNK_LINES lines. Each chunk
+ * only the last piece changes: React rewrites one short text node instead of
+ * the whole fence, and the finished pieces, laid out on their own
+ * (`content-visibility`, app/globals.css), are skipped while off screen.
+ */
+function StreamingCodeChunks({ code }: { code: string }) {
+  const pieces: string[] = [];
+  let start = 0;
+  let lines = 0;
+  for (let index = code.indexOf("\n"); index !== -1; index = code.indexOf("\n", index + 1)) {
+    lines += 1;
+    if (lines === STREAM_CHUNK_LINES) {
+      // The newline between pieces is the block break itself: kept in the
+      // text, a copied selection would get a blank line at every piece.
+      pieces.push(code.slice(start, index));
+      start = index + 1;
+      lines = 0;
+    }
+  }
+  const tail = code.slice(start);
+  return (
+    <>
+      {pieces.map((text, index) => <FrozenCodeChunk key={index} text={text} />)}
+      <span className="markdown-code-stream-chunk">{tail}</span>
+    </>
+  );
+}
+
 /**
  * Syntax-highlighted code block with copy button.
  * Used as the "source" view for mermaid blocks and for all non-mermaid code fences.
@@ -321,10 +358,12 @@ export function CodeBlock({ code, lang, headerAction, isStreaming }: CodeBlockPr
   const [copied, setCopied] = useState(false);
 
   const copy = () => {
+    // A refused copy is silent: no "Copied", and the rejection is handled
+    // so it never surfaces as an unhandled one (lib/clipboard.ts).
     copyText(code).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
-    });
+    }, () => {});
   };
 
   return (
@@ -343,7 +382,7 @@ export function CodeBlock({ code, lang, headerAction, isStreaming }: CodeBlockPr
       </div>
       {isStreaming ? (
         <pre className="markdown-code-plain" style={{ margin: 0, padding: "11px 13px", fontSize: "calc(12.5px + var(--chat-font-size-offset, 0px))", lineHeight: 1.62, borderRadius: 0, overflow: "auto", backgroundColor: "color-mix(in srgb, var(--bg) 92%, var(--bg-panel))" }}>
-          <code style={{ fontFamily: "var(--font-mono)", background: "none" }}>{code}</code>
+          <code style={{ fontFamily: "var(--font-mono)", background: "none" }}><StreamingCodeChunks code={code} /></code>
         </pre>
       ) : <Suspense
         fallback={(

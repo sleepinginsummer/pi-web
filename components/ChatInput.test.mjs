@@ -12,7 +12,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { ChatInput, ModelDataDiagnosticBanner, RUN_END_CLICK_GUARD_MS, isRunEndStrayClick, ModelErrorBanner, ModelScopeWarningBanner, modelSupportsImageInput, canClearBuiltinCommandInput, canRunBuiltinSlashCommandWhileStreaming, isExactSlashCommand, offersBuiltinSlashCommandWhileStreaming, replaceTextareaRange, submitsSlashCommandOnEnter } = await jiti.import("./ChatInput.tsx");
+const { ChatInput, ModelDataDiagnosticBanner, RUN_END_CLICK_GUARD_MS, isRunEndStrayClick, ModelErrorBanner, ModelScopeWarningBanner, modelSupportsImageInput, canClearBuiltinCommandInput, canRunBuiltinSlashCommandWhileStreaming, isExactSlashCommand, offersBuiltinSlashCommandWhileStreaming, autoGrowTextarea, scrollTextareaCaretIntoView, replaceTextareaRange, submitsSlashCommandOnEnter } = await jiti.import("./ChatInput.tsx");
 const { filterModelOptions } = await jiti.import("./ModelPicker.tsx");
 const { I18nProvider } = await jiti.import("@/hooks/useI18n");
 const { clearDraft, setDraft } = await jiti.import("@/lib/draft-store");
@@ -104,6 +104,10 @@ test("follow-up shortcuts preserve newline, IME, mobile and completion behavior"
     ["Ctrl+Enter mode: Enter completes an exact slash command instead of sending it", {}, { enterSendMode: "ctrlEnter", isStreaming: false, slashMenuOpen: true, slashQuery: "copy", value: "/copy", displayedSlashCommands: [{ name: "copy", source: "builtin" }] }, "slash"],
     ["Ctrl+Enter mode: Ctrl+Enter sends an exact slash command", { ctrlKey: true }, { enterSendMode: "ctrlEnter", isStreaming: false, slashMenuOpen: true, slashQuery: "copy", value: "/copy", displayedSlashCommands: [{ name: "copy", source: "builtin" }] }, "send"],
     ["mobile ignores Ctrl+Enter mode for plain Enter", {}, { enterSendMode: "ctrlEnter", isMobile: true }, "native"],
+    // An extension's dialog hides the menus (#1678): Enter must not pick from one the user cannot see.
+    ["an open extension dialog hides slash completion", {}, { isStreaming: false, extensionUiOpen: true, slashMenuOpen: true, slashQuery: "help" }, "send"],
+    ["an open extension dialog hides file completion", {}, { isStreaming: false, extensionUiOpen: true, atMenuOpen: true, atQuery: {} }, "send"],
+    ["an open extension dialog hides history selection", {}, { isStreaming: false, extensionUiOpen: true, historyMenuOpen: true }, "send"],
   ];
   for (const [name, keys, state, expected] of cases) {
     let action = "native";
@@ -112,6 +116,7 @@ test("follow-up shortcuts preserve newline, IME, mobile and completion behavior"
       COMPOSITION_END_ENTER_GRACE_MS: 100,
       isMobile: false, isStreaming: true, enterSendMode: "enter",
       isComposingRef: { current: false }, lastCompositionEndAtRef: { current: 0 },
+      extensionUiOpen: false,
       historyMenuOpen: false, inputHistory: ["previous"], historyActiveIndex: 0,
       slashMenuOpen: false, slashQuery: null, displayedSlashCommands: [{}], slashActiveIndex: 0,
       atMenuOpen: false, atQuery: null, atMatches: [{}], atActiveIndex: 0,
@@ -728,4 +733,46 @@ test("the attach button hands every picked file to the chat, or only images with
   assert.match(source, /accept=\{onAttachFiles \? undefined : "image\/\*"\}/);
   assert.match(source, /onChange=\{handleFilePick\}/);
   assert.match(source, /if \(onAttachFiles\) onAttachFiles\(files\);\s*else void processImageFiles\(files\);/);
+});
+
+test("a capped composer keeps its scroll while it regrows, so a caret at the end stays visible", () => {
+  // As a browser does: an "auto" height fits the whole text, which clamps
+  // scrollTop to 0.
+  const fake = (value, scrollHeight, clientHeight) => {
+    let height = "";
+    const ta = {
+      value,
+      style: {
+        overflowY: "",
+        get height() { return height; },
+        set height(next) { height = next; if (next === "auto") ta.scrollTop = 0; },
+      },
+      scrollTop: 40,
+      get scrollHeight() { return scrollHeight; },
+      clientHeight,
+    };
+    return ta;
+  };
+
+  const tall = fake("lots of lines", 320, 24);
+  autoGrowTextarea(tall);
+  assert.equal(tall.style.height, "200px");
+  assert.equal(tall.scrollTop, 40, "the auto-height reset does not leave the box scrolled back to the top");
+});
+
+test("a programmatic caret at the end scrolls an overflowing box to its bottom, a mid-text caret does not", () => {
+  const fake = (value, selectionEnd, scrollHeight) => ({
+    value,
+    selectionEnd,
+    scrollTop: 0,
+    get scrollHeight() { return scrollHeight; },
+  });
+
+  const atEnd = fake("many\nlines", 10, 320);
+  scrollTextareaCaretIntoView(atEnd);
+  assert.equal(atEnd.scrollTop, 320, "a caret at the very end scrolls to the bottom");
+
+  const mid = fake("many\nlines", 3, 320);
+  scrollTextareaCaretIntoView(mid);
+  assert.equal(mid.scrollTop, 0, "a mid-text caret leaves the scroll alone");
 });

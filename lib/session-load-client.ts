@@ -194,7 +194,7 @@ export async function fetchSessionContext(
   if (options.deferMedia !== false) params.set("deferMedia", "1");
   if (options.before) params.set("before", options.before);
   if (options.tail) params.set("tail", String(options.tail));
-  const cacheable = !options.leafId && !options.before;
+  const cacheable = !options.leafId && !options.before && (options.tail === undefined || options.tail === 50);
   const knownCached = cacheable ? sessionContextCache.get(sid) : undefined;
   const cached = !options.skipCache ? knownCached : undefined;
   if (cached) {
@@ -218,7 +218,7 @@ export async function fetchSessionContext(
     if (response.status === 304 && knownCached) {
       knownCached.createdAt = Date.now();
       knownCached.lastAccessedAt = Date.now();
-      return knownCached.result;
+      return { ...knownCached.result, cached: false };
     }
     if (response.status === 404) return { kind: "missing" };
     if (!response.ok) {

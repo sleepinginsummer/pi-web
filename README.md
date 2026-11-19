@@ -6,7 +6,16 @@ Local web UI for the [pi coding agent](https://github.com/badlogic/pi-mono). Pi 
 
 ![Pi Web shows the same pi session with structured Markdown, tool calls, and project navigation beside the CLI](https://raw.githubusercontent.com/agegr/pi-web/main/docs/screenshot2.png)
 
-The same pi session in CLI and Pi Web: structured tool calls, readable Markdown, session browsing, and cleaner results.
+![Pi Web displaying a pi session with structured Markdown, tool calls, and project navigation](https://raw.githubusercontent.com/agegr/pi-web/main/docs/screenshot2.png)
+
+## Features
+
+- **Session workspace**: browse, resume, rename, export, and delete conversations grouped by project, with running state, context usage, cost, and compaction details.
+- **Two ways to branch**: **New session** creates an independent session file from an earlier message; **Edit from here** creates a branch inside the current session.
+- **Project file tools**: browse and upload files, inspect Git diffs, and preview source, Markdown, images, audio, PDFs, and DOCX files with automatic refresh.
+- **Git worktrees**: switch checkouts from the sidebar while keeping sessions from the same repository grouped together.
+- **Web-based configuration**: manage provider login and API keys, models, model tests, plugin packages, and skills without leaving Pi Web.
+- **English, Simplified Chinese, and Traditional Chinese UI**: Pi Web follows the browser language initially. Change it under Settings → General → Language.
 
 ## Quick Start
 
@@ -82,6 +91,8 @@ PI_WEB_PASSWORD='a-long-random-password' pi-web --hostname 0.0.0.0
 ```
 
 Password authentication does not encrypt the connection. Do not expose Pi Web over plain HTTP to the internet; use HTTPS through a trusted reverse proxy or a trusted VPN. If a reverse proxy sends an external hostname, add that exact name to `PI_WEB_ALLOWED_HOSTS`. This allow-list does not change the address Pi Web binds to.
+
+With many chats, terminals or file previews active at once, plain HTTP limits the browser to six connections and requests start to wait; see [Serving Pi Web over HTTP/2](./docs/http2.md).
 
 ### Docker
 
@@ -221,3 +232,9 @@ bin/
   pi-web.js           # npm CLI entrypoint
 instrumentation.ts    # initializes the server HTTP dispatcher
 ```
+
+See [AGENTS.md](./AGENTS.md) for the architecture notes, API routes and topic notes.
+
+## License
+
+[MIT](./LICENSE)

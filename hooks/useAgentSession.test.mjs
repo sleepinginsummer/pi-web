@@ -200,7 +200,7 @@ test("reloads compacted context directly from the authoritative server snapshot"
 
   assert.match(compactLoadSource, /invalidateSessionContext\(sid\)/);
   assert.match(compactLoadSource, /deleteSessionViewSnapshot\(sid\)/);
-  assert.match(compactLoadSource, /return loadSession\(sid, showLoading, false, \{ validateView: true, focusCompaction: showLoading \}\)/);
+  assert.match(compactLoadSource, /return loadSession\(sid, false, false, \{ validateView: true, focusCompaction, preserveScroll: !focusCompaction \}\)/);
   assert.doesNotMatch(source, /liveSessionMessages|live-session-cache/);
   assert.match(eventSource, /case "compaction_end":[\s\S]*?loadCompactedSession\(sessionIdRef\.current, event\.reason === "manual"\)/);
   assert.match(manualCompactSource, /await loadCompactedSession\(sid, true\)/);
@@ -249,7 +249,7 @@ test("refuses a normal send while the hook knows an asynchronous run is active",
     source.indexOf("  const executeBash = useCallback"),
   );
 
-  assert.match(sendSource, /if \(agentRunningRef\.current \|\| bashRunningRef\.current\) return false;/);
+  assert.match(sendSource, /if \(\(agentRunningRef\.current && !isBashCommand\) \|\| bashRunningRef\.current\) return false;/);
   assert.match(sendSource, /return Boolean\(sentSessionId\);/);
 });
 

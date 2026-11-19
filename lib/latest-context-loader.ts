@@ -12,6 +12,7 @@ export class LatestContextLoader {
   private readonly gate = new LatestRequestGate();
   private readonly controllers = new Map<string, AbortController>();
 
+  private readonly pending = new Map<string, Promise<void>>();
   async run<T, R>(
     key: string,
     task: (signal: AbortSignal) => Promise<T>,
@@ -22,6 +23,8 @@ export class LatestContextLoader {
     const controller = new AbortController();
     this.controllers.set(key, controller);
     const generation = this.gate.begin(key);
+    const settled = Promise.withResolvers<void>();
+    this.pending.set(key, settled.promise);
 
     try {
       const value = await task(controller.signal);
@@ -34,9 +37,14 @@ export class LatestContextLoader {
     } finally {
       if (this.controllers.get(key) === controller) this.controllers.delete(key);
       this.gate.finish(key);
+      if (this.pending.get(key) === settled.promise) this.pending.delete(key);
+      settled.resolve();
     }
   }
 
+  whenIdle(key: string): Promise<void> | undefined {
+    return this.pending.get(key);
+  }
   cancel(key: string): void {
     this.controllers.get(key)?.abort();
     this.controllers.delete(key);

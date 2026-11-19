@@ -37,7 +37,7 @@ test("positions the Agents panel at the left and delegates session selection", (
   assert.match(topPanelSource, /const AGENT_PANEL_WIDTH = 420/);
   assert.match(topPanelSource, /activePanel === "agents"[\s\S]*?left: topBarRect\.left[\s\S]*?Math\.min\(AGENT_PANEL_WIDTH, topBarRect\.width\)/);
   assert.match(appShellSource, /<AppTopPanels/);
-  assert.match(appShellSource, /onSelectSession=\{handleSelectSession\}/);
+  assert.match(appShellSource, /onSelectSession=\{handleSelectAgentFromStrip\}/);
 });
 
 

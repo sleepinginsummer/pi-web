@@ -1,4 +1,4 @@
-import { CONFIGURED_TOOL_PRESET, isToolPreset, type ToolPreset } from "./tool-presets";
+import { CONFIGURED_TOOL_PRESET, SETTINGS_BUILTIN_TOOLS, isToolPreset, type ToolPreset } from "./tool-presets";
 
 const STORAGE_KEY = "pi-tool-preset";
 
@@ -42,5 +42,25 @@ export function setPreferredToolPreset(
     storage.setItem(STORAGE_KEY, preset);
   } catch {
     // Browser storage is best-effort.
+  }
+}
+
+const CUSTOM_TOOLS_STORAGE_KEY = "pi-web:custom-tools";
+
+export function getPreferredCustomTools(): string[] | null {
+  try {
+    const stored: unknown = JSON.parse(getBrowserStorage()?.getItem(CUSTOM_TOOLS_STORAGE_KEY) ?? "null");
+    if (!Array.isArray(stored) || stored.length === 0 || stored.some((tool) => !SETTINGS_BUILTIN_TOOLS.includes(tool))) return null;
+    return [...new Set(stored as string[])];
+  } catch {
+    return null;
+  }
+}
+
+export function setPreferredCustomTools(tools: readonly string[] | null): void {
+  try {
+    getBrowserStorage()?.setItem(CUSTOM_TOOLS_STORAGE_KEY, JSON.stringify(tools));
+  } catch (error) {
+    console.warn("[pi-web] 无法保存自定义工具选择", error);
   }
 }

@@ -342,5 +342,5 @@ test("Settings › MCP switches whole groups from the heading too, and a disable
   assert.match(templateSource, /export function ConfigNotice\(\{ id, action, children \}[\s\S]*?<div id=\{id\} role="status"/);
   assert.match(templateSource, /export function ConfigTrustNotice\(\{\n\s*id,[\s\S]*?<ConfigNotice\n\s*id=\{id\}/);
   assert.match(mcp, /describedBy=\{block \? blockNoticeId : undefined\}/);
-  assert.match(mcp, /<ConfigSwitch[\s\S]*?describedBy=\{note \? noteId : undefined\}/);
+  assert.match(mcp, /<ConfigSwitch[\s\S]*?describedBy=\{whyId\}/);
 });

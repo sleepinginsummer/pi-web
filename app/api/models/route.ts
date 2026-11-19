@@ -16,6 +16,7 @@ import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-acces
 import { projectTrustReloadOptions } from "@/lib/project-trust";
 import { isFastModeAvailable } from "@/lib/fast-mode";
 import { readModelsConfigSnapshot } from "@/lib/models-config-commit";
+import { llamaCppExtension } from "@/lib/pi-sdk-internals";
 import { providerDisplayNames, rememberProviderModels, withDeferredProviderModels } from "@/lib/deferred-provider-models";
 import { inferRemovedWorktree } from "@/lib/worktree";
 import { cwdMissingBody } from "@/lib/missing-cwd";
@@ -42,6 +43,7 @@ async function loadModels(
   const services = await createAgentSessionServices({
     cwd,
     agentDir,
+    resourceLoaderOptions: { extensionFactories: [llamaCppExtension] },
     ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),
   });
   const modelError = services.modelRuntime.getError();

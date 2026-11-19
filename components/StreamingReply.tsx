@@ -2,17 +2,19 @@
 
 import { memo, type RefObject } from "react";
 import { MessageView } from "./MessageView";
+import type { ToolClocks } from "@/lib/tool-clock";
 import { selectStreamingMessage, useStreamingSelector } from "@/hooks/useStreamingSelector";
 import type { StreamingStore } from "@/lib/streaming-message";
 import type { ToolResultMessage } from "@/lib/types";
 
 /** 只让当前回复订阅正文；滚动跟随仍由 fork 的 useChatScrollFollow 管理。 */
 export const StreamingReply = memo(function StreamingReply({
-  store, messageRef, toolResults, modelNames, cwd, sessionId, onOpenFile, onOpenSubagent, visibleBlockOffset = 0,
+  store, messageRef, toolResults, toolClocks, modelNames, cwd, sessionId, onOpenFile, onOpenSubagent, visibleBlockOffset = 0,
 }: {
   store: StreamingStore;
   messageRef: RefObject<HTMLDivElement | null>;
   toolResults: Map<string, ToolResultMessage>;
+  toolClocks?: ToolClocks;
   modelNames: Record<string, string>;
   cwd?: string;
   sessionId?: string;
@@ -28,6 +30,7 @@ export const StreamingReply = memo(function StreamingReply({
         message={message}
         isStreaming
         toolResults={toolResults}
+        toolClocks={toolClocks}
         modelNames={modelNames}
         cwd={cwd}
         sessionId={sessionId}

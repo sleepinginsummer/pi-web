@@ -10,7 +10,7 @@ import { TrashSessionActions, trashButtonStyle } from "./TrashSessionActions";
 import { ProcessDetailsGroup } from "./ProcessDetailsGroup";
 import { getTurnDurationMs } from "@/lib/turn-duration";
 import { buildMessageRenderGroups } from "@/lib/message-render-groups";
-import { countToolCallBlocks, getDisplayableAssistantBlocks, isHiddenCustomMessage, isMessageGroupAnchor } from "@/lib/message-display";
+import { countToolCallBlocks, getDisplayableAssistantBlocks, getTurnAnchors, hasTurnRef, isHiddenCustomMessage, isMessageGroupAnchor } from "@/lib/message-display";
 import { getFinalAnswerViews } from "@/lib/turn-views";
 import type { AgentMessage, AssistantMessage, SessionContext, ToolResultMessage } from "@/lib/types";
 import type { TrashedSession } from "@/lib/trash";
@@ -153,7 +153,7 @@ export function TrashSessionDetail({ session, onClose, onRestored, onRenamed }: 
               })}
             </div>
           </div>
-          {showOutline && context && <ChatMinimap messages={messages} entryIds={context.entryIds}
+          {showOutline && context && <ChatMinimap messages={messages} entryIds={context.entryIds} turnAnchors={getTurnAnchors(messages)}
             getStreamingMessage={noStreamingMessage} isStreaming={false} scrollContainer={scrollContainer}
             messageRefs={messageRefs} onRevealHistory={noRevealHistory} turnsBefore={0} />}
         </div>

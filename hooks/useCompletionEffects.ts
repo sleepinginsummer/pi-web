@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 import type { RunCompletion } from "@/hooks/useRunCompletion";
 import type { SessionNotificationOptions } from "@/lib/session-notifications";
 import { isManualStopNotificationSuppressed } from "@/lib/manual-stop-notification";
+import { claimDoneChime, DONE_CHIME_SAME_EVENT_MS } from "@/lib/done-chime";
 
 interface CompletionEffectsOptions {
   /** Off for subagents and side chats: an aside the user drives owes no sound or notification. */
@@ -41,7 +42,9 @@ export function useCompletionEffects({
       return;
     }
 
-    if (soundEnabled) playDoneSound();
+    if (soundEnabled && (!completion.sessionId || claimDoneChime([completion.sessionId], Date.now() - DONE_CHIME_SAME_EVENT_MS))) {
+      playDoneSound();
+    }
     const notificationSuppressed = completion.sessionId
       ? isManualStopNotificationSuppressed(completion.sessionId)
       : false;

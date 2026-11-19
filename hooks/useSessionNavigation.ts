@@ -83,6 +83,11 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
       .catch(() => {});
   }, []);
 
+  const requestSidebarLocate = useCallback((sessionId: string) => {
+    const revision = notificationLocateRevisionRef.current + 1;
+    notificationLocateRevisionRef.current = revision;
+    setNotificationSessionLocateRequest({ sessionId, revision });
+  }, []);
   const applySessionSelection = useCallback((session: SessionInfo, isRestore = false) => {
     if (!isRestore && activeSessionIdRef.current === session.id) return;
     if (!isRestore) {
@@ -92,6 +97,7 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
     activeSessionIdRef.current = session.id;
     setNewSessionCwd(null);
     setSelectedSession(session);
+    requestSidebarLocate(session.id);
     bumpSessionKey();
     resetSessionViews();
     setInitialSessionRestored(true);
@@ -100,14 +106,9 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
     if (!isRestore || new URLSearchParams(window.location.search).get("session") !== session.id) {
       replaceSessionUrl(session.id);
     }
-  }, [bumpSessionKey, isMobile, onMobileSelect, resetSessionViews]);
+  }, [bumpSessionKey, isMobile, onMobileSelect, requestSidebarLocate, resetSessionViews]);
 
   const isActiveSession = useCallback((sessionId: string) => activeSessionIdRef.current === sessionId, []);
-  const requestSidebarLocate = useCallback((sessionId: string) => {
-    const revision = notificationLocateRevisionRef.current + 1;
-    notificationLocateRevisionRef.current = revision;
-    setNotificationSessionLocateRequest({ sessionId, revision });
-  }, []);
   const invalidateNotificationNavigation = useNotificationSessionNavigation({
     isActiveSession,
     selectSession: applySessionSelection,
@@ -151,11 +152,12 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
       return next;
     });
     setSelectedSession(session);
+    requestSidebarLocate(session.id);
     setTabOpenSession(session.id);
     onRefresh();
     hydrateSelectedSession(session.id);
     replaceSessionUrl(session.id);
-  }, [hydrateSelectedSession, invalidateNotificationNavigation, invalidateWorkspaceRestore, onRefresh]);
+  }, [hydrateSelectedSession, invalidateNotificationNavigation, invalidateWorkspaceRestore, onRefresh, requestSidebarLocate]);
 
   /** 发送途中用户已切走：只收尾和刷新侧栏；如果又回到了这个目录的新会话页，才进入该会话。 */
   const sessionCreatedInBackground = useCallback((session: SessionInfo) => {

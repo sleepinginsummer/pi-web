@@ -81,6 +81,7 @@ export async function GET(
       deferToolResultImages,
       tail,
       excludeLeaf: Boolean(before && live),
+      fullHistory: Boolean(before),
       sessionId: id,
       ...(indexed ? { effectiveSettings: indexed.settings } : {}),
     });
@@ -97,7 +98,8 @@ export async function GET(
         leafId: activeLeafId,
         models: liveRpc?.inner.modelRuntime,
       }));
-    }    const contextMs = performance.now() - contextStartedAt;
+    }
+    const contextMs = performance.now() - contextStartedAt;
     const payload = JSON.stringify({
       context,
       leafId: activeLeafId,

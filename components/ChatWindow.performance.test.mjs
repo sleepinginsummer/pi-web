@@ -18,7 +18,7 @@ test("长会话渲染索引通过一次线性 memo 复用", () => {
   assert.match(indexSource, /const visibleRefIndexByMessage = new Map/);
   assert.match(indexSource, /const writtenFilesByFinalAssistant = new Map/);
   assert.match(indexSource, /for \(let index = 0; index < messages\.length; index\+\+\)/);
-  assert.match(indexSource, /\}, \[activeToolResults, messageCwd, messages\]\);/);
+  assert.match(indexSource, /\}, \[activeToolResults, messageCwd, messages, turnAnchors\]\);/);
   assert.doesNotMatch(indexSource, /buildMessageRenderGroups/);
   assert.match(renderSource, /const \{ toolResults, visibleRefIndexByMessage, writtenFilesByFinalAssistant \} = messageRenderIndex/);
   assert.doesNotMatch(renderSource, /for \(let j = idx \+ 1; j < messages\.length; j\+\+\)/);

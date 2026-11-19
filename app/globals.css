@@ -1571,6 +1571,16 @@ pre, code {
 .markdown-code-line {
   display: flex;
 }
+/* Keep line numbers out of text selection. `user-select: none` alone still
+   lets browsers paint the number when a selection crosses lines, so the
+   visible digits are generated content rather than text nodes. */
+.markdown-code-line-number {
+  flex-shrink: 0;
+  user-select: none;
+}
+.markdown-code-line-number::before {
+  content: attr(data-line-number);
+}
 /* A zero basis: an `auto` one measures every line's unwrapped width first,
    which nearly doubled the layout of a reply's fences. */
 .markdown-code-line-text {
@@ -1578,6 +1588,15 @@ pre, code {
   min-width: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+/* A streaming fence in pieces (CodeBlock): each piece is its own block, and a
+   finished one off screen skips layout and paint, sized by its last layout. */
+.markdown-code-stream-chunk {
+  display: block;
+}
+.markdown-code-stream-chunk.is-frozen {
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto calc(64 * 1.62em);
 }
 /* An extension dialog measures its fences unwrapped (ChatWindow), so it still
    grows to show them whole where the screen allows. */
@@ -3320,6 +3339,8 @@ span.token.table {
 .dev-servers-trigger .dev-servers-error-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: #ef4444; }
 .extension-widget-panels-left { left: 12px; right: auto; }
 .extension-widget-left-shelf { display: flex; flex: 0 0 auto; align-items: center; }
+/* 待办独占左侧容器，宽度上限只适用于右侧多组件列表。 */
+.extension-widget-left-shelf > .extension-widget-triggers { max-width: 100%; }
 .dev-servers-panel { width: min(420px, calc(100vw - 24px)); }
 .mobile-activity-label, .dev-servers-trigger .mobile-activity-count { display: none; }
 
@@ -3370,6 +3391,9 @@ span.token.table {
     padding: 0 8px;
   }
   .extension-status-bar .extension-widget-trigger {
+    flex-basis: auto;
+    width: auto;
+    min-width: 44px;
     min-height: 44px;
     padding: 0 6px;
     border: 0;

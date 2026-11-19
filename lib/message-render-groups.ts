@@ -36,7 +36,7 @@ export function buildRecentItemWindow(itemCounts: number[], limit: number): Rece
 export function buildMessageRenderGroups<T>(
   messages: T[],
   options: {
-    isAnchor: (message: T) => boolean;
+    isAnchor: (message: T, index: number) => boolean;
     findFinalAssistantIndex: (messages: T[], start: number, end: number) => number;
     busy: boolean;
     lastAnchorIndex: number;
@@ -46,7 +46,7 @@ export function buildMessageRenderGroups<T>(
   let liveTailStartIndex: number | null = null;
   for (let index = 0; index < messages.length;) {
     // 首页可能从轮次中途开始，仍将缺少 user 锚点的前缀作为一个完整过程组。
-    const hasAnchor = options.isAnchor(messages[index]);
+    const hasAnchor = options.isAnchor(messages[index], index);
     if (!hasAnchor && index !== 0) {
       groups.push({ start: index, end: index + 1, finalAssistantIdx: -1, isLiveTail: false });
       index += 1;
@@ -54,7 +54,7 @@ export function buildMessageRenderGroups<T>(
     }
     const start = index;
     let end = start + 1;
-    while (end < messages.length && !options.isAnchor(messages[end])) end += 1;
+    while (end < messages.length && !options.isAnchor(messages[end], end)) end += 1;
     const finalAssistantIdx = options.findFinalAssistantIndex(messages, hasAnchor ? start : start - 1, end);
     const isLiveTail = options.busy && end === messages.length && start === options.lastAnchorIndex;
     if (isLiveTail) liveTailStartIndex = groups.length;

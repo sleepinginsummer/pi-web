@@ -37,6 +37,7 @@ import { getFileWatchVersion } from "@/lib/file-watch-version";
 import { injectSandboxedHtmlPolyfill } from "@/lib/html-sandbox-polyfill";
 import { getPreviewDocumentRedirect, isRawPreviewCredentialAllowed, rawPreviewFileSegments } from "@/lib/html-preview-auth";
 import { registerFileWatch } from "@/lib/file-watch-registry";
+import { FILE_WATCH_HEARTBEAT_MS } from "@/lib/file-version";
 import { pageStreamLabel, registerPageStream } from "@/lib/page-stream-registry";
 
 const FILE_REQUEST_TYPES = ["list", "read", "download", "meta", "preview", "raw", "watch"] as const;
@@ -49,7 +50,6 @@ const FILE_REQUEST_TYPE_SET = new Set<string>(FILE_REQUEST_TYPES);
 // is therefore unreachable, the same trade-off `/api/files/reveal` makes. The
 // origin guard in lib/request-security.ts admits those subresource loads and
 // shares the segment constant.
-const MAX_UPLOAD_FILE_BYTES = 25 * 1024 * 1024;
 const MAX_UPLOAD_TOTAL_BYTES = 100 * 1024 * 1024;
 // Multipart boundaries and headers are not file bytes, but must be bounded too.
 const MAX_UPLOAD_REQUEST_BYTES = MAX_UPLOAD_TOTAL_BYTES + 1024 * 1024;
@@ -211,9 +211,6 @@ export async function POST(
       throw error;
     }
     const files = formData.getAll("files").filter((entry): entry is File => typeof entry !== "string");
-    if (files.some((file) => file.size > MAX_UPLOAD_FILE_BYTES)) {
-      return NextResponse.json({ error: "Each upload must be 25MB or smaller" }, { status: 413 });
-    }
     if (files.reduce((total, file) => total + file.size, 0) > MAX_UPLOAD_TOTAL_BYTES) {
       return NextResponse.json({ error: "Uploads must total 100MB or less" }, { status: 413 });
     }
@@ -258,10 +255,12 @@ export async function POST(
       }
 
       try {
+        // Async writes: a 100MB file written synchronously would stall every
+        // stream and request this process serves until the disk catches up.
         if (conflictSet.has(file.name)) {
-          replaceUploadFile(destination, bytes);
+          await replaceUploadFile(destination, bytes);
         } else {
-          fs.writeFileSync(destination, bytes, { flag: "wx" });
+          await fs.promises.writeFile(destination, bytes, { flag: "wx" });
         }
         uploaded.push(file.name);
       } catch (error) {
@@ -376,7 +375,7 @@ function streamFile(filePath: string, stat: fs.Stats, contentType: string, range
   }
 
   const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader);
-  if (!match) {
+  if (!match || (!match[1] && !match[2])) {
     return new Response(null, {
       status: 416,
       headers: {
@@ -648,6 +647,7 @@ export async function GET(
       let lastIno = stat?.ino ?? 0;
       let lastSize = stat?.size ?? 0;
       let lastExists = stat !== undefined;
+      let heartbeat: ReturnType<typeof setInterval> | undefined;
       const stream = new ReadableStream({
         start(controller) {
           const send = (eventName: string, data: Record<string, unknown>) => {
@@ -656,6 +656,7 @@ export async function GET(
               controller.enqueue(new TextEncoder().encode(payload));
             } catch {
               // client disconnected
+              clearInterval(heartbeat);
             }
           };
           try {
@@ -689,6 +690,7 @@ export async function GET(
               }
             });
             watcher.on("error", () => {
+              clearInterval(heartbeat);
               try { watcher?.close(); } catch { /* ignore */ }
               watcher = null;
               releaseWatch?.();
@@ -704,6 +706,7 @@ export async function GET(
             // A client gone without a cancel (a phone off the network) would keep
             // the watcher, and its place in the debug panel's count, forever.
             const onAbort = () => {
+              clearInterval(heartbeat);
               try { watcher?.close(); } catch { /* ignore */ }
               watcher = null;
               releaseWatch?.();
@@ -717,12 +720,14 @@ export async function GET(
             // The client snapshots only after this event, so emit it after the
             // watcher exists to avoid dropping changes between those steps.
             send("connected", { filePath });
+            heartbeat = setInterval(() => send("ping", {}), FILE_WATCH_HEARTBEAT_MS);
           } catch {
             send("error", { message: "Failed to watch file" });
             controller.close();
           }
         },
         cancel() {
+          clearInterval(heartbeat);
           try { watcher?.close(); } catch { /* ignore */ }
           releaseWatch?.();
         },

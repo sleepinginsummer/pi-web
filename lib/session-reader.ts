@@ -11,7 +11,7 @@ import type { SessionEntry as PiSessionEntry } from "@earendil-works/pi-coding-a
 import { normalizeToolCalls } from "./normalize";
 import { getThinkingPreview } from "./message-display";
 import { withoutMessageSignatures } from "./message-signatures";
-import { countTurnsBefore } from "./session-turns";
+import { countTurnsBefore, turnAnchorShape } from "./session-turns";
 import { projectIdentityKey } from "./project-identity";
 import { sessionPathKey } from "./session-path";
 import { skillExpansionToCommand } from "./slash-display";
@@ -802,7 +802,7 @@ export function buildSessionContext(
 
   const piEntries = sliced as unknown as PiSessionEntry[];
   const contextEntries = options.fullHistory
-    ? readFullBranchEntries(sliced, leafId)
+    ? readFullBranchEntries(sliced, excludeLeaf ? sliced.at(-1)?.id : leafId)
     : piBuildContextEntries(
       piEntries,
       leafId,
@@ -857,7 +857,7 @@ export function buildSessionContext(
   const oldestCursorEntry = oldestReturnedEntry ?? sliced[0];
   const hasMore = Boolean(tail && tail > 0 && oldestCursorEntry?.parentId);
   // 当前页之上的轮次数：minimap 从会话第一轮开始编号，加载更早页时编号不变（#791）。
-  const turnsBefore = hasMore && oldestCursorEntry ? countTurnsBefore(entries, oldestCursorEntry) : 0;
+  const turnsBefore = hasMore && oldestCursorEntry ? countTurnsBefore(entries, sliced.slice(sliced.indexOf(oldestCursorEntry)), turnAnchorShape) : 0;
 
   return {
     messages,

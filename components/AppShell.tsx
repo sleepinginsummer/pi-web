@@ -17,6 +17,7 @@ import { TerminalPanel } from "./TerminalPanel";
 import { SubagentViewer } from "./SubagentViewer";
 import { SessionChatPanel } from "./SessionChatPanel";
 import { createSideChat, deleteSideChat } from "@/lib/side-chat-client";
+import { sideChatHit } from "@/lib/session-search-hit";
 import { DevServerViewer } from "./DevServerViewer";
 import { agentOverlayTabId, serverOverlayTabId, type OverlayTab } from "./overlay-tabs";
 import { newTerminalTab, restoreTerminalTabs, TERMINAL_TABS_KEY, type TerminalTab } from "./terminal-tab-state";
@@ -61,14 +62,16 @@ import {
 import { DEFAULT_PENDING_NEW_SESSION_CONTROL, selectPendingNewSession, type PendingNewSessionControl } from "@/lib/pending-new-session";
 import type { ChatInputHandle } from "./ChatInput";
 import { AppTopPanels } from "./AppTopPanels";
+import { AgentMiniStrip } from "./AgentMiniStrip";
 import { getLastSettingsSection, settingsSectionRequiresProject, type SettingsSection } from "@/lib/settings-navigation";
-import { getAgentsBadge, getSessionFamily, isHiddenRelation, sideChatNameFrom, sideChatTitle } from "@/lib/session-family";
+import { getAgentStripMembers, getAgentsBadge, getSessionFamily, isHiddenRelation, sideChatNameFrom, sideChatTitle } from "@/lib/session-family";
 import { DebugPanel, DebugPanelBoundary } from "./DebugPanel";
 import { focusIfLost } from "@/lib/stacked-dialog";
 import { startPageVisibilityTracking } from "@/lib/page-debug";
 import type { DebugClientSession } from "@/lib/debug-types";
 import type { SessionInfo } from "@/lib/types";
 import { PRESET_READ_ONLY, type ToolEntry } from "@/lib/tool-presets";
+import { loadAgentStripLocked, saveAgentStripLocked } from "@/lib/agent-strip-lock";
 
 // pi 内置工具中从不改动文件的那些；其他工具都可能写文件（#1144）。
 const READ_ONLY_TOOL_NAMES = new Set<string>(PRESET_READ_ONLY);
@@ -108,6 +111,13 @@ export function AppShell() {
   const [searchTarget, setSearchTarget] = useState<{ sessionId: string; entryId: string; blockIndex?: number } | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(() => !initialNavigation.sidebarCollapsed);
   const [observerPanelSessionId, setObserverPanelSessionId] = useState<string | null>(null);
+  const [agentStripLocked, setAgentStripLocked] = useState(false);
+  useEffect(() => setAgentStripLocked(loadAgentStripLocked()), []);
+  const toggleAgentStripLock = useCallback(() => {
+    const locked = !agentStripLocked;
+    setAgentStripLocked(locked);
+    saveAgentStripLocked(locked);
+  }, [agentStripLocked]);
   const desktopSidebarOpenRef = useRef(!initialNavigation.sidebarCollapsed);
   const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([]);
   const [activeTerminalTabId, setActiveTerminalTabId] = useState<string | null>(null);
@@ -462,6 +472,11 @@ export function AppShell() {
     () => getSessionFamily(sessionsWithSelection, selectedSession?.id),
     [selectedSession?.id, sessionsWithSelection],
   );
+  const agentStripMembers = getAgentStripMembers(activeSessionFamily, selectedSession?.id, agentStripLocked);
+  const handleSelectAgentFromStrip = useCallback((session: SessionInfo) => {
+    closeTopPanel();
+    handleSelectSession(session);
+  }, [closeTopPanel, handleSelectSession]);
   const {
     dismissNotification,
     notificationController,
@@ -484,7 +499,7 @@ export function AppShell() {
   const handleSearchTargetHandled = useCallback((target: { sessionId: string; entryId: string }) => {
     setSearchTarget((current) => current?.sessionId === target.sessionId && current.entryId === target.entryId ? null : current);
   }, []);
-  const { runningSessionIds, awaitingInputSessionIds, startingSessions, subagentsActiveSessionIds, backgroundActivity, sessionListVersion, getCompletionSummary } = useRunningSessions();
+  const { runningSessionIds, awaitingInputSessionIds, startingSessions, subagentsActiveSessionIds, backgroundActivity, sessionListVersion, getCompletionSummary, readAt, getUnreadMarkTime } = useRunningSessions();
   const runningSessionTransitions = useRunningSessionTransitions(runningSessionIds, selectedSession?.id ?? null, subagentsActiveSessionIds);
   // The debug panel's reader of the chat's own state: kept in a ref, so registering renders
   // nothing, and read only by the open panel (DebugPanel), never on AppShell's renders.
@@ -775,25 +790,47 @@ export function AppShell() {
     handleOpenSubagentTab(sessionId, label);
   };
 
+  // A side chat's tab belongs to its parent's panel: opened here while the main
+  // chat shows that family, else saved with the parent, where the restore effect
+  // above finds it as the parent arrives. False when it waits there.
+  const openSideChatTab = useCallback((session: SessionInfo, label: string) => {
+    const parentId = session.relation?.kind === "side" ? session.relation.parentSessionId : null;
+    if (!parentId || parentId === sideTabOwnerRef.current) {
+      handleOpenSubagentTab(session.id, label, true);
+      return true;
+    }
+    try {
+      const key = sideTabsKey(parentId);
+      window.sessionStorage.setItem(key, appendSideTab(window.sessionStorage.getItem(key), session.id, label));
+    } catch { /* storage is optional */ }
+    return false;
+  }, [handleOpenSubagentTab]);
+
+  // A search hit in a side chat never picks it as the main chat (ADR 0007): its
+  // parent opens with the side chat's tab, as the Agents switcher's tab button
+  // shows it.
+  const handleSelectSideChat = useCallback((session: SessionInfo, entryId?: string, blockIndex?: number) => {
+    const target = sideChatHit(session, sessionCatalog, translate("agentSwitcher.sideChat"));
+    const parent = target ? sessionCatalog.find((item) => item.id === target.parentSessionId) : undefined;
+    // The search can read a list newer than this page's, which the running poll
+    // brings up to date: until then a parent it lacks cannot be opened.
+    if (!target || !parent) return;
+    setSearchTarget(entryId ? { sessionId: session.id, entryId, blockIndex } : null);
+    // The side chat is listed at once: a tab restore keeps only listed sessions.
+    setSessionCatalog((prev) => (prev.some((item) => item.id === session.id) ? prev : [session, ...prev]));
+    if (!openSideChatTab(session, target.label)) handleSelectSession(parent);
+  }, [handleSelectSession, openSideChatTab, sessionCatalog, translate]);
+
   // `/side` landed (hooks/useAgentSession): open the forked chat's tab, seed
   // its composer when the command carried a prompt, and refresh the list so
-  // the family's badge folds the new member in.
+  // the family's badge folds the new member in. A fork that landed after the
+  // main chat moved on leaves its tab with its own session.
   const handleSideSession = useCallback((session: SessionInfo, prompt: string | null) => {
     if (prompt) setSideChatPrompts((prev) => ({ ...prev, [session.id]: prompt }));
     setSessionCatalog((prev) => [session, ...prev.filter((item) => item.id !== session.id)]);
-    const label = translate("agentSwitcher.sideChat");
-    const parentId = session.relation?.kind === "side" ? session.relation.parentSessionId : null;
-    if (parentId && parentId !== sideTabOwnerRef.current) {
-      // The fork landed after the main chat moved on: the tab waits with its own session.
-      try {
-        const key = sideTabsKey(parentId);
-        window.sessionStorage.setItem(key, appendSideTab(window.sessionStorage.getItem(key), session.id, label));
-      } catch { /* storage is optional */ }
-    } else {
-      handleOpenSubagentTab(session.id, label, true);
-    }
+    openSideChatTab(session, translate("agentSwitcher.sideChat"));
     setRefreshKey((key) => key + 1);
-  }, [handleOpenSubagentTab, translate]);
+  }, [openSideChatTab, translate]);
 
   // The switcher's New side chat, on the main agent's row, whichever family member the main chat shows.
   const handleNewSideChat = useCallback(async (rootSessionId: string) => {
@@ -872,6 +909,13 @@ export function AppShell() {
     if (nextTerminalId) activatePanelTab(nextTerminalId);
     else if (nextAgentId) openFilePanel();
   }, [activatePanelTab, activeOverlayTabId, activeTerminalTabId, overlayTabs, clearFileTabs, openFilePanel, terminalTabs]);
+
+  // An extension's ctx.shutdown() ended the session's runtime, as pi quits: leave it the
+  // way a deleted session is left (the refreshed list shows whether its file remains).
+  const handleSessionEnded = useCallback((sessionId: string) => {
+    handleSessionDeleted(sessionId);
+    handleClosePanelTab(agentOverlayTabId(sessionId));
+  }, [handleSessionDeleted, handleClosePanelTab]);
 
   // The Agents switcher's Delete on a side chat: its tab goes with it, and the
   // main chat showing it goes back to the parent, as the Main agent row does
@@ -996,6 +1040,7 @@ export function AppShell() {
         selectedSessionId={selectedSession?.id ?? null}
         selectedSession={selectedSession}
         onSelectSession={handleSidebarSelectSession}
+        onSelectSideChat={handleSelectSideChat}
         onNewSession={handleNewSession}
         initialSessionId={initialNavigation.sessionId}
         skipInitialProjectSelection={initialNavigation.requestedCwd !== null}
@@ -1007,7 +1052,11 @@ export function AppShell() {
         backgroundActivity={backgroundActivity}
         startingSessions={startingSessions}
         runningSessionTransitions={runningSessionTransitions}
-        locateSessionRequest={notificationSessionLocateRequest}
+        locateSessionRequest={notificationSessionLocateRequest && activeSessionFamily && selectedSession?.relation?.kind === "side"
+          ? { ...notificationSessionLocateRequest, sessionId: activeSessionFamily.root.id }
+          : notificationSessionLocateRequest}
+        readAt={readAt}
+        getUnreadMarkTime={getUnreadMarkTime}
         selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? null}
         onCwdChange={handleCwdChange}
         worktreeState={worktreeState}
@@ -1275,12 +1324,23 @@ export function AppShell() {
             onOpen: openProjectTrustDialog,
           }}
         />
+        {showChat && agentStripMembers && activeSessionFamily && selectedSession && activeTopPanel !== "agents" && (
+          <AgentMiniStrip
+            rootSession={activeSessionFamily.root}
+            members={agentStripMembers}
+            selectedSessionId={selectedSession.id}
+            runningSessionIds={runningSessionIds}
+            onSelectSession={handleSelectAgentFromStrip}
+            locked={agentStripLocked}
+            onToggleLock={toggleAgentStripLock}
+          />
+        )}
           <AppTopPanels
             activePanel={activeTopPanel}
             agentFamily={activeSessionFamily}
             locale={locale}
             onCopySessionField={handleCopySessionField}
-            onSelectSession={handleSelectSession}
+            onSelectSession={handleSelectAgentFromStrip}
             onToggleSubagentTab={handleToggleSubagentTab}
             openSubagentTabIds={openSubagentTabIds}
             onNewSideChat={() => activeSessionFamily ? handleNewSideChat(activeSessionFamily.root.id) : Promise.resolve(null)}
@@ -1337,6 +1397,7 @@ export function AppShell() {
                   notificationController={notificationController}
                   onNewSessionCwdChange={updateDraftCwd}
                   onAgentEnd={handleAgentEnd}
+                  onSessionEnded={handleSessionEnded}
                   onSessionCreated={handleSessionCreated}
                   onSessionCreatedInBackground={handleSessionCreatedInBackground}
                   onSessionListRefresh={requestAgentSessionListRefresh}
@@ -1538,6 +1599,9 @@ export function AppShell() {
             <SessionChatPanel
               key={activeOverlayTab.sessionId}
               sessionId={activeOverlayTab.sessionId}
+              searchTarget={searchTarget?.sessionId === activeOverlayTab.sessionId ? searchTarget : undefined}
+              onSearchTargetHandled={handleSearchTargetHandled}
+              onSessionEnded={handleSessionEnded}
               running={runningSessionIds.has(activeOverlayTab.sessionId)}
               initialPrompt={sideChatPrompts[activeOverlayTab.sessionId]}
               onInitialPromptConsumed={() => setSideChatPrompts((prev) => {

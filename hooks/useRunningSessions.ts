@@ -32,6 +32,10 @@ export function useRunningSessions() {
   const [backgroundActivity, setBackgroundActivity] = useState<BackgroundActivityMap>(() => new Map());
   const [sessionListVersion, setSessionListVersion] = useState<number | null>(null);
   // 放在 ref 里：只有完成通知读取，轮询不应因此重渲染。
+  const [readAt, setReadAt] = useState<Readonly<Record<string, number>>>({});
+  const lastRunningAtRef = useRef(new Map<string, number>());
+  const finishedAtRef = useRef(new Map<string, number>());
+  const getUnreadMarkTime = useCallback((id: string) => finishedAtRef.current.get(id) ?? 0, []);
   const completionSummariesRef = useRef<ReadonlyMap<string, SessionCompletionSummary>>(new Map());
   const getCompletionSummary = useCallback((sessionId: string) => completionSummariesRef.current.get(sessionId), []);
 
@@ -84,11 +88,23 @@ export function useRunningSessions() {
           sessionListVersion?: number;
           completionSummaries?: SessionCompletionSummary[];
           backgroundActivity?: SessionBackgroundActivity[];
+          serverNow?: number;
+          readAt?: Record<string, number>;
         };
         answeredAt = Date.now();
         if (stopped || controller !== current) return;
         // 先于集合提交：集合变化触发的完成通知要读到同一次响应的摘要。
         completionSummariesRef.current = new Map((data.completionSummaries ?? []).map((summary) => [summary.sessionId, summary]));
+        if (typeof data.serverNow === "number") {
+          const active = new Set([...(data.runningSessionIds ?? []), ...(data.subagentsActiveSessionIds ?? [])]);
+          finishedAtRef.current = new Map([...lastRunningAtRef.current].filter(([id]) => !active.has(id)));
+          const now = data.serverNow;
+          lastRunningAtRef.current = new Map([...active].map((id) => [id, now]));
+        }
+        if (data.readAt) setReadAt((previous) => {
+          const entries = Object.entries(data.readAt!);
+          return entries.length === Object.keys(previous).length && entries.every(([id, at]) => previous[id] === at) ? previous : data.readAt!;
+        });
         commitSnapshot(data.runningSessionIds ?? [], data.awaitingInputSessionIds ?? [], data.subagentsActiveSessionIds ?? []);
         setBackgroundActivity((previous) => stabilizeBackgroundActivity(previous, data.backgroundActivity ?? []));
         const starting = data.startingSessions ?? [];
@@ -128,5 +144,5 @@ export function useRunningSessions() {
     };
   }, [commitSnapshot]);
 
-  return { runningSessionIds, awaitingInputSessionIds, startingSessions, subagentsActiveSessionIds, backgroundActivity, sessionListVersion, getCompletionSummary };
+  return { runningSessionIds, awaitingInputSessionIds, startingSessions, subagentsActiveSessionIds, backgroundActivity, sessionListVersion, getCompletionSummary, readAt, getUnreadMarkTime };
 }

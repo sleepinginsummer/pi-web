@@ -47,6 +47,11 @@ test("历史回复和流式回复把会话 ID 传给本地正文图片", () => {
   }
 });
 
+test("a collapsed grep card shows what was searched for", () => {
+  const html = renderMessage({ role: "assistant", content: [{ type: "toolCall", toolCallId: "grep-preview", toolName: "grep", input: { path: "src", pattern: "TODO" } }] });
+  assert.match(html, />TODO<\/span>/);
+  assert.doesNotMatch(html, />src<\/span>/);
+});
 test("updates a reused message when its written files change", () => {
   const props = { message: { role: "assistant", content: [] } };
   assert.equal(MessageView.compare(props, props), true);
@@ -380,6 +385,51 @@ test("renders partial assistant content before the provider error", () => {
 
   assert.match(html, /Partial response/);
   assert.match(html, /Error: Connection closed/);
+});
+
+test("a stopped reply says Stopped, never the abort error its provider's client threw", () => {
+  for (const errorMessage of ["Request aborted", "This operation was aborted", "OpenAI Responses stream ended before a terminal response event"]) {
+    const html = renderMessage({
+      role: "assistant",
+      provider: "openai",
+      model: "gpt-test",
+      content: [{ type: "text", text: "Partial response" }],
+      stopReason: "aborted",
+      errorMessage,
+    });
+    assert.match(html, /Partial response/);
+    assert.match(html, />Stopped</);
+    assert.ok(!html.includes(errorMessage), errorMessage);
+  }
+
+  // Stopped while it streamed a tool call's arguments: the call never ran, so
+  // its card has no result, and the line under it says why.
+  const html = renderMessage({
+    role: "assistant",
+    provider: "anthropic",
+    model: "claude-test",
+    content: [
+      { type: "text", text: "Writing the file." },
+      { type: "toolCall", toolCallId: "call-stopped-write", toolName: "write", input: { path: "a.txt" } },
+    ],
+    stopReason: "aborted",
+    errorMessage: "This operation was aborted",
+  }, { toolResults: new Map() });
+  assert.ok(html.indexOf(">Stopped<") > html.indexOf("a.txt"));
+});
+
+test("a stopped reply's mark leads its usage line instead of a line of its own", () => {
+  const html = renderMessage({
+    role: "assistant",
+    provider: "anthropic",
+    model: "claude-test",
+    content: [{ type: "text", text: "Partial response" }],
+    stopReason: "aborted",
+    errorMessage: "This operation was aborted",
+    usage: { input: 1200, output: 34, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+  }, { turnDurationMs: 12_000 });
+  assert.match(html, /<span>Stopped<\/span> <span>·<\/span> <span><span[^>]*>↑<\/span>/);
+  assert.equal(html.split(">Stopped<").length, 2);
 });
 
 test("marks persisted assistant messages with their source entry", () => {
@@ -871,7 +921,8 @@ test("collapses the compaction summary to its title and token count, as pi's TUI
     null,
     React.createElement(CompactionSummaryDetails, { summary }),
   ));
-  assert.match(details, /following summary/);
+  // The header already says it was compacted; the summary follows with no sentence restating that.
+  assert.doesNotMatch(details, /following summary/);
   assert.match(details, /Ship the parser fix/);
   assert.match(details, /File context: 1 read, 1 modified/);
   assert.match(details, /lib\/read\.ts/);

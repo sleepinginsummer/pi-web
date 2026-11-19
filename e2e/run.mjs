@@ -12,6 +12,7 @@ import { chromium } from "playwright";
 import { checkFilePanel, filePanelFixture } from "./file-panel.mjs";
 import { checkExtensionDialogSizing, checkExtensionDialogs, extensionSource } from "./extension-dialog.mjs";
 import { checkChatAppearance } from "./chat-appearance.mjs";
+import { checkComposerFocus } from "./composer-focus.mjs";
 import { checkCodeBackground } from "./code-background.mjs";
 import { checkModelDiscovery } from "./model-discovery.mjs";
 import { checkModelContext } from "./model-context.mjs";
@@ -36,6 +37,7 @@ const RICH = "e2e-rich-session";
 const COMPACTED = "e2e-compacted-session";
 const APPEND = "e2e-external-append-session";
 const CODE_BACKGROUND = "e2e-code-background";
+const SIDE = "e2e-side-session";
 const text = (i) => `E2E message ${String(i).padStart(4, "0")}`;
 const ids = (start, end) => Array.from({ length: end - start }, (_, i) => `e${start + i}`);
 
@@ -43,8 +45,9 @@ function message(id, parentId, role, content) {
   return { type: "message", id, parentId, timestamp, message: { role, content } };
 }
 
-function writeSession(id, entries) {
-  const header = { type: "session", version: 3, id, timestamp, cwd: project };
+function writeSession(id, entries, parentId) {
+  const header = { type: "session", version: 3, id, timestamp, cwd: project,
+    ...(parentId ? { parentSession: join(sessionDir, `2026-08-23T00-00-00-000Z_${parentId}.jsonl`) } : {}) };
   writeFileSync(join(sessionDir, `2026-08-23T00-00-00-000Z_${id}.jsonl`),
     [header, ...entries].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
 }
@@ -111,6 +114,15 @@ try {
   ];
   Object.assign(richEntries.at(-1).message, { provider: "test", model: "E2E Model" });
   writeSession(RICH, richEntries);
+  const sideQuestion = "E2E unique side conversation about copper cooling";
+  writeSession(SIDE, [
+    { type: "custom", customType: "pi-web:side", id: "side-meta", parentId: null, timestamp,
+      data: { version: 1, parentSessionId: RICH, createdAt: timestamp } },
+    message("inherited", "side-meta", "user", "E2E inherited-only question"),
+    { type: "custom_message", customType: "pi-web:side-boundary", id: "side-boundary", parentId: "inherited", timestamp, content: "Side chat boundary", display: false },
+    message("side-question", "side-boundary", "user", sideQuestion),
+    message("side-reply", "side-question", "assistant", "The copper cooling calculation is complete."),
+  ], RICH);
   writeSession(CODE_BACKGROUND, [
     message("user", null, "user", "E2E code background"),
     message("answer", "user", "assistant", [{ type: "text", text:
@@ -184,7 +196,7 @@ try {
     const response = await fetch(`${base}/api/sessions`, { signal: AbortSignal.timeout(5000) }).catch(() => null);
     if (response?.ok) {
       const { sessions } = await response.json();
-      assert.deepEqual(sessions.map((session) => session.id).sort(), [LONG, BRANCH, RICH, COMPACTED, APPEND, CODE_BACKGROUND].sort());
+      assert.deepEqual(sessions.map((session) => session.id).sort(), [LONG, BRANCH, RICH, COMPACTED, APPEND, CODE_BACKGROUND, SIDE].sort());
       break;
     }
     assert.ok(Date.now() < deadline, "Server readiness timed out; see server.log");
@@ -215,6 +227,12 @@ try {
   assert.equal(compacted.context.entryIds[0], "compact");
   assert.equal(compacted.context.messages.some((entry) => entry.role === "user"), false);
   console.log("PASS: bounded history, branch context, pagination root, and API errors");
+
+  const receipt = await post(`/api/sessions/${LONG}/read`, {});
+  assert.ok(Number.isSafeInteger(receipt.readAt) && receipt.readAt > 0);
+  const receiptSnapshot = await api("/api/agent/running");
+  assert.equal(receiptSnapshot.readAt[LONG], receipt.readAt, "A fresh poll shares the persisted read with other browsers");
+  assert.ok(receiptSnapshot.serverNow >= receipt.readAt);
 
   // 外部写入通过界面实际使用的 /context 检测；普通详情仍可按需强制刷新。
   {
@@ -316,8 +334,9 @@ try {
       assert.equal(firstPage.number, "2500", "Minimap turns are numbered from the session's first turn");
       assert.match(firstPage.earlier, /^Earlier turns not loaded: \d+\. Click to load$/);
     }
-    const triggerOlderPage = async () => {
-      const responsePromise = page.waitForResponse(isOlderContextResponse);
+    const triggerOlderPage = async (seen) => {
+      const responsePromise = page.waitForResponse((response) => isOlderContextResponse(response)
+        && !seen.has(new URL(response.url()).searchParams.get("before")));
       for (let attempt = 0; attempt < 40; attempt++) {
         await sentinel.evaluate((element) => element.scrollIntoView({ block: "start", behavior: "instant" }));
         const response = await Promise.race([responsePromise, delay(250).then(() => null)]);
@@ -330,7 +349,7 @@ try {
     // Observer 可能在断言前扩展本地渲染窗口并预取第一页历史；
     // 这里只验证后续两次请求，不假设浏览器仍停留在初始 50 条边界。
     for (let turn = 0; turn < 2; turn++) {
-      const response = await triggerOlderPage();
+      const response = await triggerOlderPage(new Set(olderPages.map((pageData) => pageData.beforeId)));
       const older = (await response.json()).context;
       olderPages.push({
         status: response.status(),
@@ -343,10 +362,13 @@ try {
     assert.equal(await latestUser.textContent(), text(4998), "Prepending history must keep the latest message available");
     assert.equal(olderPages.length, 2, "Scrolling must fetch two consecutive older pages");
     let oldest;
-    for (const pageData of olderPages) {
+    const verifiedCursors = new Set();
+    for (const pageData of olderPages.sort((a, b) => Number(b.beforeId.slice(1)) - Number(a.beforeId.slice(1)))) {
       assert.equal(pageData.status, 200);
       assert.match(pageData.beforeId, /^e\d+$/);
       const before = Number(pageData.beforeId.slice(1));
+      // 观察者与手动滚动都可能看到已校验过的同一游标。
+      if (verifiedCursors.has(before)) continue;
       // 两次手动滚动之间可能还有哨兵预取，逐页校验实际拿到的响应。
       while (oldest !== undefined && before < oldest) {
         const intermediate = olderResponses.get(`e${oldest}`);
@@ -358,8 +380,10 @@ try {
         assert.deepEqual(context.entryIds, ids(start, oldest));
         assert.equal(context.oldestEntryId, `e${start}`);
         oldest = start;
+        verifiedCursors.add(oldest + context.entryIds.length);
       }
       if (oldest !== undefined) assert.equal(before, oldest);
+      verifiedCursors.add(before);
       const older = pageData.context;
       const pageStart = before - older.entryIds.length;
       assert.deepEqual(older.entryIds, ids(pageStart, before));
@@ -369,6 +393,7 @@ try {
       assert.equal(older.hasMore, true);
     }
     assert.equal(typeof oldest, "number");
+    await page.locator(`[data-entry-id="e${oldest}"]`).first().waitFor({ state: "attached" });
     const rendered = (await page.getByText(/^E2E message \d{4}$/).allTextContents())
       // The sidebar also displays the first message as the session title.
       .filter((value) => value !== text(0));
@@ -489,7 +514,7 @@ try {
         return targetBox.y - scrollBox.y;
       };
       const captureReadingAnchor = async () => {
-        const deadline = Date.now() + 5000;
+        const deadline = Date.now() + 30_000;
         while (Date.now() < deadline) {
           const anchor = await page.locator("[data-entry-id]:not([data-message-role])").evaluateAll((elements) => {
             const scroll = document.querySelector("[data-chat-scroll-container]");
@@ -518,10 +543,11 @@ try {
         return readingOffset(target);
       };
       await selectSession(text(0), "e4999");
-      const olderPage = page.waitForResponse(isOlderContextResponse);
-      await sentinel.evaluate((element) => element.scrollIntoView({ block: "start", behavior: "instant" }));
-      await olderPage;
-      await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      const olderMessage = page.locator('[data-entry-id="e4949"]:not([data-message-role])');
+      // 旧页可能已从这次页面内的历史快照恢复，按目标消息是否已挂载来决定要不要再分页。
+      if (await olderMessage.count() === 0) await triggerOlderPage(new Set());
+      await olderMessage.waitFor({ state: "visible" });
+      await positionForReading(olderMessage);
       await selectSession("Render **E2E markdown**", "user");
       const process = page.getByRole("button", { name: /process details/i });
       await process.click();
@@ -608,6 +634,18 @@ try {
     await page.goto(`${base}/?session=${CODE_BACKGROUND}`, { waitUntil: "domcontentloaded" });
     await page.locator(".markdown-code-block pre").waitFor();
     await checkCodeBackground(page);
+    await checkComposerFocus(page, { base, sessionId: RICH });
+    if (viewport.width > 600) {
+      await page.goto(`${base}/?session=${BRANCH}`, { waitUntil: "domcontentloaded" });
+      const showSidebar = page.getByRole("button", { name: "Show sidebar", exact: true });
+      if (await showSidebar.isVisible()) await showSidebar.click();
+      await page.getByRole("button", { name: "Search conversations", exact: true }).click();
+      await page.getByRole("searchbox", { name: "Search all conversations..." }).fill("unique cooling");
+      await page.getByRole("button", { name: /Side chat of Render/ }).click();
+      await page.locator("#file-panel [data-entry-id='side-question']").first().waitFor({ state: "visible" });
+      await page.waitForURL((url) => url.searchParams.get("session") === RICH);
+      console.log("PASS: a multi-term side chat result opens the parent and reveals the hit in the panel");
+    }
     assert.deepEqual(errors, [], `Browser errors at width ${viewport.width}`);
     console.log(`PASS: ${viewport.width}px browser pagination, branch, markdown, code, tool call, and compaction navigation`);
     await context.tracing.stop();

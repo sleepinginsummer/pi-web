@@ -6,6 +6,16 @@
 
 中文微信群：请查看 [GitHub Discussions 帖子](https://github.com/agegr/pi-web/discussions/271)。
 
+![Pi Web 展示包含结构化 Markdown、工具调用和项目导航的 pi 会话](https://raw.githubusercontent.com/agegr/pi-web/main/docs/screenshot2.png)
+
+## 功能
+
+- **会话工作区**：按项目查找、继续、重命名、导出和删除对话，并查看运行状态、上下文占用、花费和压缩信息。
+- **两种分支方式**：**新会话**会从较早的消息创建独立会话文件；**从此处编辑**会在当前会话内创建分支。
+- **项目文件工具**：浏览和上传文件、查看 Git Diff，并预览源码、Markdown、图片、音频、PDF 和 DOCX；文件变化后会自动刷新。
+- **Git worktree**：从侧边栏切换 checkout，同时把同一仓库不同 worktree 的会话归在一起。
+- **网页配置**：无需离开 Pi Web，即可管理 Provider 登录和 API Key、模型、模型测试、插件包及技能。
+- **英文、简体中文和繁体中文界面**：Pi Web 首次打开时跟随浏览器语言，也可在「设置 → 常规 → 语言」中切换语言。
 ## 快速开始
 
 Pi Web 要求 Node.js 22.19.0 或更高版本。可通过 `node --version` 检查当前版本。
@@ -46,6 +56,25 @@ API 请求仅接受 loopback 名称、IP 字面量、当前监听主机名，以
 ## 本 fork 的预构建 Release
 
 `sleepinginsummer/pi-web` 通过 `.github/workflows/release-package.yml` 发布包含 `.next` 的 npm `.tgz`。手动触发工作流或推送与包版本一致的 `v*-merge.*` 标签后，依次执行检查、构建、打包和独立安装验证，成功后才发布 Release。无需 npm registry 发布权限。
+端口和主机名以命令行参数为准，优先于对应的环境变量。`--no-open` 与 `PI_WEB_NO_OPEN=1` 中任意一个都会关闭自动打开浏览器。运行 `pi-web --help`（或 `-h`）可打印启动选项并以退出码 0 结束，不会启动服务；未知参数会报错并以退出码 1 结束。
+
+| 参数或环境变量 | 用途 | 默认值 |
+| --- | --- | --- |
+| `--help`、`-h` | 打印启动选项并退出 | — |
+| `--port <端口>`、`-p <端口>` 或 `PORT` | 服务端口 | `30141` |
+| `--hostname <主机>`、`-H <主机>` 或 `PI_WEB_HOSTNAME` | 监听主机名 | `127.0.0.1` |
+| `--no-open` 或 `PI_WEB_NO_OPEN=1` | 不自动打开浏览器 | 自动打开 |
+| `PI_WEB_APP_NAME` | PWA manifest 的 `name` 和 `short_name`；去除首尾空白，空值使用默认值 | `Pi Web` |
+| `PI_WEB_SKIP_VERSION_CHECK=1` | 关闭 Pi Web 的更新检查 | 未设置 |
+| `PI_WEB_ALLOWED_HOSTS` | 额外允许的代理或自定义主机名，多个值用逗号分隔，必须精确匹配 | 未设置 |
+| `PI_WEB_PASSWORD` | 启用浏览器密码登录；API 客户端可使用用户名为 `pi` 的 Basic Auth | 不启用认证 |
+| `PI_WEB_IDLE_TIMEOUT_MS` | 会话空闲超时，单位毫秒，最大 `2147483647`；`0` 表示不因空闲关闭会话；无效或超出范围的值使用默认值 | `600000`（10 分钟） |
+| `PI_WEB_SHUTDOWN_DEADLINE_MS` | 关闭会话时留给扩展处理 `session_shutdown` 的时间，到时仍会释放会话；单位毫秒，最大 `2147483647`；`0`、无效或超出范围的值使用默认值 | `5000`（5 秒） |
+| `PI_CODEMODE_MAX_WORKERS` | pi 同时运行 codemode 脚本的上限，由服务器里所有会话和 subagent 共用；pi 自身默认是 `2`，变量未设置或为空时 pi-web 设为 `8`。每个脚本最多可用 256 MB | `8` |
+
+在启动服务前设置 `PI_WEB_APP_NAME`，例如 `PI_WEB_APP_NAME='工作 Pi' pi-web`。修改后重启服务即可提供新的 manifest，无需重新构建。已安装 PWA 的名称更新由浏览器管理，不保证立即生效；此设置不改变页面标题或图标。
+
+例如：
 
 ```bash
 gh workflow run release-package.yml --repo sleepinginsummer/pi-web --ref main
@@ -59,6 +88,13 @@ macOS 安装包附带 `scripts/macos-service.sh start|stop|restart|status`，使
 
 
 ## HTTP 代理
+同时开着很多活跃的会话、终端或文件预览时，明文 HTTP 下浏览器最多只有六个连接，请求会开始排队；见 [Serving Pi Web over HTTP/2](./http2.md)。
+
+### Docker
+
+每个版本都会向 `ghcr.io/agegr/pi-web` 发布镜像。镜像用法、Compose 示例以及需要保留哪些卷，见 [Running Pi Web in Docker](./docker.md)。
+
+### HTTP 代理
 
 Pi Web 的服务端模型请求和 API 请求会读取标准的 `HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY` 环境变量。
 
@@ -93,9 +129,10 @@ npx @agegr/pi-web@latest
 
 - **智能体数据**：Pi Web 默认读取 `~/.pi/agent` 下的 pi 数据，包括 `sessions/<编码后的工作目录>/<时间戳>_<uuid>.jsonl` 中的会话文件。可通过 `PI_CODING_AGENT_DIR` 指定其他 pi agent 目录。
 - **文件系统访问**：Pi Web 必须能读取智能体数据目录及会话记录中的工作目录。与现有 pi 会话共用数据时，请让 Pi Web 运行在与 pi 相同的文件系统环境中。
-- **共享配置**：模型面板使用 pi 的模型、设置和凭据存储，因此两种界面都能看到相关更改。
+- **共享配置**：模型面板使用 pi 的模型、设置和凭据存储，因此两种界面都能看到相关更改。已打开的会话要再次选择该模型，才会应用保存后的模型修改。
 - **文件访问边界**：文件浏览器仅能访问在 Pi Web 中选择过的工作目录，以及它已识别的项目或会话根目录；它不是通用的文件系统浏览器。
 - **Git worktree**：切换器何时显示、如何创建 worktree，以及删除会产生什么影响，见 [Pi Web 里的 Worktree](./worktrees.zh-CN.md)。
+- **集成接口**：嵌入 Pi Web 的应用可以替换会话行的右键菜单，服务端的 pi 扩展可以让会话不因空闲被关闭；见 [Integration Hooks](./integrations.md)。
 
 ## 开发
 
@@ -121,7 +158,7 @@ npm run lint
 
 ```
 
-架构说明和详细文件地图见 [AGENTS.md](../AGENTS.md)。
+架构说明、API 路由和专题笔记见 [AGENTS.md](../AGENTS.md)。
 
 ## 许可证
 

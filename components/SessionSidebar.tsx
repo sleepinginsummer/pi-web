@@ -1,7 +1,8 @@
 "use client";
 
 import type { BackgroundActivityMap } from "@/hooks/useRunningSessions";
-import { stabilizeStringSet } from "@/lib/stable-string-set";
+import { needsRead, parseUnreadMarks, sameMarksOr, serializeUnreadMarks, UNREAD_SESSIONS_STORAGE_KEY, withoutReadMarks } from "@/lib/unread-markers";
+import { isPageAttended, subscribePageAttention } from "@/lib/user-attention";
 import { useEffect, useState, useCallback, useMemo, useRef, type ReactNode } from "react";
 import type { SessionInfo, WorktreeState } from "@/lib/types";
 import { isHiddenRelation } from "@/lib/session-family";
@@ -124,6 +125,7 @@ interface Props {
   /** 新会话转正后、服务端列表扫描到文件前用于立即渲染当前会话。 */
   selectedSession?: SessionInfo | null;
   onSelectSession: (session: SessionInfo, isRestore?: boolean, entryId?: string, blockIndex?: number) => void;
+  onSelectSideChat: (session: SessionInfo, entryId?: string, blockIndex?: number) => void;
   onNewSession?: (sessionId: string, cwd: string) => void;
   initialSessionId?: string | null;
   skipInitialProjectSelection?: boolean;
@@ -137,6 +139,8 @@ interface Props {
   backgroundActivity?: BackgroundActivityMap;
   startingSessions?: ReadonlyMap<string, string>;
   runningSessionTransitions: RunningSessionTransitionEvent;
+  readAt: Readonly<Record<string, number>>;
+  getUnreadMarkTime: (id: string) => number;
   locateSessionRequest?: { sessionId: string; revision: number } | null;
   selectedCwd?: string | null;
   onCwdChange?: (cwd: string | null, projectRoot?: string | null, projectKey?: string | null) => void;
@@ -147,9 +151,10 @@ interface Props {
   onExplorerRefresh?: () => void;
   onAtMention?: (relativePath: string, isDir: boolean) => void;
   onAtMentions?: (relativePaths: string[]) => void;
-  /** Fired when a session that is not currently selected finishes running.
-   *  Lets the app play a cross-workspace completion tone. */
-  onBackgroundTaskDone?: () => void;
+  /** Fired when sessions that are not currently selected finish running.
+   *  Lets the app play a cross-workspace completion tone. `since`: no earlier
+   *  than the poll that last saw them running (a chime claim's bound, #1688). */
+  onBackgroundTaskDone?: (sessionIds: string[], since: number) => void;
   /**
    * Sessions that finished while the tab was hidden (#1484): usually the
    * selected one, which `unreadSessionIds` excludes. Counted by the favicon
@@ -160,7 +165,6 @@ interface Props {
   onSessionsChange?: (sessions: SessionInfo[]) => void;
 }
 
-const UNREAD_SESSIONS_STORAGE_KEY = "pi-web:unread-session-ids";
 const LAST_CUSTOM_CWD_STORAGE_KEY = "pi-web:last-custom-cwd";
 
 function loadLastCustomCwd(): string {
@@ -181,33 +185,12 @@ function saveLastCustomCwd(cwd: string): void {
   }
 }
 
-function parseUnreadSessionIds(raw: string | null): Set<string> {
-  if (!raw) return new Set();
+function loadUnreadMarks(): Map<string, number> {
+  if (typeof window === "undefined") return new Map();
   try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (Array.isArray(parsed)) return new Set(parsed.filter((id): id is string => typeof id === "string"));
+    return parseUnreadMarks(window.localStorage.getItem(UNREAD_SESSIONS_STORAGE_KEY));
   } catch {
-    // A malformed value (an interrupted write, another client) means no markers.
-  }
-  return new Set();
-}
-
-function loadUnreadSessionIds(): Set<string> {
-  if (typeof window === "undefined") return new Set();
-  try {
-    return parseUnreadSessionIds(window.localStorage.getItem(UNREAD_SESSIONS_STORAGE_KEY));
-  } catch {
-    return new Set();
-  }
-}
-
-function saveUnreadSessionIds(ids: Set<string>): void {
-  if (typeof window === "undefined") return;
-  try {
-    if (ids.size === 0) window.localStorage.removeItem(UNREAD_SESSIONS_STORAGE_KEY);
-    else window.localStorage.setItem(UNREAD_SESSIONS_STORAGE_KEY, JSON.stringify([...ids]));
-  } catch {
-    // ignore storage quota / privacy-mode errors
+    return new Map();
   }
 }
 
@@ -309,7 +292,7 @@ function PiWebTitle() {
 }
 const EMPTY_SESSION_ID_SET: ReadonlySet<string> = new Set();
 
-export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, selectedSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, runningSessionIds, awaitingInputSessionIds = EMPTY_SESSION_ID_SET, backgroundActivity, startingSessions, runningSessionTransitions, locateSessionRequest, selectedCwd: selectedCwdProp, onCwdChange, worktreeState = null, onOpenFile, onOpenTerminal, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onSessionsChange }: Props) {
+export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, selectedSession, onSelectSession, onSelectSideChat, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, runningSessionIds, awaitingInputSessionIds = EMPTY_SESSION_ID_SET, backgroundActivity, startingSessions, runningSessionTransitions, readAt, getUnreadMarkTime, locateSessionRequest, selectedCwd: selectedCwdProp, onCwdChange, worktreeState = null, onOpenFile, onOpenTerminal, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onSessionsChange }: Props) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
   const {
@@ -357,7 +340,10 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
   const [explorerRefreshDone, setExplorerRefreshDone] = useState(false);
   const [fileManager, setFileManager] = useState<FileManagerAvailability | null>(null);
   const [fileManagerError, setFileManagerError] = useState<string | null>(null);
-  const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => loadUnreadSessionIds());
+  const [unreadMarks, setUnreadMarks] = useState(loadUnreadMarks);
+  const unreadSessionIds = useMemo(() => new Set(unreadMarks.keys()), [unreadMarks]);
+  const lastReadRequestRef = useRef<{ sessionId: string; modified: string | undefined } | null>(null);
+  const unreadRevisionRef = useRef(0);
   const explorerRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fileExplorerRef = useRef<FileExplorerHandle>(null);
 
@@ -373,9 +359,9 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
   useEffect(() => {
     if (loading || error) return;
     const existingIds = new Set(allSessions.map((session) => session.id));
-    setUnreadSessionIds((current) => {
+    setUnreadMarks((current) => {
       if (current.size === 0) return current;
-      const next = new Set([...current].filter((id) => existingIds.has(id)));
+      const next = new Map([...current].filter(([id]) => existingIds.has(id)));
       return next.size === current.size ? current : next;
     });
   }, [allSessions, error, loading]);
@@ -459,8 +445,14 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
   // Persist unread markers so they survive a browser refresh before the user
   // has actually opened the completed session.
   useEffect(() => {
-    saveUnreadSessionIds(unreadSessionIds);
-  }, [unreadSessionIds]);
+    try {
+      const value = serializeUnreadMarks(unreadMarks);
+      if (value === null) window.localStorage.removeItem(UNREAD_SESSIONS_STORAGE_KEY);
+      else if (window.localStorage.getItem(UNREAD_SESSIONS_STORAGE_KEY) !== value) {
+        window.localStorage.setItem(UNREAD_SESSIONS_STORAGE_KEY, value);
+      }
+    } catch { /* 浏览器存储不可用时仍可在当前页面标记。 */ }
+  }, [unreadMarks]);
 
   // Another tab's read or mark-unread of the same session: its localStorage
   // write is the only cross-tab notice there is, and the browser fires the
@@ -471,7 +463,7 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
   useEffect(() => {
     const onStorage = (event: StorageEvent) => {
       if (event.key !== null && event.key !== UNREAD_SESSIONS_STORAGE_KEY) return;
-      setUnreadSessionIds((prev) => stabilizeStringSet(prev, [...parseUnreadSessionIds(event.newValue)]));
+      setUnreadMarks((previous) => sameMarksOr(previous, parseUnreadMarks(event.newValue)));
     };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
@@ -490,9 +482,9 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
 
 
   useEffect(() => {
-    setUnreadSessionIds((prev) => {
+    setUnreadMarks((prev) => {
       if (![...runningSessionIds].some((sessionId) => prev.has(sessionId))) return prev;
-      const next = new Set(prev);
+      const next = new Map(prev);
       runningSessionIds.forEach((sessionId) => next.delete(sessionId));
       return next;
     });
@@ -510,28 +502,50 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
   }, [awaitingInputSessionIds, unreadSessionIds, hiddenFinishedSessionIds]);
 
   useEffect(() => {
-    if (runningSessionTransitions.revision === 0) return;
+    if (runningSessionTransitions.revision <= unreadRevisionRef.current) return;
+    unreadRevisionRef.current = runningSessionTransitions.revision;
     const { completedInBackground, started } = runningSessionTransitions;
     if (completedInBackground.length > 0) {
-      setUnreadSessionIds((prev) => {
-        const next = new Set(prev);
-        completedInBackground.forEach((sessionId) => next.add(sessionId));
-        return next;
+      setUnreadMarks((previous) => {
+        const next = new Map(previous);
+        completedInBackground.forEach((sessionId) => next.set(sessionId, getUnreadMarkTime(sessionId)));
+        return withoutReadMarks(next, readAt);
       });
     }
     // 新会话开始运行或后台会话完成时刷新列表；当前会话完成由 ChatWindow 刷新。
     if (completedInBackground.length > 0 || started.length > 0) void loadSessions(false);
-  }, [loadSessions, runningSessionTransitions]);
+  }, [getUnreadMarkTime, loadSessions, readAt, runningSessionTransitions]);
 
   useEffect(() => {
-    if (!selectedSessionId) return;
-    setUnreadSessionIds((prev) => {
-      if (!prev.has(selectedSessionId)) return prev;
-      const next = new Set(prev);
-      next.delete(selectedSessionId);
-      return next;
-    });
-  }, [selectedSessionId]);
+    setUnreadMarks((previous) => withoutReadMarks(previous, readAt));
+  }, [readAt]);
+
+  useEffect(() => {
+    if (!selectedSessionId || runningSessionIds.has(selectedSessionId)) return;
+    const modified = selectedSession?.id === selectedSessionId ? selectedSession.modified : undefined;
+    const sendRead = () => {
+      if (!isPageAttended()) return;
+      const last = lastReadRequestRef.current;
+      const marked = unreadMarks.has(selectedSessionId);
+      if (!marked && last?.sessionId === selectedSessionId && last.modified === modified) return;
+      const known = Object.hasOwn(readAt, selectedSessionId) ? readAt[selectedSessionId] : undefined;
+      if (!needsRead({ readAt: known, modifiedMs: modified ? Date.parse(modified) : undefined, marked, pending: false })) return;
+      const request = { sessionId: selectedSessionId, modified };
+      if (last?.sessionId === selectedSessionId && last.modified === modified) return;
+      lastReadRequestRef.current = request;
+      void fetch(`/api/sessions/${encodeURIComponent(selectedSessionId)}/read`, { method: "POST" })
+        .then((response) => {
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        })
+        .catch((error) => {
+          if (lastReadRequestRef.current === request) lastReadRequestRef.current = null;
+          console.error("[pi-web] 更新会话已读失败", error);
+        });
+    };
+    const unsubscribe = subscribePageAttention(sendRead);
+    sendRead();
+    return unsubscribe;
+  }, [readAt, runningSessionIds, selectedSession?.id, selectedSession?.modified, selectedSessionId, unreadMarks]);
 
   useEffect(() => {
     if (explorerRefreshKey !== undefined) setExplorerKey((k) => k + 1);
@@ -988,6 +1002,8 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
         refreshKey={refreshKey ?? null}
         selectedSessionId={selectedSessionId}
         onSelectSession={handleSelectSessionFromList}
+        onSelectSideChat={onSelectSideChat}
+        sessions={visibleSessions}
       >
       {/* 项目目录与会话组成同一棵导航树。 */}
       <div data-session-scroll ref={listScrollRef} className="scrollbar-subtle" style={{ flex: explorerOpen && (selectedCwdProp || selectedCwd) ? "1 1 0" : "1 1 auto", overflowY: "auto", padding: "0", minHeight: 80 }}>

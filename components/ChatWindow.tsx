@@ -8,7 +8,7 @@ import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecuti
 import { normalizeCustomPanelLines, parseAnsiLine } from "@/lib/ansi";
 import { stripAnsi } from "@/lib/ansi";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
-import { collapsesProcessDetails, countToolCallBlocks, hasAssistantAnswer, getDisplayableAssistantBlocks, isHiddenCustomMessage, isMessageGroupAnchor, splitFinalAssistantBlocks } from "@/lib/message-display";
+import { collapsesProcessDetails, countToolCallBlocks, hasAssistantAnswer, getDisplayableAssistantBlocks, isHiddenCustomMessage, getTurnAnchors, hasTurnRef, LIVE_OUTPUT_PREVIEW_LINES, liveOutputPreview, splitFinalAssistantBlocks } from "@/lib/message-display";
 import { EXTENSION_DIALOG_BASE_WIDTH, fitExtensionDialogWidth } from "@/lib/extension-dialog-fit";
 import { getTurnDurationMs } from "@/lib/turn-duration";
 import { compactNotificationText, getAssistantNotificationPreview, NOTIFICATION_TITLE_CHARS } from "@/lib/notification-text";
@@ -80,6 +80,7 @@ interface Props {
   onPendingNewSessionEvent: (cwd: string, event: PendingNewSessionEvent) => void;
   notificationController: CompletionNotificationController;
   onAgentEnd?: () => void;
+  onSessionEnded?: (sessionId: string) => void;
   onSessionCreated?: (session: SessionInfo) => void;
   onSessionCreatedInBackground?: (session: SessionInfo) => void;
   onSessionListRefresh?: (request: SessionListRefreshRequest) => void;
@@ -240,7 +241,7 @@ function LiveProcessDetailsGroup({ hiddenCount, renderAll, renderRecent, t }: { 
   );
 }
 
-export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSession, onDebugSnapshotReaderChange, navigationKey, isNavigationActive, session, observerPanel, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, newSessionCwd, newSessionWorktrees, pendingNewSessionControl, onPendingNewSessionEvent, notificationController, onAgentEnd, onSessionCreated, onSessionCreatedInBackground, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onShadowMindControlChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenSettings, onContextUsageChange, onOpenFile, onFilesUploaded, onOpenSubagent, onOpenServerPreview, onToolEnd, onNewSessionCwdChange, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed }: Props) {
+export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSession, onDebugSnapshotReaderChange, navigationKey, isNavigationActive, session, observerPanel, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, newSessionCwd, newSessionWorktrees, pendingNewSessionControl, onPendingNewSessionEvent, notificationController, onAgentEnd, onSessionEnded, onSessionCreated, onSessionCreatedInBackground, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onShadowMindControlChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenSettings, onContextUsageChange, onOpenFile, onFilesUploaded, onOpenSubagent, onOpenServerPreview, onToolEnd, onNewSessionCwdChange, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed }: Props) {
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio, holdAudio } = useAudio();
   const {
@@ -263,14 +264,14 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
 
   const {
     loading, error, sendError, activeLeafId, messages, entryIds, messageKeys, historyCursor, streamingStore, hasEarlierMessages, loadingEarlierMessages, earlierTurnCount,
-    agentRunning, bashRunning, pendingBash, modelState, modelActions, missingCwd, isModelScopeActive, allModelList, loadAllModels, toolPreset,
+    agentRunning, bashRunning, pendingBash, modelState, modelActions, missingCwd, isModelScopeActive, allModelList, loadAllModels, toolPreset, customToolNames, activeBuiltinTools,
     retryInfo, contextUsage, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
     notices, setNoticeExpanded, extensionDialog, extensionCustomUi, askQuestionnaire, submitAskQuestionnaire, cancelAskQuestionnaire, extensionStatuses, extensionWidgets, detachedSubagentStatuses, todos, respondToExtensionUi, sendExtensionCustomInput, armCustomAnswer,
     agentPhase, completion,
     isNew, creationSettingsLocked, scrollPositionRequest,
-    activeToolResults, editEntryId, handleEditContent, cancelEdit, addNotice,
+    activeToolResults, toolClocks, editEntryId, handleEditContent, cancelEdit, addNotice,
     sessionIdRef,
     handleSend, handleAbort, startSideChat, handleFork, loadEarlierMessages,
     handleCompact, handleQueuedSubmit, handleAbortCompaction, dismissCompactError,
@@ -278,7 +279,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
     handleBuiltinSlashCommand,
     handleShadowMindToggle, handleToolPresetChange, loadSlashCommands,
   } = useAgentSession({
-    navigationKey, isNavigationActive, session, newSessionCwd, pendingNewSessionControl, onPendingNewSessionEvent, onSessionCreated, onSessionCreatedInBackground, onSessionListRefresh, onSessionForked, onToolEnd,
+    navigationKey, isNavigationActive, session, newSessionCwd, pendingNewSessionControl, onPendingNewSessionEvent, onSessionCreated, onSessionCreatedInBackground, onSessionListRefresh, onSessionForked, onSessionEnded, onToolEnd,
     onSideSession, onDebugSnapshotReaderChange, t, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onSessionStatsPanelOpen, onOpenSettings,
   });
   const isStreaming = useStreamingSelector(streamingStore, selectIsStreaming);
@@ -681,7 +682,10 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
   useEffect(() => {
     if (!searchTarget || loading || searchLoadRef.current) return;
     if (entryIds.includes(searchTarget.entryId)) {
-      setRenderWindow({ key: renderWindowKey, count: MAX_MOUNTED_HISTORY_GROUPS, offset: 0 });
+      const { entryGroups, total } = historyGroupWindowRef.current;
+      const groupIndex = entryGroups.get(searchTarget.entryId);
+      const offset = groupIndex === undefined ? 0 : Math.max(0, total - groupIndex - MAX_MOUNTED_HISTORY_GROUPS);
+      setRenderWindow({ key: renderWindowKey, count: MAX_MOUNTED_HISTORY_GROUPS, offset });
       setPendingSearchScroll(searchTarget);
       return;
     }
@@ -701,7 +705,9 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
     if (!pendingSearchScroll || pendingSearchScroll !== searchTarget) return;
     const frame = requestAnimationFrame(() => {
       const selector = `[data-entry-id="${CSS.escape(pendingSearchScroll.entryId)}"]`;
-      const element = scrollContainerRef.current?.querySelector<HTMLElement>(selector);
+      const container = scrollContainerRef.current;
+      const element = container?.querySelector<HTMLElement>(`${selector} [data-search-target]`)
+        ?? container?.querySelector<HTMLElement>(selector);
       if (element) {
         element.scrollIntoView({ block: "start", behavior: "instant" });
         element.animate(
@@ -861,6 +867,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
   const { isDragOver, handleDragEnter, handleDragOver, handleDragLeave, handleDrop } = useDragDrop(onDrop);
 
   const messageCwd = session?.cwd ?? newSessionCwd ?? undefined;
+  const turnAnchors = useMemo(() => getTurnAnchors(messages, { openTail: agentRunning || isStreaming }), [messages, agentRunning, isStreaming]);
   const messageRenderIndex = useMemo(() => {
     const toolResults = new Map<string, ToolResultMessage>(activeToolResults);
     const visibleRefIndexByMessage = new Map<number, number>();
@@ -892,7 +899,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
 
     for (let index = 0; index < messages.length; index++) {
       const message = messages[index];
-      if (isMessageGroupAnchor(message)) {
+      if (turnAnchors[index]) {
         if (turnStarted) commitWrittenFilesForTurn();
         turnStarted = true;
         turnContent = [];
@@ -910,14 +917,14 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
       if (message.role === "toolResult") {
         toolResults.set((message as ToolResultMessage).toolCallId, message as ToolResultMessage);
       }
-      if (isMessageGroupAnchor(message) || message.role === "assistant") {
+      if (hasTurnRef(message, turnAnchors[index])) {
         visibleRefIndexByMessage.set(index, visibleCount++);
       }
     }
     if (turnStarted) commitWrittenFilesForTurn();
 
     return { toolResults, visibleRefIndexByMessage, visibleCount, writtenFilesByFinalAssistant };
-  }, [activeToolResults, messageCwd, messages]);
+  }, [activeToolResults, messageCwd, messages, turnAnchors]);
   // 回合最终回答拆分出的副本按原消息缓存，消息对象本身不会被修改（见 getFinalAnswerViews）。
   const finalAnswerViewCache = useMemo(() => new WeakMap<AssistantMessage, FinalAnswerViews>(), []);
   const inputHistory = useMemo(() => {
@@ -969,6 +976,8 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
       onDismissCompactError={dismissCompactError}
       compactResult={compactResult}
       toolPreset={toolPreset}
+      customToolNames={customToolNames}
+      activeBuiltinTools={activeBuiltinTools}
       onToolPresetChange={(session && !isHiddenRelation(session.relation)) || isNew ? handleToolPresetChange : undefined}
       retryInfo={retryInfo}
       queuedMessages={queuedMessages}
@@ -977,6 +986,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
       slashCommands={slashCommands}
       slashCommandsLoading={slashCommandsLoading}
       onLoadSlashCommands={loadSlashCommands}
+      extensionUiOpen={Boolean(extensionDialog || extensionCustomUi)}
       onBuiltinCommand={handleBuiltinSlashCommand}
       soundEnabled={soundEnabled}
       onSoundToggle={onSoundToggle}
@@ -1199,7 +1209,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                 if (messages[i].role === "user" || messages[i].role === "assistant") { lastRenderedMessageIdx = i; break; }
               }
               for (let i = messages.length - 1; i >= 0; i--) {
-                if (isMessageGroupAnchor(messages[i])) { lastAnchorIdx = i; break; }
+                if (turnAnchors[i]) { lastAnchorIdx = i; break; }
               }
 
               const attachVisibleRef = (idx: number, refIndex: number) => (el: HTMLDivElement | null) => {
@@ -1213,7 +1223,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                 if (isHiddenCustomMessage(msg)) return null;
                 // pi's showCacheMissNotices (#1265): read from the stored message, not a turn view's copy.
                 const notices = options.withNotices === false ? [] : getTranscriptNotices(messages[idx]);
-                const isVisible = isMessageGroupAnchor(msg) || msg.role === "assistant";
+                const isVisible = hasTurnRef(msg, turnAnchors[idx]);
                 const currentRefIdx = visibleRefIndexByMessage.get(idx);
                 const keyPrefix = options.keyPrefix ?? "message";
                 // 不能只用 entry id：本轮发送或流式产生的消息要等重读文件后才有 id（#1184）。
@@ -1229,6 +1239,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                     key={`${keyPrefix}-view-${messageKey}`}
                     message={msg}
                     toolResults={toolResults}
+                    toolClocks={toolClocks}
                     modelNames={modelState.names}
                     cwd={messageCwd}
                     onOpenFile={onOpenFile}
@@ -1279,7 +1290,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
               };
 
               const { groups, liveTailStartIndex } = buildMessageRenderGroups(messages, {
-                isAnchor: isMessageGroupAnchor,
+                isAnchor: (_message, index) => turnAnchors[index],
                 findFinalAssistantIndex,
                 busy: sessionBusy || isStreaming,
                 lastAnchorIndex: lastAnchorIdx,
@@ -1292,6 +1303,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                     store={streamingStore}
                     messageRef={lastRenderedMessageRef}
                     toolResults={toolResults}
+                    toolClocks={toolClocks}
                     modelNames={modelState.names}
                     cwd={messageCwd}
                     sessionId={session?.id ?? sessionIdRef.current ?? undefined}
@@ -1304,7 +1316,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
 
               const renderGroup = (group: MessageRenderGroup): ReactNode => {
                 const { start, end, finalAssistantIdx, isLiveTail } = group;
-                const hasAnchor = isMessageGroupAnchor(messages[start]);
+                const hasAnchor = turnAnchors[start];
                 const processStart = hasAnchor ? start + 1 : start;
                 const nodes: ReactNode[] = [];
                 if (isLiveTail) {
@@ -1502,10 +1514,29 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                   role: "bashExecution",
                   command: pendingBash.command,
                   output: "",
+                  ...pendingBash.result,
                   excludeFromContext: pendingBash.excludeFromContext,
+                  // Its own card: a later command's does not open because this one was opened.
+                  timestamp: pendingBash.startedAt,
                 } as BashExecutionMessage}
                 sessionId={session?.id ?? sessionIdRef.current ?? undefined}
               />
+            )}
+            {pendingBash?.liveOutput && !pendingBash.result && (
+              // Its last lines while it runs, at most as many rows once wrapped, as pi's
+              // TUI previews a command: the box keeps the bottom rows, a long line's end.
+              <div
+                aria-live="off"
+                className="rounded-md border border-border px-2.5 py-1.5 font-mono text-[12px] leading-[1.45] text-text-muted"
+                style={{ marginTop: -2, background: "var(--tool-bg)" }}
+              >
+                <pre
+                  className="m-0 flex flex-col justify-end overflow-hidden whitespace-pre-wrap break-words"
+                  style={{ maxHeight: `${LIVE_OUTPUT_PREVIEW_LINES * 1.45}em` }}
+                >
+                  <span>{liveOutputPreview(pendingBash.liveOutput)}</span>
+                </pre>
+              </div>
             )}
 
             </div>
@@ -1533,6 +1564,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
             }}
             onRevealHistory={revealHistoryForMinimap}
             turnsBefore={earlierTurnCount}
+            turnAnchors={turnAnchors}
           />
         )}
       </div>
@@ -1785,7 +1817,7 @@ function ExtensionDialog({
   return (
     <div
       onKeyDown={(event) => {
-        if (event.key !== "Escape" || event.nativeEvent.isComposing) return;
+        if (event.key !== "Escape" || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
         event.preventDefault();
         event.stopPropagation();
         onRespond(request, { cancelled: true });
@@ -1936,7 +1968,7 @@ function ExtensionDialog({
               placeholder={request.placeholder?.replace(SECRET_INPUT_MARKER, "")}
               onChange={(e) => setValue(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.nativeEvent.isComposing) submitValue();
+                if (e.key === "Enter" && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229) submitValue();
               }}
               style={{
                 width: "100%",
@@ -1956,7 +1988,7 @@ function ExtensionDialog({
               value={value}
               onChange={(e) => setValue(e.target.value)}
               onKeyDown={(e) => {
-                if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && !e.nativeEvent.isComposing) submitValue();
+                if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229) submitValue();
               }}
               style={{
                 width: "100%",
@@ -2142,7 +2174,7 @@ function ExtensionCustomPanel({
           autoCorrect="off"
           spellCheck={false}
           onKeyDown={(event) => {
-            if (composingRef.current || event.nativeEvent.isComposing) return;
+            if (composingRef.current || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
             const data = toTerminalKeyData(event);
             if (!data) return;
             event.preventDefault();

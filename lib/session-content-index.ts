@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { writePrivateFileAtomicSync } from "./atomic-file";
 import { projectTreeForResponse } from "./project-tree";
-import { isTurnAnchorEntry } from "./session-turns";
+import { countTurnsBefore, turnAnchorShape } from "./session-turns";
+import type { TurnAnchorMessage } from "./message-display";
 import type { SessionContext, SessionEntry, SessionTreeNode } from "./types";
 import { readShadowMindStateEntry, type ShadowStateEntryLike } from "./shadow-session-protocol";
 
@@ -15,7 +16,7 @@ interface IndexedRecord {
   offset: number;
   length: number;
   /** 这条记录开启新的一轮（与聊天分组、minimap 编号相同的规则）。 */
-  anchor: boolean;
+  turn?: TurnAnchorMessage;
   previewRole?: "user" | "assistant";
   previewText?: string;
   thinkingLevel?: string;
@@ -32,8 +33,8 @@ interface FileIdentity {
 }
 
 interface PersistedSessionContentIndex {
-  // 3：增加会话级 Shadow 开关元数据，旧索引需重建。
-  format: 3;
+  // 4：保存轮次判断所需的消息字段，旧索引需重建。
+  format: 4;
   filePath: string;
   identity: FileIdentity;
   indexedBytes: number;
@@ -124,7 +125,7 @@ function loadPersisted(filePath: string): PersistedSessionContentIndex | null {
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as PersistedSessionContentIndex;
     if (
-      parsed.format !== 3
+      parsed.format !== 4
       || parsed.filePath !== filePath
       || !isRecord(parsed.identity)
       || !Number.isSafeInteger(parsed.indexedBytes)
@@ -142,7 +143,7 @@ function loadPersisted(filePath: string): PersistedSessionContentIndex | null {
         && record.offset >= 0
         && Number.isSafeInteger(record.length)
         && record.length >= 0
-        && typeof record.anchor === "boolean"
+        && (record.turn === undefined || (record.turn !== null && typeof record.turn === "object"))
       ))
       || !Array.isArray(parsed.tree)
     ) return null;
@@ -179,13 +180,14 @@ function toIndexedRecord(entry: Record<string, unknown>, offset: number, length:
       ? { provider: message.provider, modelId: message.model }
       : undefined;
   const shadowMindEnabled = readShadowMindStateEntry(entry as ShadowStateEntryLike);
+  const turn = turnAnchorShape(entry);
   return {
     id: entry.id,
     parentId,
     type: entry.type,
     offset,
     length,
-    anchor: isTurnAnchorEntry(entry),
+    ...(turn ? { turn } : {}),
     ...previewOf(entry),
     ...(entry.type === "thinking_level_change" && typeof entry.thinkingLevel === "string" ? { thinkingLevel: entry.thinkingLevel } : {}),
     ...(model ? { model } : {}),
@@ -228,7 +230,7 @@ function buildProjectedTree(records: IndexedRecord[]): SessionTreeNode[] {
 
 function blankIndex(filePath: string, identity: FileIdentity): PersistedSessionContentIndex {
   return {
-    format: 3,
+    format: 4,
     filePath,
     identity,
     indexedBytes: 0,
@@ -289,7 +291,7 @@ async function scanFrom(filePath: string, index: PersistedSessionContentIndex): 
 async function buildOrUpdateIndex(filePath: string, attempt = 1): Promise<PersistedSessionContentIndex> {
   const current = fileIdentity(filePath);
   const memory = indexes().get(filePath);
-  const persisted = (memory?.format === 3 ? memory : null) ?? loadPersisted(filePath);
+  const persisted = (memory?.format === 4 ? memory : null) ?? loadPersisted(filePath);
   if (persisted && persisted.identity.size === current.size && persisted.identity.mtimeNs === current.mtimeNs && persisted.identity.ctimeNs === current.ctimeNs) {
     indexes().set(filePath, persisted);
     return persisted;
@@ -393,14 +395,11 @@ export async function readIndexedContextPage(
     leafId: activeLeafId,
     // 页内只有当前页的记录，向上数轮次必须走索引里的全部祖先（#791）。
     turnsBefore: (entryId: string) => {
-      let turns = 0;
-      const oldest = byId.get(entryId);
-      let cursor = oldest?.parentId ? byId.get(oldest.parentId) : undefined;
-      while (cursor) {
-        if (cursor.anchor) turns += 1;
-        cursor = cursor.parentId ? byId.get(cursor.parentId) : undefined;
-      }
-      return turns;
+      const oldest = selected.findIndex((record) => record.id === entryId);
+      const record = byId.get(entryId);
+      if (!record) return 0;
+      const page = oldest < 0 ? [record] : selected.slice(oldest);
+      return countTurnsBefore(index.records, page, (entry) => entry.turn ?? null);
     },
     settings: { thinkingLevel: thinkingLevel ?? "off", model: model ?? null },
     // 与 wrapper 的 getEntries() 一致：开关属于整个会话，不随分支或分页回退。

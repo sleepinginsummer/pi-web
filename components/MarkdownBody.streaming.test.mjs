@@ -31,7 +31,7 @@ function stripTags(html) {
  * 这些节点渲染上不可见（`.markdown-body` 不设置 white-space），比较时统一折叠。
  */
 function collapseBlockWhitespace(html) {
-  return html.replace(/>\s+</g, "><");
+  return html.replace(/<span class="markdown-code-stream-chunk">([\s\S]*?)<\/span>/g, "$1").replace(/>\s+</g, "><");
 }
 
 // 顶层结构：标题、段落、列表、表格、代码围栏、引用、展示数学。

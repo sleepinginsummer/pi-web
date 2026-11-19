@@ -13,6 +13,7 @@ import {
 } from "@/lib/rpc-manager";
 import { cwdMissingBody, missingCwdFromBody } from "@/lib/missing-cwd";
 import { readObserverEnabled, readObserverHistory, readObserverState } from "@/lib/session-observer-protocol";
+import { EXTENSION_REPORTED_CODE } from "@/lib/agent-client";
 
 /**
  * 会话列表只依赖会话文件中的持久化数据。查询类命令不需要淘汰缓存，
@@ -183,13 +184,15 @@ export async function POST(
     }
     // Read by its fields: the wrapper that threw may come from another route's bundle.
     const missingCwd = missingCwdFromBody(error);
+    const status = (error as { status?: number })?.status;
     return NextResponse.json({
       error: error instanceof Error ? error.message : String(error),
       ...(missingCwd ? cwdMissingBody(missingCwd) : {}),
+      ...((error as { code?: unknown } | null)?.code === EXTENSION_REPORTED_CODE ? { code: EXTENSION_REPORTED_CODE } : {}),
       ...(commandType === "prompt" && !promptAccepted
         ? { code: "prompt_rejected", accepted: false }
         : {}),
-    }, { status: 500 });
+    }, { status: status === 404 ? status : 500 });
   }
 }
 

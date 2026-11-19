@@ -113,7 +113,7 @@ test("shows running and unread activity at project scope", () => {
 
 
 test("通知跳转会展开目标项目并让会话树执行一次定位", () => {
-  assert.match(appShellSource, /locateSessionRequest=\{notificationSessionLocateRequest\}/);
+  assert.match(appShellSource, /locateSessionRequest=\{notificationSessionLocateRequest/);
   assert.match(source, /const targetProject = sidebarProjectPath\(targetSession\)/);
   assert.match(source, /next\.delete\(targetProject\)/);
   assert.match(projectSectionSource, /handledLocateRevisionRef\.current === request\.revision/);
@@ -129,4 +129,10 @@ test("the favicon counts sessions that finished while the tab was hidden (#1484)
     source,
     /\}, \[awaitingInputSessionIds, unreadSessionIds, hiddenFinishedSessionIds\]\);/,
   );
+});
+
+test("opening a session requests sidebar location from the shared navigation entry", async () => {
+  const navigation = await readFile(new URL("../hooks/useSessionNavigation.ts", import.meta.url), "utf8");
+  assert.match(navigation, /const applySessionSelection = useCallback[\s\S]*?requestSidebarLocate\(session.id\)/);
+  assert.match(navigation, /const sessionCreated = useCallback[\s\S]*?requestSidebarLocate\(session.id\)/);
 });

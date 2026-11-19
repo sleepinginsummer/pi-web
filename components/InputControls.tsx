@@ -7,7 +7,7 @@ import type { ModelSelectionViewActions, ModelSelectionViewState } from "@/lib/m
 import { THINKING_LEVEL_OPTIONS, type ThinkingLevelOption } from "@/lib/thinking-levels";
 import { Ellipsis, Zap } from "lucide-react";
 import type { ToolPreset } from "@/lib/tool-presets";
-import { TOOL_PRESET_VALUES } from "@/lib/tool-presets";
+import { getPresetFromToolNames, getToolNamesForPreset, SETTINGS_BUILTIN_TOOLS, TOOL_PRESET_VALUES } from "@/lib/tool-presets";
 import { useRunEndStrayClick } from "@/lib/run-end-click";
 const TOOL_PRESET_LABELS = ["off", ...TOOL_PRESET_VALUES.filter((preset) => preset !== "none")] as const;
 type ToolPresetLabel = typeof TOOL_PRESET_LABELS[number];
@@ -174,15 +174,33 @@ const FastModeControl = memo(function FastModeControl({ isMobile, modelState, on
 interface ToolPresetControlProps {
   isMobile: boolean;
   toolPreset?: ToolPreset;
-  onChange?: (preset: ToolPreset) => void;
+  customToolNames?: readonly string[] | null;
+  activeBuiltinTools?: readonly string[];
+  onChange?: (preset: ToolPreset, customNames?: string[] | null) => void;
   isStrayClick: (event: { detail: number }) => boolean;
 }
 
-const ToolPresetControl = memo(function ToolPresetControl({ isMobile, toolPreset, onChange, isStrayClick }: ToolPresetControlProps) {
+const ToolPresetControl = memo(function ToolPresetControl({ isMobile, toolPreset, customToolNames, activeBuiltinTools, onChange, isStrayClick }: ToolPresetControlProps) {
   const { t } = useI18n();
   const [toolDropdownOpen, setToolDropdownOpen] = useState(false);
   const toolDropdownRef = useRef<HTMLDivElement>(null);
-  const toolPresetLabel = toolPreset === "none" ? "off" : (toolPreset ?? "default");
+  const [configuredTools, setConfiguredTools] = useState<string[] | null>(null);
+  useEffect(() => {
+    if (!toolDropdownOpen || toolPreset !== "configured" || activeBuiltinTools) return;
+    const controller = new AbortController();
+    void fetch("/api/tools/settings", { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json() as { builtinTools: string[] };
+        if (!controller.signal.aborted) setConfiguredTools(data.builtinTools);
+      })
+      .catch((error) => {
+        if (!controller.signal.aborted) console.error("[pi-web] 无法读取内置工具默认设置", error);
+      });
+    return () => controller.abort();
+  }, [activeBuiltinTools, toolDropdownOpen, toolPreset]);
+  const selectedTools = customToolNames ?? getToolNamesForPreset(toolPreset ?? "default") ?? activeBuiltinTools ?? configuredTools;
+  const toolPresetLabel = toolPreset === "none" ? "off" : (customToolNames ? t("chat.customToolSelection") : toolPreset ?? "default");
   useEffect(() => {
     if (!toolDropdownOpen) return;
     const close = (event: MouseEvent) => {
@@ -235,7 +253,7 @@ const ToolPresetControl = memo(function ToolPresetControl({ isMobile, toolPreset
                   }}>
                     {TOOL_PRESET_LABELS.map((label) => {
                       const preset = presetForLabel(label);
-                      const isActive = (toolPreset ?? "default") === preset;
+                      const isActive = !customToolNames && (toolPreset ?? "default") === preset;
                       let desc: string;
                       if (label === "off") desc = t("chat.noTools");
                       // configured 不钉死工具列表，由 settings.json 的 defaultTools 解析
@@ -268,6 +286,26 @@ const ToolPresetControl = memo(function ToolPresetControl({ isMobile, toolPreset
                         </button>
                       );
                     })}
+                    <div className="border-t border-border px-3 py-2" role="group" aria-label={t("settings.builtinTools")}>
+                      {SETTINGS_BUILTIN_TOOLS.map((name) => (
+                        <label key={name} className="flex cursor-pointer items-center gap-2 py-1 text-xs text-text-muted">
+                          <input
+                            type="checkbox"
+                            disabled={!selectedTools}
+                            checked={selectedTools?.includes(name) ?? false}
+                            onChange={(event) => {
+                              if (!selectedTools) return;
+                              const next = event.target.checked ? [...selectedTools, name] : selectedTools.filter((tool) => tool !== name);
+                              const preset = getPresetFromToolNames(next);
+                              const names = getToolNamesForPreset(preset);
+                              const matches = names?.length === next.length && next.every((tool) => names.includes(tool));
+                              onToolPresetChange(preset, matches ? null : next);
+                            }}
+                          />
+                          {name}
+                        </label>
+                      ))}
+                    </div>
                   </div>
                 )}
               </div>
@@ -479,7 +517,9 @@ interface InputControlsProps {
   modelActions: ModelSelectionViewActions;
   onThinkingLevelChange?: (level: ThinkingLevelOption) => void;
   toolPreset?: ToolPreset;
-  onToolPresetChange?: (preset: ToolPreset) => void;
+  customToolNames?: readonly string[] | null;
+  activeBuiltinTools?: readonly string[];
+  onToolPresetChange?: (preset: ToolPreset, customNames?: string[] | null) => void;
   onCompact?: () => void;
   onAbortCompaction?: () => void;
   isCompacting?: boolean;
@@ -493,7 +533,7 @@ interface InputControlsProps {
 
 /** 输入控制栏自行管理下拉菜单，输入文字变化时无需重建控制栏。 */
 export const InputControls = memo(function InputControls({
-  isMobile, isStreaming, modelState, modelActions, onThinkingLevelChange, toolPreset, onToolPresetChange,
+  isMobile, isStreaming, modelState, modelActions, onThinkingLevelChange, toolPreset, customToolNames, activeBuiltinTools, onToolPresetChange,
   onCompact, onAbortCompaction, isCompacting, onAbort, soundEnabled, onSoundToggle,
   notificationEnabled, notificationPermission, onNotificationToggle,
 }: InputControlsProps) {
@@ -544,7 +584,7 @@ export const InputControls = memo(function InputControls({
                 <>
                   <ThinkingControl isMobile={isMobile} modelState={modelState} isStreaming={isStreaming} onChange={onThinkingLevelChange} />
                   {!isStreaming && <FastModeControl isMobile={isMobile} modelState={modelState} onChange={modelActions.changeFastEnabled} />}
-                  {!isStreaming && <ToolPresetControl isMobile={isMobile} toolPreset={toolPreset} onChange={onToolPresetChange} isStrayClick={isStrayClick} />}
+                  {!isStreaming && <ToolPresetControl isMobile={isMobile} toolPreset={toolPreset} customToolNames={customToolNames} activeBuiltinTools={activeBuiltinTools} onChange={onToolPresetChange} isStrayClick={isStrayClick} />}
                 </>
               ) : null}
               runControls={(!isMobile || (!isStreaming && !isCompacting)) ? (
