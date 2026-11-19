@@ -53,11 +53,16 @@ test("prefills rename with the displayed title and exposes the desktop context m
   assert.match(source, /onContextMenu=\{isMobile \|\| mutations\.confirmDelete \|\| mutations\.renaming \? undefined : handleContextMenu\}/);
 });
 
-test("未读标记保持静态，仅运行状态使用循环动画", () => {
-  const runningIndicatorSource = source.slice(source.indexOf("function RunningSessionIndicator()"), source.indexOf("function UnreadSessionIndicator()"));
-  const unreadIndicatorSource = source.slice(source.indexOf("function UnreadSessionIndicator()"), source.indexOf("function SessionDeleteConfirm("));
-  assert.match(runningIndicatorSource, /repeatCount="indefinite"/);
-  assert.doesNotMatch(unreadIndicatorSource, /<animate|repeatCount=/);
+test("会话运行圆点只改变透明度，并尊重减少动态效果偏好", async () => {
+  const runningIndicator = source.slice(source.indexOf("function RunningSessionIndicator()"), source.indexOf("function AwaitingInputSessionIndicator()"));
+  const unreadIndicator = source.slice(source.indexOf("function UnreadSessionIndicator()"), source.indexOf("function SessionDeleteConfirm("));
+  const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(runningIndicator, /role="img"[^>]*aria-label=\{t\("sidebar\.agentRunning"\)\}/);
+  assert.match(runningIndicator, /className="session-running-dot"/);
+  assert.doesNotMatch(runningIndicator, /<svg|<animate/);
+  assert.match(css, /@keyframes session-running-breathe\s*\{\s*50%\s*\{\s*opacity:\s*\.4;\s*\}\s*\}/);
+  assert.match(css, /@media \(prefers-reduced-motion: no-preference\)\s*\{\s*\.session-running-dot\s*\{\s*animation: session-running-breathe 2s ease-in-out infinite;/);
+  assert.doesNotMatch(unreadIndicator, /<animate|repeatCount=|session-running-dot/);
 });
 
 test("停在扩展对话框上的运行用琥珀色呼吸圆点替换运行动画", () => {
