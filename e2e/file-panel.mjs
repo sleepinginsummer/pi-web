@@ -9,6 +9,14 @@ export const filePanelFixture = `<!doctype html><html><body style="margin:20px;m
 <script>window.previewInstance = Math.random();</script></body></html>`;
 
 export async function checkFilePanel(page, filePath) {
+  const topBar = page.locator(".app-top-bar");
+  const topBarToggle = page.locator('.app-top-bar-end button[aria-controls="file-panel"]');
+  await topBarToggle.waitFor();
+  const [bar, button] = await Promise.all([topBar.boundingBox(), topBarToggle.boundingBox()]);
+  assert.ok(bar && button, "The top bar and file panel toggle are visible");
+  assert.equal(button.y, bar.y, "The file panel toggle starts at the top of the bar");
+  assert.equal(button.height, bar.height, "The file panel toggle reaches the bottom of the bar");
+  assert.equal(button.width, bar.height, "The file panel toggle has a square touch target");
   const showSidebar = page.getByRole("button", { name: "Show sidebar", exact: true });
   if (await showSidebar.isVisible()) await showSidebar.click();
   // The DOM title normalizes Windows paths to forward slashes
