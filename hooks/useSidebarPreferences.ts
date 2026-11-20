@@ -128,6 +128,11 @@ export function useSidebarPreferences(sessions: SessionInfo[], sessionsReady: bo
     const existing = new Set(sessions.map((session) => session.id));
     return new Set(preferences.pinnedSessionIds.filter((id) => existing.has(id)));
   }, [preferences.pinnedSessionIds, sessions]);
+  const topPinnedSessionIds = useMemo(() => {
+    const existing = new Set(sessions.map((session) => session.id));
+    return preferences.topPinnedSessionIds.filter((id) => existing.has(id));
+  }, [preferences.topPinnedSessionIds, sessions]);
+  const topPinnedSessionIdSet = useMemo(() => new Set(topPinnedSessionIds), [topPinnedSessionIds]);
 
   const sessionPinColors = useMemo(
     () => new Map(Object.entries(preferences.sessionPinColors)),
@@ -141,6 +146,14 @@ export function useSidebarPreferences(sessions: SessionInfo[], sessionsReady: bo
   const toggleSessionPinned = useCallback((sessionId: string) => {
     enqueue({ type: "set_session_pinned", sessionId, pinned: !pinnedSessionIds.has(sessionId) });
   }, [enqueue, pinnedSessionIds]);
+
+  const toggleSessionTopPinned = useCallback((sessionId: string) => {
+    enqueue({ type: "set_session_top_pinned", sessionId, topPinned: !topPinnedSessionIdSet.has(sessionId) });
+  }, [enqueue, topPinnedSessionIdSet]);
+
+  const moveTopPinnedSession = useCallback((source: string, target: string) => {
+    enqueue({ type: "move_top_pinned_session", source, target, visibleIds: topPinnedSessionIds });
+  }, [enqueue, topPinnedSessionIds]);
 
   const setSessionPinColor = useCallback((sessionId: string, color: SessionPinColor) => {
     enqueue({ type: "set_session_pin_color", sessionId, color });
@@ -168,10 +181,14 @@ export function useSidebarPreferences(sessions: SessionInfo[], sessionsReady: bo
   return {
     sessionOrder,
     pinnedSessionIds,
+    topPinnedSessionIds,
+    topPinnedSessionIdSet,
     sessionPinColors,
     getProjectOrder,
     moveSession,
     toggleSessionPinned,
+    toggleSessionTopPinned,
+    moveTopPinnedSession,
     setSessionPinColor,
     moveProject,
     removeProjects,

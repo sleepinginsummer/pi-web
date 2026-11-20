@@ -21,7 +21,8 @@ import { useScrollbarVisibility } from "@/hooks/useScrollbarVisibility";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { DismissButton } from "./DismissButton";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
-import { ProjectSection, type SessionTreeSharedProps } from "./ProjectSection";
+import { PinnedSessionsSection, ProjectSection, type SessionTreeSharedProps } from "./ProjectSection";
+import { collectTopPinnedSessionIds } from "@/lib/session-tree";
 import { TrashPanel } from "./TrashPanel";
 import { SessionSearch } from "./SessionSearch";
 
@@ -306,10 +307,14 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
   const {
     sessionOrder,
     pinnedSessionIds: pinnedIds,
+    topPinnedSessionIds,
+    topPinnedSessionIdSet,
     sessionPinColors,
     getProjectOrder,
     moveSession,
     toggleSessionPinned: togglePinned,
+    toggleSessionTopPinned,
+    moveTopPinnedSession,
     setSessionPinColor,
     moveProject,
     projects: knownProjects,
@@ -678,6 +683,14 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
     () => reconcileSessionPreferenceOrder(visibleSessions, sessionOrder),
     [sessionOrder, visibleSessions],
   );
+  const topPinnedSectionIds = useMemo(
+    () => collectTopPinnedSessionIds(visibleSessions, topPinnedSessionIdSet),
+    [topPinnedSessionIdSet, visibleSessions],
+  );
+  const topPinnedSessions = useMemo(
+    () => (topPinnedSectionIds.size > 0 ? visibleSessions.filter((session) => topPinnedSectionIds.has(session.id)) : []),
+    [topPinnedSectionIds, visibleSessions],
+  );
   const recentProjects = getRecentProjects(visibleSessions);
   const selectedProject = resolveSidebarProjectPath(visibleSessions, selectedCwd, {
     projectRoot: projectRootFor(selectedCwd),
@@ -701,6 +714,7 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
     if (!locateSessionRequest) return;
     const targetSession = visibleSessions.find((session) => session.id === locateSessionRequest.sessionId);
     if (!targetSession) return;
+    if (topPinnedSectionIds.has(targetSession.id)) return;
     const targetProject = sidebarProjectPath(targetSession);
     setCollapsedProjects((current) => {
       if (!current.has(targetProject)) return current;
@@ -708,7 +722,7 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
       next.delete(targetProject);
       return next;
     });
-  }, [locateSessionRequest, visibleSessions]);
+  }, [locateSessionRequest, topPinnedSectionIds, visibleSessions]);
 
   const handleRemoveProject = useCallback(async () => {
     if (!projectPendingRemoval || projectRemovalBusy) return;
@@ -923,11 +937,8 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
             {t("sidebar.selectProject")}
           </div>
         )}
-        {visibleProjects.map((project) => {
-          const collapsed = collapsedProjects.has(project);
-          const projectSessions = sessionsForProject(visibleSessions, project);
-          const active = project === selectedProject;
-          const treeProps: SessionTreeSharedProps = {
+        {(() => {
+          const sharedTreeProps: SessionTreeSharedProps = {
             selectedSessionId,
             runningSessionIds,
             awaitingInputSessionIds,
@@ -935,6 +946,7 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
             startingSessions,
             unreadSessionIds,
             pinnedSessionIds: pinnedIds,
+            topPinnedSessionIds: topPinnedSessionIdSet,
             sessionPinColors,
             locateSessionRequest,
             isMobile,
@@ -943,6 +955,7 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
             onSelectSession: handleSelectSessionFromList,
             onRenamed: loadSessions,
             onMoveSession: moveSession,
+            onToggleTopPinned: toggleSessionTopPinned,
             onTogglePinned: togglePinned,
             onSetPinColor: setSessionPinColor,
             onSessionDeleted: (id) => {
@@ -950,44 +963,75 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
               loadSessions();
             },
           };
+          const resolveSessionProject = (session: SessionInfo) => {
+            const path = sidebarProjectPath(session);
+            return { name: projectName(path), path };
+          };
           return (
-            <ProjectSection
-              key={project}
-              project={{
-                path: project,
-                name: projectName(project),
-                active,
-                collapsed,
-                isMobile,
-                activity: showProjectActivity(projectActivity.get(project), t),
-                sessions: projectSessions,
-                sessionOrder: visibleSessionOrder,
-              }}
-              labels={{
-                empty: t("sidebar.noSessions"),
-                remove: t("sidebar.removeProjectButton", { name: projectName(project) }),
-                newSession: t("sidebar.newSessionTitle", { path: project }),
-              }}
-              actions={{
-                onToggleCollapsed: () => {
-                  setCollapsedProjects((current) => {
-                    const next = new Set(current);
-                    if (next.has(project)) next.delete(project);
-                    else next.add(project);
-                    return next;
-                  });
-                },
-                onMove: (source, target) => moveProject(source, target, visibleProjects),
-                onRemove: () => {
-                  setProjectRemovalError(null);
-                  setProjectPendingRemoval(project);
-                },
-                onNewSession: () => handleNewSession(project),
-              }}
-              treeProps={treeProps}
-            />
+            <>
+              <PinnedSessionsSection
+                title={t("sidebar.pinned")}
+                sessions={topPinnedSessions}
+                sessionOrder={topPinnedSessionIds}
+                treeProps={{
+                  ...sharedTreeProps,
+                  onMoveSession: moveTopPinnedSession,
+                  resolveProject: resolveSessionProject,
+                }}
+              />
+              {visibleProjects.length > 0 && (
+                <div style={{ padding: "6px 14px 4px 16px", fontSize: 11, fontWeight: 500, color: "var(--text-dim)", userSelect: "none" }}>
+                  {t("sidebar.projects")}
+                </div>
+              )}
+              {visibleProjects.map((project) => {
+                const collapsed = collapsedProjects.has(project);
+                const projectSessions = sessionsForProject(visibleSessions, project);
+                const unpinnedProjectSessions = topPinnedSectionIds.size > 0
+                  ? projectSessions.filter((session) => !topPinnedSectionIds.has(session.id))
+                  : projectSessions;
+                const active = project === selectedProject;
+                return (
+                  <ProjectSection
+                    key={project}
+                    project={{
+                      path: project,
+                      name: projectName(project),
+                      active,
+                      collapsed,
+                      isMobile,
+                      activity: showProjectActivity(projectActivity.get(project), t),
+                      sessions: unpinnedProjectSessions,
+                      sessionOrder: visibleSessionOrder,
+                    }}
+                    labels={{
+                      empty: t("sidebar.noSessions"),
+                      remove: t("sidebar.removeProjectButton", { name: projectName(project) }),
+                      newSession: t("sidebar.newSessionTitle", { path: project }),
+                    }}
+                    actions={{
+                      onToggleCollapsed: () => {
+                        setCollapsedProjects((current) => {
+                          const next = new Set(current);
+                          if (next.has(project)) next.delete(project);
+                          else next.add(project);
+                          return next;
+                        });
+                      },
+                      onMove: (source, target) => moveProject(source, target, visibleProjects),
+                      onRemove: () => {
+                        setProjectRemovalError(null);
+                        setProjectPendingRemoval(project);
+                      },
+                      onNewSession: () => handleNewSession(project),
+                    }}
+                    treeProps={sharedTreeProps}
+                  />
+                );
+              })}
+            </>
           );
-        })}
+        })()}
       </div>
       </div>
       </SessionSearch>

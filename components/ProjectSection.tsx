@@ -1,5 +1,6 @@
 "use client";
 
+import { Folder, FolderOpen } from "lucide-react";
 import type { BackgroundActivityMap } from "@/hooks/useRunningSessions";
 import { useLayoutEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
 import type { SessionInfo } from "@/lib/types";
@@ -42,7 +43,7 @@ export function ProjectSection({ project, labels, actions, treeProps }: ProjectS
     <section style={{ padding: "2px 6px 6px" }}>
       <ProjectHeader project={project} labels={labels} actions={actions} />
       {!project.collapsed && (
-        <div style={{ paddingLeft: 24 }}>
+        <div style={{ paddingLeft: 16 }}>
           {tree.length > 0 ? (
             <VirtualizedSessionTree
               tree={tree}
@@ -112,12 +113,9 @@ function ProjectHeader({
           textAlign: "left",
         }}
       >
-        <svg width="9" height="9" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ transform: project.collapsed ? "none" : "rotate(90deg)", transition: "transform 0.12s", flexShrink: 0 }}>
-          <polyline points="3 2 7 5 3 8" />
-        </svg>
-        <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}>
-          <path d="M2.5 5.5h5l1.7 2h8.3v7.5a1.5 1.5 0 0 1-1.5 1.5H4A1.5 1.5 0 0 1 2.5 15V5.5Z" />
-        </svg>
+        {project.collapsed
+          ? <Folder size={16} strokeWidth={1.7} aria-hidden="true" data-project-folder-icon="closed" style={{ flexShrink: 0 }} />
+          : <FolderOpen size={16} strokeWidth={1.7} aria-hidden="true" data-project-folder-icon="open" style={{ flexShrink: 0 }} />}
         <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 13, fontWeight: 600 }}>{project.name}</span>
         {project.activity}
       </button>
@@ -148,6 +146,38 @@ function ProjectHeader({
   );
 }
 
+/** 侧边栏顶部独立置顶区：跨项目展示置顶会话，复用同一会话树与虚拟列表。 */
+export function PinnedSessionsSection({
+  title,
+  sessions,
+  sessionOrder,
+  treeProps,
+}: {
+  title: string;
+  sessions: SessionInfo[];
+  sessionOrder: string[];
+  treeProps: SessionTreeSharedProps;
+}) {
+  const tree = useMemo(
+    () => buildSessionTree(sessions, sessionOrder, { independentRootIds: treeProps.topPinnedSessionIds }),
+    [sessionOrder, sessions, treeProps.topPinnedSessionIds],
+  );
+  const handledLocateRevisionRef = useRef(0);
+  if (tree.length === 0) return null;
+  return (
+    <section data-pinned-sessions-section style={{ padding: "6px 6px 8px" }}>
+      <div style={{ padding: "4px 8px 4px 10px", fontSize: 11, fontWeight: 500, color: "var(--text-dim)", userSelect: "none" }}>
+        {title}
+      </div>
+      <VirtualizedSessionTree
+        tree={tree}
+        treeProps={treeProps}
+        handledLocateRevisionRef={handledLocateRevisionRef}
+      />
+    </section>
+  );
+}
+
 
 
 export interface SessionTreeSharedProps {
@@ -159,6 +189,8 @@ export interface SessionTreeSharedProps {
   unreadSessionIds: Set<string>;
   pinnedSessionIds: Set<string>;
   sessionPinColors: ReadonlyMap<string, SessionPinColor>;
+  topPinnedSessionIds?: ReadonlySet<string>;
+  resolveProject?: (session: SessionInfo) => { name: string; path: string };
   locateSessionRequest?: { sessionId: string; revision: number } | null;
   isMobile: boolean;
   openSwipeSessionId: string | null;
@@ -167,6 +199,7 @@ export interface SessionTreeSharedProps {
   onRenamed?: () => void;
   onMoveSession: (sourceId: string, targetId: string) => void;
   onTogglePinned: (sessionId: string) => void;
+  onToggleTopPinned?: (sessionId: string) => void;
   onSetPinColor: (sessionId: string, color: SessionPinColor) => void;
   onSessionDeleted?: (id: string) => void;
 }
@@ -316,7 +349,7 @@ function SessionTreeRow({
   collapsed: boolean;
   onToggleCollapse: () => void;
 }) {
-  const { selectedSessionId, runningSessionIds, awaitingInputSessionIds, backgroundActivity, startingSessions, unreadSessionIds, pinnedSessionIds, sessionPinColors, isMobile, openSwipeSessionId, onOpenSwipeSessionChange, onSelectSession, onRenamed, onMoveSession, onTogglePinned, onSetPinColor, onSessionDeleted } = treeProps;
+  const { selectedSessionId, runningSessionIds, awaitingInputSessionIds, backgroundActivity, startingSessions, unreadSessionIds, pinnedSessionIds, topPinnedSessionIds, sessionPinColors, resolveProject, isMobile, openSwipeSessionId, onOpenSwipeSessionChange, onSelectSession, onRenamed, onMoveSession, onToggleTopPinned, onTogglePinned, onSetPinColor, onSessionDeleted } = treeProps;
   const hasChildren = node.children.length > 0;
   const background = backgroundActivity?.get(node.session.id);
   return (
@@ -350,11 +383,13 @@ function SessionTreeRow({
           startingFirstMessage: startingSessions?.get(node.session.id),
           isUnread: unreadSessionIds.has(node.session.id),
           isPinned: pinnedSessionIds.has(node.session.id),
+          isTopPinned: topPinnedSessionIds?.has(node.session.id) ?? false,
           pinColor: sessionPinColors.get(node.session.id),
         }}
         mobile={{ enabled: isMobile, swipeOpen: openSwipeSessionId === node.session.id, onSwipeOpenChange: (open) => onOpenSwipeSessionChange(node.session.id, open) }}
-        actions={{ onClick: () => onSelectSession(node.session), onRenamed, onDeleted: (id) => onSessionDeleted?.(id), onTogglePinned: () => onTogglePinned(node.session.id), onSetPinColor: (color) => onSetPinColor(node.session.id, color) }}
+        actions={{ onClick: () => onSelectSession(node.session), onRenamed, onDeleted: (id) => onSessionDeleted?.(id), onToggleTopPinned: onToggleTopPinned ? () => onToggleTopPinned(node.session.id) : undefined, onTogglePinned: () => onTogglePinned(node.session.id), onSetPinColor: (color) => onSetPinColor(node.session.id, color) }}
         tree={{ depth, hasChildren, collapsed, onToggleCollapse }}
+        project={resolveProject?.(node.session)}
       />
     </div>
   );

@@ -25,6 +25,8 @@ export interface SidebarPreferences {
   projectOrder: string[];
   sessionOrder: string[];
   pinnedSessionIds: string[];
+  /** 顶部独立置顶区的有序会话 ID 列表，与项目内彩色标记（pinnedSessionIds）相互独立。 */
+  topPinnedSessionIds: string[];
   /** 只保存已 Pin 且非默认色的会话。 */
   sessionPinColors: Record<string, SessionPinColor>;
 }
@@ -34,6 +36,8 @@ export type SidebarPreferenceAction =
   | { type: "move_session"; source: string; target: string; visibleIds: string[] }
   | { type: "set_session_pinned"; sessionId: string; pinned: boolean }
   | { type: "set_session_pin_color"; sessionId: string; color: SessionPinColor }
+  | { type: "set_session_top_pinned"; sessionId: string; topPinned: boolean }
+  | { type: "move_top_pinned_session"; source: string; target: string; visibleIds: string[] }
   | { type: "remove_projects"; ids: string[] }
   | { type: "remove_sessions"; ids: string[] }
   | { type: "merge_legacy"; sessionOrder: string[]; pinnedSessionIds: string[] };
@@ -51,6 +55,7 @@ export function emptySidebarPreferences(): SidebarPreferences {
     projectOrder: [],
     sessionOrder: [],
     pinnedSessionIds: [],
+    topPinnedSessionIds: [],
     sessionPinColors: {},
   };
 }
@@ -79,6 +84,7 @@ export function parseSidebarPreferences(value: unknown): SidebarPreferences {
     projectOrder: uniquePreferenceIds(raw.projectOrder),
     sessionOrder: uniquePreferenceIds(raw.sessionOrder),
     pinnedSessionIds,
+    topPinnedSessionIds: uniquePreferenceIds(raw.topPinnedSessionIds),
     sessionPinColors: parseSessionPinColors(raw.sessionPinColors, pinnedSessionIds),
   };
 }
@@ -96,9 +102,22 @@ function moveVisibleItem(storedOrder: string[], visibleIds: string[], source: st
   return [...nextVisible, ...hidden];
 }
 
+function moveTopPinnedItem(storedIds: string[], visibleIds: string[], source: string, target: string): string[] {
+  const currentSet = new Set(storedIds);
+  if (!currentSet.has(source) || !currentSet.has(target) || source === target) return storedIds;
+  const validVisible = uniquePreferenceIds(visibleIds).filter((id) => currentSet.has(id));
+  return moveVisibleItem(storedIds, validVisible, source, target);
+}
+
 function setPinned(ids: string[], id: string, pinned: boolean): string[] {
   const next = ids.filter((item) => item !== id);
   if (pinned && id) next.push(id);
+  return next;
+}
+
+function setTopPinned(ids: string[], id: string, topPinned: boolean): string[] {
+  const next = ids.filter((item) => item !== id);
+  if (topPinned && id) next.unshift(id);
   return next;
 }
 
@@ -138,8 +157,13 @@ export function reduceSidebarPreferences(
   if (action.type === "remove_sessions") {
     const sessionOrder = removeIds(current.sessionOrder, action.ids);
     const pinnedSessionIds = removeIds(current.pinnedSessionIds, action.ids);
-    if (sameIds(sessionOrder, current.sessionOrder) && sameIds(pinnedSessionIds, current.pinnedSessionIds)) return current;
-    return { ...current, revision: current.revision + (incrementRevision ? 1 : 0), sessionOrder, pinnedSessionIds, sessionPinColors: withoutPinColors(current.sessionPinColors, action.ids) };
+    const topPinnedSessionIds = removeIds(current.topPinnedSessionIds, action.ids);
+    if (
+      sameIds(sessionOrder, current.sessionOrder)
+      && sameIds(pinnedSessionIds, current.pinnedSessionIds)
+      && sameIds(topPinnedSessionIds, current.topPinnedSessionIds)
+    ) return current;
+    return { ...current, revision: current.revision + (incrementRevision ? 1 : 0), sessionOrder, pinnedSessionIds, topPinnedSessionIds, sessionPinColors: withoutPinColors(current.sessionPinColors, action.ids) };
   }
   if (action.type === "set_session_pin_color") {
     const previous = Object.hasOwn(current.sessionPinColors, action.sessionId) ? current.sessionPinColors[action.sessionId] : DEFAULT_SESSION_PIN_COLOR;
@@ -150,6 +174,11 @@ export function reduceSidebarPreferences(
       revision: current.revision + (incrementRevision ? 1 : 0),
       sessionPinColors: action.color === DEFAULT_SESSION_PIN_COLOR ? sessionPinColors : { ...sessionPinColors, [action.sessionId]: action.color },
     };
+  }
+  if (action.type === "move_top_pinned_session") {
+    const topPinnedSessionIds = moveTopPinnedItem(current.topPinnedSessionIds, action.visibleIds, action.source, action.target);
+    if (sameIds(topPinnedSessionIds, current.topPinnedSessionIds)) return current;
+    return { ...current, revision: current.revision + (incrementRevision ? 1 : 0), topPinnedSessionIds };
   }
   const next = { ...current, revision: current.revision + (incrementRevision ? 1 : 0) };
   switch (action.type) {
@@ -163,6 +192,9 @@ export function reduceSidebarPreferences(
       next.pinnedSessionIds = setPinned(current.pinnedSessionIds, action.sessionId, action.pinned);
       // 取消 Pin 后颜色不保留，再次 Pin 回到默认色。
       if (!action.pinned) next.sessionPinColors = withoutPinColors(current.sessionPinColors, [action.sessionId]);
+      break;
+    case "set_session_top_pinned":
+      next.topPinnedSessionIds = setTopPinned(current.topPinnedSessionIds, action.sessionId, action.topPinned);
       break;
     case "merge_legacy":
       next.sessionOrder = mergeOrder(current.sessionOrder, action.sessionOrder);
@@ -191,6 +223,10 @@ export function rebaseSidebarPreferenceAction(
   }
   if (action.type === "move_session") {
     return { ...action, visibleIds: orderVisibleIdsByStored(action.visibleIds, current.sessionOrder) };
+  }
+  if (action.type === "move_top_pinned_session") {
+    const visibleSet = new Set(uniquePreferenceIds(action.visibleIds));
+    return { ...action, visibleIds: current.topPinnedSessionIds.filter((id) => visibleSet.has(id)) };
   }
   return action;
 }

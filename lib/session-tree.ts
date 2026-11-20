@@ -6,7 +6,11 @@ export interface SessionTreeNode {
 }
 
 /** Build the sidebar hierarchy. Forks remain roots; only subagents nest. */
-export function buildSessionTree(allSessions: SessionInfo[], manualOrder: readonly string[] = []): SessionTreeNode[] {
+export function buildSessionTree(
+  allSessions: SessionInfo[],
+  manualOrder: readonly string[] = [],
+  options: { independentRootIds?: ReadonlySet<string> } = {},
+): SessionTreeNode[] {
   // 侧聊只出现在所属会话的 Agents 面板和右侧标签里，不占侧栏行（ADR 0007）。
   const sessions = allSessions.filter((session) => session.relation?.kind !== "side");
   const byId = new Map<string, SessionTreeNode>();
@@ -36,7 +40,9 @@ export function buildSessionTree(allSessions: SessionInfo[], manualOrder: readon
 
   const roots: SessionTreeNode[] = [];
   for (const node of byId.values()) {
-    const ancestor = resolveAncestor(node.session.id);
+    const ancestor = options.independentRootIds?.has(node.session.id)
+      ? null
+      : resolveAncestor(node.session.id);
     if (ancestor) byId.get(ancestor)!.children.push(node);
     else roots.push(node);
   }
@@ -56,4 +62,33 @@ export function buildSessionTree(allSessions: SessionInfo[], manualOrder: readon
     for (const node of nodes) pending.push(node.children);
   }
   return roots;
+}
+
+/** 收集顶部置顶区应展示的会话 ID（包含已置顶会话的子代理后代，避免子代理在原项目孤立）。 */
+export function collectTopPinnedSessionIds(
+  allSessions: readonly SessionInfo[],
+  topPinnedIds: ReadonlySet<string>,
+): Set<string> {
+  if (topPinnedIds.size === 0) return new Set();
+  const parentOf = new Map<string, string>();
+  for (const session of allSessions) {
+    if (session.relation?.kind === "subagent") {
+      parentOf.set(session.id, session.relation.parentSessionId);
+    }
+  }
+  const result = new Set<string>();
+  for (const session of allSessions) {
+    if (session.relation?.kind === "side") continue;
+    let current: string | undefined = session.id;
+    const visited = new Set<string>();
+    while (current && !visited.has(current)) {
+      if (topPinnedIds.has(current)) {
+        result.add(session.id);
+        break;
+      }
+      visited.add(current);
+      current = parentOf.get(current);
+    }
+  }
+  return result;
 }

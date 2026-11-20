@@ -86,3 +86,43 @@ test("移动端选中会话在 Pin 后仍显示角标", () => {
   assert.ok(row);
   assert.ok(row.querySelector("[data-session-pin-marker]"));
 });
+
+
+test("独立置顶按钮与项目目录元数据行正确渲染", () => {
+  const toggledTop = [];
+  render(React.createElement(
+    I18nProvider,
+    null,
+    React.createElement(SessionItem, {
+      session,
+      status: { isSelected: true, isRunning: true, isUnread: false, isPinned: false, isTopPinned: true },
+      mobile: { enabled: false, swipeOpen: false, onSwipeOpenChange() {} },
+      actions: {
+        onClick() {},
+        onTogglePinned() {},
+        onToggleTopPinned: () => toggledTop.push("toggle"),
+      },
+      project: { name: "pi-web", path: "/Volumes/syy2t/project/pi-web" },
+    }),
+  ));
+
+  const row = document.querySelector("[data-session-row]");
+  const slot = document.querySelector("[data-session-actions]");
+  assert.ok(row);
+  assert.ok(slot);
+  assert.equal(slot.querySelectorAll("button").length, 4);
+
+  const topPinButton = slot.querySelector('button[aria-pressed="true"]');
+  assert.ok(topPinButton);
+  fireEvent.click(topPinButton);
+  assert.deepEqual(toggledTop, ["toggle"]);
+
+  const projectTag = row.querySelector("[data-session-project]");
+  assert.ok(projectTag);
+  assert.equal(projectTag.textContent, "pi-web");
+  assert.equal(projectTag.getAttribute("title"), "/Volumes/syy2t/project/pi-web");
+  // 运行状态指示器排在项目目录前面
+  const runningIndicator = row.querySelector(".session-running-indicator");
+  assert.ok(runningIndicator);
+  assert.ok(runningIndicator.compareDocumentPosition(projectTag) & Node.DOCUMENT_POSITION_FOLLOWING);
+});

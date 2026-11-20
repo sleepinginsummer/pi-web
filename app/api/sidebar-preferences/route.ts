@@ -49,6 +49,16 @@ function parseAction(value: unknown): SidebarPreferenceAction | null {
       return validString(body.sessionId, MAX_SESSION_ID_LENGTH) && isSessionPinColor(body.color)
         ? { type: body.type, sessionId: body.sessionId, color: body.color }
         : null;
+    case "set_session_top_pinned":
+      return validString(body.sessionId, MAX_SESSION_ID_LENGTH) && typeof body.topPinned === "boolean"
+        ? { type: body.type, sessionId: body.sessionId, topPinned: body.topPinned }
+        : null;
+    case "move_top_pinned_session": {
+      const visibleIds = stringArray(body.visibleIds, MAX_SESSION_ID_LENGTH);
+      return validString(body.source, MAX_SESSION_ID_LENGTH) && validString(body.target, MAX_SESSION_ID_LENGTH) && visibleIds
+        ? { type: body.type, source: body.source, target: body.target, visibleIds }
+        : null;
+    }
     case "remove_projects": {
       const ids = stringArray(body.ids, MAX_PROJECT_LENGTH);
       return ids ? { type: body.type, ids } : null;

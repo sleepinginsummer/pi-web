@@ -1,6 +1,6 @@
 "use client";
 
-import { Pin as PinIcon } from "lucide-react";
+import { ArrowUpToLine, Pin as PinIcon } from "lucide-react";
 import { useCallback, useState, type CSSProperties, type MouseEvent, type ReactNode, type RefObject } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import { useSessionItemMutations, type SessionDeleteMode, type SessionDeleteStep } from "@/hooks/useSessionItemMutations";
@@ -12,13 +12,13 @@ import { parseSkillMessage } from "@/lib/skill-block";
 import type { SessionInfo } from "@/lib/types";
 
 const ITEM_HEIGHT = 54;
-const SESSION_SWIPE_ACTION_WIDTH = 132;
-const DESKTOP_ACTION_BUTTON_WIDTH = 32;
-const DESKTOP_ACTION_GAP = 4;
-const DESKTOP_ACTION_COUNT = 3;
+const SESSION_SWIPE_ACTION_BUTTON_WIDTH = 44;
+const DESKTOP_ACTION_BUTTON_WIDTH = 28;
+const DESKTOP_ACTION_GAP = 3;
+const DESKTOP_ACTION_COUNT = 4;
 const DESKTOP_SESSION_ACTIONS_WIDTH = DESKTOP_ACTION_BUTTON_WIDTH * DESKTOP_ACTION_COUNT + DESKTOP_ACTION_GAP * (DESKTOP_ACTION_COUNT - 1);
 
-type ActionTone = "pin" | "accent" | "danger";
+type ActionTone = "pin" | "topPin" | "accent" | "danger";
 
 interface SessionItemStatus {
   isSelected: boolean;
@@ -34,6 +34,8 @@ interface SessionItemStatus {
   isUnread?: boolean;
   isPinned?: boolean;
   pinColor?: SessionPinColor;
+  /** 是否处于顶部独立置顶区（与 isPinned 彩色标记相互独立）。 */
+  isTopPinned?: boolean;
 }
 
 interface SessionItemMobileState {
@@ -47,6 +49,7 @@ interface SessionItemActions {
   onRenamed?: () => void;
   onDeleted?: (id: string) => void;
   onTogglePinned?: () => void;
+  onToggleTopPinned?: () => void;
   onSetPinColor?: (color: SessionPinColor) => void;
 }
 
@@ -63,6 +66,8 @@ interface SessionItemProps {
   mobile: SessionItemMobileState;
   actions: SessionItemActions;
   tree?: SessionItemTreeState;
+  /** 顶部置顶区展示用：在元数据行标明所属项目目录名。 */
+  project?: { name: string; path: string };
 }
 
 function formatRelativeTime(dateStr: string): string {
@@ -99,37 +104,58 @@ function SessionActionButton({ mobile, open, label, pressed, tone, onClick, chil
   onClick: (event: MouseEvent<HTMLButtonElement>) => void;
   children: ReactNode;
 }) {
-  const color = tone === "danger" ? "#ef4444" : tone === "accent" ? "var(--accent)" : pressed ? "#d97706" : "var(--text-muted)";
-  const background = tone === "danger" && mobile ? "rgba(239,68,68,0.10)" : pressed ? "color-mix(in srgb, #f59e0b 12%, var(--bg-hover))" : "var(--bg-hover)";
+  const color = tone === "danger"
+    ? "#ef4444"
+    : tone === "accent"
+      ? "var(--accent)"
+      : tone === "topPin"
+        ? (pressed ? "var(--accent)" : "var(--text-muted)")
+        : pressed ? "#d97706" : "var(--text-muted)";
+  const background = tone === "danger" && mobile
+    ? "rgba(239,68,68,0.10)"
+    : tone === "topPin" && pressed
+      ? "color-mix(in srgb, var(--accent) 14%, var(--bg-hover))"
+      : pressed ? "color-mix(in srgb, #f59e0b 12%, var(--bg-hover))" : "var(--bg-hover)";
+  const borderColor = tone === "topPin" && pressed
+    ? "color-mix(in srgb, var(--accent) 45%, transparent)"
+    : pressed ? "rgba(217,119,6,0.42)" : "var(--border)";
   return (
     <button
       type="button"
       tabIndex={mobile && !open ? -1 : 0}
       title={label}
       aria-label={label}
-      aria-pressed={tone === "pin" ? pressed : undefined}
+      aria-pressed={tone === "pin" || tone === "topPin" ? pressed : undefined}
       onClick={onClick}
-      style={{ width: mobile ? 44 : DESKTOP_ACTION_BUTTON_WIDTH, height: mobile ? ITEM_HEIGHT : 32, display: "flex", alignItems: "center", justifyContent: "center", padding: 0, flexShrink: 0, border: mobile ? "none" : `1px solid ${pressed ? "rgba(217,119,6,0.42)" : "var(--border)"}`, borderRadius: mobile ? 0 : 7, boxShadow: mobile ? "inset 1px 0 var(--border)" : undefined, background, color, cursor: "pointer", touchAction: "manipulation", transition: "background 0.12s, color 0.12s, border-color 0.12s" }}
+      style={{ width: mobile ? SESSION_SWIPE_ACTION_BUTTON_WIDTH : DESKTOP_ACTION_BUTTON_WIDTH, height: mobile ? ITEM_HEIGHT : 32, display: "flex", alignItems: "center", justifyContent: "center", padding: 0, flexShrink: 0, border: mobile ? "none" : `1px solid ${borderColor}`, borderRadius: mobile ? 0 : 7, boxShadow: mobile ? "inset 1px 0 var(--border)" : undefined, background, color, cursor: "pointer", touchAction: "manipulation", transition: "background 0.12s, color 0.12s, border-color 0.12s" }}
     >
       {children}
     </button>
   );
 }
 
-function SessionActions({ mobile, open, isPinned, onTogglePinned, onRename, onDelete }: {
+function SessionActions({ mobile, open, isPinned, isTopPinned, onToggleTopPinned, onTogglePinned, onRename, onDelete }: {
   mobile: boolean;
   open: boolean;
   isPinned: boolean;
+  isTopPinned: boolean;
+  onToggleTopPinned?: (event: MouseEvent<HTMLButtonElement>) => void;
   onTogglePinned: (event: MouseEvent<HTMLButtonElement>) => void;
   onRename: (event: MouseEvent<HTMLButtonElement>) => void;
   onDelete: (event: MouseEvent<HTMLButtonElement>) => void;
 }) {
   const { t } = useI18n();
+  const swipeWidth = SESSION_SWIPE_ACTION_BUTTON_WIDTH * (onToggleTopPinned ? 4 : 3);
   const containerStyle = mobile
-    ? { position: "absolute" as const, inset: "0 0 0 auto", width: SESSION_SWIPE_ACTION_WIDTH, height: ITEM_HEIGHT, display: "flex", zIndex: 0 }
-    : { display: "flex", gap: DESKTOP_ACTION_GAP, flexShrink: 0 };
+    ? { position: "absolute" as const, inset: "0 0 0 auto", width: swipeWidth, height: ITEM_HEIGHT, display: "flex", zIndex: 0 }
+    : { display: "flex", justifyContent: "flex-end", gap: DESKTOP_ACTION_GAP, flexShrink: 0 };
   return (
     <div aria-hidden={mobile && !open} style={containerStyle}>
+      {onToggleTopPinned && (
+        <SessionActionButton mobile={mobile} open={open} label={t(isTopPinned ? "sidebar.unpinTop" : "sidebar.pinTop")} pressed={isTopPinned} tone="topPin" onClick={onToggleTopPinned}>
+          <ArrowUpToLine size={mobile ? 17 : 14} strokeWidth={2} aria-hidden="true" />
+        </SessionActionButton>
+      )}
       <SessionActionButton mobile={mobile} open={open} label={t(isPinned ? "sidebar.unpin" : "sidebar.pin")} pressed={isPinned} tone="pin" onClick={onTogglePinned}>
         <PinIcon size={mobile ? 17 : 14} strokeWidth={2} aria-hidden="true" style={{ transform: "rotate(45deg)" }} />
       </SessionActionButton>
@@ -340,37 +366,55 @@ function SessionRowContent({ session, view, actions }: {
   session: SessionInfo;
   view: {
     title: string;
-    status: Required<Pick<SessionItemStatus, "isSelected" | "isPinned">> & Pick<SessionItemStatus, "isRunning" | "isAwaitingInput" | "backgroundCommands" | "nextScheduledTaskAt" | "isUnread" | "startingFirstMessage">;
+    status: Required<Pick<SessionItemStatus, "isSelected" | "isPinned" | "isTopPinned">> & Pick<SessionItemStatus, "isRunning" | "isAwaitingInput" | "backgroundCommands" | "nextScheduledTaskAt" | "isUnread" | "startingFirstMessage">;
     isMobile: boolean;
     hovered: boolean;
     tree: Required<Pick<SessionItemTreeState, "depth" | "hasChildren" | "collapsed">>;
+    project?: { name: string; path: string };
   };
   actions: {
     onToggleCollapse?: () => void;
+    onToggleTopPinned?: (event: MouseEvent<HTMLButtonElement>) => void;
     onTogglePinned: (event: MouseEvent<HTMLButtonElement>) => void;
     onRename: (event: MouseEvent<HTMLButtonElement>) => void;
     onDelete: (event: MouseEvent<HTMLButtonElement>) => void;
   };
 }) {
-  const { status, isMobile, hovered, tree } = view;
-  const { isSelected, isRunning, isAwaitingInput, backgroundCommands = 0, nextScheduledTaskAt = null, isUnread, isPinned, startingFirstMessage } = status;
+  const { status, isMobile, hovered, tree, project } = view;
+  const { isSelected, isRunning, isAwaitingInput, backgroundCommands = 0, nextScheduledTaskAt = null, isUnread, isPinned, isTopPinned, startingFirstMessage } = status;
   const { depth, hasChildren, collapsed } = tree;
-  const { onToggleCollapse, onTogglePinned, onRename, onDelete } = actions;
+  const { onToggleCollapse, onToggleTopPinned, onTogglePinned, onRename, onDelete } = actions;
   const { t } = useI18n();
   const title = startingFirstMessage === undefined
     ? view.title
     : `${t("sidebar.creatingSession")} · ${startingFirstMessage.slice(0, 50)}`;
+  const hasActiveStatus = Boolean(isRunning || backgroundCommands > 0 || isUnread);
   return (
     <>
       {depth > 0 && (
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-hidden="true"><rect x="5" y="7" width="14" height="11" rx="2" /><path d="M9 11h.01M15 11h.01M9 15h6M12 7V4M10 4h4" /></svg>
       )}
-      <div style={{ position: "relative", flex: 1, minWidth: 0, boxSizing: "border-box", paddingRight: !isMobile ? DESKTOP_SESSION_ACTIONS_WIDTH + 8 : 0 }}>
+      <div style={{ position: "relative", flex: 1, minWidth: 0, boxSizing: "border-box" }}>
         <div title={title} style={{ display: "flex", alignItems: "center", gap: 5, minWidth: 0, color: "var(--text)", fontSize: 12, fontWeight: isSelected ? 500 : 400, lineHeight: 1.4 }}><span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{title}</span></div>
         <div style={{ marginTop: 2, display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-          <div style={{ display: "flex", flex: 1, alignItems: "center", gap: 8, minWidth: 0, overflow: "hidden", color: "var(--text-dim)", fontSize: 11, whiteSpace: "nowrap" }}>
-            <SessionStatusIndicator modified={session.modified} isRunning={isRunning} isAwaitingInput={isAwaitingInput} backgroundCommands={backgroundCommands} nextScheduledTaskAt={nextScheduledTaskAt} isUnread={isUnread} />
-            <span>{t("sidebar.messagesCount", { count: session.messageCount })}</span>
+          <div style={{ display: "flex", flex: 1, alignItems: "center", gap: project ? 6 : 8, minWidth: 0, overflow: "hidden", color: "var(--text-dim)", fontSize: 11, whiteSpace: "nowrap" }}>
+            {project ? (
+              <>
+                {hasActiveStatus ? (
+                  <SessionStatusIndicator modified={session.modified} isRunning={isRunning} isAwaitingInput={isAwaitingInput} backgroundCommands={backgroundCommands} nextScheduledTaskAt={nextScheduledTaskAt} isUnread={isUnread} />
+                ) : nextScheduledTaskAt !== null ? (
+                  <ScheduledTaskSessionIndicator at={nextScheduledTaskAt} />
+                ) : null}
+                <span data-session-project title={project.path} style={{ color: "var(--text-muted)", fontWeight: 500, flex: "0 1 auto", minWidth: "2.5ch", overflow: "hidden", textOverflow: "ellipsis" }}>{project.name}</span>
+                <span title={session.modified} style={{ flexShrink: 0 }}>{formatRelativeTime(session.modified)}</span>
+                <span style={{ flexShrink: 0 }}>{t("sidebar.messagesCount", { count: session.messageCount })}</span>
+              </>
+            ) : (
+              <>
+                <SessionStatusIndicator modified={session.modified} isRunning={isRunning} isAwaitingInput={isAwaitingInput} backgroundCommands={backgroundCommands} nextScheduledTaskAt={nextScheduledTaskAt} isUnread={isUnread} />
+                <span>{t("sidebar.messagesCount", { count: session.messageCount })}</span>
+              </>
+            )}
             {session.currentBranch && (
               <span title={`${session.isWorktree ? "Worktree" : "当前分支"}: ${session.currentBranch}\n${session.cwd}`} style={{ display: "flex", alignItems: "center", gap: 3, color: "var(--accent)", minWidth: 0, overflow: "hidden" }}>
                 <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-hidden="true"><line x1="6" y1="3" x2="6" y2="15" /><circle cx="18" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M18 9a9 9 0 0 1-9 9" /></svg>
@@ -382,9 +426,20 @@ function SessionRowContent({ session, view, actions }: {
         {!isMobile && (
           <div
             data-session-actions
-            style={{ position: "absolute", top: "50%", right: 0, width: DESKTOP_SESSION_ACTIONS_WIDTH, height: 32, transform: "translateY(-50%)", pointerEvents: hovered || isSelected ? "auto" : "none", zIndex: 2 }}
+            style={{
+              position: "absolute",
+              top: "50%",
+              right: 0,
+              width: DESKTOP_SESSION_ACTIONS_WIDTH,
+              height: 32,
+              transform: "translateY(-50%)",
+              pointerEvents: hovered || isSelected ? "auto" : "none",
+              background: hovered || isSelected ? (isSelected ? "var(--bg-selected)" : "var(--bg-hover)") : "transparent",
+              boxShadow: hovered || isSelected ? `-10px 0 8px -2px ${isSelected ? "var(--bg-selected)" : "var(--bg-hover)"}` : "none",
+              zIndex: 2,
+            }}
           >
-            {(hovered || isSelected) && <SessionActions mobile={false} open isPinned={isPinned} onTogglePinned={onTogglePinned} onRename={onRename} onDelete={onDelete} />}
+            {(hovered || isSelected) && <SessionActions mobile={false} open isPinned={isPinned} isTopPinned={isTopPinned} onToggleTopPinned={onToggleTopPinned} onTogglePinned={onTogglePinned} onRename={onRename} onDelete={onDelete} />}
           </div>
         )}
       </div>
@@ -395,10 +450,10 @@ function SessionRowContent({ session, view, actions }: {
   );
 }
 
-export function SessionItem({ session, status, mobile, actions, tree = {} }: SessionItemProps) {
-  const { isSelected, isRunning, isAwaitingInput, backgroundCommands, nextScheduledTaskAt, startingFirstMessage, isUnread, isPinned = false, pinColor = DEFAULT_SESSION_PIN_COLOR } = status;
+export function SessionItem({ session, status, mobile, actions, tree = {}, project }: SessionItemProps) {
+  const { isSelected, isRunning, isAwaitingInput, backgroundCommands, nextScheduledTaskAt, startingFirstMessage, isUnread, isPinned = false, isTopPinned = false, pinColor = DEFAULT_SESSION_PIN_COLOR } = status;
   const { enabled: isMobile, swipeOpen, onSwipeOpenChange } = mobile;
-  const { onClick, onRenamed, onDeleted, onTogglePinned, onSetPinColor } = actions;
+  const { onClick, onRenamed, onDeleted, onToggleTopPinned, onTogglePinned, onSetPinColor } = actions;
   const { depth = 0, hasChildren = false, collapsed = false, onToggleCollapse } = tree;
   const [hovered, setHovered] = useState(false);
   const [pinColorPickerOpen, setPinColorPickerOpen] = useState(false);
@@ -408,7 +463,8 @@ export function SessionItem({ session, status, mobile, actions, tree = {} }: Ses
   const { t } = useI18n();
   const mutations = useSessionItemMutations({ session, title, onRenamed, onDeleted, onSwipeOpenChange });
   const showPinColorPicker = pinColorPickerOpen && isPinned && !mutations.renaming && !mutations.confirmDelete;
-  const swipe = useSwipeActions({ enabled: isMobile && !mutations.renaming && !mutations.confirmDelete && !showPinColorPicker, open: swipeOpen, actionWidth: SESSION_SWIPE_ACTION_WIDTH, onOpenChange: onSwipeOpenChange });
+  const swipeActionWidth = SESSION_SWIPE_ACTION_BUTTON_WIDTH * (onToggleTopPinned ? 4 : 3);
+  const swipe = useSwipeActions({ enabled: isMobile && !mutations.renaming && !mutations.confirmDelete && !showPinColorPicker, open: swipeOpen, actionWidth: swipeActionWidth, onOpenChange: onSwipeOpenChange });
 
   const handleContextMenu = useCallback((event: MouseEvent<HTMLDivElement>) => {
     const handled = dispatchSessionRowContextMenu({ id: session.id, path: session.path, cwd: session.cwd, name: session.name, clientX: event.clientX, clientY: event.clientY, refresh: () => onRenamed?.() });
@@ -436,6 +492,13 @@ export function SessionItem({ session, status, mobile, actions, tree = {} }: Ses
     openInNewTab();
   }, [isMobile, mutations.confirmDelete, mutations.renaming, openInNewTab, session.transient]);
 
+  const stopAndToggleTopPin = onToggleTopPinned
+    ? (event: MouseEvent<HTMLButtonElement>) => {
+      event.stopPropagation();
+      onSwipeOpenChange(false);
+      onToggleTopPinned();
+    }
+    : undefined;
   const stopAndTogglePin = (event: MouseEvent<HTMLButtonElement>) => {
     event.stopPropagation();
     onSwipeOpenChange(false);
@@ -452,7 +515,7 @@ export function SessionItem({ session, status, mobile, actions, tree = {} }: Ses
 
   return (
     <div draggable={!isMobile && !mutations.renaming} style={{ height: ITEM_HEIGHT, position: "relative", overflow: "hidden" }}>
-      {isMobile && !mutations.confirmDelete && !mutations.renaming && <SessionActions mobile open={swipeOpen} isPinned={isPinned} onTogglePinned={stopAndTogglePin} onRename={stopAndRename} onDelete={stopAndDelete} />}
+      {isMobile && !mutations.confirmDelete && !mutations.renaming && <SessionActions mobile open={swipeOpen} isPinned={isPinned} isTopPinned={isTopPinned} onToggleTopPinned={stopAndToggleTopPin} onTogglePinned={stopAndTogglePin} onRename={stopAndRename} onDelete={stopAndDelete} />}
       <div
         data-session-row
         {...swipe.pointerHandlers}
@@ -475,12 +538,13 @@ export function SessionItem({ session, status, mobile, actions, tree = {} }: Ses
             session={session}
             view={{
               title,
-              status: { isSelected, isRunning, isAwaitingInput, backgroundCommands, nextScheduledTaskAt, startingFirstMessage, isUnread, isPinned },
+              status: { isSelected, isRunning, isAwaitingInput, backgroundCommands, nextScheduledTaskAt, startingFirstMessage, isUnread, isPinned, isTopPinned },
               isMobile,
               hovered,
               tree: { depth, hasChildren, collapsed },
+              project,
             }}
-            actions={{ onToggleCollapse, onTogglePinned: stopAndTogglePin, onRename: stopAndRename, onDelete: stopAndDelete }}
+            actions={{ onToggleCollapse, onToggleTopPinned: stopAndToggleTopPin, onTogglePinned: stopAndTogglePin, onRename: stopAndRename, onDelete: stopAndDelete }}
           />
         )}
       </div>
