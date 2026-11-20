@@ -104,11 +104,25 @@ test("入口只说「任务」，两类各一个图标计数，已结束的收�
   const collapsed = render(data, { tasks: [task, finishedTask], commands: [running, exited] });
   assert.match(collapsed, /class="extension-widget-key">tasks\.triggerShort<\/span>/, "定时任务和后台命令合并成一个词");
   assert.equal((collapsed.match(/scheduled-tasks-count/g) ?? []).length, 2, "两类各一个图标计数");
+  assert.deepEqual(
+    [...collapsed.matchAll(/scheduled-tasks-count"[^>]*>.*?<\/svg>(\d+)<\/span>/g)].map((m) => m[1]),
+    ["1", "1"],
+    "只统计未结束的任务与后台命令，已结束的不计入数字",
+  );
 
-  // 只有一类时只出现那一类的图标计数。
+  // 只有一类未结束时只出现那一类的图标计数；只有已结束时不显示数字徽标。
   assert.equal((render(data, { commands: [running] }).match(/scheduled-tasks-count/g) ?? []).length, 1);
   assert.equal((render(data, { tasks: [task] }).match(/scheduled-tasks-count/g) ?? []).length, 1);
+  const finishedOnly = render(data, { tasks: [finishedTask], commands: [exited] });
+  assert.match(finishedOnly, /class="extension-widget-key">tasks\.triggerShort<\/span>/, "仅有已结束记录时入口保留");
+  assert.doesNotMatch(finishedOnly, /scheduled-tasks-count/, "已结束的记录不在任务后面显示数字");
 
+  // 其他会话的运行中记录不计入当前会话的数字。
+  const foreignRunning = { ...running, id: "foreign-run", sessionId: "other" };
+  const foreignTask = { ...task, id: "foreign-task", sessionId: "other" };
+  const withForeign = render(data, { tasks: [finishedTask, foreignTask], commands: [exited, foreignRunning] });
+  assert.doesNotMatch(withForeign, /scheduled-tasks-count/, "非本会话的运行中记录不在任务后面显示数字");
+  assert.equal(render(data, { tasks: [foreignTask], commands: [foreignRunning], sessionId: undefined }), "");
   const panel = render(data, { tasks: [task, finishedTask], commands: [running, exited], open: true });
   const details = panel.indexOf('class="finished-tasks"');
   assert.ok(details > 0, "已结束的记录放进折叠区");

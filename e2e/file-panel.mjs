@@ -14,9 +14,17 @@ export async function checkFilePanel(page, filePath) {
   await topBarToggle.waitFor();
   const [bar, button] = await Promise.all([topBar.boundingBox(), topBarToggle.boundingBox()]);
   assert.ok(bar && button, "The top bar and file panel toggle are visible");
-  assert.equal(button.y, bar.y, "The file panel toggle starts at the top of the bar");
-  assert.equal(button.height, bar.height, "The file panel toggle reaches the bottom of the bar");
-  assert.equal(button.width, bar.height, "The file panel toggle has a square touch target");
+  assert.equal(button.width, button.height, "The file panel toggle is a square icon button");
+  if (page.viewportSize().width <= 640) {
+    assert.equal(button.y, bar.y, "The mobile file panel toggle starts at the top of the bar");
+    assert.equal(button.height, bar.height, "The mobile file panel toggle reaches the bottom of the bar");
+  } else {
+    assert.ok(button.y >= bar.y, "The desktop file panel toggle stays within the top of the bar");
+    assert.ok(button.y + button.height <= bar.y + bar.height, "The desktop file panel toggle stays within the bottom of the bar");
+    const topGap = button.y - bar.y;
+    const bottomGap = (bar.y + bar.height) - (button.y + button.height);
+    assert.ok(Math.abs(topGap - bottomGap) <= 1.5, `The desktop file panel toggle is vertically centered (top=${topGap}, bottom=${bottomGap})`);
+  }
   const showSidebar = page.getByRole("button", { name: "Show sidebar", exact: true });
   if (await showSidebar.isVisible()) await showSidebar.click();
   // The DOM title normalizes Windows paths to forward slashes

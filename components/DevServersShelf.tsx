@@ -196,8 +196,8 @@ export function DevServersShelf({
   const activeNames = new Set(servers.filter(isDevServerActive).map((server) => server.name));
   const declared = data?.enabled ? data.configs.filter((config) => !activeNames.has(config.name)) : [];
   // 只显示当前会话自己的定时任务与后台命令；其他会话的记录不进这个入口。
-  const tasks = (scheduled.data?.tasks ?? []).filter((task) => task.sessionId === sessionId);
-  const commands = (background.data?.commands ?? []).filter((command) => command.sessionId === sessionId);
+  const tasks = sessionId ? (scheduled.data?.tasks ?? []).filter((task) => task.sessionId === sessionId) : [];
+  const commands = sessionId ? (background.data?.commands ?? []).filter((command) => command.sessionId === sessionId) : [];
   const showServers = servers.length > 0 || launchErrors.length > 0;
   if (!showServers && tasks.length === 0 && commands.length === 0) return null;
   const runningCommandCount = commands.filter((command) => command.status === "running" || command.status === "stopping").length;
@@ -466,17 +466,17 @@ export function DevServersShelf({
         <span className="extension-widget-key">{triggerText}</span>
         <span className="mobile-activity-label" aria-hidden="true"><Activity size={15} />{t("servers.activity")}<ChevronUp className="mobile-activity-chevron" size={12} /></span>
         {runningCount > 0 && <span className="dev-servers-count">{runningCount}</span>}
-        {/* 两类各一个图标+数量，只有一类就不出现另一个（桌面和手机同一套）。 */}
-        {tasks.length > 0 && (
+        {/* 两类各一个图标+数量，只统计当前会话未结束的；只有一类就不出现另一个（桌面和手机同一套）。 */}
+        {openTasks.length > 0 && (
           <span className="dev-servers-count scheduled-tasks-count" aria-hidden="true">
             <svg {...iconProps} width={9} height={9}><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>
-            {tasks.length}
+            {openTasks.length}
           </span>
         )}
-        {commands.length > 0 && (
+        {openCommands.length > 0 && (
           <span className="dev-servers-count scheduled-tasks-count" aria-hidden="true">
             <svg {...iconProps} width={9} height={9}><path d="M5 7l5 5-5 5M12 17h7" /></svg>
-            {commands.length}
+            {openCommands.length}
           </span>
         )}
         {hasErrors && <span className="dev-servers-error-dot" aria-hidden="true" />}

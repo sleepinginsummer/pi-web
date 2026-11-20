@@ -4569,6 +4569,7 @@ span.token.table {
 
 [data-mobile-toolbar="true"] .app-top-bar-end {
   padding: 0;
+  border-bottom: none;
   background: var(--bg-panel);
 }
 
@@ -4585,6 +4586,7 @@ span.token.table {
 
 [data-mobile-toolbar="true"] .top-bar-end-btn {
   border-left: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
 }
 
 [data-mobile-toolbar="true"] .top-bar-stats-btn.is-mobile {
