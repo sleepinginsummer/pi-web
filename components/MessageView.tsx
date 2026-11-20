@@ -11,6 +11,7 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { CustomMessageView } from "./CustomMessageView";
 import { CopyActionIcon, MessageActions, createForkAction, type MessageAction } from "./MessageActions";
+import { useMessageActionsReveal } from "./useMessageActionsReveal";
 import { formatMessageTime as formatTime, getMessageImages, getMessageText, MessageImage } from "./MessageContentPrimitives";
 import { getAssistantErrorMessage, getThinkingPreview, hasAssistantAnswer, isAssistantAborted, isAssistantTruncated, isDisplayableAssistantBlock, isHiddenCustomMessage, splitThinkingPieces } from "@/lib/message-display";
 import { formatTurnDuration } from "@/lib/turn-duration";
@@ -314,6 +315,8 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
 }) {
   const { t } = useI18n();
   const [hovered, setHovered] = useState(false);
+  // 触屏没有 hover：按一下这条消息也要能把动作栏叫出来。
+  const reveal = useMessageActionsReveal(hovered, setHovered);
   const [copied, setCopied] = useState(false);
   const [longMessageExpanded, setLongMessageExpanded] = useState(false);
   const [deferredContent, setDeferredContent] = useState<string | null>(null);
@@ -392,9 +395,11 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
   });
   return (
     <div
+      ref={reveal.ref}
       style={{ marginBottom: 16, display: "flex", flexDirection: "column", alignItems: "flex-end" }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
+      onPointerDown={reveal.onPointerDown}
     >
       <div style={{ display: "flex", alignItems: "flex-end", gap: 6, maxWidth: "85%" }}>
         <div
@@ -570,6 +575,8 @@ function AssistantMessageView({
   const truncated = isAssistantTruncated(message, { isStreaming });
   const unansweredTruncation = truncated && !hasAssistantAnswer(message);
   const [hovered, setHovered] = useState(false);
+  // 触屏没有 hover：按一下这条消息也要能把动作栏叫出来。
+  const reveal = useMessageActionsReveal(hovered, setHovered);
   const [copied, setCopied] = useState(false);
   const streamStartRef = useRef<StreamRateStart | null>(null);
   const rateKey = streamRateKey(message);
@@ -727,11 +734,13 @@ function AssistantMessageView({
 
   return (
     <div
+      ref={reveal.ref}
       data-message-role="assistant"
       data-entry-id={entryId}
       style={{ marginBottom: 16 }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
+      onPointerDown={reveal.onPointerDown}
     >
       <AssistantMessageHeader
         modelName={message.provider ? getModelDisplayName(message.provider, message.model, modelNames) : undefined}

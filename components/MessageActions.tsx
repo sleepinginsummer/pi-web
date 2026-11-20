@@ -54,7 +54,7 @@ export function MessageActions({ actions, visible }: Props) {
   if (actions.length === 0) return null;
 
   return (
-    <div style={{
+    <div data-message-actions="" style={{
       display: "flex",
       gap: 3,
       opacity: visible ? 1 : 0,

@@ -412,3 +412,13 @@ hooks/useAgentSession.ts:3462   missing: handleCompact, opts.chatInputRef, sessi
   里有两条立刻变红。
 
 验证：全量 570 文件 / 4134 通过 / 0 失败；`tsc --noEmit` 与 `eslint` 通过。
+
+## 18. 触屏上点消息不出复制按钮（0.17.0-merge.25）
+
+**现象**（用户报告）：移动端点回复正文不出复制按钮；点其他内容出过一次之后，回头再点正文又「轻松能点出来」。
+
+**根因**：动作栏完全由 `hovered` 驱动（`onMouseEnter`）。触屏没有真正的 hover——iOS Safari 只对浏览器认为「可点」的元素合成 mouseenter，按在纯文本上不发；先在可点元素上按一下之后合成事件才打开，于是出现「回头就灵」的错觉。
+
+**修法**：`components/useMessageActionsReveal.ts`，触屏（`pointerType !== "mouse"`）按在这条消息上就显示动作栏，按到别处收起（document 捕获阶段；`[data-message-actions]` 上的按下不算「别处」，否则点复制按钮会把栏收掉）。鼠标仍走 hover。用户消息与助手消息共用这一个 hook。
+
+**验证**：jsdom + React 用例（触屏按下显示、点按钮不收、点外面收起、鼠标不参与）；真浏览器 400px + 触摸模拟，并**拦掉所有合成 mouseover/mouseenter/mousemove** 模拟 iOS 行为——只靠 pointerdown 仍能把动作栏叫出来（opacity 0 → 1），点外面回到 0。
