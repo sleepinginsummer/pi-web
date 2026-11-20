@@ -32,6 +32,20 @@ export interface FirstPageBackfillOptions<Page extends BackfillPage> {
   limit?: number;
 }
 
+/**
+ * 补页拿到的那一页，是否还属于首屏那个会话视图。
+ *
+ * 补页是两次独立请求，中间会话文件可能被重写（压缩、外部改写、切分支）：这时服务端
+ * 返回的是新版本、可能还是另一条分支末端，两页的记录接不上。合并进去会得到一张既
+ * 没有消息、又标着「没有更早消息」的空白页 —— 只能丢弃这次结果，重新读首屏。
+ */
+export function sameSessionView(
+  first: { version: string; leafId: string | null },
+  page: { version: string; leafId: string | null },
+): boolean {
+  return first.version === page.version && first.leafId === page.leafId;
+}
+
 /** 默认最多补三页：翻不到就保留「加载更早消息」入口，不做无上限的自动翻页。 */
 export const FIRST_PAGE_BACKFILL_LIMIT = 3;
 

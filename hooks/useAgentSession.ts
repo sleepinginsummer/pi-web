@@ -70,7 +70,7 @@ import {
   type SessionDetails,
   invalidateSessionContext,
 } from "@/lib/session-load-client";
-import { backfillFirstPage, mergeOlderPage } from "@/lib/first-page-backfill";
+import { backfillFirstPage, mergeOlderPage, sameSessionView } from "@/lib/first-page-backfill";
 import { LatestContextLoader } from "@/lib/latest-context-loader";
 import { createIdleMessageReads, entriesAfter } from "@/lib/idle-message-read";
 import { SessionContextRefreshScheduler } from "@/lib/session-context-refresh-scheduler";
@@ -1274,7 +1274,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     sid: string,
     showLoading = false,
     includeState = false,
-    options: { preserveScroll?: boolean; validateView?: boolean; focusCompaction?: boolean } = {},
+    // `reloadedAfterRewrite` 只在内部用：补页发现文件被重写时重读一次首屏，避免无限重读。
+    options: { preserveScroll?: boolean; validateView?: boolean; focusCompaction?: boolean; reloadedAfterRewrite?: boolean } = {},
   ) => {
     const performancePrefix = `pi-session:${sid}`;
     if (showLoading) {
@@ -1352,6 +1353,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // 不读 ref 或 state —— 它们在同一个异步续体里可能还是上一帧、甚至上一个会话的值。
       const firstSnapshot = committedSnapshot ?? contextResult.value.snapshot;
       const firstLeafId = contextResult.value.leafId;
+      // 补页期间会话文件被重写时，拿到的页属于另一个视图（版本或分支末端变了）。
+      let viewChanged = false;
       await backfillFirstPage({
         first: firstSnapshot,
         readOlder: async (before) => {
@@ -1367,6 +1370,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           });
           if (!older.committed || older.value.kind !== "loaded") return null;
           if (sessionIdRef.current !== sid) return null;
+          // 两页接不上就别合并：先把首屏重读一遍，拿到新版本的那个视图。
+          if (!sameSessionView(
+            { version: firstSnapshot.version, leafId: firstLeafId },
+            { version: older.value.snapshot.version, leafId: older.value.leafId },
+          )) {
+            viewChanged = true;
+            return null;
+          }
           return older.value;
         },
         commit: (page) => {
@@ -1381,6 +1392,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           );
         },
       });
+      if (viewChanged) {
+        // 文件在补页期间被重写：这次的首屏与补页结果都过期了，重读一次（只重试一次，
+        // 免得来回重读）；重读失败就保留当前这张带「加载更早消息」入口的页。
+        if (!options.reloadedAfterRewrite) {
+          return loadSession(sid, showLoading, includeState, { ...options, reloadedAfterRewrite: true });
+        }
+      }
       if (showLoading) {
         performance.clearMarks(`${performancePrefix}:data`);
         performance.mark(`${performancePrefix}:data`);

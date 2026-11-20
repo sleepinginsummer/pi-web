@@ -87,7 +87,14 @@ const THEMATIC_BREAK = /^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3
 export function scanOutlineLines(markdown: string): OutlineLine[] {
   if (!markdown) return [];
   const lines: OutlineLine[] = [];
-  let inFence: { char: string; length: number } | null = null;
+  /**
+   * 打开着的围栏：`containerIndent` 是它所在列表项的内容缩进（不在列表里是 0）。
+   *
+   * 列表项里的围栏**不靠结束标记也能结束**：缩进退回容器之外时它跟着收尾，
+   * 和 remark 渲染正文的行为一致。否则一个漏写结束标记的围栏会把后面的
+   * `## 标题` 当成代码，正文显示了标题、大纲却没有。
+   */
+  let inFence: { char: string; length: number; containerIndent: number } | null = null;
   // 上一行正文：下一行若是 Setext 下划线，它其实是标题文字。`topLevel` 记住它是否在列表外。
   let pending: { text: string; topLevel: boolean } | null = null;
   // 每层打开着的列表项的内容缩进；空行不关闭列表，只有缩进回到外面才关闭。
@@ -99,11 +106,22 @@ export function scanOutlineLines(markdown: string): OutlineLine[] {
   };
 
   for (const rawLine of markdown.replace(/\r\n/g, "\n").split("\n")) {
+    const indent = rawLine.length - rawLine.trimStart().length;
+    // 缩进退回围栏容器之外（列表项结束）：未闭合的围栏在这里收尾，这一行继续按正文处理。
+    if (inFence && rawLine.trim() && indent < inFence.containerIndent) inFence = null;
     const fenceMatch = rawLine.match(FENCE);
     if (fenceMatch) {
       if (!inFence) {
         flush();
-        inFence = { char: fenceMatch[1][0], length: fenceMatch[1].length };
+        // 先按缩进关掉更深的列表：顶格的围栏在 remark 里不属于上一项。
+        while (listContentIndents.length > 0 && indent < listContentIndents[listContentIndents.length - 1]) {
+          listContentIndents.pop();
+        }
+        inFence = {
+          char: fenceMatch[1][0],
+          length: fenceMatch[1].length,
+          containerIndent: listContentIndents[listContentIndents.length - 1] ?? 0,
+        };
       } else if (closesFence(rawLine, inFence)) {
         inFence = null;
       }
@@ -112,7 +130,6 @@ export function scanOutlineLines(markdown: string): OutlineLine[] {
     }
     if (inFence) continue;
 
-    const indent = rawLine.length - rawLine.trimStart().length;
     const thematicBreak = THEMATIC_BREAK.test(rawLine);
     const marker = thematicBreak ? null : rawLine.match(LIST_MARKER);
     let insideList = false;

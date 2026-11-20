@@ -296,3 +296,11 @@ hooks/useAgentSession.ts:3462   missing: handleCompact, opts.chatInputRef, sessi
 | P3-2 `check_in_seconds` 上限 | 新增 `MAX_CHECK_IN_SECONDS = 86400`，工具描述同步；`background-commands.test.mjs` 补 3e9 / 86401 拒绝 |
 | P3-3 `/context` 304 前置 | 新增 `liveSessionBrowseVersion()`：存活会话先只读版本比对 `If-None-Match`，命中 304 就不再 `projectSessionTree`；`context-route.test.mjs` 断言顺序，带 `before` 的分页不参与 304 |
 | P3-4 大纲跳转守卫 | `jumpToUnloadedTurn` 在 `await onLoadUntilEntry` 之后用 `jumpTargetRef` 复核目标仍是当前目标，否则丢弃（不再 `onRevealHistory` 到新分支）；切换会话/分支时一并清掉 `pendingNavigationRef`；`finally` 不再清掉新一次跳转的加载态 |
+
+## 10. 边界复测修正（merge.15 之后）
+
+| 问题 | 根因 | 修法 | 验证 |
+|---|---|---|---|
+| 补页期间会话文件被重写，聊天停在空白页 | 补页是两次独立请求，合并时只按「元数据取首屏、消息取旧页」拼，没核对两页是否同一视图；旧页的 `hasMore: false` 会把「加载更早消息」入口一起关掉 | `lib/first-page-backfill.ts` 加 `sameSessionView()`（版本 + 分支末端）；`loadSession` 在 `readOlder` 里发现不一致就标记 `viewChanged`、丢弃该页，并**重读一次首屏**（`options.reloadedAfterRewrite` 防止无限重读） | `first-page-backfill.test.mjs`「补页的页必须和首屏属于同一个会话视图」+ `useAgentSession.test.mjs` 源形态断言 |
+| 列表项里的未闭合围栏让大纲漏标题 | 行扫描器只在遇到结束标记时关闭围栏；remark 在列表项结束（缩进退回容器外）时就会收尾，后面的 `##` 在正文里是标题 | `scanOutlineLines` 给围栏记下 `containerIndent`：缩进退回容器之外即视为围栏结束，该行继续按正文扫描；开围栏前先按缩进关掉更深的列表 | `session-outline.test.mjs`「列表项里的围栏随容器结束而结束」5 个用例；另用 remark 逐例对照（含两个「该隐藏」的反例） |
+| 底栏轮询换项目后旧结果覆盖新数据 | `usePolledJson` 只用请求序号挡同一接口的乱序；操作收尾时调用的 `refresh` 属于旧 URL，序号反而更大 | 增加 `urlRef`：`refresh` 发现当前 URL 已变就直接返回（不发请求），提交与错误写入再核对请求序号 + URL；两个任务 hook 的 `actionError`、开发服务 hook 的 `setError` 按 `cwd` 判断 | `hooks/usePolledJson.test.mjs` 用真 React + JSDOM 复现「A 的删除未完成 → 切到 B → A 完成」；去掉守卫即失败（`旧项目的刷新不该再发请求`） |

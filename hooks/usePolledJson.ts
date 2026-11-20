@@ -16,6 +16,9 @@ export function usePolledJson<T extends object>(url: string | null, intervalMs: 
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
   const requestRef = useRef(0);
+  // 当前接口地址：换项目会换 URL，旧请求（含操作后的那次 refresh）回来时必须认得出。
+  const urlRef = useRef(url);
+  urlRef.current = url;
   // 间隔可以按当前状态算（有服务正在启动/命令还在跑时快一些）：放进 ref 读最新值，
   // 免得每次改快慢都重启轮询、连带多发一次请求。
   const delayRef = useRef(intervalMs);
@@ -26,17 +29,21 @@ export function usePolledJson<T extends object>(url: string | null, intervalMs: 
   }, []);
 
   const refresh = useCallback(async (): Promise<void> => {
-    if (!url) return;
+    // 已经换了项目/接口：旧项目那次操作收尾时发起的刷新直接丢掉，不发请求也不写数据。
+    if (!url || urlRef.current !== url) return;
+    const requestedUrl = url;
     const request = ++requestRef.current;
+    const isCurrent = () => request === requestRef.current && urlRef.current === requestedUrl;
     try {
-      const response = await fetch(url, { cache: "no-store" });
+      const response = await fetch(requestedUrl, { cache: "no-store" });
       const next = await response.json() as T & { error?: string };
-      if (request !== requestRef.current) return;
+      if (!isCurrent()) return;
       if (!response.ok || next.error) throw new Error(next.error ?? `HTTP ${response.status}`);
       setData((current) => (sameJson(current, next) ? current : next));
       setError(null);
     } catch (cause) {
-      if (request === requestRef.current) setError(cause instanceof Error ? cause.message : String(cause));
+      // 请求序号和当前 URL 都要对得上：序号挡同一接口的乱序，URL 挡换项目后的旧结果。
+      if (isCurrent()) setError(cause instanceof Error ? cause.message : String(cause));
     }
   }, [url]);
 

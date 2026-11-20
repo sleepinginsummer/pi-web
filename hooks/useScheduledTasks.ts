@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { usePolledJson } from "@/hooks/usePolledJson";
 import type { ScheduledTaskListResponse } from "@/lib/types";
 
@@ -15,6 +15,9 @@ export function useScheduledTasks(cwd: string | null | undefined) {
   // 操作失败单独记：轮询刷新只清读取错误，不该把「删除失败」这类提示一并抹掉。
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set());
+  // 操作可能在切项目之后才完成：错误提示只能落在发起它的那个项目上。
+  const cwdRef = useRef(cwd);
+  cwdRef.current = cwd;
   const { data, error, refresh } = usePolledJson<ScheduledTaskListResponse>(
     cwd ? `/api/scheduled-tasks?cwd=${encodeURIComponent(cwd)}` : null,
     POLL_MS,
@@ -38,7 +41,7 @@ export function useScheduledTasks(cwd: string | null | undefined) {
       }
       setActionError(null);
     } catch (cause) {
-      setActionError(cause instanceof Error ? cause.message : String(cause));
+      if (cwdRef.current === cwd) setActionError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setPending((current) => {
         const next = new Set(current);

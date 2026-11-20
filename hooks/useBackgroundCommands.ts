@@ -12,6 +12,9 @@ export function useBackgroundCommands(cwd: string | null | undefined) {
   // 操作失败单独记：轮询刷新只清读取错误，不该把「移除失败」这类提示一并抹掉。
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set());
+  // 操作可能在切项目之后才完成：错误提示只能落在发起它的那个项目上。
+  const cwdRef = useRef(cwd);
+  cwdRef.current = cwd;
   const latestRef = useRef<BackgroundCommandListResponse | null>(null);
   const busy = Boolean(latestRef.current?.commands.some((command) => command.status === "running" || command.status === "stopping"));
   const { data, error, refresh } = usePolledJson<BackgroundCommandListResponse>(
@@ -38,7 +41,7 @@ export function useBackgroundCommands(cwd: string | null | undefined) {
       }
       setActionError(null);
     } catch (cause) {
-      setActionError(cause instanceof Error ? cause.message : String(cause));
+      if (cwdRef.current === cwd) setActionError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setPending((current) => {
         const next = new Set(current);

@@ -30,6 +30,9 @@ async function postJson(url: string, body: unknown): Promise<void> {
  */
 export function useDevServers(cwd: string | null | undefined) {
   const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set());
+  // 操作可能在切项目之后才完成：错误提示只能落在发起它的那个项目上。
+  const cwdRef = useRef(cwd);
+  cwdRef.current = cwd;
   // 轮询快慢看最近一次结果：ref 每次渲染更新，poller 的下一拍读它，
   // 于是「有服务在启动」时不必重启轮询、也不会多发一次请求。
   const latestRef = useRef<DevServerListResponse | null>(null);
@@ -47,7 +50,7 @@ export function useDevServers(cwd: string | null | undefined) {
       await action();
       setError(null);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (cwdRef.current === cwd) setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setPending((current) => {
         const next = new Set(current);

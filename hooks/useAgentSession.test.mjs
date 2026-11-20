@@ -236,6 +236,11 @@ test("context loads atomically through the shared latest loader", () => {
   assert.doesNotMatch(backfillSource, /loadedCount|loadedEntryIds|viewSnapshotRef\.current\.page|messagesRef\.current\.length/);
   // 元数据沿用首屏那页，滚动行为沿用本次加载的 options：补页不该把模型/思考强度改回旧值，
   // 也不该因为 preserveScroll 让首屏停在顶部。
+  // 补页中途文件被重写（版本或分支末端变了）时不能合并：两页接不上，会得到一张既没有
+  // 消息、又标着「没有更早消息」的空白页。丢弃后重读一次首屏，且只重试一次。
+  assert.match(backfillSource, /if \(!sameSessionView\(/);
+  assert.match(backfillSource, /viewChanged = true;/);
+  assert.match(loadSource, /if \(!options\.reloadedAfterRewrite\) \{\s*\n\s*return loadSession\(sid, showLoading, includeState, \{ \.\.\.options, reloadedAfterRewrite: true \}\);/);
   assert.match(backfillSource, /mergeOlderPage\(firstSnapshot, page\.snapshot\)/);
   assert.match(backfillSource, /firstLeafId,[\s\S]*?options,/);
   assert.doesNotMatch(backfillSource, /preserveScroll: true/);
