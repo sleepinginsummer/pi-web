@@ -452,3 +452,12 @@ test("ordered list padding grows with its widest number so two-digit markers are
   const wide = renderMarkdown("98. a\n99. b\n100. c");
   assert.match(wide, /<ol start="98" style="--ol-marker-digits:3">/);
 });
+
+test("markAnswerHeadings 只给最终回答的顶层标题加标记", () => {
+  const marked = renderMarkdown("# 标题\n\n正文\n\n> ## 引用里的标题", { markAnswerHeadings: true });
+  assert.match(marked, /<h1 data-answer-heading="1">标题<\/h1>/);
+  assert.match(marked, /<blockquote>\s*<h2>引用里的标题<\/h2>/);
+
+  const plain = renderMarkdown("# 标题");
+  assert.doesNotMatch(plain, /data-answer-heading/, "普通正文不标记");
+});

@@ -328,18 +328,44 @@ export async function getSessionContentIndex(filePath: string): Promise<Persiste
   return pending;
 }
 
+/**
+ * 同一个会话文件里多次按偏移读取共用一个描述符。
+ *
+ * 大纲遇到长串纯工具记录时会一条条往前补读候选回答；每读一条都 open/close 一遍
+ * 就是纯系统调用开销。调用方负责在 finally 里 close()。
+ */
+interface IndexedRecordReader {
+  read(records: readonly IndexedRecord[]): SessionEntry[];
+  close(): void;
+}
+
+function openRecordReader(filePath: string): IndexedRecordReader {
+  const fd = openSync(filePath, "r");
+  let closed = false;
+  return {
+    read(records) {
+      return records.map((record) => {
+        const buffer = Buffer.allocUnsafe(record.length);
+        const bytesRead = readSync(fd, buffer, 0, record.length, record.offset);
+        if (bytesRead !== record.length) throw new Error(`会话索引记录读取不完整: ${record.id}`);
+        return JSON.parse(buffer.toString("utf8")) as SessionEntry;
+      });
+    },
+    close() {
+      if (closed) return;
+      closed = true;
+      closeSync(fd);
+    },
+  };
+}
+
 function readRecords(filePath: string, records: IndexedRecord[]): SessionEntry[] {
   if (records.length === 0) return [];
-  const fd = openSync(filePath, "r");
+  const reader = openRecordReader(filePath);
   try {
-    return records.map((record) => {
-      const buffer = Buffer.allocUnsafe(record.length);
-      const bytesRead = readSync(fd, buffer, 0, record.length, record.offset);
-      if (bytesRead !== record.length) throw new Error(`会话索引记录读取不完整: ${record.id}`);
-      return JSON.parse(buffer.toString("utf8")) as SessionEntry;
-    });
+    return reader.read(records);
   } finally {
-    closeSync(fd);
+    reader.close();
   }
 }
 
@@ -438,9 +464,6 @@ export interface IndexedBranchOutlineSlice {
   }>;
 }
 
-/** 末尾助手记录不可展示时最多再往前找几条，避免一轮里的大量工具调用把读取撑爆。 */
-const MAX_FINAL_ANSWER_BACKTRACK = 8;
-
 /**
  * 仅按字节偏移读取当前活动分支上每轮的锚点记录和最终助手记录，
  * 跳过全部 toolResult 与中间过程消息，用于快速生成全量轻量大纲。
@@ -483,16 +506,22 @@ export async function readIndexedBranchOutlineRecords(
     const last = spec.assistants.at(-1);
     if (last) queue(last);
   }
-  const entriesById = new Map(readRecords(filePath, toRead).map((entry) => [entry.id, entry]));
-  const turns = specs
-    .map((spec) => {
-      const anchor = entriesById.get(spec.anchor.id);
-      if (!anchor) return null;
-      const finalAssistant = selectFinalAssistant(filePath, spec.assistants, entriesById);
-      return { turnNumber: spec.turnNumber, anchor, finalAssistant };
-    })
-    .filter((item): item is NonNullable<typeof item> => item !== null);
-  return { leafId: activeLeafId, version: index.version, turns };
+  // 同一份文件读一次描述符：末尾没有回答的轮次会逐条往前补读候选记录。
+  const reader = openRecordReader(filePath);
+  try {
+    const entriesById = new Map(reader.read(toRead).map((entry) => [entry.id, entry]));
+    const turns = specs
+      .map((spec) => {
+        const anchor = entriesById.get(spec.anchor.id);
+        if (!anchor) return null;
+        const finalAssistant = selectFinalAssistant(reader, spec.assistants, entriesById);
+        return { turnNumber: spec.turnNumber, anchor, finalAssistant };
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null);
+    return { leafId: activeLeafId, version: index.version, turns };
+  } finally {
+    reader.close();
+  }
 }
 
 /**
@@ -501,18 +530,17 @@ export async function readIndexedBranchOutlineRecords(
  * 由大纲按空摘要处理（主对话同样回退到它）。
  */
 function selectFinalAssistant(
-  filePath: string,
+  reader: IndexedRecordReader,
   assistants: readonly IndexedRecord[],
   entriesById: Map<string, SessionEntry>,
 ): SessionEntry | null {
   const last = assistants.at(-1);
   if (!last) return null;
   for (let i = assistants.length - 1; i >= 0; i -= 1) {
-    if (assistants.length - 1 - i > MAX_FINAL_ANSWER_BACKTRACK) break;
     const record = assistants[i];
     let entry = entriesById.get(record.id);
     if (!entry) {
-      entry = readRecords(filePath, [record])[0];
+      entry = reader.read([record])[0];
       if (!entry) continue;
       entriesById.set(record.id, entry);
     }

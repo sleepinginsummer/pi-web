@@ -3455,7 +3455,7 @@ span.token.table {
 .extension-widget-content { max-height: 260px; overflow: auto; margin: 0; padding: 8px 9px; color: var(--text-muted); font: 12px/1.5 var(--font-mono); white-space: pre-wrap; word-break: break-word; }
 /* Dev servers: the bottom bar entry, its list, and the right-panel viewer. */
 .extension-status-bar.has-only-leading:not(:has(.dev-servers-shelf)) { display: none !important; }
-.dev-servers-shelf { display: flex; flex: 0 0 auto; align-items: center; }
+.dev-servers-shelf { display: flex; flex: 0 0 auto; align-items: center; gap: 2px; }
 .dev-servers-trigger .dev-servers-count {
   display: inline-flex;
   align-items: center;
@@ -3476,7 +3476,6 @@ span.token.table {
 /* 待办独占左侧容器，宽度上限只适用于右侧多组件列表。 */
 .extension-widget-left-shelf > .extension-widget-triggers { max-width: 100%; }
 .dev-servers-panel { width: min(420px, calc(100vw - 24px)); }
-.mobile-activity-label { display: none; }
 
 .mobile-composer-more,
 .mobile-controls-close {
@@ -3633,9 +3632,7 @@ span.token.table {
     background: var(--bg-selected);
     color: var(--text);
   }
-  .extension-status-bar .dev-servers-trigger > :is(.extension-widget-placement, .extension-widget-key) { display: none; }
-  .mobile-activity-label { display: inline-flex; align-items: center; gap: 4px; }
-  .dev-servers-trigger[aria-expanded="true"] .mobile-activity-chevron { rotate: 180deg; }
+  .extension-status-bar .dev-servers-trigger > .extension-widget-placement { display: none; }
   .extension-status-bar .extension-widget-panels {
     inset: auto 8px 49px;
     z-index: 10;
@@ -3716,7 +3713,6 @@ span.token.table {
 .scheduled-task-row .dev-server-name { display: flex; flex-direction: column; line-height: 1.3; }
 .scheduled-task-owner { overflow: hidden; color: var(--text-dim); font-family: var(--font-sans, inherit); font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
 .scheduled-task-row.is-stopped > .dev-server-dot { background: transparent; border: 1px solid var(--text-dim); }
-.dev-servers-trigger .scheduled-tasks-count { display: inline-flex; align-items: center; gap: 2px; }
 .dev-servers-panel { max-height: min(70vh, 560px); overflow-y: auto; }
 .background-command-item { list-style: none; }
 .scheduled-task-owner.is-error { color: #ef4444; }
@@ -4101,8 +4097,9 @@ span.token.table {
   height: 28px !important;
 }
 
-/* Phone portrait: the send/stop buttons sit in the text row, so the whole
-   bottom bar can go while the keyboard is up. */
+/* Phone portrait: the send and queue buttons sit in the text row, so the whole
+   bottom bar can go while the keyboard is up. Stop still lives in that bar, so
+   it hides with the keyboard too. */
 @media (max-width: 640px) {
   html[data-keyboard-open] .chat-input-controls,
   html[data-keyboard-open] .extension-status-shelf,

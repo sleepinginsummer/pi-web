@@ -39,6 +39,8 @@ test("助手消息显示时间，流式尾消息隐藏时间并允许分段覆�
 test("过程与答复拆分后只在答复显示同一条助手消息的时间", () => {
   assert.match(source, /showTimestamp: processIdx !== finalAssistantIdx \|\| !finalAnswerMessage/);
   assert.match(source, /if \(finalAnswerMessage\) nodes\.push\(renderMessage\(finalAssistantIdx, \{\s*messageOverride: finalAnswerMessage, writtenFiles,/);
+  // 答复那一次渲染在容器上留标记：大纲跳转据此在同一条消息的过程副本里挑对节点。
+  assert.match(source, /data-answer=\{options\.finalAnswer \? "1" : undefined\}/);
 });
 
 test("本地渲染窗口耗尽后继续请求服务端历史页", () => {

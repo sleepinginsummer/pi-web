@@ -101,10 +101,15 @@ export function TrashSessionDetail({ session, onClose, onRestored, onRenamed }: 
     } finally { setRestoring(false); }
   };
 
-  const renderMessage = (message: AgentMessage, index: number, final = false) => (
-    <div key={context?.entryIds[index] ?? index} data-entry-id={context?.entryIds[index]}
-      ref={(element) => { if (refIndices[index] >= 0) messageRefs.current[refIndices[index]] = element; }}>
+  // 答复和过程副本共用同一个 entryId：答复那次渲染带上答案容器标记，大纲跳转才认得出它，
+  // 标题也只在答复副本上打标记（过程详情里的标题不算大纲标题）。
+  // 过程详情默认折叠、展开时才挂载子节点：它的副本不能再认领同一个 ref，否则展开过程详情
+  // 会把答复的节点顶掉，大纲就找不到可点的标题了（主聊天同样只让答复 attachRef）。
+  const renderMessage = (message: AgentMessage, index: number, final = false, attachRef = true) => (
+    <div key={context?.entryIds[index] ?? index} data-entry-id={context?.entryIds[index]} data-answer={final ? "1" : undefined}
+      ref={attachRef && refIndices[index] >= 0 ? (element) => { messageRefs.current[refIndices[index]] = element; } : undefined}>
       <MessageView message={message} toolResults={toolResults} cwd={session.cwd} showTimestamp={final}
+        markAnswerHeadings={final}
         prevTimestamp={index > 0 ? messages[index - 1].timestamp : undefined} />
     </div>
   );
@@ -146,7 +151,7 @@ export function TrashSessionDetail({ session, onClose, onRestored, onRenamed }: 
                     durationMs={anchor ? getTurnDurationMs(messages, group.start, group.end) : undefined}
                     defaultExpanded={false}
                     t={t}
-                    renderChildren={() => <>{process.map(({ message, index }) => renderMessage(message, index))}</>}
+                    renderChildren={() => <>{process.map(({ message, index }) => renderMessage(message, index, false, false))}</>}
                   /> }
                   {views?.answer && renderMessage(views.answer, group.finalAssistantIdx, true)}
                 </div>;

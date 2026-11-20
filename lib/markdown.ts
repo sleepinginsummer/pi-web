@@ -34,6 +34,10 @@ const markdownSanitizeSchema = {
   attributes: {
     ...defaultSchema.attributes,
     code: [["className", /^language-./, "math-inline", "math-display"]],
+    // 大纲跳转标记：只加在一/二级标题上（remarkAnswerHeadingMarkers 在 remark 阶段写，
+    // 这里保留下来，原样 HTML 里的标题不会带上它）。
+    h1: [...(defaultSchema.attributes?.h1 ?? []), "dataAnswerHeading"],
+    h2: [...(defaultSchema.attributes?.h2 ?? []), "dataAnswerHeading"],
   },
   protocols: {
     ...defaultSchema.protocols,
@@ -586,6 +590,144 @@ function remarkWindowsFileLinks() {
       if ("children" in node) node.children.forEach(walk);
     };
     walk(tree);
+  };
+}
+
+interface OutlineMarkdownNode {
+  type?: string;
+  depth?: number;
+  value?: string;
+  children?: OutlineMarkdownNode[];
+  data?: { hProperties?: Record<string, unknown> };
+}
+
+/**
+ * 原样 HTML 里的同名属性：只有本插件加的标记能参与跳转编号。
+ *
+ * 助手可以在正文里写 `<h2 data-answer-heading="1">`。清洗规则为了保住标记必须放行这个
+ * 属性，于是原样 HTML 也能伪造一个；它会被正文算进序号，而大纲预览（只认 Markdown
+ * 标题）不会列它，后面的标题就会往前错一位。所以先把这段属性从 HTML 原文里去掉：
+ * 按标签和引号扫描，`title="a>b"` 这种带 `>` 的属性值不会让后面的标记漏掉。
+ */
+const RAW_ANSWER_HEADING_ATTRIBUTE = "data-answer-heading";
+
+/**
+ * 删掉一个标签里的指定属性。逐个属性扫描，属性值里的引号、`>` 都不会打断标签。
+ * 属性名大小写不敏感；`</tag>`、声明和注释原样返回。
+ */
+function stripAttributeInTag(tag: string, name: string): string {
+  if (!/^<[a-zA-Z]/.test(tag)) return tag;
+  let result = "";
+  let index = 0;
+  while (index < tag.length && !/[\s/>]/.test(tag[index])) {
+    result += tag[index];
+    index += 1;
+  }
+  while (index < tag.length) {
+    const start = index;
+    while (index < tag.length && /\s/.test(tag[index])) index += 1;
+    if (index >= tag.length) {
+      result += tag.slice(start);
+      break;
+    }
+    if (tag[index] === ">" || tag[index] === "/") {
+      result += tag.slice(start);
+      break;
+    }
+    const nameStart = index;
+    while (index < tag.length && !/[\s=/>]/.test(tag[index])) index += 1;
+    const attributeName = tag.slice(nameStart, index).toLowerCase();
+    let after = index;
+    while (after < tag.length && /\s/.test(tag[after])) after += 1;
+    if (tag[after] === "=") {
+      after += 1;
+      while (after < tag.length && /\s/.test(tag[after])) after += 1;
+      const quote = tag[after];
+      if (quote === '"' || quote === "'") {
+        const close = tag.indexOf(quote, after + 1);
+        after = close === -1 ? tag.length : close + 1;
+      } else {
+        while (after < tag.length && !/[\s>]/.test(tag[after])) after += 1;
+      }
+    }
+    if (attributeName !== name) result += tag.slice(start, after);
+    index = after;
+  }
+  return result;
+}
+
+/** 从一段原样 HTML 里删掉指定的同名属性（大小写不敏感），标签以外的文字原样保留。 */
+function stripAttributeFromHtml(html: string, name: string): string {
+  let result = "";
+  let index = 0;
+  while (index < html.length) {
+    const open = html.indexOf("<", index);
+    if (open === -1) {
+      result += html.slice(index);
+      break;
+    }
+    result += html.slice(index, open);
+    if (html.startsWith("<!--", open)) {
+      const end = html.indexOf("-->", open + 4);
+      if (end === -1) {
+        result += html.slice(open);
+        break;
+      }
+      result += html.slice(open, end + 3);
+      index = end + 3;
+      continue;
+    }
+    // 找到标签真正的结尾：引号里的 `>` 不算。
+    let cursor = open + 1;
+    let quote: string | null = null;
+    while (cursor < html.length) {
+      const character = html[cursor];
+      if (quote) {
+        if (character === quote) quote = null;
+      } else if (character === '"' || character === "'") {
+        quote = character;
+      } else if (character === ">") {
+        break;
+      }
+      cursor += 1;
+    }
+    if (cursor >= html.length) {
+      result += html.slice(open);
+      break;
+    }
+    result += stripAttributeInTag(html.slice(open, cursor + 1), name);
+    index = cursor + 1;
+  }
+  return result;
+}
+
+function stripRawAnswerHeadingAttributes(nodes: readonly OutlineMarkdownNode[]): void {
+  for (const node of nodes) {
+    if (node.type === "html" && typeof node.value === "string") {
+      node.value = stripAttributeFromHtml(node.value, RAW_ANSWER_HEADING_ATTRIBUTE);
+    }
+    if (Array.isArray(node.children)) stripRawAnswerHeadingAttributes(node.children);
+  }
+}
+
+/**
+ * 给最终回答的顶层 h1/h2 打标记，供右侧大纲跳到正文时逐行对上。
+ *
+ * 大纲预览只列每段 Markdown 的顶层标题：引用块、列表、表格和原样 HTML 里的标题
+ * 都不算，正文必须用同一套规则，否则两边编号会错位、跳到另一段。
+ */
+export function remarkAnswerHeadingMarkers() {
+  return (tree: { children?: OutlineMarkdownNode[] }) => {
+    if (!Array.isArray(tree.children)) return;
+    // 先抹掉原样 HTML 里的同名属性，只有下面这段给 Markdown 标题加的标记能留到正文。
+    stripRawAnswerHeadingAttributes(tree.children);
+    for (const node of tree.children) {
+      if (node.type !== "heading" || typeof node.depth !== "number" || node.depth > 2) continue;
+      node.data = {
+        ...node.data,
+        hProperties: { ...node.data?.hProperties, "data-answer-heading": "1" },
+      };
+    }
   };
 }
 

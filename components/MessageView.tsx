@@ -225,6 +225,8 @@ interface Props {
   onCompact?: () => void;
   isCompacting?: boolean;
   compactError?: string | null;
+  /** 本轮最终回答：给顶层标题打标记，右侧大纲跳转靠它定位到正确的那一段。 */
+  markAnswerHeadings?: boolean;
 }
 function haveSameRelevantToolEntries<T>(
   message: AgentMessage,
@@ -240,14 +242,14 @@ function haveSameRelevantToolEntries<T>(
   return true;
 }
 
-export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, toolClocks, modelNames, cwd, onOpenFile, onOpenSubagent, entryId, searchBlockIndex, onFork, forking, onEditContent, onCancelEdit, isEditing, showTimestamp, prevTimestamp, sessionId, writtenFiles, visibleBlockOffset, turnDurationMs, onCompact, isCompacting, compactError }: Props) {
+export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, toolClocks, modelNames, cwd, onOpenFile, onOpenSubagent, entryId, searchBlockIndex, onFork, forking, onEditContent, onCancelEdit, isEditing, showTimestamp, prevTimestamp, sessionId, writtenFiles, visibleBlockOffset, turnDurationMs, onCompact, isCompacting, compactError, markAnswerHeadings }: Props) {
   // display:false 的自定义消息只给模型看，pi TUI 不渲染（#1043）。
   if (isHiddenCustomMessage(message)) return null;
   if (message.role === "user") {
     return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} onEditContent={onEditContent} onCancelEdit={onCancelEdit} isEditing={isEditing} />;
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} toolClocks={toolClocks} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} onOpenSubagent={onOpenSubagent} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} searchBlockIndex={searchBlockIndex} onFork={onFork} forking={forking} writtenFiles={writtenFiles} visibleBlockOffset={visibleBlockOffset} turnDurationMs={turnDurationMs} onCompact={onCompact} isCompacting={isCompacting} compactError={compactError} />;
+    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} toolClocks={toolClocks} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} onOpenSubagent={onOpenSubagent} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} searchBlockIndex={searchBlockIndex} onFork={onFork} forking={forking} writtenFiles={writtenFiles} visibleBlockOffset={visibleBlockOffset} turnDurationMs={turnDurationMs} onCompact={onCompact} isCompacting={isCompacting} compactError={compactError} markAnswerHeadings={markAnswerHeadings} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
@@ -287,7 +289,8 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     && prev.visibleBlockOffset === next.visibleBlockOffset
     && prev.onCompact === next.onCompact
     && prev.isCompacting === next.isCompacting
-    && prev.compactError === next.compactError;
+    && prev.compactError === next.compactError
+    && prev.markAnswerHeadings === next.markAnswerHeadings;
 });
 
 function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, onEditContent, onCancelEdit, isEditing }: {
@@ -521,6 +524,7 @@ function AssistantMessageView({
   onCompact,
   isCompacting,
   compactError,
+  markAnswerHeadings,
 }: {
   message: AssistantMessage;
   isStreaming?: boolean;
@@ -543,6 +547,7 @@ function AssistantMessageView({
   onCompact?: () => void;
   isCompacting?: boolean;
   compactError?: string | null;
+  markAnswerHeadings?: boolean;
 }) {
   const { t } = useI18n();
   const time = showTimestamp ? formatTime(message.timestamp) : null;
@@ -730,7 +735,7 @@ function AssistantMessageView({
         {/* Not keyed by the entry id: a message of this run gets one when the file is
             read again, and its blocks keep their state across that read (#1184). */}
         {blockItems.map(({ block, originalIndex }) => (
-          <BlockView key={originalIndex} block={block} searchTarget={originalIndex === searchBlockIndex} toolResults={toolResults} toolClocks={toolClocks} toolsNotRun={aborted || providerError !== null} isStreaming={isStreaming} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} onOpenSubagent={onOpenSubagent} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} />
+          <BlockView key={originalIndex} block={block} searchTarget={originalIndex === searchBlockIndex} toolResults={toolResults} toolClocks={toolClocks} toolsNotRun={aborted || providerError !== null} isStreaming={isStreaming} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} onOpenSubagent={onOpenSubagent} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} markAnswerHeadings={markAnswerHeadings} />
         ))}
       </div>
 
@@ -824,9 +829,9 @@ function AssistantMessageView({
   );
 }
 
-function BlockView({ block, searchTarget, toolResults, toolsNotRun, toolClocks, isStreaming, streamingDuration, toolCallDurations, cwd, onOpenFile, onOpenSubagent, sessionId, entryId, blockIndex }: { block: AssistantContentBlock; searchTarget?: boolean; toolResults?: Map<string, ToolResultMessage>; toolsNotRun?: boolean; toolClocks?: ToolClocks; isStreaming?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; onOpenSubagent?: (sessionId: string, label: string) => void; sessionId?: string; entryId?: string; blockIndex: number }) {
+function BlockView({ block, searchTarget, toolResults, toolsNotRun, toolClocks, isStreaming, streamingDuration, toolCallDurations, cwd, onOpenFile, onOpenSubagent, sessionId, entryId, blockIndex, markAnswerHeadings }: { block: AssistantContentBlock; searchTarget?: boolean; toolResults?: Map<string, ToolResultMessage>; toolsNotRun?: boolean; toolClocks?: ToolClocks; isStreaming?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; onOpenSubagent?: (sessionId: string, label: string) => void; sessionId?: string; entryId?: string; blockIndex: number; markAnswerHeadings?: boolean }) {
   if (block.type === "text") {
-    return <div data-search-target={searchTarget || undefined}><TextBlock block={block as TextContent} isStreaming={isStreaming} cwd={cwd} sessionId={sessionId} onOpenFile={onOpenFile} /></div>;
+    return <div data-search-target={searchTarget || undefined}><TextBlock block={block as TextContent} isStreaming={isStreaming} cwd={cwd} sessionId={sessionId} onOpenFile={onOpenFile} markAnswerHeadings={markAnswerHeadings} /></div>;
   }
   if (block.type === "image") {
     return <ImageBlock block={block as ImageContent} />;
@@ -843,7 +848,7 @@ function BlockView({ block, searchTarget, toolResults, toolsNotRun, toolClocks, 
   return null;
 }
 
-function TextBlock({ block, isStreaming, cwd, sessionId, onOpenFile }: { block: TextContent; isStreaming?: boolean; cwd?: string; sessionId?: string; onOpenFile?: (filePath: string) => void }) {
+function TextBlock({ block, isStreaming, cwd, sessionId, onOpenFile, markAnswerHeadings }: { block: TextContent; isStreaming?: boolean; cwd?: string; sessionId?: string; onOpenFile?: (filePath: string) => void; markAnswerHeadings?: boolean }) {
   // 普通文本始终读当前块；只有按需加载的完整正文进入 state，避免稳定块 key 冻结流式内容。
   const [loaded, setLoaded] = useState<{ url: string; text: string } | null>(null);
   const fullContentLoaded = loaded !== null && loaded.url === block.deferredUrl;
@@ -861,7 +866,7 @@ function TextBlock({ block, isStreaming, cwd, sessionId, onOpenFile }: { block: 
     }).catch((cause) => setError(String(cause))).finally(() => setLoading(false));
   };
   return <>
-    <SafeMarkdownBody isStreaming={isStreaming} cwd={cwd} sessionId={sessionId} onOpenFile={onOpenFile}>{text}</SafeMarkdownBody>
+    <SafeMarkdownBody isStreaming={isStreaming} cwd={cwd} sessionId={sessionId} onOpenFile={onOpenFile} markAnswerHeadings={markAnswerHeadings}>{text}</SafeMarkdownBody>
     {block.deferredUrl && !fullContentLoaded && (
       <button type="button" onClick={load} disabled={loading} style={{ padding: 0, border: 0, background: "none", color: "var(--accent)", cursor: loading ? "default" : "pointer", fontSize: 11 }}>
         {loading ? "loading..." : "view full content"}

@@ -987,3 +987,26 @@ test("a tool card shows the run time pi recorded, else the timestamps' differenc
   assert.equal(formatToolDuration(185_000), "3m 5s");
   assert.equal(formatToolDuration(3_725_000), "1h 2m 5s");
 });
+
+test("最终回答的顶层标题带大纲跳转标记，过程副本不带", async () => {
+  const { getFinalAnswerViews } = await jiti.import("../lib/turn-views.ts");
+  const message = {
+    role: "assistant",
+    content: [
+      { type: "text", text: "## 过程里的标题" },
+      { type: "thinking", thinking: "先想一想" },
+      { type: "text", text: "## 最终回答\n\n正文。" },
+    ],
+  };
+  const views = getFinalAnswerViews(new WeakMap(), message);
+
+  const answer = renderMessage(views.answer, { markAnswerHeadings: true });
+  assert.match(answer, /<h2 data-answer-heading="1">最终回答<\/h2>/, "最终回答的标题要带标记");
+  assert.doesNotMatch(answer, /过程里的标题/);
+
+  const process = renderMessage(views.process, {});
+  assert.match(process, /<h2>过程里的标题<\/h2>/, "过程副本不标记");
+  assert.doesNotMatch(process, /data-answer-heading/);
+
+  assert.doesNotMatch(renderMessage(views.answer, {}), /data-answer-heading/, "没要求时不标记");
+});

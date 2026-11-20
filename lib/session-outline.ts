@@ -1,7 +1,7 @@
 import { getTurnAnchors, splitFinalAssistantBlocks } from "./message-display";
 import { normalizeAssistantMessage } from "./normalize";
-import { hasOutlineFinalAnswer } from "./outline-final-answer";
-import { extractOutlineHeadings, scanOutlineLines, stripInlineMarkdown } from "./outline-headings";
+import { hasOutlineFinalAnswer, pickOutlineFinalAssistant } from "./outline-final-answer";
+import { extractOutlineHeadings, joinAnswerBlocks, scanOutlineLines, stripInlineMarkdown } from "./outline-headings";
 import { readIndexedBranchOutlineRecords, readIndexedOutlineIdentity } from "./session-content-index";
 import { turnAnchorShape } from "./session-turns";
 import type { AssistantMessage, SessionEntry, TextContent } from "./types";
@@ -119,11 +119,13 @@ function extractFinalAssistantMarkdown(entry: SessionEntry | null): string {
   if (!Array.isArray(entry.message.content)) return "";
   const normalized = normalizeAssistantMessage(entry.message) as AssistantMessage;
   const { answerBlocks } = splitFinalAssistantBlocks(normalized);
-  return answerBlocks
+  // 保留原始缩进：四空格缩进的第一个围栏是缩进代码，trim 掉缩进会让它变成顶格围栏，
+  // 把后面的标题全吞掉。只用 trim 判断「有没有正文」。
+  const blocks = answerBlocks
     .filter((block): block is TextContent => block.type === "text")
-    .map((block) => block.text)
-    .join("\n\n")
-    .trim();
+    .map((block) => block.text);
+  const markdown = joinAnswerBlocks(blocks);
+  return markdown.trim() ? markdown : "";
 }
 
 export function buildOutlineTurnsFromPairs(
@@ -165,21 +167,17 @@ export function buildSessionOutlineFromEntries(
   const pairs: Array<{ turnNumber: number; anchor: SessionEntry; finalAssistant: SessionEntry | null }> = [];
   for (let i = 0; i < branch.length; i += 1) {
     if (!anchors[i]) continue;
-    // 与主对话一致：取本轮最后一条「有可展示回答」的助手记录。
-    // 末尾若只剩工具调用或空中止（stopReason/空 content），回退到上一条真实回答，
-    // 否则这一轮的摘要和标题会被那条空记录抹掉。
-    let finalAssistant: SessionEntry | null = null;
-    let lastAssistant: SessionEntry | null = null;
+    // 与磁盘索引共用同一套挑选规则：取本轮最后一条「有可展示回答」的助手记录；
+    // 末尾只剩工具调用或空中止（stopReason/空 content）时一直往前找，和主对话一样
+    // 不设上限，否则运行中的会话和空闲后读磁盘会给出不同的摘要与标题。
+    const assistants: SessionEntry[] = [];
     let j = i + 1;
     while (j < branch.length && !anchors[j]) {
-      const entry = branch[j].entry;
-      if (branch[j].shape.role === "assistant") {
-        lastAssistant = entry;
-        if (hasOutlineFinalAnswer(entry)) finalAssistant = entry;
-      }
+      if (branch[j].shape.role === "assistant") assistants.push(branch[j].entry);
       j += 1;
     }
-    pairs.push({ turnNumber: pairs.length + 1, anchor: branch[i].entry, finalAssistant: finalAssistant ?? lastAssistant });
+    const finalAssistant = pickOutlineFinalAssistant(assistants, hasOutlineFinalAnswer);
+    pairs.push({ turnNumber: pairs.length + 1, anchor: branch[i].entry, finalAssistant });
   }
   return { leafId: activeLeafId, turns: buildOutlineTurnsFromPairs(pairs) };
 }

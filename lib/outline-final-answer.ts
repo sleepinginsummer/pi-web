@@ -15,3 +15,22 @@ export function hasOutlineFinalAnswer(entry: SessionEntry | null | undefined): b
   if (!Array.isArray(entry.message.content)) return false;
   return hasAssistantFinalAnswer(normalizeAssistantMessage(entry.message) as AssistantMessage);
 }
+
+/**
+ * 从一轮的助手记录里挑最终回答：最后一条有正文/图片的；整轮都没有回答时退回最后一条
+ * （摘要为空，和主对话的回退一致）。
+ *
+ * 与主对话一样不设回退上限：真实回答可能被一长串工具调用或空中止记录隔在前面，设上限
+ * 会让大纲把它当成「没有回答」。磁盘大纲只在末尾没有回答时才多读几条记录。
+ */
+export function pickOutlineFinalAssistant<T>(
+  assistants: readonly T[],
+  hasAnswer: (assistant: T) => boolean,
+): T | null {
+  const last = assistants.at(-1);
+  if (last === undefined) return null;
+  for (let i = assistants.length - 1; i >= 0; i -= 1) {
+    if (hasAnswer(assistants[i])) return assistants[i];
+  }
+  return last;
+}

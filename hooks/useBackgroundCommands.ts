@@ -10,6 +10,8 @@ const BUSY_POLL_MS = 2000;
 export function useBackgroundCommands(cwd: string | null | undefined) {
   const [data, setData] = useState<BackgroundCommandListResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // 操作失败单独记：轮询刷新只清读取错误，不该把「移除失败」这类提示一并抹掉。
+  const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set());
   const requestRef = useRef(0);
 
@@ -31,6 +33,7 @@ export function useBackgroundCommands(cwd: string | null | undefined) {
   useEffect(() => {
     setData(null);
     setError(null);
+    setActionError(null);
   }, [cwd]);
 
   const busy = Boolean(data?.commands.some((command) => command.status === "running" || command.status === "stopping"));
@@ -68,9 +71,9 @@ export function useBackgroundCommands(cwd: string | null | undefined) {
         const body = await response.json().catch(() => null) as { error?: string } | null;
         throw new Error(body?.error ?? `HTTP ${response.status}`);
       }
-      setError(null);
+      setActionError(null);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setActionError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setPending((current) => {
         const next = new Set(current);
@@ -81,7 +84,7 @@ export function useBackgroundCommands(cwd: string | null | undefined) {
     }
   }, [refresh]);
 
-  return { data, error, pending, refresh, act };
+  return { data, error, actionError, pending, refresh, act };
 }
 
 /** A command's latest output while its row is expanded; refreshed while it runs. */

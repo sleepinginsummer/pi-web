@@ -8,7 +8,7 @@ import {
   normalizeDisplayMath,
 } from "@/lib/markdown";
 import { hasTurnRef, isHiddenCustomMessage, splitFinalAssistantBlocks } from "@/lib/message-display";
-import { hasOutlineHeadings } from "@/lib/outline-headings";
+import { cachedHasOutlineHeadings, hasOutlineHeadings, joinAnswerBlocks } from "@/lib/outline-headings";
 import { loadMinimapPreviewLocked, saveMinimapPreviewLocked } from "@/lib/minimap-preview-lock";
 import type { SessionOutlineResponse, SessionOutlineTurn } from "@/lib/session-outline-types";
 import type { AgentMessage, AssistantMessage, CustomMessage, TextContent, UserMessage } from "@/lib/types";
@@ -42,9 +42,12 @@ const NAVIGATION_ACTIVE_LOCK_MS = 1600;
 const MAX_PILL_TICKS = 28;
 
 interface AssistantPreview {
+  /** 最终回答的正文（文本块按块边界拼接，围栏不跨块），用于搜索和标题预览。 */
   markdown: string;
   entryId?: string;
   element: HTMLDivElement | null;
+  /** 正在流式输出的这条回复：正文每帧都变，不用进标题缓存。 */
+  streaming?: boolean;
 }
 
 interface TurnInfo {
@@ -83,21 +86,62 @@ export function countToolCalls(message: AgentMessage | Partial<AgentMessage>): n
   );
 }
 
-function getAssistantAnswerMarkdown(message: AgentMessage | Partial<AgentMessage>): string {
-  if (message.role !== "assistant") return "";
+/**
+ * 本轮最终回答的正文；没有回答时返回 null。
+ *
+ * 和主对话一样按「文本或图片」判断有没有回答：纯图片的答复也是回答，返回空正文，
+ * 让上一段过程回复的标题从大纲里消失，而不是继续显示一个点不到的文字预览。
+ * 保留原始缩进（四空格缩进的围栏是缩进代码），只用 trim 判断有没有正文。
+ */
+export function getAssistantAnswerMarkdown(message: AgentMessage | Partial<AgentMessage>): string | null {
+  if (message.role !== "assistant") return null;
   const { answerBlocks } = splitFinalAssistantBlocks(message as AssistantMessage);
-  return answerBlocks
+  if (answerBlocks.length === 0) return null;
+  const blocks = answerBlocks
     .filter((block): block is TextContent => block.type === "text")
-    .map((block) => block.text)
-    .join("\n\n")
-    .trim();
+    .map((block) => block.text);
+  const markdown = joinAnswerBlocks(blocks);
+  return markdown.trim() ? markdown : "";
 }
 
-/** 分组折叠时同一消息可能有“过程”和“最终回答”两个 DOM 节点；标题定位必须选实际含标题的节点。 */
+/**
+ * 正文里「算大纲标题」的那几个节点：只有最终回答渲染时会给顶层 h1/h2 打标记
+ * （`lib/markdown.ts` 的 `remarkAnswerHeadingMarkers`），过程详情、引用块、
+ * 原样 HTML 里的标题都不算，编号才和预览逐行一致。
+ */
+const ANSWER_HEADING_SELECTOR = "[data-answer-heading]";
+/** 最终回答的容器标记（ChatWindow 给答复那一次渲染加的），用来在同一条消息的过程副本里挑对节点。 */
+const ANSWER_CONTAINER_SELECTOR = "[data-answer]";
+
+function answerHeadingElements(root: HTMLElement | null | undefined): HTMLElement[] {
+  if (!root) return [];
+  return [...root.querySelectorAll<HTMLElement>(ANSWER_HEADING_SELECTOR)];
+}
+
+/**
+ * 同一条消息可能同时渲染「过程」和「最终回答」两个节点：先认 ChatWindow 给答复加的
+ * `data-answer` 容器，其次才是含标题标记的节点（未拆分的过程与答复合成一个节点时），
+ * 最后退回测量时记下的元素。只按“有没有 h1/h2”挑会选到过程详情里的标题。
+ */
 function findRenderedHeadingRoot(scrollEl: HTMLElement, preview: AssistantPreview | null | undefined): HTMLElement | null {
   if (!preview?.entryId) return preview?.element ?? null;
-  const roots = scrollEl.querySelectorAll<HTMLElement>(`[data-entry-id="${CSS.escape(preview.entryId)}"]`);
-  return Array.from(roots).find((root) => root.querySelector("h1, h2")) ?? preview.element;
+  const roots = Array.from(scrollEl.querySelectorAll<HTMLElement>(`[data-entry-id="${CSS.escape(preview.entryId)}"]`));
+  return roots.find((root) => root.matches(ANSWER_CONTAINER_SELECTOR))
+    ?? roots.find((root) => root.querySelector(ANSWER_HEADING_SELECTOR))
+    ?? preview.element;
+}
+
+/**
+ * 这个回答的标题现在点得动吗。
+ *
+ * 答复已经挂载时要求副本里真有标记（流式气泡、没打标记的渲染入口点了也找不到节点）；
+ * 还没挂载（长会话只挂最近一段）时只要还有 entryId，可以先交给 onRevealHistory
+ * 把那一组挂进来再定位。定位不到就不给可点的标题，免得点了像没反应。
+ */
+export function canLocateAnswerHeadings(preview: Pick<AssistantPreview, "element" | "entryId"> | null | undefined): boolean {
+  if (!preview) return false;
+  if (preview.element) return Boolean(preview.element.querySelector(ANSWER_HEADING_SELECTOR));
+  return Boolean(preview.entryId);
 }
 
 function PreviewHeading({
@@ -324,6 +368,8 @@ export const ChatMinimap = memo(function ChatMinimap({
   entryIdsRef.current = entryIds;
   turnsBeforeRef.current = turnsBefore;
   turnAnchorsRef.current = turnAnchors;
+  // 「这段回答有没有标题」的结果按正文缓存：滚动重测会反复问同一批回答。
+  const [headingScanCache] = useState(() => new Map<string, boolean>());
 
 
   // 正在按需加载的轮次：异步回调里判断这次加载是否还有效（会话切走后不再提示）。
@@ -339,11 +385,18 @@ export const ChatMinimap = memo(function ChatMinimap({
     setRevealFailed(false);
     jumpTargetRef.current = null;
     setRemoteOutline(null);
-  }, [sessionId, leafId]);
+    // 旧会话的正文不会被再问到，缓存跟着会话/分支一起清掉。
+    headingScanCache.clear();
+  }, [headingScanCache, sessionId, leafId]);
 
   // 打开大纲且存在未加载历史时，按需向服务端拉取全分支轻量目录（不触发主对话翻页）。
   useEffect(() => {
-    if (!minimapHovered || !sessionId || turnsBefore <= 0) return;
+    if (!minimapHovered || !sessionId || turnsBefore <= 0) {
+      // 历史翻完了（turnsBefore 归零）或预览已关闭：被取消的请求不会自己收尾，
+      // 这里清掉加载态，否则面板会一直显示「正在读取完整大纲」。
+      setOutlineLoading(false);
+      return;
+    }
     if (remoteOutline?.key === outlineRequestKey) return;
     const controller = new AbortController();
     setOutlineLoading(true);
@@ -466,12 +519,15 @@ export const ChatMinimap = memo(function ChatMinimap({
         }
         currentTurn.toolCount += countToolCalls(message);
         const answerMarkdown = getAssistantAnswerMarkdown(message);
-        if (answerMarkdown) {
+        // 纯图片答复返回空正文（而不是 null）：它是回答，只是没有文字标题。
+        if (answerMarkdown !== null) {
           // 1-A：每轮只保留最后一条最终回答，过滤中途过程回复。
           currentTurn.finalAssistant = {
             markdown: answerMarkdown,
             entryId: entryIdsRef.current[messageIndex],
             element,
+            // 最后一条并带流式正文时就是正在输出的回复。
+            ...(streamingMessage && messageIndex === allMessages.length - 1 ? { streaming: true } : {}),
           };
         }
       }
@@ -493,9 +549,7 @@ export const ChatMinimap = memo(function ChatMinimap({
             const heading = (
               pendingNavigation.headingIndex === undefined
                 ? null
-                : findRenderedHeadingRoot(scrollEl, pendingNode.targetTurn.finalAssistant)
-                  ?.querySelectorAll<HTMLElement>("h1, h2")
-                  .item(pendingNavigation.headingIndex)
+                : answerHeadingElements(findRenderedHeadingRoot(scrollEl, pendingNode.targetTurn.finalAssistant))[pendingNavigation.headingIndex]
             );
             const headingRect = heading?.getBoundingClientRect();
             targetTop = headingRect
@@ -612,7 +666,7 @@ export const ChatMinimap = memo(function ChatMinimap({
       onRevealHistory(node.targetTurn.entryId);
       return;
     }
-    const heading = answerElement.querySelectorAll<HTMLElement>("h1, h2").item(headingIndex);
+    const heading = answerHeadingElements(answerElement)[headingIndex];
     if (!heading) return;
     const containerRect = scrollEl.getBoundingClientRect();
     const headingRect = heading.getBoundingClientRect();
@@ -725,6 +779,22 @@ export const ChatMinimap = memo(function ChatMinimap({
         || String(node.turnNumber).includes(normalizedQuery);
     });
   }, [allNodes, normalizedQuery, t]);
+
+  // 判断“这一轮有没有标题”要扫描整段最终回答。预览会在滚动切换当前轮时重渲染，
+  // 所以按 allNodes 一次算好，别在渲染循环里对每一轮重扫 Markdown；正文没变的
+  // 回答直接取缓存（滚动重测每次都会新建 allNodes，内容却没变）。
+  const nodesWithHeadings = useMemo(() => {
+    const indexes = new Set<number>();
+    for (const node of allNodes) {
+      const finalAssistant = node.targetTurn.finalAssistant;
+      // 流式正文每帧都是新内容，进缓存只会占位并把它挤掉，直接扫这一份。
+      const hasHeadings = finalAssistant?.streaming
+        ? hasOutlineHeadings(finalAssistant.markdown)
+        : finalAssistant ? cachedHasOutlineHeadings(headingScanCache, finalAssistant.markdown) : false;
+      if (hasHeadings) indexes.add(node.index);
+    }
+    return indexes;
+  }, [allNodes, headingScanCache]);
 
   const railTicks = useMemo(
     () => sampleRailTicks(turnsBefore, allNodes, activeIndex),
@@ -898,7 +968,7 @@ export const ChatMinimap = memo(function ChatMinimap({
             {filteredLoadedNodes.map((node) => {
               const isActive = activeIndex === node.index;
               const finalAssistant = node.targetTurn.finalAssistant;
-              const hasHeadings = Boolean(finalAssistant && hasOutlineHeadings(finalAssistant.markdown));
+              const hasHeadings = nodesWithHeadings.has(node.index);
               const isExpanded = hasHeadings && (
                 isActive ? !toggledTurns.has(-node.turnNumber) : toggledTurns.has(node.turnNumber)
               );
@@ -942,7 +1012,7 @@ export const ChatMinimap = memo(function ChatMinimap({
                     <div className={styles.headingsWrap}>
                       <AssistantOutline
                         markdown={finalAssistant.markdown}
-                        onHeadingClick={(headingIndex) => scrollToHeading(node, headingIndex)}
+                        onHeadingClick={canLocateAnswerHeadings(finalAssistant) ? (headingIndex) => scrollToHeading(node, headingIndex) : undefined}
                       />
                     </div>
                   )}

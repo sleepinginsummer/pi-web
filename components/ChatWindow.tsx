@@ -1263,7 +1263,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                 if (idx === lastAnchorIdx) { (lastUserMsgRef as { current: HTMLDivElement | null }).current = el; }
               };
 
-              const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; writtenFiles?: WrittenFile[]; visibleBlockOffset?: number; recoverTruncation?: boolean; turnDurationMs?: number; withNotices?: boolean } = {}): ReactNode => {
+              const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; writtenFiles?: WrittenFile[]; visibleBlockOffset?: number; recoverTruncation?: boolean; turnDurationMs?: number; withNotices?: boolean; finalAnswer?: boolean } = {}): ReactNode => {
                 const msg = options.messageOverride ?? messages[idx];
                 if (msg.role === "custom" && msg.customType === SIDE_BOUNDARY_MESSAGE_TYPE) return <SideChatDivider key="side-chat-divider" />;
                 if (isHiddenCustomMessage(msg)) return null;
@@ -1308,12 +1308,13 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                     onCompact={options.recoverTruncation ? handleCompact : undefined}
                     isCompacting={options.recoverTruncation ? isCompacting : undefined}
                     compactError={options.recoverTruncation ? compactError : undefined}
+                    markAnswerHeadings={options.finalAnswer}
                   />
                 );
                 const noticeLines = notices.length > 0 ? <TranscriptNoticeLines key={`${keyPrefix}-notices-${messageKey}`} notices={notices} /> : null;
                 if (idx === lastAnchorIdx && (!isVisible || currentRefIdx === undefined)) {
                   return (
-                    <div key={`${keyPrefix}-${messageKey}`} data-entry-id={entryIds[idx]} ref={(el) => {
+                    <div key={`${keyPrefix}-${messageKey}`} data-entry-id={entryIds[idx]} data-answer={options.finalAnswer ? "1" : undefined} ref={(el) => {
                       (lastUserMsgRef as { current: HTMLDivElement | null }).current = el;
                       if (idx === lastRenderedMessageIdx) lastRenderedMessageRef.current = el;
                     }}>
@@ -1325,7 +1326,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                 // 有无提示都保持同一结构，重读后新出现的提示行不会让消息重挂载。
                 if (!isVisible || currentRefIdx === undefined) return <Fragment key={`${keyPrefix}-${messageKey}`}>{view}{noticeLines}</Fragment>;
                 return (
-                  <div key={`${keyPrefix}-${messageKey}`} data-entry-id={entryIds[idx]} ref={options.attachRef === false ? undefined : (el) => {
+                  <div key={`${keyPrefix}-${messageKey}`} data-entry-id={entryIds[idx]} data-answer={options.finalAnswer ? "1" : undefined} ref={options.attachRef === false ? undefined : (el) => {
                     attachVisibleRef(idx, currentRefIdx)(el);
                     if (idx === lastRenderedMessageIdx) lastRenderedMessageRef.current = el;
                   }}>
@@ -1501,6 +1502,8 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                 const writtenFiles = turnWrittenFiles ? keepWrittenFiles(finalViews, turnWrittenFiles) : undefined;
                 if (finalAnswerMessage) nodes.push(renderMessage(finalAssistantIdx, {
                   messageOverride: finalAnswerMessage, writtenFiles,
+                  // 最终回答的顶层标题带标记：右侧大纲跳转靠它和预览的编号逐个对上。
+                  finalAnswer: true,
                   // 没有过程详情时，本轮耗时显示在答复下方。
                   turnDurationMs: processViews.length === 0 ? turnDurationMs : undefined,
                   recoverTruncation: end === messages.length && !isStreaming && !hasAssistantAnswer(finalAnswerMessage),
@@ -1730,7 +1733,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
           widgets={displayExtensionWidgets}
           onCommand={handleSend}
           commandsDisabled={sessionBusy}
-          leading={<DevServersShelf isMobile={isMobile} cwd={messageCwd} sessionId={session?.id} onOpenPreview={onOpenServerPreview} />}
+          leading={<DevServersShelf cwd={messageCwd} sessionId={session?.id} onOpenPreview={onOpenServerPreview} />}
         />
       </div>
       </>
