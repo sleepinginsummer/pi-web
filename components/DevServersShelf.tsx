@@ -504,7 +504,6 @@ export function DevServersShelf({
           title={serverLabel}
           onClick={() => setOpen((current) => (current === "servers" ? null : "servers"))}
         >
-          <span className="extension-widget-placement" aria-hidden="true"><ChevronUp size={12} className="extension-widget-chevron" /></span>
           <span className="extension-widget-key">{t("servers.trigger")}</span>
           {activeServers.length > 0 && (
             <CountBadge
@@ -513,6 +512,7 @@ export function DevServersShelf({
             />
           )}
           {launchErrors.length > 0 && <span className="dev-servers-error-dot" aria-hidden="true" />}
+          <span className="extension-widget-placement" aria-hidden="true"><ChevronUp size={12} className="extension-widget-chevron" /></span>
         </button>
       )}
       {showTasks && (
@@ -525,7 +525,6 @@ export function DevServersShelf({
           title={taskLabel}
           onClick={() => setOpen((current) => (current === "tasks" ? null : "tasks"))}
         >
-          <span className="extension-widget-placement" aria-hidden="true"><ChevronUp size={12} className="extension-widget-chevron" /></span>
           <span className="extension-widget-key">{t("tasks.triggerShort")}</span>
           {/* 徽标和读屏名称用同一个数：暂停的任务仍在列表里，但不再算「待触发」。 */}
           {pendingTaskCount > 0 && (
@@ -535,6 +534,7 @@ export function DevServersShelf({
             <CountBadge count={openCommands.length} icon={<><path d="M5 7l5 5-5 5M12 17h7" /></>} />
           )}
           {taskHasErrors && <span className="dev-servers-error-dot" aria-hidden="true" />}
+          <span className="extension-widget-placement" aria-hidden="true"><ChevronUp size={12} className="extension-widget-chevron" /></span>
         </button>
       )}
     </div>

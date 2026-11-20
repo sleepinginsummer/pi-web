@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { ChevronUp } from "lucide-react";
 import { useI18n } from "@/hooks/useI18n";
 import type { ExtensionWidgetItem } from "@/lib/types";
@@ -31,7 +31,7 @@ function getInitialExpandedKey(widgets: ExtensionWidgetItem[]): string | null {
   ))?.key ?? null;
 }
 
-export function ExtensionWidgetShelf({ widgets, left = false, compactLabel }: { widgets: ExtensionWidgetItem[]; left?: boolean; compactLabel?: string }) {
+export function ExtensionWidgetShelf({ widgets, left = false, compactLabel, icon }: { widgets: ExtensionWidgetItem[]; left?: boolean; compactLabel?: string; icon?: ReactNode }) {
   const { t } = useI18n();
   const idPrefix = useId();
   const rootRef = useRef<HTMLDivElement>(null);
@@ -143,8 +143,10 @@ export function ExtensionWidgetShelf({ widgets, left = false, compactLabel }: { 
               onClick={() => toggle(widget.key)}
             >
               <span className="extension-widget-update-pulse" aria-hidden="true" />
-              <span className="extension-widget-placement" aria-hidden="true"><ChevronUp size={12} className={`extension-widget-chevron${widget.placement === "belowEditor" ? " is-below" : ""}`} /></span>
+              {icon && <span className="extension-widget-icon" aria-hidden="true">{icon}</span>}
               <span className="extension-widget-key">{compactLabel ? t(compactLabel) : widget.key}</span>
+              {/* 折叠符统一放在最右：和「扩展状态」「服务器 / 任务」入口同一位置。 */}
+              <span className="extension-widget-placement" aria-hidden="true"><ChevronUp size={12} className={`extension-widget-chevron${widget.placement === "belowEditor" ? " is-below" : ""}`} /></span>
             </button>
           ) : (
             <div
@@ -155,8 +157,9 @@ export function ExtensionWidgetShelf({ widgets, left = false, compactLabel }: { 
               title={label}
             >
               <span className="extension-widget-update-pulse" aria-hidden="true" />
-              <span className="extension-widget-placement" aria-hidden="true"><ChevronUp size={12} className={`extension-widget-chevron${widget.placement === "belowEditor" ? " is-below" : ""}`} /></span>
+              {icon && <span className="extension-widget-icon" aria-hidden="true">{icon}</span>}
               <span className="extension-widget-key">{widget.key}</span>
+              <span className="extension-widget-placement" aria-hidden="true"><ChevronUp size={12} className={`extension-widget-chevron${widget.placement === "belowEditor" ? " is-below" : ""}`} /></span>
             </div>
           );
         })}

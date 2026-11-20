@@ -1078,12 +1078,27 @@ button.extension-widget-trigger:focus-visible {
   outline-offset: -2px;
 }
 
+/* 折叠符统一贴在最右：三个入口（服务器 / 任务、待办、扩展状态）同一位置。 */
 .extension-widget-placement {
   display: flex;
   position: relative;
   z-index: 1;
   width: 10px;
   flex: 0 0 10px;
+  align-items: center;
+  justify-content: center;
+  /* 计数徽标紧跟在文字后面，剩下的空隙留给折叠符。 */
+  margin-left: auto;
+  color: var(--text-dim);
+}
+
+/* 有些入口带一个前置图标（待办、扩展状态），和折叠符占同样宽的格子。 */
+.extension-widget-icon {
+  display: flex;
+  position: relative;
+  z-index: 1;
+  width: 12px;
+  flex: 0 0 12px;
   align-items: center;
   justify-content: center;
   color: var(--text-dim);
@@ -1100,7 +1115,8 @@ button.extension-widget-trigger:focus-visible {
 .extension-widget-key {
   position: relative;
   z-index: 1;
-  flex: 1;
+  /* 不再撑满整行：文字后面紧跟计数，折叠符由 margin-left: auto 推到最右。 */
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   color: var(--text);

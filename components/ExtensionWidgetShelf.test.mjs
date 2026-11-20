@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -76,4 +77,34 @@ test("opens rpiv-todos in the left popover while other widgets keep their panel"
   fireEvent.click(trigger);
   fireEvent.pointerDown(getByRole("button", { name: "Scheduled tasks" }));
   assert.equal(queryByRole("region", { name: "rpiv-todos" }), null);
+});
+
+test("触发器的图标在前、折叠符在最后", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(I18nProvider, null, React.createElement(ExtensionWidgetShelf, {
+      widgets: [{ key: "rpiv-todos", placement: "aboveEditor", lines: ["a", "b"] }],
+      compactLabel: "chat.todos",
+      icon: React.createElement("svg", { "data-test-icon": "1" }),
+    })),
+  );
+  const icon = html.indexOf("data-test-icon");
+  const label = html.indexOf("extension-widget-key");
+  const chevron = html.indexOf("extension-widget-placement");
+  assert.ok(icon !== -1 && icon < label && label < chevron, `${icon}/${label}/${chevron}`);
+  // 旧的写法是折叠符在最前，这条挡住回退。
+  assert.doesNotMatch(html, /extension-widget-placement[\s\S]{0,200}?extension-widget-key/);
+});
+
+test("底栏入口的样式：图标和折叠符同宽，折叠符贴右、文字不撑满整行", async () => {
+  const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
+  const rule = (selector) => {
+    const start = css.indexOf(`${selector} {`);
+    assert.ok(start > 0, selector);
+    return css.slice(start, css.indexOf("}", start));
+  };
+  // 三个入口（服务器/任务、待办、扩展状态）用同一套盒子：图标 12px，折叠符贴右。
+  assert.match(rule(".extension-widget-icon"), /width: 12px/);
+  assert.match(rule(".extension-widget-placement"), /margin-left: auto/);
+  // 文字不再 flex:1 撑满：计数徽标才能紧跟文字，空隙留给折叠符。
+  assert.match(rule(".extension-widget-key"), /flex: 0 1 auto/);
 });

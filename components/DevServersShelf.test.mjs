@@ -75,6 +75,23 @@ test("服务器入口与任务入口分开，服务器用图标+运行数量", (
   assert.deepEqual(countBadges(stoppedOnly), [], "已停止的服务器不计入运行数量");
 });
 
+test("两个入口的计数紧跟在文字后，折叠符在最右", () => {
+  const html = render(
+    { enabled: true, servers: [running], configs: [], errors: [] },
+    { tasks: [{ id: "t1", project: "/project", sessionId: "current", prompt: "p", createdAt: 1, enabled: true, nextRunAt: Date.now() + 60_000, lastRunAt: null, lastError: null, delivery: "followUp", cron: null }] },
+  );
+  for (const label of ["servers.trigger", "tasks.triggerShort"]) {
+    const start = html.indexOf(`class="extension-widget-key">${label}<`);
+    assert.ok(start > 0, label);
+    const end = html.indexOf("</button>", start);
+    const trigger = html.slice(start, end);
+    const badge = trigger.indexOf("dev-servers-count");
+    const chevron = trigger.indexOf("extension-widget-placement");
+    assert.ok(badge !== -1 && badge < chevron, `${label}：数量要在折叠符之前`);
+    assert.ok(!/extension-widget-placement[\s\S]*extension-widget-key/.test(trigger), `${label}：折叠符不能回到最前`);
+  }
+});
+
 test("运行中的服务器与配置错误同时存在时两个标记都保留", () => {
   const html = render({ enabled: true, servers: [running], configs: [], errors: [".pi/launch.json: invalid JSON"] });
   assert.match(html, /aria-label="servers\.triggerErrors"/);

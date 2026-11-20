@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { ChevronUp, Puzzle } from "lucide-react";
+import { ChevronUp, ListChecks, Puzzle } from "lucide-react";
 import { useI18n } from "@/hooks/useI18n";
 import { stripAnsi } from "@/lib/ansi";
 import { AnsiText } from "./AnsiText";
@@ -86,7 +86,9 @@ function MobileExtensionStatus({ widgets, statuses }: { widgets: ExtensionWidget
       root.current?.querySelector("button")?.focus();
     }}>
       <button type="button" className="extension-widget-trigger" aria-expanded={open} aria-controls={open ? id : undefined} onClick={() => setOpen(!open)}>
-        <Puzzle size={15} aria-hidden="true" />{t("chat.extensionStatus")}<ChevronUp size={12} aria-hidden="true" />
+        <span className="extension-widget-icon" aria-hidden="true"><Puzzle size={12} /></span>
+        {t("chat.extensionStatus")}
+        <ChevronUp size={12} aria-hidden="true" />
       </button>
       {open && (
         <div className="extension-widget-panels">
@@ -170,7 +172,14 @@ export function ExtensionStatusBar({
       style={{ display: "flex", alignItems: "center", flexShrink: 0, minWidth: 0, ...(isMobile ? {} : { height: 36, padding: "0 10px" }), borderTop: "1px solid var(--border)", background: "transparent" }}
     >
       {leading}
-      {todo && <ExtensionWidgetShelf widgets={[todo]} left compactLabel={isMobile ? "chat.todos" : undefined} />}
+      {todo && (
+        <ExtensionWidgetShelf
+          widgets={[todo]}
+          left
+          compactLabel={isMobile ? "chat.todos" : undefined}
+          icon={<ListChecks size={12} />}
+        />
+      )}
       {isMobile ? (
         (otherWidgets.length > 0 || statusLine) && <MobileExtensionStatus widgets={otherWidgets} statuses={statusLine} />
       ) : (

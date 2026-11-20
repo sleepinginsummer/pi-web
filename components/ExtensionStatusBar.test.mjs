@@ -287,3 +287,22 @@ test("the shared row scrolls sideways as a whole; its triggers and status line d
   assert.doesNotMatch(css, /\.extension-widget-triggers[^{]*\{[^}]*max-width:\s*70%/);
   assert.match(lineInRowRule, /flex:\s*0 0 auto/);
 });
+
+test("三个入口形式统一：图标在左、文字居中、折叠符在最右", () => {
+  const html = renderStatusBar({
+    statuses: [],
+    widgets: [{ key: "rpiv-todos", lines: ["a", "b"], placement: "aboveEditor" }],
+    isMobile: true,
+  });
+
+  // 待办入口：图标 → 文字 → 折叠符。
+  const icon = html.indexOf("extension-widget-icon");
+  const label = html.indexOf("extension-widget-key");
+  const chevron = html.indexOf("extension-widget-placement");
+  assert.ok(icon !== -1, "待办要有图标");
+  assert.ok(icon < label && label < chevron, `顺序应为图标、文字、折叠符：${icon}/${label}/${chevron}`);
+
+  // 折叠符在触发器内部最后一个可见元素：计数徽标若在前面，也不会被它挡住。
+  const trigger = html.slice(html.indexOf("extension-widget-trigger"), html.indexOf("</button>", html.indexOf("extension-widget-trigger")));
+  assert.ok(trigger.lastIndexOf("extension-widget-placement") > trigger.lastIndexOf("extension-widget-key"));
+});
