@@ -4,6 +4,7 @@ import remarkFrontmatter from "remark-frontmatter";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import remarkParse from "remark-parse";
+import { normalizeDisplayMath } from "./display-math";
 import type { OutlineHeading } from "./session-outline-types";
 
 /**
@@ -228,7 +229,9 @@ function headingText(node: TextLikeNode): string {
 export function extractOutlineHeadings(markdown: string, limit = Number.POSITIVE_INFINITY): OutlineHeading[] {
   if (!markdown || limit <= 0) return [];
   const headings: OutlineHeading[] = [];
-  for (const node of headingProcessor.parse(markdown).children) {
+  // 正文、展开预览和文件预览都先跑 `normalizeDisplayMath` 再渲染，目录必须吃同一份输入：
+  // 否则 `\[ … \]` 里的 `## 小标题` 在正文里是公式内容，在目录里就成了标题。
+  for (const node of headingProcessor.parse(normalizeDisplayMath(markdown)).children) {
     if (headings.length >= limit) break;
     if (node.type !== "heading" || node.depth > 2) continue;
     const text = headingText(node).replace(/\s+/g, " ").trim();

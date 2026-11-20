@@ -395,3 +395,20 @@ hooks/useAgentSession.ts:3462   missing: handleCompact, opts.chatInputRef, sessi
 - 桌面 1440px 轨道：同一次跳转 `scrollTop` **2473**，目标距顶 156px
 - 顺带确认：此前「滚动位置一直是 0」的观测有一半是**后台标签页**造成的——隐藏标签页里 `requestAnimationFrame` 与 smooth 滚动都不跑，`scrollTo` 被调用但不动。测这类滚动必须先把窗口激活。
 - 同一份规则也接到**已加载轮次的双击跳转**（`scrollToNode`）：先量 DOM，量不到才退回缓存偏移。桌面 1440px 实测双击第 10 轮，落点距容器顶 156px（设计的三分之一处）。
+
+## 17. 大纲与正文的数学预处理对齐（0.17.0-merge.24）
+
+正文（`MarkdownBody`）、展开预览（`AssistantOutline`）、文件预览都先跑 `normalizeDisplayMath()`：
+把 `\[…\]` 整理成 remark-math 能稳定解析的 `$$…$$` 块。完整目录直接解析原文，于是 `\[…\]` 里的
+`## 小标题` 在正文里是公式内容、在旧轮次的目录里却成了一个标题。
+
+- 数学预处理从 `lib/markdown.ts` 抽到独立模块 `lib/display-math.ts`（纯字符串处理，无依赖）：
+  服务端目录不能再 import 客户端渲染模块（`react-markdown` / `rehype-*` 只在 devDependencies 里，
+  发布包安装后并不存在）。`lib/markdown.ts` 保留同名再导出，调用方不用改。
+- `extractOutlineHeadings()` 解析前也跑 `normalizeDisplayMath()`，目录、预览、正文从此吃同一份输入。
+- `lib/markdown.test.mjs` 改成走 jiti 加载（`markdown.ts` 现在有无扩展名的相对再导出，Node 自带的
+  类型剥离要求写全扩展名）。
+- 对照测试补了两种形状（`\[…\]` 与 `$$…$$` 里的 `##`），并新增一条专门用例；去掉预处理后三条断言
+  里有两条立刻变红。
+
+验证：全量 570 文件 / 4134 通过 / 0 失败；`tsc --noEmit` 与 `eslint` 通过。
