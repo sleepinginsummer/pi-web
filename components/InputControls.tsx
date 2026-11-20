@@ -212,7 +212,7 @@ const ToolPresetControl = memo(function ToolPresetControl({ isMobile, toolPreset
     : getToolNamesForPreset(toolPreset ?? "default");
   // 名单未知（刚打开、没有存活运行时）时不假装有选择：勾选留空，chip 用中性名字。
   const selectedTools = toolSelectionKnown ? (customToolNames ?? presetTools) : undefined;
-  // chip 与菜单行同一套名字：预设用译名，自定义单独一个词，不再混英文标识符。
+  // chip 与菜单行同一套英文短名（off/configured/read-only/default/full/custom），和旁边的推理级别保持风格一致。
   const toolPresetLabel = !toolSelectionKnown
     ? t("settings.builtinTools")
     : customToolNames

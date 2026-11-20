@@ -3,7 +3,11 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import type { ModelsData, SelectedModel } from "@/lib/model-types";
-import { DEFAULT_OBSERVER_INTERVAL, isObserverInterval, type ObserverModelPreferences } from "@/lib/session-observer-protocol";
+import {
+  DEFAULT_OBSERVER_INTERVAL, OBSERVER_FOCUS_NOTE_LIMIT, OBSERVER_FOCUS_PRESETS,
+  isObserverFocusPreset, isObserverInterval,
+  type ObserverFocusPreset, type ObserverModelPreferences,
+} from "@/lib/session-observer-protocol";
 import { isThinkingLevel, type ThinkingLevel } from "@/lib/thinking-levels";
 
 const selectStyle = "w-full min-w-0 rounded border border-border bg-[var(--bg-panel)] px-3 py-2 text-sm disabled:opacity-60";
@@ -26,6 +30,7 @@ export function SessionObserverSettingsDialog({ cwd, initialSettings, busy, fail
   const titleId = useId();
   const [draft, setDraft] = useState(initialSettings);
   const [interval, setIntervalDraft] = useState(String(initialSettings.interval ?? DEFAULT_OBSERVER_INTERVAL));
+  const [focusNote, setFocusNote] = useState(initialSettings.focusNote ?? "");
   const [catalog, setCatalog] = useState<ModelsData | null>(null);
   const [catalogFailed, setCatalogFailed] = useState(false);
 
@@ -70,7 +75,15 @@ export function SessionObserverSettingsDialog({ cwd, initialSettings, busy, fail
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    if (!busy && isObserverInterval(Number(interval))) onSave({ ...draft, interval: Number(interval) });
+    const trimmedNote = focusNote.trim();
+    if (!busy && isObserverInterval(Number(interval)) && trimmedNote.length <= OBSERVER_FOCUS_NOTE_LIMIT) {
+      onSave({
+        ...draft,
+        interval: Number(interval),
+        focus: draft.focus ?? "balanced",
+        focusNote: trimmedNote,
+      });
+    }
   }
 
   return (
@@ -110,6 +123,34 @@ export function SessionObserverSettingsDialog({ cwd, initialSettings, busy, fail
         <label className="grid gap-1 text-sm">
           {t("observer.interval")}
           <input className={selectStyle} type="number" inputMode="numeric" min={1} step={1} required disabled={busy} value={interval} onChange={(event) => setIntervalDraft(event.target.value)} />
+        </label>
+        <label className="grid gap-1 text-sm">
+          {t("observer.focus")}
+          <select
+            className={selectStyle}
+            value={draft.focus ?? "balanced"}
+            disabled={busy}
+            onChange={(event) => {
+              const value = event.target.value;
+              if (isObserverFocusPreset(value)) setDraft({ ...draft, focus: value as ObserverFocusPreset });
+            }}
+          >
+            {OBSERVER_FOCUS_PRESETS.map((preset) => (
+              <option key={preset} value={preset}>{t(`observer.focus.${preset}`)}</option>
+            ))}
+          </select>
+        </label>
+        <label className="grid gap-1 text-sm">
+          {t("observer.focusNote")}
+          <textarea
+            className={`${selectStyle} resize-y`}
+            rows={2}
+            maxLength={OBSERVER_FOCUS_NOTE_LIMIT}
+            disabled={busy}
+            value={focusNote}
+            placeholder={t("observer.focusNotePlaceholder")}
+            onChange={(event) => setFocusNote(event.target.value)}
+          />
         </label>
         {catalogFailed && <p role="status" className="text-xs text-text-muted">{t("observer.modelsUnavailable")}</p>}
         {failed && <p role="alert" className="text-sm text-red-400">{t("observer.saveFailed")}</p>}

@@ -9,6 +9,7 @@ import { copyText } from "@/lib/clipboard";
 import { SessionObserverSettingsDialog } from "./SessionObserverSettingsDialog";
 import { SessionObserverHistory } from "./SessionObserverHistory";
 import type { SessionObserverState } from "@/lib/session-observer-protocol";
+import { partitionObserverItems, type ObserverItem } from "@/lib/observer-checklist";
 
 const actionStyle = "rounded border border-border px-2 py-1 text-xs hover:bg-[var(--bg-selected)] disabled:opacity-50";
 
@@ -93,10 +94,12 @@ export function SessionObserverPanel({ sessionId, cwd, onClose }: {
     }
   }
 
+  const { open: openItems, done: doneItems } = partitionObserverItems(state?.items ?? []);
+
   async function copyChecklist() {
     if (!state?.items.length) return;
     setCopyStatus(null);
-    const text = state.items.map(({ title, done, priority }) => {
+    const text = [...openItems, ...doneItems].map(({ title, done, priority }) => {
       const label = priority === "normal" ? "" : `[${t(`observer.${priority}`)}] `;
       return `- [${done ? "x" : " "}] ${label}${title.replace(/\s*[\r\n\u0085\u2028\u2029]+\s*/g, " ")}`;
     }).join("\n");
@@ -106,6 +109,21 @@ export function SessionObserverPanel({ sessionId, cwd, onClose }: {
     } catch {
       setCopyStatus("failed");
     }
+  }
+
+  function renderChecklistItem(item: ObserverItem) {
+    return (
+      <li key={item.id} className="observer-checklist-item relative py-2" data-priority={item.priority} title={item.priority === "normal" ? undefined : t(`observer.${item.priority}`)}>
+        <label className="flex cursor-pointer items-start gap-2 text-sm [overflow-wrap:anywhere]">
+          <input type="checkbox" className="mt-0.5 shrink-0 accent-[var(--accent)]" checked={item.done} disabled={busy} onChange={(event) => void update({ type: "edit_session_observer_checklist", action: "update", id: item.id, done: event.target.checked })} />
+          <span className="min-w-0">
+            <span className={item.done ? "text-text-muted line-through" : ""}>{item.title}</span>
+            {item.priority !== "normal" && <span className="sr-only">{t(`observer.${item.priority}`)}</span>}
+            <ChecklistTime createdAt={item.createdAt} locale={locale} todayLabel={t("observer.today")} />
+          </span>
+        </label>
+      </li>
+    );
   }
 
   const usage = state?.contextUsage;
@@ -148,21 +166,20 @@ export function SessionObserverPanel({ sessionId, cwd, onClose }: {
         {!state && !error && <p role="status" className="text-xs text-text-muted">{t("observer.loading")}</p>}
         {state?.checking && <p role="status" className="text-xs text-text-muted">{t("observer.checking")}</p>}
         {state && !state.items.length && !state.checking && <p className="text-xs text-text-muted">{t(state.enabled ? "observer.empty" : "observer.disabled")}</p>}
-        {state && state.items.length > 0 && (
+        {state && openItems.length > 0 && (
           <ul className="divide-y divide-border">
-            {state.items.map((item) => (
-              <li key={item.id} className="observer-checklist-item relative py-2" data-priority={item.priority} title={item.priority === "normal" ? undefined : t(`observer.${item.priority}`)}>
-                <label className="flex cursor-pointer items-start gap-2 text-sm [overflow-wrap:anywhere]">
-                  <input type="checkbox" className="mt-0.5 shrink-0 accent-[var(--accent)]" checked={item.done} disabled={busy} onChange={(event) => void update({ type: "edit_session_observer_checklist", action: "update", id: item.id, done: event.target.checked })} />
-                  <span className="min-w-0">
-                    <span className={item.done ? "text-text-muted line-through" : ""}>{item.title}</span>
-                    {item.priority !== "normal" && <span className="sr-only">{t(`observer.${item.priority}`)}</span>}
-                    <ChecklistTime createdAt={item.createdAt} locale={locale} todayLabel={t("observer.today")} />
-                  </span>
-                </label>
-              </li>
-            ))}
+            {openItems.map(renderChecklistItem)}
           </ul>
+        )}
+        {state && doneItems.length > 0 && (
+          <details className={openItems.length > 0 ? "border-t border-border pt-2" : ""}>
+            <summary className="cursor-pointer select-none py-1 text-xs font-medium text-text-muted hover:text-[var(--text)]">
+              {t("observer.completedSection", { count: doneItems.length })}
+            </summary>
+            <ul className="divide-y divide-border">
+              {doneItems.map(renderChecklistItem)}
+            </ul>
+          </details>
         )}
         </>}
       </div>

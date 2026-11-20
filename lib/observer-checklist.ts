@@ -6,6 +6,19 @@ export type ObserverEdit =
   | { action: "update"; id: string; patch: Partial<Omit<ObserverItem, "id" | "createdAt">> }
   | { action: "delete"; id: string }
   | { action: "move"; id: string; beforeId: string | null };
+const PRIORITY_RANK: Record<ObserverPriority, number> = { urgent: 0, important: 1, normal: 2 };
+
+/** 将清单拆分为按重要程度排序的未完成项与保留原序的已完成项。 */
+export function partitionObserverItems(items: readonly ObserverItem[]): { open: ObserverItem[]; done: ObserverItem[] } {
+  const open: ObserverItem[] = [];
+  const done: ObserverItem[] = [];
+  for (const item of items) {
+    if (item.done) done.push(item);
+    else open.push(item);
+  }
+  open.sort((a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority]);
+  return { open, done };
+}
 
 export function applyObserverEdit(items: ObserverItem[], edit: ObserverEdit): ObserverItem[] {
   if (edit.action === "add") return [...items, edit.item];

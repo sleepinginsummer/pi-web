@@ -68,8 +68,8 @@ export function getToolNamesForPreset(preset: ToolPreset): string[] | undefined 
 }
 
 /**
- * 预设的界面名字（i18n key）。菜单行和输入框上的 chip 共用这一套，
- * 否则会出现一半用英文标识符（full/configured）、一半用译名（自定义）的混搭。
+ * 预设的界面名字（i18n key）。菜单行和输入框上的 chip 共用同一套英文短名，
+ * 右侧说明各自按语言展示，与推理级别控件保持一致。
  */
 export function toolPresetLabelKey(preset: ToolPreset): string {
   if (preset === "none") return "chat.presetOff";

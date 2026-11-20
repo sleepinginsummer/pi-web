@@ -28,7 +28,7 @@ import { generateTitleForSessionFile } from "./session-file-title";
 import { findDeferredModel, findDeferredStartupModel, rememberProviderModels } from "./deferred-provider-models";
 import { ObserverContextOverflow, observerModelTools, SessionObserver } from "./session-observer";
 import { createObserverChecklistExtension } from "./observer-checklist-extension";
-import { isObserverInterval, SESSION_OBSERVER_ENTRY, type ObserverInteraction, type StoredObserverInteraction } from "./session-observer-protocol";
+import { isObserverFocusPreset, isObserverInterval, normalizeObserverFocusNote, SESSION_OBSERVER_ENTRY, type ObserverInteraction, type StoredObserverInteraction } from "./session-observer-protocol";
 import { isThinkingLevel } from "./thinking-levels";
 import { isBlockingExtensionUiRequest } from "./extension-ui-queue";
 import { createDevServerExtension } from "./dev-server-extension";
@@ -2486,19 +2486,28 @@ export class AgentSessionWrapper {
       }
       case "save_session_observer_settings": {
         const { model, thinkingLevel } = command;
-        const enabled = this.sessionObserver.snapshot().enabled;
-        const interval = command.interval === undefined ? this.sessionObserver.snapshot().preferences.interval : command.interval;
+        const snapshot = this.sessionObserver.snapshot();
+        const enabled = snapshot.enabled;
+        const previous = snapshot.preferences;
+        const interval = command.interval === undefined ? previous.interval : command.interval;
         if (interval !== undefined && !isObserverInterval(interval)) throw new Error("Invalid observer interval");
+        const rawFocus = command.focus === undefined ? previous.focus : command.focus;
+        if (rawFocus !== undefined && rawFocus !== null && !isObserverFocusPreset(rawFocus)) {
+          throw new Error("Invalid observer focus");
+        }
+        const focus = rawFocus === null || rawFocus === "balanced" ? undefined : rawFocus;
+        const focusNote = command.focusNote === undefined
+          ? previous.focusNote
+          : normalizeObserverFocusNote(command.focusNote);
         if (thinkingLevel !== null && !isThinkingLevel(thinkingLevel)) throw new Error("Invalid observer thinking level");
         if (model === null && thinkingLevel === null) {
-          return this.sessionObserver.saveSettings({ enabled, model: null, thinkingLevel: null, interval });
+          return this.sessionObserver.saveSettings({ enabled, model: null, thinkingLevel: null, interval, focus, focusNote });
         }
         if (typeof model !== "object" || model === null || !("provider" in model) || !("modelId" in model)
             || typeof model.provider !== "string" || typeof model.modelId !== "string") {
           throw new Error("Invalid observer model");
         }
         const { provider, modelId } = model;
-        const previous = this.sessionObserver.snapshot().preferences;
         // 模型下架后仍能关闭观察或保留原选择，只有修改模型组合时校验目录。
         if (provider !== previous.model?.provider || modelId !== previous.model?.modelId || thinkingLevel !== previous.thinkingLevel) {
           const runtime = this.inner.modelRuntime as ModelRuntime;
@@ -2508,7 +2517,7 @@ export class AgentSessionWrapper {
             throw new Error("Observer model does not support this thinking level");
           }
         }
-        return this.sessionObserver.saveSettings({ enabled, model: { provider, modelId }, thinkingLevel, interval });
+        return this.sessionObserver.saveSettings({ enabled, model: { provider, modelId }, thinkingLevel, interval, focus, focusNote });
       }
       case "edit_session_observer_checklist":
         return this.sessionObserver.editChecklist(command);

@@ -3,13 +3,34 @@ import { applyObserverEdit, type ObserverEdit, type ObserverItem } from "./obser
 import type { ThinkingLevel } from "./thinking-levels";
 
 export const SESSION_OBSERVER_ENTRY = "pi-web:session-observer";
-export const DEFAULT_OBSERVER_INTERVAL = 6;
+export const DEFAULT_OBSERVER_INTERVAL = 10;
+export const OBSERVER_FOCUS_PRESETS = ["balanced", "risks", "requirements"] as const;
+export type ObserverFocusPreset = typeof OBSERVER_FOCUS_PRESETS[number];
+export const OBSERVER_FOCUS_NOTE_LIMIT = 300;
 
 export function isObserverInterval(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
 }
 
-export type ObserverModelPreferences = { model: SelectedModel | null; thinkingLevel: ThinkingLevel | null; interval?: number };
+export function isObserverFocusPreset(value: unknown): value is ObserverFocusPreset {
+  return typeof value === "string" && (OBSERVER_FOCUS_PRESETS as readonly string[]).includes(value);
+}
+
+export function normalizeObserverFocusNote(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") throw new Error("Invalid observer focus note");
+  const trimmed = value.trim();
+  if (trimmed.length > OBSERVER_FOCUS_NOTE_LIMIT) throw new Error("Invalid observer focus note");
+  return trimmed || undefined;
+}
+
+export type ObserverModelPreferences = {
+  model: SelectedModel | null;
+  thinkingLevel: ThinkingLevel | null;
+  interval?: number;
+  focus?: ObserverFocusPreset;
+  focusNote?: string;
+};
 export type ObserverSettings = ObserverModelPreferences & { enabled: boolean };
 export type ObserverSummary = { throughId: string; text: string };
 
