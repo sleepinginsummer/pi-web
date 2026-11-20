@@ -9,6 +9,8 @@ export interface AgentRuntimeState {
   isStreaming: boolean;
   isPromptRunning: boolean;
   isBashRunning: boolean;
+  /** 正在执行的扩展命令（提交原文）。它们不启动模型回合，只能靠这个字段让界面说明状态。 */
+  runningCommands?: string[];
   isCompacting: boolean;
   autoCompactionEnabled: boolean;
   autoRetryEnabled: boolean;

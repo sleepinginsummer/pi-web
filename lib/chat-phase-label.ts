@@ -24,7 +24,13 @@ export type Translate = (key: string, params?: Record<string, string | number>) 
  * phase in the meantime reads as a hang. Compaction is what the user needs to know.
  * While compacting, messages queued for after it count beside it (`chat.compactingQueued`).
  */
-export function phaseLabel(phase: AgentPhase, t: Translate, isCompacting?: boolean, queuedCount = 0): string | null {
+export function phaseLabel(
+  phase: AgentPhase,
+  t: Translate,
+  isCompacting?: boolean,
+  queuedCount = 0,
+  runningCommand?: string | null,
+): string | null {
   if (isCompacting) return queuedCount > 0 ? t("chat.compactingQueued", { count: queuedCount }) : t("chat.compacting");
   if (phase?.kind === "running_tools") {
     const latest = phase.tools[phase.tools.length - 1];
@@ -38,6 +44,38 @@ export function phaseLabel(phase: AgentPhase, t: Translate, isCompacting?: boole
     return t("chat.runningToolsMore", { names: names.slice(0, 2).join(", "), count: names.length - 2 });
   }
   if (phase?.kind === "waiting_model") return t("chat.waitingModel");
-  if (phase?.kind === "running_command") return t("chat.runningCommand");
+  if (phase?.kind === "running_command") return extensionPhaseLabel(t, runningCommand);
   return null;
+}
+
+/** A command line can be a whole pasted sentence; the status line shows its beginning. */
+export const RUNNING_COMMAND_MAX_CHARS = 120;
+
+export function truncateCommand(text: string): string {
+  const trimmed = text.trim();
+  return trimmed.length > RUNNING_COMMAND_MAX_CHARS ? `${trimmed.slice(0, RUNNING_COMMAND_MAX_CHARS)}…` : trimmed;
+}
+
+/** 扩展命令的状态文案：显示这条命令的提交原文，过长的按字符截断。 */
+export function extensionPhaseLabel(t: Translate, runningCommand?: string | null): string {
+  return runningCommand ? t("chat.runningExtensionCommand", { command: truncateCommand(runningCommand) }) : t("chat.runningCommand");
+}
+
+/** The command name a `/name args` submission addresses, or null when it is not a command. */
+export function commandNameOf(text: string): string | null {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("/")) return null;
+  const name = trimmed.slice(1).split(/\s+/, 1)[0] ?? "";
+  return name.length > 0 ? name : null;
+}
+
+/**
+ * The advice under a running command's status line. pi gives an extension command no abort
+ * signal, so Stop cannot end one; the command's own cancel entry is the way out, and the
+ * convention (`/review cancel`) is what the extensions follow.
+ */
+export function phaseHint(phase: AgentPhase, t: Translate, runningCommand?: string | null): string | null {
+  if (phase?.kind !== "running_command" || !runningCommand) return null;
+  const name = commandNameOf(runningCommand);
+  return name ? t("chat.runningExtensionCommandHint", { command: name }) : null;
 }

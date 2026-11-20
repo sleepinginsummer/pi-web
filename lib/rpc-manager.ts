@@ -98,7 +98,7 @@ import { isSystemPromptAddonExtension, withSessionSystemPromptAddon } from "./sy
 import { createPiWebBuiltinExtensions, createSubagentCodemodeExtension, createSubagentMcpExtensions } from "./builtin-extensions";
 import type { McpHost } from "./mcp-host";
 import type { DebugMcpHost, DebugSessionLifecycle, DebugWrapperSnapshot } from "./debug-types";
-import { mcpPromptPreparation, type McpCommandCandidate } from "./mcp-command";
+import { mcpPromptPreparation, promptCommandName, type McpCommandCandidate } from "./mcp-command";
 import { createReadOnlyMcpPolicyExtension, createSubagentMcpPolicyExtension } from "./mcp-read-only-policy";
 import { createSubagentSkillsBinding } from "./subagent-skills";
 import { isNestedToolExecutionEvent } from "./agent-event-wire";
@@ -492,8 +492,12 @@ export class AgentSessionWrapper {
   private extensionWidgetsResetting = false;
   private promptRunning = false;
   private firstPromptEntry: ParkedPrompt | null = null;
-  // Prompts waiting for the running compaction to finish (ParkedPrompt above).
+  // Prompts waiting for the running compaction to finish, and an extension command sent as a
+  // follow-up while a run streams (ParkedPrompt above).
   private parkedDuringCompaction: ParkedPrompt[] = [];
+  // The extension commands pi is running right now, by their submitted text: they start no run, so
+  // nothing else tells the composer what occupies the session (see get_state / abort).
+  private runningCommands: string[] = [];
   private sessionReplacement: "fork" | "clone" | null = null;
   // Whether the last run ended because it was stopped (pi 1.1's `agent_settled.aborted`), not finished.
   private lastRunAborted = false;
@@ -1034,6 +1038,9 @@ export class AgentSessionWrapper {
         this.maybeAutoContinueUnfinishedTool();
         // 会话第一轮结束后自动生成标题（文件级独立 services，不与主 agent 争用 transport）
         this.maybeAutoTitleSession();
+        // A follow-up command (an extension command sent behind the run) goes now, as its queue
+        // row promised; compaction's parked prompts are flushed by compaction_end instead.
+        this.flushParkedWhenIdle();
       }
       // A name from setSessionName(), an extension's included: a title generated
       // in the background lands after the run's agent_end, a command's with no
@@ -1413,6 +1420,17 @@ export class AgentSessionWrapper {
     }
   }
 
+  /**
+   * Deliver the commands parked behind a finished turn. pi runs an extension command the moment it
+   * arrives, so a follow-up one waits in the parked list (see the prompt case); compaction's
+   * refusals share that list and `compaction_end` flushes them.
+   */
+  private flushParkedWhenIdle(): void {
+    if (this.parkedDuringCompaction.length === 0) return;
+    if (this.inner.isStreaming || this.inner.isCompacting) return;
+    this.flushParkedPrompts();
+  }
+
   private async deliverParkedPrompt(entry: ParkedPrompt): Promise<void> {
     const releaseAdmission = await this.acquirePromptAdmission();
     entry.delivering = false;
@@ -1432,8 +1450,15 @@ export class AgentSessionWrapper {
     };
     let disposition: "handled" | "queued" | "started" | undefined;
     let failure: unknown;
+    // A parked follow-up command starts no run; name it while pi runs it, as a directly submitted
+    // one is named (see the prompt case).
+    let deliveredCommand = "";
     try {
       const multiSkill = expandMultiSkillCommand(entry.message, this.inner.resourceLoader?.getSkills().skills ?? []);
+      if (!multiSkill.expanded && this.isExtensionCommandPrompt(multiSkill.text)) {
+        deliveredCommand = multiSkill.text.trim();
+        this.runningCommands.push(deliveredCommand);
+      }
       await this.inner.prompt(multiSkill.text, {
         ...(multiSkill.expanded ? { expandPromptTemplates: false } : {}),
         ...(entry.images?.length ? { images: entry.images } : {}),
@@ -1446,6 +1471,10 @@ export class AgentSessionWrapper {
       });
     } catch (error) {
       failure = error;
+    }
+    if (deliveredCommand) {
+      const index = this.runningCommands.indexOf(deliveredCommand);
+      if (index !== -1) this.runningCommands.splice(index, 1);
     }
     release();
     if (failure !== undefined && disposition === undefined && isCompactionInProgressError(failure)) {
@@ -1766,6 +1795,16 @@ export class AgentSessionWrapper {
       // Unreadable: treat the prompt as one that may start a run, as before.
       return [];
     }
+  }
+
+  /**
+   * Whether pi dispatches this message to an extension command instead of starting a run. Such a
+   * prompt is accepted and then runs for as long as the command's handler does (`/review` can take
+   * minutes), so it never awaits a run: see the prompt case for the acknowledgement.
+   */
+  private isExtensionCommandPrompt(message: string): boolean {
+    const name = promptCommandName(message);
+    return name !== null && this.extensionCommandCandidates().some((command) => command.name === name);
   }
 
   /** Defer out of the extension callback, including session_start, before awaiting binding. */
@@ -2210,10 +2249,39 @@ export class AgentSessionWrapper {
           this.lastAutoContinuedToolCallId = null;
           const loadedSkills = this.inner.resourceLoader?.getSkills().skills ?? [];
           const multiSkill = expandMultiSkillCommand(command.message as string, loadedSkills);
+          // pi runs an extension command before anything else and starts no run, then calls back
+          // only once its handler returns. Waiting for that acknowledgement would hold the POST,
+          // and this admission, for the command's whole lifetime (`/review` runs for minutes), so
+          // every later submission — a message answered in its own run, another command — waited
+          // for it. A dispatch to a registered command is the acceptance itself.
+          const dispatchesCommand = !multiSkill.expanded && this.isExtensionCommandPrompt(multiSkill.text);
+          const commandText = dispatchesCommand ? multiSkill.text.trim() : "";
+          // pi never queues an extension command: it runs one the moment it arrives, mid-run too.
+          // The composer's follow-up button means "after this turn", so hold the command here — it
+          // becomes a queue row, the run's end delivers it (flushParkedPrompts), and Stop or Recall
+          // hands it back. The same parked list takes compaction's refusals.
+          if (commandText && streamingBehavior === "followUp" && this.inner.isStreaming
+            && this.runningCommands.length === 0) {
+            this.parkDuringCompaction({
+              message: command.message as string,
+              images: promptImages,
+              streamingBehavior: "followUp",
+              settle: finishPrompt,
+            });
+            return { queued: true };
+          }
           // A new prompt, not one queued into a run: what an earlier run's Stop said is over.
           // Not at acceptance: pi accepts a command that awaits a run of its own after that
           // run settled, and the run's Stop must still keep its push and chime away.
           if (!streamingBehavior) this.lastRunAborted = false;
+          // Which extension command is running (for the composer's label and for Stop, which cannot
+          // interrupt one): recorded around the dispatch and cleared when the handler returns.
+          if (commandText) this.runningCommands.push(commandText);
+          const forgetCommand = () => {
+            if (!commandText) return;
+            const index = this.runningCommands.indexOf(commandText);
+            if (index !== -1) this.runningCommands.splice(index, 1);
+          };
           let prompt: Promise<void>;
           try {
             prompt = this.inner.prompt(multiSkill.text, {
@@ -2228,18 +2296,22 @@ export class AgentSessionWrapper {
               preflightResult: () => acceptPreflight(),
             });
           } catch (error) {
+            forgetCommand();
             finishPrompt();
             throw error;
           }
+          if (dispatchesCommand) acceptPreflight();
 
           void prompt.then(() => {
             // Compatibility fallback if a future SDK resolves without invoking
             // the internal callback. This waits for the run, but never acks early.
             acceptPreflight();
+            forgetCommand();
             finishPrompt();
             if (!streamingBehavior) this.emit(this.promptDoneEvent());
             this.checkExtensionShutdown();
           }, (error) => {
+            forgetCommand();
             // pi's SDK refuses prompts while a manual compaction runs. Park the
             // submission and flush it at compaction end (the TUI's
             // compactionQueuedMessages). An extension command typed meanwhile
@@ -2288,6 +2360,14 @@ export class AgentSessionWrapper {
 
       case "abort": {
         if (this.aborting) return null;
+        // pi gives an extension command no abort signal (`ctx.signal` exists only during a run and
+        // `agent.abort()` never reaches a handler), so nothing here can stop one. Say so instead of
+        // returning a no-op that looks like a stop: the composer names the command and points at its
+        // own cancel entry (`/review cancel`). A run, a compaction or a shell command still stops.
+        if (!this.inner.isStreaming && !this.inner.isCompacting && !this.shellRunning
+          && this.runningCommands.length > 0 && !this.hasBlockingUiRequest()) {
+          return { blockedByCommands: [...this.runningCommands] };
+        }
         this.observerInstance?.cancel();
         this.aborting = true;
         this.forceShutdownOnIdle = true;
@@ -2338,6 +2418,9 @@ export class AgentSessionWrapper {
           isStreaming: this.inner.isStreaming,
           isPromptRunning: this.pendingPrompts.active,
           isBashRunning: this.shellRunning,
+          // The extension commands pi is running, by their submitted text: they start no run, so the
+          // composer needs this to name what is going on and to point at the command's own cancel.
+          runningCommands: [...this.runningCommands],
           isCompacting: this.inner.isCompacting,
           autoCompactionEnabled: this.inner.autoCompactionEnabled,
           autoRetryEnabled: this.inner.autoRetryEnabled,
@@ -2582,15 +2665,23 @@ export class AgentSessionWrapper {
         };
       }
 
-      case "steer": {
-        const steerImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
-        await this.inner.steer(command.message as string, steerImages?.length ? steerImages : undefined);
-        return null;
-      }
-
+      case "steer":
       case "follow_up": {
-        const followImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
-        await this.inner.followUp(command.message as string, followImages?.length ? followImages : undefined);
+        const queuedImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
+        const queuedImagesOrNone = queuedImages?.length ? queuedImages : undefined;
+        // pi 的这两个队列只由运行中的回合消费。扩展命令（/review 等）执行期间 isStreaming 仍是
+        // false：此时入队的消息没有消费者，会一直留在队列里直到下一次运行。命令没有回合可插入，
+        // 所以按 TUI 的做法把消息当成一轮提示交给 SDK —— 有回合就排队，没有回合就开跑。
+        if (!this.inner.isStreaming) {
+          return this.send({
+            type: "prompt",
+            message: command.message,
+            streamingBehavior: command.type === "steer" ? "steer" : "followUp",
+            ...(queuedImagesOrNone ? { images: queuedImagesOrNone } : {}),
+          });
+        }
+        if (command.type === "steer") await this.inner.steer(command.message as string, queuedImagesOrNone);
+        else await this.inner.followUp(command.message as string, queuedImagesOrNone);
         return null;
       }
 

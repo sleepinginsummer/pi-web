@@ -40,7 +40,7 @@ import { getPreferredCustomTools, getPreferredToolPreset, setPreferredCustomTool
 import type { ToolPreset } from "@/lib/tool-presets";
 import { AgentCommandError, EXTENSION_REPORTED_CODE, agentStatusUrl, isPromptRejectedError, sendAgentCommand } from "@/lib/agent-client";
 import { peekPageId } from "@/lib/page-debug";
-import { runStatePhase } from "@/lib/chat-phase-label";
+import { commandNameOf, runStatePhase } from "@/lib/chat-phase-label";
 import { SESSION_LEASE_TIMEOUT_MS, type SessionLeaseReply } from "@/lib/agent-event-connection";
 import type { DebugClientLease, DebugClientSession } from "@/lib/debug-types";
 import type { TranslationParams } from "@/lib/i18n/types";
@@ -638,6 +638,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     reset: resetStreamDeltas,
   } = useFrameBatchedStreamDispatch(dispatchStreamBatch, streamScopeKey);
   const [agentRunning, setAgentRunning] = useState(false);
+  // 正在执行的扩展命令（提交原文）。它们不起模型回合，界面靠它显示「执行命令中：/review …」。
+  const runningCommandsRef = useRef<string[]>([]);
+  const [runningCommands, setRunningCommandsState] = useState<string[]>([]);
+  const setRunningCommands = useCallback((next: string[]) => {
+    const previous = runningCommandsRef.current;
+    if (previous.length === next.length && previous.every((text, index) => text === next[index])) return;
+    runningCommandsRef.current = next;
+    setRunningCommandsState(next);
+  }, []);
   const [bashRunning, setBashRunning] = useState(false);
   const [pendingBash, setPendingBash] = useState<PendingBash | null>(null);
   const [toolClocks, setToolClocks] = useState<ToolClocks>(NO_TOOL_CLOCKS);
@@ -966,6 +975,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const applyRuntimeState = useCallback((state: AgentRuntimeState | undefined, usageRead?: { sid: string; runId: number; requestId: number }) => {
     setIsCompacting(state?.isCompacting ?? false);
     setQueuedMessages(normalizeQueuedMessages(state?.queuedMessages));
+    setRunningCommands(state?.runningCommands ?? []);
     if (!state) {
       setFastEnabled(false);
       setRuntimeFastAvailable(null);
@@ -998,7 +1008,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
       }
     }
-  }, [applyContextUsage, applyShadowRuntimeState, modelSelectionActions, newSessionCwd, onPendingNewSessionEvent]);
+  }, [applyContextUsage, applyShadowRuntimeState, modelSelectionActions, newSessionCwd, onPendingNewSessionEvent, setRunningCommands]);
 
   // extensions-binding 是等待态：绑定完成事件可能错过（例如切走期间绑定已完成），
   // 因此在这个状态里兜底轮询运行时状态，由同一协议投影收敛到就绪或失败。
@@ -2168,6 +2178,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     optimisticUserMessageKeyRef.current = null;
     setAgentRunning(false);
     setAgentPhase(null);
+    // 命令也结束了：pi 不会为主运行发 prompt_done，界面上的「执行命令中：/…」同样要清掉。
+    setRunningCommands([]);
     setRetryInfo(null);
     flushStreamDeltas();
     dispatch({ type: "end" });
@@ -2191,7 +2203,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (sessionIdRef.current === sid) requestScrollPosition("running-end");
       });
     }
-  }, [settleUnconfirmedSend, dispatch, flushStreamDeltas, loadSession, onSessionListRefresh, requestScrollPosition, scheduleEventStreamClose, settleRun]);
+  }, [settleUnconfirmedSend, dispatch, flushStreamDeltas, loadSession, onSessionListRefresh, requestScrollPosition, scheduleEventStreamClose, settleRun, setRunningCommands]);
 
   const readAgentSnapshot = useCallback(async (sid: string): Promise<AgentRuntimeSnapshot | null> => {
     try {
@@ -3041,19 +3053,28 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       return;
     }
+    let recall: (QueuedMessages & { blockedByCommands?: string[] }) | null = null;
+    try {
+      recall = await sendAgentCommand<QueuedMessages & { blockedByCommands?: string[] } | null>(sid, { type: "abort" });
+    } catch (e) {
+      console.error("Failed to abort:", e);
+      return;
+    }
+    // 扩展命令（/review 等）没有中止信号，Stop 停不了：说明现状并指向命令自己的取消入口，
+    // 不能装作停掉了——挂起的 dialog 也还在等用户，不能跟着关掉。
+    const blocked = recall?.blockedByCommands;
+    if (blocked?.length) {
+      addNotice({ type: "warning", message: translate("chat.stopBlockedByCommand", { command: commandNameOf(blocked[0]) ?? blocked[0] }) });
+      return;
+    }
     // 中止会话后不再等待用户输入，关闭挂起的 dialog 弹窗
     setExtensionDialog(null);
     extensionDialogRef.current = null;
     clearAskQuestionnaire();
     markManualStopNotificationSuppressed(sid);
-    try {
-      // Queued prompts come back for the composer, as Recall's do.
-      restoreRecalledPrompts(sid, await sendAgentCommand<QueuedMessages | null>(sid, { type: "abort" }));
-    } catch (e) {
-      clearManualStopNotificationSuppression(sid);
-      console.error("Failed to abort:", e);
-    }
-  }, [clearAskQuestionnaire, restoreRecalledPrompts]);
+    // Queued prompts come back for the composer, as Recall's do.
+    restoreRecalledPrompts(sid, recall as QueuedMessages | null);
+  }, [addNotice, clearAskQuestionnaire, restoreRecalledPrompts, translate]);
 
   const handleFork = useCallback(async (entryId: string, draft?: ChatDraft) => {
     if (bashRunningRef.current) return;
@@ -3477,6 +3498,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (!isNavigationActive(navigationKey)) return false;
       const acknowledgement = await sendAgentCommand<AgentSubmitAcknowledgement>(sid, command);
       if (!acknowledgement?.accepted) throw new Error("服务端未确认接收消息");
+      // 命令可能已经开始跑（不进模型回合）：读一次状态，让「执行命令中：/…」立刻出现。
+      if (command.type === "prompt") void reconcileAgentState(sid, promptRunIdRef.current);
       return true;
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -3484,7 +3507,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       addNotice({ type: "error", message: `消息发送失败，输入已保留：${detail}` });
       return false;
     }
-  }, [addNotice, editEntryId, isNavigationActive, navigationKey, runShadowSlashCommand]);
+  }, [addNotice, editEntryId, isNavigationActive, navigationKey, runShadowSlashCommand, reconcileAgentState]);
 
   const handleAbortCompaction = useCallback(async () => {
     const sid = sessionIdRef.current;
@@ -3907,7 +3930,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     isCompacting, compactError, compactResult, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
     notices: noticeState.visible, setNoticeExpanded, extensionDialog, extensionCustomUi, askQuestionnaire, submitAskQuestionnaire, cancelAskQuestionnaire, extensionStatuses, extensionWidgets, detachedSubagentStatuses: [...detachedSubagentStatuses, ...shadowReportStatuses], todos, respondToExtensionUi, sendExtensionCustomInput, armCustomAnswer,
-    agentPhase, completion,
+    agentPhase, completion, runningCommands,
     isNew, creationSettingsLocked, scrollPositionRequest,
     activeToolResults, toolClocks, editEntryId,
     // Refs
@@ -3934,7 +3957,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     slashCommands, slashCommandsLoading, queuedMessages,
     noticeState.visible, setNoticeExpanded, extensionDialog, extensionCustomUi, askQuestionnaire, submitAskQuestionnaire, cancelAskQuestionnaire, extensionStatuses, extensionWidgets, detachedSubagentStatuses, todos, respondToExtensionUi, sendExtensionCustomInput, armCustomAnswer,
     isNew, creationSettingsLocked, scrollPositionRequest,
-    agentPhase, completion,
+    agentPhase, completion, runningCommands,
     activeToolResults, toolClocks, editEntryId, handleEditContent, cancelEdit, addNotice, shadowReportStatuses,
     sessionIdRef, eventSourceRef,
     handleSend, handleAbort, handleFork, handleNavigate, loadEarlierMessages, loadUntilEntryId,

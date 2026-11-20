@@ -63,6 +63,7 @@ import { getFileName } from "@/lib/file-paths";
 import { NoticeShelf } from "./NoticeShelf";
 import { SessionObserverPanel } from "./SessionObserverPanel";
 import { buildQuotedSelection } from "@/lib/quoted-selection";
+import { extensionPhaseLabel, phaseHint } from "@/lib/chat-phase-label";
 
 const MAX_MOUNTED_HISTORY_GROUPS = 160;
 
@@ -117,7 +118,13 @@ interface Props {
   onInitialPromptConsumed?: (sessionId: string, prompt: string) => void;
 }
 
-function phaseLabel(phase: AgentPhase, t: (key: string, params?: Record<string, string | number>) => string, isCompacting = false, queuedCount = 0): string {
+function phaseLabel(
+  phase: AgentPhase,
+  t: (key: string, params?: Record<string, string | number>) => string,
+  isCompacting = false,
+  queuedCount = 0,
+  runningCommand?: string | null,
+): string {
   if (isCompacting) return queuedCount > 0 ? t("chat.compactingQueued", { count: queuedCount }) : t("chat.compacting");
   if (phase?.kind === "running_tools") {
     const progress = phase.tools.find((tool) => tool.progress)?.progress;
@@ -129,7 +136,8 @@ function phaseLabel(phase: AgentPhase, t: (key: string, params?: Record<string, 
     return t("chat.runningToolsMore", { names: names.slice(0, 2).join(", "), count: names.length - 2 });
   }
   if (phase?.kind === "waiting_model") return t("chat.waitingModel");
-  if (phase?.kind === "running_command") return t("chat.runningCommand");
+  // 扩展命令不启动模型回合：只有这里能说明是哪条命令还在跑（过长的截断显示）。
+  if (phase?.kind === "running_command") return extensionPhaseLabel(t, runningCommand);
   return t("chat.thinking");
 }
 
@@ -268,7 +276,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
     isCompacting, compactError, compactResult, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
     notices, setNoticeExpanded, extensionDialog, extensionCustomUi, askQuestionnaire, submitAskQuestionnaire, cancelAskQuestionnaire, extensionStatuses, extensionWidgets, detachedSubagentStatuses, todos, respondToExtensionUi, sendExtensionCustomInput, armCustomAnswer,
-    agentPhase, completion,
+    agentPhase, completion, runningCommands,
     isNew, creationSettingsLocked, scrollPositionRequest,
     activeToolResults, toolClocks, editEntryId, handleEditContent, cancelEdit, addNotice,
     sessionIdRef,
@@ -1536,7 +1544,12 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
 
             {(agentRunning || isCompacting) && !hasStreamingContent && (agentPhase || isCompacting) && (
               <div className="break-words py-2 text-[13px] text-text-muted">
-                <span className="animate-[pulse_1.5s_infinite]">{phaseLabel(agentPhase, t, isCompacting, (queuedMessages?.steering.length ?? 0) + (queuedMessages?.followUp.length ?? 0))}</span>
+                <span className="animate-[pulse_1.5s_infinite]">{phaseLabel(agentPhase, t, isCompacting, (queuedMessages?.steering.length ?? 0) + (queuedMessages?.followUp.length ?? 0), runningCommands[0])}</span>
+                {(() => {
+                  // pi 不给扩展命令中止信号：Stop 停不了，只能说清怎么取消（见 phaseHint）。
+                  const hint = phaseHint(agentPhase, t, runningCommands[0]);
+                  return hint ? <div className="mt-1 text-[11.5px] text-text-dim">{hint}</div> : null;
+                })()}
               </div>
             )}
 

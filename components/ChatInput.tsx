@@ -604,7 +604,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const pendingImageCountRef = useRef(0);
   const resizeFrameRef = useRef<number | null>(null);
   const textareaAtMaxHeightRef = useRef(false);
-  const queuedSubmitTokenRef = useRef(0);
   const queuedSubmitPendingRef = useRef(false);
   valueRef.current = value;
   attachedImagesRef.current = attachedImages;
@@ -1311,31 +1310,26 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     }
     const submittedImages = [...attachedImages];
     if ((!msg && submittedImages.length === 0) || textAttachment || !onQueuedSubmit || queuedSubmitPendingRef.current) return;
-    const token = queuedSubmitTokenRef.current + 1;
-    queuedSubmitTokenRef.current = token;
     queuedSubmitPendingRef.current = true;
     setQueuedSubmitPending(true);
     onAudioUnlock?.();
     try {
       if (!submittedImages.length && offersBuiltinSlashCommandWhileStreaming(msg) && await runBuiltinCommand(msg)) return;
-      const accepted = await onQueuedSubmit(
-        msg,
-        mode === "steer" ? "steer" : "followUp",
-        submittedImages.length ? submittedImages : undefined,
+      // 发送即清空：服务端已受理的排队消息不该再占着输入框（命令可能跑很久才回执）。
+      // 只有明确未受理或请求失败才把文字和附件放回，见 submitOptimistically。
+      await submitOptimistically(
+        { value, images: submittedImages, textAttachment, draftKey: draftKeyRef.current ?? null },
+        () => onQueuedSubmit(
+          msg,
+          mode === "steer" ? "steer" : "followUp",
+          submittedImages.length ? submittedImages : undefined,
+        ),
       );
-      // 外部草稿恢复等路径仍可能改值或附件；旧 ACK 绝不能清掉较新的输入。
-      const imagesUnchanged = attachedImagesRef.current.length === submittedImages.length
-        && attachedImagesRef.current.every((image, index) => image === submittedImages[index]);
-      if (accepted && queuedSubmitTokenRef.current === token && valueRef.current.trim() === msg && imagesUnchanged) clearInput();
-    } catch {
-      // 提交方负责展示具体错误；这里必须保留输入，避免未处理 rejection 导致静默丢消息。
     } finally {
-      if (queuedSubmitTokenRef.current === token) {
-        queuedSubmitPendingRef.current = false;
-        setQueuedSubmitPending(false);
-      }
+      queuedSubmitPendingRef.current = false;
+      setQueuedSubmitPending(false);
     }
-  }, [value, attachedImages, textAttachment, onQueuedSubmit, clearInput, onAudioUnlock, runBuiltinCommand, handleSend]);
+  }, [value, attachedImages, textAttachment, onQueuedSubmit, onAudioUnlock, runBuiltinCommand, handleSend, submitOptimistically]);
 
   const getNextSlashIndex = useCallback((direction: "up" | "down" | "left" | "right") => {
     const lastIndex = displayedSlashCommands.length - 1;

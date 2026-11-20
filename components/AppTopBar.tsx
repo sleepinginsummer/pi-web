@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useId, useRef, useState, type ReactNode, type RefObject } from "react";
-import { Bot, Bug, Eye, GitBranch, History, MoreHorizontal, ScrollText, Sparkles, Wrench } from "lucide-react";
+import { Bot, Bug, Eye, GitBranch, History, MoreHorizontal, ScrollText, SlidersHorizontal, Sparkles, Wrench } from "lucide-react";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { SessionTreeNode } from "@/lib/types";
 import type { TopPanel } from "@/hooks/useTopPanel";
@@ -31,6 +31,8 @@ interface AppTopBarProps {
     topBarRef: RefObject<HTMLDivElement | null>;
   };
   onTogglePanel: (panel: TopPanel) => void;
+  /** 顶栏「工具设置」：扩展工具的模型/思考强度面板。 */
+  onOpenToolSettings: () => void;
   session: {
     /** Running subagents while any runs, else all of them; null without subagents. */
     agentsBadge: { count: number; running: boolean } | null;
@@ -121,7 +123,7 @@ function ObserverTopBarToggle({ session, compact }: { session: AppTopBarProps["s
   const draft = session.observerDraft;
   return draft ? <DraftObserverSessionToggle cwd={draft.cwd} disabled={draft.busy} compact={compact} /> : null;
 }
-function SessionTopBarControls({ activePanel, hideAgents = false, hideStats = false, stacked = false, locale, navigation, onTogglePanel, session, translate }: Pick<AppTopBarProps, "activePanel" | "navigation" | "onTogglePanel" | "session" | "translate"> & { hideAgents?: boolean; hideStats?: boolean; stacked?: boolean; locale: string }) {
+function SessionTopBarControls({ activePanel, hideAgents = false, hideStats = false, stacked = false, locale, navigation, onOpenToolSettings, onTogglePanel, session, translate }: Pick<AppTopBarProps, "activePanel" | "navigation" | "onOpenToolSettings" | "onTogglePanel" | "session" | "translate"> & { hideAgents?: boolean; hideStats?: boolean; stacked?: boolean; locale: string }) {
   if (!session.show) return null;
   const hasMessages = session.hasPersistedSession && (
     (session.stats?.userMessages ?? 0) > 0
@@ -173,6 +175,9 @@ function SessionTopBarControls({ activePanel, hideAgents = false, hideStats = fa
         <button type="button" onClick={() => onTogglePanel("tools")} title={translate("tools.title")} aria-label={translate("tools.title")} aria-pressed={activePanel === "tools"} className={`top-bar-btn top-bar-text-btn${activePanel === "tools" ? " is-active" : ""}`}>
           {stacked && <Wrench size={16} aria-hidden="true" />}{translate("tools.label")}
         </button>
+        <button type="button" onClick={onOpenToolSettings} title={translate("tools.settingsTitle")} aria-label={translate("tools.settingsTitle")} className="top-bar-btn top-bar-text-btn">
+          {stacked && <SlidersHorizontal size={16} aria-hidden="true" />}{translate("tools.settingsLabel")}
+        </button>
         <DebugTopBarButton {...{ activePanel, onTogglePanel, translate }} showLabel={stacked} />
         {!stacked && <span className="top-bar-group-sep" aria-hidden="true" />}
         <ShadowSessionToggle
@@ -218,7 +223,7 @@ function SessionTopBarControls({ activePanel, hideAgents = false, hideStats = fa
 }
 
 export function AppTopBar(props: AppTopBarProps) {
-  const { activePanel, endAction, locale, navigation, onTogglePanel, session, translate, trust } = props;
+  const { activePanel, endAction, locale, navigation, onOpenToolSettings, onTogglePanel, session, translate, trust } = props;
   const mobileMenuId = useId();
   const moreButtonRef = useRef<HTMLButtonElement>(null);
   const [mobileToolbarMoreOpen, setMobileToolbarMoreOpen] = useState(false);
@@ -305,7 +310,7 @@ export function AppTopBar(props: AppTopBarProps) {
             <>
               {(session.show || projectTrustWarning) && <span className="top-bar-group-sep" aria-hidden="true" />}
               {projectTrustWarning}
-              <SessionTopBarControls {...{ activePanel, navigation, onTogglePanel, session, translate, locale }} />
+              <SessionTopBarControls {...{ activePanel, navigation, onOpenToolSettings, onTogglePanel, session, translate, locale }} />
             </>
           )}
         </div>
@@ -330,6 +335,7 @@ export function AppTopBar(props: AppTopBarProps) {
         <div id={mobileMenuId} className="mobile-top-bar-menu" aria-label={translate("chat.moreControls")} role="region">
           <SessionTopBarControls
             {...{ activePanel, navigation, translate, locale }}
+            onOpenToolSettings={() => { setMobileToolbarMoreOpen(false); onOpenToolSettings(); }}
             stacked
             hideAgents
             hideStats

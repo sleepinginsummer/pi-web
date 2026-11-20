@@ -13,6 +13,7 @@ import { openFileTab, saveFileViewerState, saveParkedFileViewerState, switchFile
 import { SettingsPanel, SettingsSectionIcon } from "./SettingsPanel";
 import { ProjectTrustDialog } from "./ProjectTrustDialog";
 import { AppTopBar } from "./AppTopBar";
+import { ToolSettingsDialog } from "./ToolSettingsDialog";
 import { TerminalPanel } from "./TerminalPanel";
 import { SubagentViewer } from "./SubagentViewer";
 import { SessionChatPanel } from "./SessionChatPanel";
@@ -95,6 +96,8 @@ export function AppShell() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0);
   const [settingsSection, setSettingsSection] = useState<SettingsSection | null>(null);
+  // 顶栏「工具设置」：扩展工具的模型/思考强度（目前是 /review），写在扩展自己的配置里。
+  const [toolSettingsOpen, setToolSettingsOpen] = useState(false);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
   const [sessionCatalog, setSessionCatalog] = useState<SessionInfo[]>([]);
   const [quoteSelectionEnabled, setQuoteSelectionEnabled] = useState(false);
@@ -1269,6 +1272,7 @@ export function AppShell() {
             topBarRef,
           }}
           onTogglePanel={handleTopPanelToggle}
+          onOpenToolSettings={() => setToolSettingsOpen(true)}
           session={{
             // The Agents panel also starts side chats, so it is there for any saved session.
             agentsBadge: activeSessionFamily ? getAgentsBadge(activeSessionFamily.subagents, runningSessionIds) : null,
@@ -1618,6 +1622,12 @@ export function AppShell() {
       onDismiss={dismissNotification}
       onNavigate={openNotificationTarget}
     />
+    {toolSettingsOpen && (
+      <ToolSettingsDialog
+        cwd={projectTrustCwd ?? null}
+        onClose={() => setToolSettingsOpen(false)}
+      />
+    )}
     {settingsSection && (
       <SettingsPanel
         cwd={projectTrustCwd}

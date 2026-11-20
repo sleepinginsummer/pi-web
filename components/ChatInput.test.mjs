@@ -555,7 +555,7 @@ test("clearing an accepted new-session prompt cannot restore its draft", async (
   assert.match(persistDraftSource, /draftKeyRef\.current !== draftKey \|\| valueRef\.current !== value/);
 });
 
-test("运行中消息仅在服务端确认后清空，失败保留输入", async () => {
+test("运行中消息发送即清空，只有明确未受理才放回输入框", async () => {
   const source = await readFile(new URL("./ChatInput.tsx", import.meta.url), "utf8");
   const queuedSource = source.slice(
     source.indexOf("const sendQueued = useCallback"),
@@ -565,13 +565,15 @@ test("运行中消息仅在服务端确认后清空，失败保留输入", async
   assert.match(queuedSource, /queuedSubmitPendingRef\.current\) return/);
   assert.match(queuedSource, /queuedSubmitPendingRef\.current = true/);
   assert.match(queuedSource, /const submittedImages = \[\.\.\.attachedImages\]/);
-  assert.match(queuedSource, /const accepted = await onQueuedSubmit/);
+  // 与服务端回执解耦：清空发生在提交时，失败由 submitOptimistically 连附件一起放回
+  // (lib/optimistic-input-submission.ts，其测试覆盖回滚与「等待期间又输入」的合并)。
+  assert.match(queuedSource, /await submitOptimistically\(/);
+  assert.match(queuedSource, /onQueuedSubmit\(\s*msg,/);
   assert.match(queuedSource, /submittedImages\.length \? submittedImages : undefined/);
-  assert.match(queuedSource, /queuedSubmitTokenRef\.current === token/);
-  assert.match(queuedSource, /valueRef\.current\.trim\(\) === msg/);
-  assert.match(queuedSource, /imagesUnchanged/);
+  // 旧的「等 ACK 再清空」令牌已移除：命令跑几分钟时它会一直占着输入框。
+  assert.doesNotMatch(queuedSource, /queuedSubmitTokenRef/);
+  assert.doesNotMatch(queuedSource, /clearInput\(\)/);
   assert.match(source, /readOnly=\{queuedSubmitPending\}/);
-  assert.ok(queuedSource.indexOf("clearInput()") < queuedSource.indexOf("finally"));
 });
 
 test("modelSupportsImageInput warns only when modality info is known and lacks image", () => {

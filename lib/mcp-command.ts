@@ -45,6 +45,13 @@ export function isMcpExtensionCommand(command: McpCommandCandidate): boolean {
   return command.name === MCP_COMMAND_NAME || /^mcp:\d+$/.test(command.name);
 }
 
+/** The command name pi looks up for a `/`-message: everything after the slash up to the first space. */
+export function promptCommandName(message: string): string | null {
+  if (!message.startsWith("/")) return null;
+  const space = message.indexOf(" ");
+  return space === -1 ? message.slice(1) : message.slice(1, space);
+}
+
 /**
  * What the MCP host does before a prompt sent while no run is going, given
  * the session's extension commands (`getRegisteredCommands()`, by invocation
@@ -59,9 +66,8 @@ export function isMcpExtensionCommand(command: McpCommandCandidate): boolean {
  * extension command and starts a run.
  */
 export function mcpPromptPreparation(message: string, commands: readonly McpCommandCandidate[]): "wait" | "register" | "none" {
-  if (!message.startsWith("/")) return "wait";
-  const space = message.indexOf(" ");
-  const name = space === -1 ? message.slice(1) : message.slice(1, space);
+  const name = promptCommandName(message);
+  if (name === null) return "wait";
   const command = commands.find((candidate) => candidate.name === name);
   if (!command) return "wait";
   return isBuiltinMcpCommand(command) ? "register" : "none";
