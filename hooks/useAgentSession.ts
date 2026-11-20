@@ -48,7 +48,7 @@ import { isSessionExternalWriteError } from "@/lib/session-external-write";
 import { prependChatDraft, queuedMessagesToDraft, type QueuedMessages } from "@/lib/queued-messages";
 export type { QueuedMessages } from "@/lib/queued-messages";
 import { getDraft, parkedNewSessionDraftKey, setDraft, type ChatDraft } from "@/lib/draft-store";
-import { getPresetFromToolNames, getToolNamesForPreset, SETTINGS_BUILTIN_TOOLS, type ToolEntry } from "@/lib/tool-presets";
+import { CONFIGURED_TOOL_PRESET, getPresetFromToolNames, getToolNamesForPreset, SETTINGS_BUILTIN_TOOLS, type ToolEntry } from "@/lib/tool-presets";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import { createShownNotices, extensionErrorMessage } from "@/lib/startup-issues";
 import type { BashResultLike } from "@/lib/pi-types";
@@ -657,15 +657,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [fastEnabled, setFastEnabled] = useState(false);
   const [runtimeFastAvailable, setRuntimeFastAvailable] = useState<boolean | null>(null);
   const [fastPending, setFastPending] = useState(false);
-  const [toolPreset, setToolPreset] = useState<ToolPreset>("default");
+  const [toolPreset, setToolPreset] = useState<ToolPreset>(CONFIGURED_TOOL_PRESET);
   const [customToolNames, setCustomToolNames] = useState<string[] | null>(null);
   const [activeBuiltinTools, setActiveBuiltinTools] = useState<string[] | undefined>();
   // 会话文件里钉死的内置工具名单；null 表示跟随 settings.json（configured）。只用于解释
   // "设置里开着、本会话却没有"的工具（例如扩展把 edit 换掉了），不决定控件显示哪一档。
   const [pinnedToolNames, setPinnedToolNames] = useState<string[] | null>(null);
   // 没有存活运行时时（刚打开一个旧会话）读不到工具名单：此时不给预设标签，免得显示
-  // 一个初始值冒充用户的选择。第一次 loadTools、或用户自己选一档后才变成已知。
-  const [toolSelectionKnown, setToolSelectionKnown] = useState(false);
+  // 一个初始值冒充用户的选择。新会话自带默认/已存偏好，一开始就是已知；旧会话需等 loadTools 或用户切换。
+  const [toolSelectionKnown, setToolSelectionKnown] = useState(() => isNew);
   // Every available model, fetched only when the selector switches to "all" or the
   // shown model is outside the scope; null until then and after each loadModels.
   const [allModelList, setAllModelList] = useState<ModelEntry[] | null>(null);
@@ -3602,12 +3602,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     applyRuntimeState(undefined);
     contextUsageAppliedIdRef.current = contextUsageRequestIdRef.current;
     setActiveToolResults(new Map());
-    // 换会话先清掉上一份工具状态：冷会话读不到名单，不能继承上一个会话的档位和差异标注。
-    setActiveBuiltinTools(undefined);
-    setPinnedToolNames(null);
-    setCustomToolNames(null);
-    setToolSelectionKnown(false);
     if (session) {
+      // 已有会话先清掉上一份工具状态：冷会话读不到名单，不能继承上一个会话的档位和差异标注。
+      // 新会话不走这里，避免覆盖前面 effect 刚从浏览器偏好恢复的 customToolNames 与 toolSelectionKnown。
+      setActiveBuiltinTools(undefined);
+      setPinnedToolNames(null);
+      setCustomToolNames(null);
+      setToolSelectionKnown(false);
       sessionIdRef.current = session.id;
       void connectEvents(session.id);
       // 先向服务端验证版本和活动 leaf，不能把旧窗口直接显示在另一个分支上。

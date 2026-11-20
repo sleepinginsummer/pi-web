@@ -512,3 +512,19 @@ test("keeps the compaction control reachable while a turn is auto-compacting", (
   assert.doesNotMatch(controlBlock, /isStreaming && !isCompacting/);
   assert.match(controlBlock, /cursor: "pointer"/);
 });
+
+test("new session keeps configured default and known tool selection across mount effects", () => {
+  assert.match(source, /const \[toolPreset, setToolPreset\] = useState<ToolPreset>\(CONFIGURED_TOOL_PRESET\);/);
+  assert.match(source, /const \[toolSelectionKnown, setToolSelectionKnown\] = useState\(\(\) => isNew\);/);
+
+  const mountEffect = source.slice(
+    source.indexOf("// Load session on mount"),
+    source.indexOf("// eslint-disable-next-line react-hooks/exhaustive-deps", source.indexOf("// Load session on mount")),
+  );
+  const beforeSessionBranch = mountEffect.slice(0, mountEffect.indexOf("if (session)"));
+  const sessionBranch = mountEffect.slice(mountEffect.indexOf("if (session)"), mountEffect.indexOf("else if (pendingSessionView.resumingInitialization)"));
+
+  assert.doesNotMatch(beforeSessionBranch, /setToolSelectionKnown\(false\)/, "挂载 effect 不能在新会话分支前把 toolSelectionKnown 覆盖回 false");
+  assert.doesNotMatch(beforeSessionBranch, /setCustomToolNames\(null\)/, "挂载 effect 不能在新会话分支前清掉刚从偏好恢复的 customToolNames");
+  assert.match(sessionBranch, /setToolSelectionKnown\(false\)/);
+});
