@@ -5,7 +5,8 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { writePrivateFileAtomicSync } from "./atomic-file";
 import { projectTreeForResponse } from "./project-tree";
 import { countTurnsBefore, turnAnchorShape } from "./session-turns";
-import type { TurnAnchorMessage } from "./message-display";
+import { getTurnAnchors, type TurnAnchorMessage } from "./message-display";
+import { hasOutlineFinalAnswer } from "./outline-final-answer";
 import type { SessionContext, SessionEntry, SessionTreeNode } from "./types";
 import { readShadowMindStateEntry, type ShadowStateEntryLike } from "./shadow-session-protocol";
 
@@ -417,6 +418,109 @@ export async function readIndexedSessionDetails(filePath: string): Promise<{
   const index = await getSessionContentIndex(filePath);
   return { leafId: index.leafId, tree: index.tree, version: index.version };
 }
+
+/** 只读索引身份（文件签名、活动 leaf），供调用方先查上层缓存再决定是否逐条读记录。 */
+export async function readIndexedOutlineIdentity(
+  filePath: string,
+  leafId?: string,
+): Promise<{ leafId: string | null; version: string }> {
+  const index = await getSessionContentIndex(filePath);
+  return { leafId: leafId ?? index.leafId, version: index.version };
+}
+
+export interface IndexedBranchOutlineSlice {
+  leafId: string | null;
+  version: string;
+  turns: Array<{
+    turnNumber: number;
+    anchor: SessionEntry;
+    finalAssistant: SessionEntry | null;
+  }>;
+}
+
+/** 末尾助手记录不可展示时最多再往前找几条，避免一轮里的大量工具调用把读取撑爆。 */
+const MAX_FINAL_ANSWER_BACKTRACK = 8;
+
+/**
+ * 仅按字节偏移读取当前活动分支上每轮的锚点记录和最终助手记录，
+ * 跳过全部 toolResult 与中间过程消息，用于快速生成全量轻量大纲。
+ */
+export async function readIndexedBranchOutlineRecords(
+  filePath: string,
+  leafId?: string,
+): Promise<IndexedBranchOutlineSlice> {
+  const index = await getSessionContentIndex(filePath);
+  const byId = new Map(index.records.map((record) => [record.id, record]));
+  const activeLeafId = leafId ?? index.leafId;
+  const branch: IndexedRecord[] = [];
+  let cursor = byId.get(activeLeafId ?? "");
+  while (cursor) {
+    if (cursor.turn) branch.push(cursor);
+    cursor = cursor.parentId ? byId.get(cursor.parentId) : undefined;
+  }
+  branch.reverse();
+  const anchors = getTurnAnchors(branch.map((record) => record.turn!));
+  const specs: Array<{ turnNumber: number; anchor: IndexedRecord; assistants: IndexedRecord[] }> = [];
+  for (let i = 0; i < branch.length; i += 1) {
+    if (!anchors[i]) continue;
+    const assistants: IndexedRecord[] = [];
+    let j = i + 1;
+    while (j < branch.length && !anchors[j]) {
+      if (branch[j].turn?.role === "assistant") assistants.push(branch[j]);
+      j += 1;
+    }
+    specs.push({ turnNumber: specs.length + 1, anchor: branch[i], assistants });
+  }
+  const toRead: IndexedRecord[] = [];
+  const seen = new Set<string>();
+  const queue = (record: IndexedRecord) => {
+    if (seen.has(record.id)) return;
+    seen.add(record.id);
+    toRead.push(record);
+  };
+  for (const spec of specs) {
+    queue(spec.anchor);
+    const last = spec.assistants.at(-1);
+    if (last) queue(last);
+  }
+  const entriesById = new Map(readRecords(filePath, toRead).map((entry) => [entry.id, entry]));
+  const turns = specs
+    .map((spec) => {
+      const anchor = entriesById.get(spec.anchor.id);
+      if (!anchor) return null;
+      const finalAssistant = selectFinalAssistant(filePath, spec.assistants, entriesById);
+      return { turnNumber: spec.turnNumber, anchor, finalAssistant };
+    })
+    .filter((item): item is NonNullable<typeof item> => item !== null);
+  return { leafId: activeLeafId, version: index.version, turns };
+}
+
+/**
+ * 与主对话一致：取本轮最后一条「有可展示回答」的助手记录。
+ * 末尾只有工具调用、思考或空中止时继续往前找；整轮都没有回答则保留最后一条，
+ * 由大纲按空摘要处理（主对话同样回退到它）。
+ */
+function selectFinalAssistant(
+  filePath: string,
+  assistants: readonly IndexedRecord[],
+  entriesById: Map<string, SessionEntry>,
+): SessionEntry | null {
+  const last = assistants.at(-1);
+  if (!last) return null;
+  for (let i = assistants.length - 1; i >= 0; i -= 1) {
+    if (assistants.length - 1 - i > MAX_FINAL_ANSWER_BACKTRACK) break;
+    const record = assistants[i];
+    let entry = entriesById.get(record.id);
+    if (!entry) {
+      entry = readRecords(filePath, [record])[0];
+      if (!entry) continue;
+      entriesById.set(record.id, entry);
+    }
+    if (hasOutlineFinalAnswer(entry)) return entry;
+  }
+  return entriesById.get(last.id) ?? null;
+}
+
 
 export function resetSessionContentIndexesForTests(): void {
   globalThis.__piSessionContentIndexes = undefined;

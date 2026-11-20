@@ -4091,10 +4091,25 @@ span.token.table {
    than the mobile breakpoint but leaves the least room of all, so short
    touch screens opt in too; tablets keep their controls because the keyboard
    leaves them enough height. */
-@media (max-width: 640px), (pointer: coarse) and (max-height: 500px) {
+.composer-card:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border)) !important;
+  box-shadow: 0 2px 14px color-mix(in srgb, var(--accent) 10%, transparent) !important;
+}
+
+.composer-top-utils > button,
+.composer-top-utils > div > button {
+  height: 28px !important;
+}
+
+/* Phone portrait: the send/stop buttons sit in the text row, so the whole
+   bottom bar can go while the keyboard is up. */
+@media (max-width: 640px) {
   html[data-keyboard-open] .chat-input-controls,
   html[data-keyboard-open] .extension-status-shelf,
   html[data-keyboard-open] .extension-status-bar {
+    display: none !important;
+  }
+  html[data-keyboard-open] .composer-top-mobile-meta {
     display: none !important;
   }
   /* Except while its model picker is open: the picker's filter is the field
@@ -4112,6 +4127,29 @@ span.token.table {
   /* Tapping it would close the keyboard anyway. */
   html[data-keyboard-open] .new-session-context {
     display: none !important;
+  }
+}
+
+/* Phone landscape is wider than the mobile breakpoint, so it keeps the desktop
+   composer and its bottom bar — where send, stop and the queue buttons live.
+   Collapse only the tools group there; hiding the bar would leave a keyboard
+   with no way to send what was just typed. */
+@media (pointer: coarse) and (max-height: 500px) {
+  html[data-keyboard-open] .extension-status-shelf,
+  html[data-keyboard-open] .extension-status-bar,
+  html[data-keyboard-open] .composer-top-mobile-meta,
+  html[data-keyboard-open] .new-session-context {
+    display: none !important;
+  }
+  /* Same picker exception as above: its filter field is what the keyboard is for. */
+  html[data-keyboard-open] .chat-input-controls-tools:not(:has(.model-selector [role="listbox"])) {
+    display: none !important;
+  }
+  html[data-keyboard-open] .chat-content {
+    padding-bottom: 0 !important;
+  }
+  html[data-keyboard-open] .chat-input-shell {
+    padding-bottom: 6px !important;
   }
 }
 

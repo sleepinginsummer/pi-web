@@ -66,8 +66,17 @@ test("collapses secondary composer chrome while the mobile keyboard is open", ()
   assert.match(chatInputSource, /className=\{compact \? undefined : "chat-input-shell"\}/);
   assert.match(extensionStatusBarSource, /className=\{`extension-status-bar/);
   assert.match(chatWindowSource, /className="[^"]*chat-content /);
-  // Phone landscape exceeds the 640px breakpoint but has the least height.
-  assert.match(cssSource, /@media \(max-width: 640px\), \(pointer: coarse\) and \(max-height: 500px\) \{\s*html\[data-keyboard-open\] \.chat-input-controls,\s*html\[data-keyboard-open\] \.extension-status-shelf,\s*html\[data-keyboard-open\] \.extension-status-bar \{\s*display: none !important;/);
+  // Phone portrait: send/stop live in the text row, so the bar may collapse.
+  assert.match(cssSource, /@media \(max-width: 640px\) \{\s*html\[data-keyboard-open\] \.chat-input-controls,\s*html\[data-keyboard-open\] \.extension-status-shelf,\s*html\[data-keyboard-open\] \.extension-status-bar \{\s*display: none !important;/);
+  // Phone landscape is wider than the breakpoint, so it keeps the desktop
+  // composer whose send/stop/queue buttons sit in that bar: only the tools
+  // group may collapse, never the whole row, or the keyboard hides sending.
+  assert.match(chatInputSource, /className="chat-input-controls-tools"/);
+  assert.match(chatInputSource, /className="chat-input-controls-actions"/);
+  const landscapeRules = cssSource.match(/@media \(pointer: coarse\) and \(max-height: 500px\) \{[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.ok(landscapeRules, "phone-landscape keyboard rules are missing");
+  assert.match(landscapeRules, /html\[data-keyboard-open\] \.chat-input-controls-tools:not\(:has\(\.model-selector \[role="listbox"\]\)\) \{\s*display: none !important;/);
+  assert.doesNotMatch(landscapeRules, /html\[data-keyboard-open\] \.chat-input-controls[ ,{]/);
   assert.match(cssSource, /html\[data-keyboard-open\] \.chat-content \{\s*padding-bottom: 0 !important;/);
   assert.match(cssSource, /html\[data-keyboard-open\] \.chat-input-shell \{\s*padding-bottom: 6px !important;/);
   // Mobile send is icon-only but keeps an accessible name.

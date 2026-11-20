@@ -2,6 +2,8 @@
 
 import React, { memo, useEffect, useRef, useState } from "react";
 import { InputControlsMenu } from "./InputControlsMenu";
+import { ContextUsageIndicator, type ContextUsageSnapshot } from "./ContextUsageIndicator";
+import type { SessionStatsInfo } from "@/lib/pi-types";
 import { useI18n } from "@/hooks/useI18n";
 import type { ModelSelectionViewActions, ModelSelectionViewState } from "@/lib/model-selection-types";
 import { THINKING_LEVEL_OPTIONS, type ThinkingLevelOption } from "@/lib/thinking-levels";
@@ -26,9 +28,10 @@ interface ThinkingControlProps {
   modelState: ModelSelectionViewState;
   isStreaming: boolean;
   onChange?: (level: ThinkingLevelOption) => void;
+  align?: "left" | "right";
 }
 
-const ThinkingControl = memo(function ThinkingControl({ isMobile, modelState, isStreaming, onChange }: ThinkingControlProps) {
+export const ThinkingControl = memo(function ThinkingControl({ isMobile, modelState, isStreaming, onChange, align }: ThinkingControlProps) {
   const { t } = useI18n();
   const { thinkingLevel, isAutoThinkingSelection, availableThinkingLevels, thinkingLevelMap } = modelState;
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
@@ -88,7 +91,7 @@ const ThinkingControl = memo(function ThinkingControl({ isMobile, modelState, is
                 </button>
                 {thinkingDropdownOpen && !isStreaming && (
                   <div style={{
-                    position: "absolute", bottom: "calc(100% + 6px)", ...(isMobile ? { left: 0 } : { right: 0 }),
+                    position: "absolute", bottom: "calc(100% + 6px)", ...(align === "left" ? { left: 0 } : isMobile ? { left: 0 } : { right: 0 }),
                     zIndex: 100, background: "var(--bg)", border: "1px solid var(--border)",
                     borderRadius: 8, boxShadow: "0 -4px 16px rgba(0,0,0,0.10)",
                     overflow: "hidden", minWidth: 180,
@@ -146,7 +149,7 @@ interface FastModeControlProps {
   onChange?: (enabled: boolean) => void;
 }
 
-const FastModeControl = memo(function FastModeControl({ isMobile, modelState, onChange }: FastModeControlProps) {
+export const FastModeControl = memo(function FastModeControl({ isMobile, modelState, onChange }: FastModeControlProps) {
   const { t } = useI18n();
   if (!modelState.fastAvailable || !onChange) return null;
   return (
@@ -186,7 +189,7 @@ interface ToolPresetControlProps {
   disabled?: boolean;
 }
 
-const ToolPresetControl = memo(function ToolPresetControl({ isMobile, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames, toolSelectionKnown = true, onChange, isStrayClick, disabled = false }: ToolPresetControlProps) {
+export const ToolPresetControl = memo(function ToolPresetControl({ isMobile, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames, toolSelectionKnown = true, onChange, isStrayClick, disabled = false }: ToolPresetControlProps) {
   const { t } = useI18n();
   const [toolDropdownOpen, setToolDropdownOpen] = useState(false);
   const toolDropdownRef = useRef<HTMLDivElement>(null);
@@ -368,7 +371,7 @@ interface RunControlsProps {
   onAbort: () => void;
 }
 
-const RunControls = memo(function RunControls({ isMobile, isStreaming, showLabel, onCompact, onAbortCompaction, isCompacting, onAbort, isStrayClick }: RunControlsProps) {
+export const RunControls = memo(function RunControls({ isMobile, isStreaming, showLabel, onCompact, onAbortCompaction, isCompacting, onAbort, isStrayClick }: RunControlsProps) {
   const { t } = useI18n();
   return (
     <>
@@ -456,7 +459,7 @@ interface PreferenceTogglesProps {
   onNotificationToggle?: () => void;
 }
 
-const PreferenceToggles = memo(function PreferenceToggles({ isMobile, soundEnabled, onSoundToggle, notificationEnabled, notificationPermission, onNotificationToggle }: PreferenceTogglesProps) {
+export const PreferenceToggles = memo(function PreferenceToggles({ isMobile, soundEnabled, onSoundToggle, notificationEnabled, notificationPermission, onNotificationToggle }: PreferenceTogglesProps) {
   const { t } = useI18n();
   return (
     <>
@@ -660,5 +663,139 @@ export const InputControls = memo(function InputControls({
             {endAction}
           </div>
     </>
+  );
+});
+
+
+interface ComposerTopUtilitiesProps {
+  isStreaming: boolean;
+  contextUsage?: ContextUsageSnapshot | null;
+  sessionStats?: SessionStatsInfo | null;
+  toolPreset?: ToolPreset;
+  customToolNames?: readonly string[] | null;
+  activeBuiltinTools?: readonly string[];
+  pinnedToolNames?: readonly string[] | null;
+  toolSelectionKnown?: boolean;
+  onToolPresetChange?: (preset: ToolPreset, customNames?: string[] | null) => void;
+  onCompact?: () => void;
+  onAbortCompaction?: () => void;
+  isCompacting?: boolean;
+  soundEnabled?: boolean;
+  onSoundToggle?: () => void;
+  notificationEnabled?: boolean;
+  notificationPermission?: NotificationPermission | "unsupported";
+  onNotificationToggle?: () => void;
+  endAction?: React.ReactNode;
+}
+
+/**
+ * 桌面端输入框右上角工具条：
+ * 上下文消耗环 · 工具预设 · 压缩/停止压缩 · 提示音 · 桌面通知 · 消息暂存库。
+ */
+export const ComposerTopUtilities = memo(function ComposerTopUtilities({
+  isStreaming,
+  contextUsage,
+  sessionStats,
+  toolPreset,
+  customToolNames,
+  activeBuiltinTools,
+  pinnedToolNames,
+  toolSelectionKnown,
+  onToolPresetChange,
+  onCompact,
+  onAbortCompaction,
+  isCompacting,
+  soundEnabled,
+  onSoundToggle,
+  notificationEnabled,
+  notificationPermission,
+  onNotificationToggle,
+  endAction,
+}: ComposerTopUtilitiesProps) {
+  const isStrayClick = useRunEndStrayClick(isStreaming);
+  return (
+    <div
+      className="composer-top-utils"
+      style={{
+        flex: "0 0 auto",
+        display: "flex",
+        alignItems: "center",
+        gap: 2,
+      }}
+    >
+      <ContextUsageIndicator contextUsage={contextUsage} sessionStats={sessionStats} />
+      <ToolPresetControl
+        isMobile={false}
+        toolPreset={toolPreset}
+        customToolNames={customToolNames}
+        activeBuiltinTools={activeBuiltinTools}
+        pinnedToolNames={pinnedToolNames}
+        toolSelectionKnown={toolSelectionKnown}
+        onChange={onToolPresetChange}
+        isStrayClick={isStrayClick}
+        disabled={isStreaming}
+      />
+      {(!isStreaming || isCompacting) && onCompact && (
+        <RunControls
+          isMobile={false}
+          isStreaming={false}
+          showLabel
+          onCompact={onCompact}
+          onAbortCompaction={onAbortCompaction}
+          isCompacting={isCompacting}
+          onAbort={() => {}}
+          isStrayClick={isStrayClick}
+        />
+      )}
+      <PreferenceToggles
+        isMobile={false}
+        soundEnabled={soundEnabled}
+        onSoundToggle={onSoundToggle}
+        notificationEnabled={notificationEnabled}
+        notificationPermission={notificationPermission}
+        onNotificationToggle={onNotificationToggle}
+      />
+      {endAction}
+    </div>
+  );
+});
+
+export const ComposerStopButton = memo(function ComposerStopButton({
+  onAbort,
+}: {
+  onAbort: () => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <button
+      type="button"
+      onClick={onAbort}
+      title={t("chat.stopAgent")}
+      aria-label={t("chat.stopAgent")}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        padding: "7px 13px",
+        height: 32,
+        background: "rgba(239,68,68,0.08)",
+        border: "1px solid rgba(239,68,68,0.3)",
+        borderRadius: 9,
+        color: "#ef4444",
+        cursor: "pointer",
+        fontSize: 12,
+        fontWeight: 600,
+        whiteSpace: "nowrap",
+        letterSpacing: "-0.01em",
+        transition: "background 0.12s",
+      }}
+      onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(239,68,68,0.16)"; }}
+      onMouseLeave={(e) => { e.currentTarget.style.background = "rgba(239,68,68,0.08)"; }}
+    >
+      <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+        <rect x="1.5" y="1.5" width="7" height="7" rx="1.5" fill="currentColor" />
+      </svg>
+      {t("chat.stop")}
+    </button>
   );
 });

@@ -1,21 +1,209 @@
-.preview {
+/* 方案 A：大纲胶囊轨道悬浮在主会话滚动条左侧，展开为独立圆角浮卡 */
+.rail {
   position: absolute;
   top: 0;
   bottom: 0;
-  right: 100%;
-  z-index: 100;
-  width: 320px;
-  overflow-x: hidden;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-width: thin;
-  scrollbar-color: var(--border) transparent;
+  right: 16px;
+  width: 34px;
+  z-index: 25;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 12px 0;
+  background: transparent;
+  user-select: none;
+  pointer-events: none;
+}
+
+.pill {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  max-height: calc(100% - 24px);
+  padding: 10px 5px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg-panel) 74%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+  backdrop-filter: blur(6px);
+  transition: background 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.pill:hover,
+.rail[data-open="true"] .pill {
   background: var(--bg);
-  border-left: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
-  box-shadow: -10px 0 26px rgba(0, 0, 0, 0.07);
+  border-color: var(--border);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.07);
+}
+
+.ticks {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 2px;
+  max-height: 280px;
+  overflow: hidden;
+}
+
+.tickWrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  min-height: 5px;
+}
+
+.tick {
+  display: block;
+  width: 10px;
+  height: 2px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-dim) 34%, transparent);
+  transition: width 120ms ease, background 120ms ease;
+}
+
+.tickLoaded {
+  width: 12px;
+  background: color-mix(in srgb, var(--text-dim) 58%, transparent);
+}
+
+.tickActive {
+  width: 16px;
+  height: 2.5px;
+  background: var(--accent);
+}
+
+.pillDivider {
+  width: 12px;
+  height: 1px;
+  background: var(--border);
+  flex-shrink: 0;
+}
+
+.lock {
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+/* 展开的独立圆角大纲浮卡（上下留白 12px，避免在输入框上沿生硬截断） */
+.preview {
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  right: 38px;
+  z-index: 100;
+  width: 312px;
+  max-width: calc(100vw - 96px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.10), 0 2px 6px rgba(0, 0, 0, 0.05);
   pointer-events: auto;
   cursor: default;
   user-select: text;
+}
+
+/* 桥接胶囊和浮卡之间的小空隙，鼠标横向移入浮卡不会闪烁收起 */
+.preview::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -12px;
+  width: 12px;
+}
+
+.header {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.searchWrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.searchIcon {
+  position: absolute;
+  left: 8px;
+  color: var(--text-dim);
+  pointer-events: none;
+}
+
+.searchInput {
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px 0 26px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-panel);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+.searchInput:focus {
+  border-color: var(--accent);
+  background: var(--bg);
+}
+
+.searchCount {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.subhint {
+  padding: 5px 10px;
+  font-size: 11px;
+  color: var(--text-dim);
+  background: var(--bg-subtle);
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 68%, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* 跳转没找到目标轮次时的提示：要能看见，但不抢标题的注意力。 */
+.revealFailed {
+  color: var(--danger, #d04b4b);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.list {
+  flex: 1;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px 0 8px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
 }
 
 .earlier {
@@ -37,246 +225,265 @@
   background: color-mix(in srgb, var(--text) 4%, var(--bg));
 }
 
+.divider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+  user-select: none;
+}
+
+.divider::before,
+.divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: color-mix(in srgb, var(--border) 75%, transparent);
+}
+
 .turn {
   position: relative;
-  display: grid;
-  grid-template-columns: 34px minmax(0, 1fr);
-  padding: 0;
-  border-bottom: 1px solid color-mix(in srgb, var(--border) 68%, transparent);
-  background: transparent;
-  transition: background 120ms ease, box-shadow 120ms ease;
+  border-left: 2px solid transparent;
+  transition: background 110ms ease, border-color 110ms ease;
 }
 
 .turn[data-located="true"] {
-  background: color-mix(in srgb, var(--text) 4%, var(--bg));
-  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--text-muted) 70%, transparent);
+  border-left-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg));
 }
 
-.number {
-  position: relative;
-  z-index: 1;
-  grid-column: 1;
+.turnRow {
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 1px;
-  width: 34px;
-  height: 32px;
-  padding: 0;
-  color: var(--text-dim);
-  font-family: var(--font-mono);
-  font-size: 10px;
-  font-variant-numeric: tabular-nums;
-  line-height: 13px;
-  text-align: center;
-}
-
-.turn[data-located="true"] .number {
-  color: var(--text-muted);
-}
-
-/* Tool-call count for the whole turn. Sits under the serial number so the
-   34px rail column keeps its width and the dot rail stays untouched. */
-.toolBadge {
-  display: block;
-  min-width: 15px;
-  padding: 0 3px;
-  border-radius: 999px;
-  background: var(--tool-bg);
-  color: var(--text-muted);
-  font-size: 9px;
-  line-height: 12px;
-}
-
-.turn[data-located="true"] .toolBadge {
-  color: var(--text);
-}
-
-.content {
-  grid-column: 2;
-  min-width: 0;
-}
-
-.user {
-  display: block;
-  width: calc(100% + 34px);
-  min-height: 32px;
-  max-height: 86px;
-  margin: 0 0 0 -34px;
-  padding: 7px 10px 7px 40px;
+  align-items: flex-start;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 8px 6px 10px;
   border: 0;
-  border-radius: 0;
   background: transparent;
   color: var(--text);
   font-family: inherit;
-  font-size: 14px;
-  font-weight: 500;
-  letter-spacing: 0;
-  line-height: 18px;
   text-align: left;
   cursor: pointer;
-  overflow: hidden;
+  user-select: none;
   transition: background 100ms ease;
 }
 
+.turnRow:hover {
+  background: var(--bg-hover);
+}
+
+.number {
+  width: 24px;
+  flex-shrink: 0;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  line-height: 18px;
+  text-align: right;
+}
+
+.turn[data-located="true"] .number {
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .userText {
+  flex: 1;
+  min-width: 0;
   display: -webkit-box;
   overflow: hidden;
   overflow-wrap: anywhere;
-  white-space: pre-wrap;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 4;
-  line-clamp: 4;
-}
-
-.user:hover {
-  background: color-mix(in srgb, var(--text) 6%, transparent);
-}
-
-.assistant {
-  position: relative;
-  display: block;
-  padding: 0;
-  border-top: 1px solid color-mix(in srgb, var(--border) 52%, transparent);
-}
-
-.assistant + .assistant {
-  margin-top: 0;
-}
-
-.assistantJump {
-  position: absolute;
-  top: 0;
-  left: -29px;
-  z-index: 2;
-  width: 24px;
-  height: 26px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--text-dim);
-  font-family: var(--font-mono);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0;
-  line-height: 26px;
-  text-align: center;
-  cursor: pointer;
-  transition: color 100ms ease, background 100ms ease;
-}
-
-.assistantJump:hover {
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 18px;
   color: var(--text);
-  background: var(--bg-subtle);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+.turnUnloaded .userText {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.chevron {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  transition: transform 130ms ease;
+}
+
+.chevronExpanded {
+  transform: rotate(90deg);
+}
+
+.headingsWrap {
+  padding: 0 10px 7px 36px;
 }
 
 .outline {
-  display: grid;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   min-width: 0;
-  gap: 0;
 }
 
-.outline :global(.katex) {
-  font-size: 1em;
-}
-
-.outline :global(.katex-display) {
-  display: inline;
-  margin: 0;
-}
-
-.heading,
-.paragraph {
-  display: block;
-  width: calc(100% + 34px);
-  min-height: 26px;
-  min-width: 0;
-  margin-left: -34px;
-  padding: 4px 10px 4px 40px;
+.heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 6px;
   border: 0;
-  border-radius: 0;
+  border-radius: 5px;
   background: transparent;
+  color: var(--text-muted);
   font-family: inherit;
-  letter-spacing: 0;
-  line-height: 18px;
-  overflow: hidden;
+  font-size: 11.5px;
+  font-weight: 400;
+  line-height: 17px;
   text-align: left;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   cursor: pointer;
+  overflow-wrap: anywhere;
   transition: background 100ms ease, color 100ms ease;
 }
 
-.heading:hover,
-.paragraph:hover {
-  background: color-mix(in srgb, var(--text) 6%, transparent);
-  color: var(--text);
+.heading::before {
+  content: "";
+  width: 4px;
+  height: 4px;
+  margin-top: 6.5px;
+  border-radius: 999px;
+  background: var(--text-dim);
+  opacity: 0.65;
+  flex-shrink: 0;
 }
 
 .heading[data-level="1"] {
-  min-height: 32px;
-  padding-top: 7px;
-  padding-bottom: 7px;
+  font-weight: 500;
   color: var(--text);
-  font-size: 14px;
-  font-weight: 600;
 }
 
 .heading[data-level="2"] {
-  min-height: 28px;
-  padding-top: 5px;
-  padding-bottom: 5px;
-  padding-left: 50px;
-  color: color-mix(in srgb, var(--text) 88%, var(--text-muted));
-  font-size: 12px;
+  padding-left: 12px;
+}
+
+.heading:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+.heading:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.previewCard {
+  margin: 2px 10px 8px 34px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--bg-panel);
+  border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text-muted);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.previewCardQuestion {
+  color: var(--text);
   font-weight: 500;
+  overflow-wrap: anywhere;
 }
 
-.heading[data-level="3"] {
-  padding-left: 60px;
+.previewCardSummary {
+  overflow-wrap: anywhere;
+}
+
+.previewCardTags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.previewTag {
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
   color: var(--text-muted);
+}
+
+.previewCardFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 5px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+}
+
+.previewCardNote {
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+
+.jumpBtn {
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg));
+  color: var(--accent);
+  font-family: inherit;
   font-size: 11px;
-  font-weight: 400;
+  font-weight: 600;
+  padding: 3px 9px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 120ms ease, color 120ms ease;
 }
 
-.paragraph {
-  color: var(--text-muted);
-  font-size: 14px;
-  font-weight: 400;
+.jumpBtn:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--accent-contrast);
 }
 
-.assistant:has(.heading[data-level="1"]:first-child) .assistantJump {
-  height: 32px;
-  line-height: 32px;
+.jumpBtn:disabled {
+  opacity: 0.6;
+  cursor: wait;
 }
 
-.assistant:has(.heading[data-level="2"]:first-child) .assistantJump {
-  height: 28px;
-  line-height: 28px;
+.emptyState {
+  padding: 22px 12px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-dim);
 }
 
-.user:focus-visible,
-.heading:focus-visible,
-.paragraph:focus-visible {
-  outline: 0;
-  background: color-mix(in srgb, var(--text) 6%, transparent);
-  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--text-muted) 65%, transparent);
+.outline code {
+  padding: 0 3px;
+  border-radius: 3px;
+  background: var(--tool-bg);
+  font-family: var(--font-mono);
+  font-size: 0.92em;
 }
 
-.assistantJump:focus-visible {
-  outline: 1px solid color-mix(in srgb, var(--text-muted) 65%, transparent);
-  outline-offset: 1px;
+.outline :global(.katex) {
+  font-size: 0.95em;
 }
 
-/* Lock toggle at the bottom of the rail: while locked, the preview panel
-   does not pop out on hover. Only where it sits; its look is LockToggle's. */
-.lock {
-  position: absolute;
-  bottom: 6px;
-  left: 50%;
-  z-index: 3;
-  width: 30px;
-  height: 30px;
-  transform: translateX(-50%);
+.outline :global(.katex-display) {
+  margin: 0;
+  overflow: hidden;
+  text-align: left;
 }

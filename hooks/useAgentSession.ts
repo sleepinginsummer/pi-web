@@ -83,6 +83,9 @@ import {
 import { getToolExecutionProgress } from "@/lib/tool-execution-progress";
 import type { SessionListRefreshRequest } from "@/lib/session-list-refresh-coordinator";
 const SESSION_CONTEXT_PAGE_SIZE = 50;
+/** 大纲跳转的按需翻页：页更大、页数更宽，才能从当前页一路走到会话第一轮。 */
+const JUMP_PAGE_SIZE = 200;
+const MAX_JUMP_PAGES = 200;
 
 interface PendingBash {
   command: string;
@@ -1142,6 +1145,101 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
     }
   }, [historyPage]);
+
+  /**
+   * 按需连续向前翻页，直到包含指定 entryId 或到达分支起点；
+   * 供大纲双击/点击「跳到对话」按需加载未加载的历史轮次，且一次提交减少中间重排。
+   *
+   * 页面按 JUMP_PAGE_SIZE 取，而不是首屏的 50：跳到大纲第一轮要跨过整段历史，
+   * 固定的小页会把长会话切成上百次往返。页数上限只是防止服务端 hasMore 永不为假，
+   * 正常分支在到达起点时自然结束；找不到目标时由调用方给出提示，不静默停在原地。
+   */
+  const loadUntilEntryId = useCallback(async (targetEntryId: string): Promise<boolean> => {
+    const sid = sessionIdRef.current;
+    if (!sid) return false;
+    if (entryIdsRef.current.includes(targetEntryId)) return true;
+
+    const initialPage = viewSnapshotRef.current.page;
+    if (initialPage.sid !== sid || !initialPage.hasMore || !initialPage.oldestEntryId) return false;
+
+    const generation = backfillRequestRef.current.generation + 1;
+    backfillRequestRef.current.controller?.abort();
+    const controller = new AbortController();
+    backfillRequestRef.current = { sid, generation, controller };
+    setHistoryPage((current) => current.sid === sid ? { ...current, loading: true } : current);
+
+    try {
+      let before: string | null = initialPage.oldestEntryId;
+      let hasMore: boolean = initialPage.hasMore;
+      let turnsBefore = initialPage.turnsBefore;
+      const prependedMessages: AgentMessage[] = [];
+      const prependedEntryIds: string[] = [];
+      const seenIds = new Set(entryIdsRef.current);
+      let found = false;
+
+      for (let step = 0; step < MAX_JUMP_PAGES && hasMore && before; step += 1) {
+        const result = await fetchSessionContext(sid, controller.signal, {
+          before,
+          tail: JUMP_PAGE_SIZE,
+          skipCache: true,
+        });
+        const currentRequest = backfillRequestRef.current;
+        if (
+          result.kind !== "loaded"
+          || currentRequest.sid !== sid
+          || currentRequest.generation !== generation
+          || sessionIdRef.current !== sid
+        ) return false;
+
+        if (result.snapshot.entryIds.some((id) => seenIds.has(id))) {
+          throw new Error("历史分页返回了重复 entryId，已拒绝前插");
+        }
+        for (const id of result.snapshot.entryIds) seenIds.add(id);
+        prependedMessages.unshift(...result.snapshot.messages);
+        prependedEntryIds.unshift(...result.snapshot.entryIds);
+        before = result.snapshot.oldestEntryId;
+        hasMore = result.snapshot.hasMore;
+        turnsBefore = result.snapshot.turnsBefore;
+        if (result.snapshot.entryIds.includes(targetEntryId)) {
+          found = true;
+          break;
+        }
+      }
+
+      if (prependedEntryIds.length > 0) {
+        setMessages((current) => {
+          const next = [...prependedMessages, ...current];
+          messagesRef.current = next;
+          return next;
+        });
+        setEntryIds((current) => {
+          const next = [...prependedEntryIds, ...current];
+          entryIdsRef.current = next;
+          return next;
+        });
+        setHistoryPage({
+          sid,
+          oldestEntryId: before,
+          hasMore,
+          turnsBefore,
+          loading: false,
+        });
+      }
+      return found || entryIdsRef.current.includes(targetEntryId);
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === "AbortError")) {
+        console.error("Failed to load session messages until target entry:", error);
+      }
+      return false;
+    } finally {
+      if (backfillRequestRef.current.generation === generation) {
+        backfillRequestRef.current.controller = null;
+        setHistoryPage((current) => current.sid === sid && current.loading
+          ? { ...current, loading: false }
+          : current);
+      }
+    }
+  }, []);
   const loadSessionDetails = useCallback((sid: string): void => {
     detailsRequestRef.current.controller?.abort();
     const controller = new AbortController();
@@ -3815,7 +3913,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // Refs
     sessionIdRef, eventSourceRef,
     // Actions
-    handleSend, handleAbort, startSideChat, handleFork, handleNavigate, loadEarlierMessages,
+    handleSend, handleAbort, startSideChat, handleFork, handleNavigate, loadEarlierMessages, loadUntilEntryId,
     handleCompact, handleQueuedSubmit, handleAbortCompaction, dismissCompactError,
     handleRecallQueue,
     handleBuiltinSlashCommand,
@@ -3839,7 +3937,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     agentPhase, completion,
     activeToolResults, toolClocks, editEntryId, handleEditContent, cancelEdit, addNotice, shadowReportStatuses,
     sessionIdRef, eventSourceRef,
-    handleSend, handleAbort, handleFork, handleNavigate, loadEarlierMessages,
+    handleSend, handleAbort, handleFork, handleNavigate, loadEarlierMessages, loadUntilEntryId,
     handleCompact, handleQueuedSubmit, handleAbortCompaction, dismissCompactError,
     handleRecallQueue,
     handleBuiltinSlashCommand,

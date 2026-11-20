@@ -8,13 +8,17 @@ import {
   normalizeDisplayMath,
 } from "@/lib/markdown";
 import { hasTurnRef, isHiddenCustomMessage, splitFinalAssistantBlocks } from "@/lib/message-display";
+import { hasOutlineHeadings } from "@/lib/outline-headings";
 import { loadMinimapPreviewLocked, saveMinimapPreviewLocked } from "@/lib/minimap-preview-lock";
+import type { SessionOutlineResponse, SessionOutlineTurn } from "@/lib/session-outline-types";
 import type { AgentMessage, AssistantMessage, CustomMessage, TextContent, UserMessage } from "@/lib/types";
 import { useI18n } from "@/hooks/useI18n";
 import styles from "./ChatMinimap.module.css";
 import { LockToggle } from "./LockToggle";
 
 interface Props {
+  sessionId?: string | null;
+  leafId?: string | null;
   messages: AgentMessage[];
   entryIds: string[];
   /** 在节流测量时读取正文，不随每个 chunk 更新 props。 */
@@ -23,21 +27,19 @@ interface Props {
   scrollContainer: RefObject<HTMLDivElement | null>;
   messageRefs: RefObject<(HTMLDivElement | null)[]>;
   onNavigate?: () => void;
-  onRevealHistory: () => void;
+  /** entryId 给出时，把该轮次所在的消息组挂进渲染窗口（长会话只挂载最近一段）。 */
+  onRevealHistory: (entryId?: string) => void;
+  /** 按需向前翻页直到加载出指定 entryId（仅在用户双击或点击「跳到对话」时调用）。 */
+  onLoadUntilEntry?: (entryId: string) => Promise<boolean>;
   /** Turns of the branch the server has not sent yet: numbers continue from it (#791). */
   turnsBefore: number;
   /** ChatWindow's getTurnAnchors() over `messages`: the minimap groups and reads refs as it renders. */
   turnAnchors: readonly boolean[];
 }
 
-const MINIMAP_WIDTH = 36;
-const MAX_NODE_GAP = 50;
-const MINIMAP_PADDING = 12;
-// The lock button sits at the bottom of the rail (6px inset + 30px): nodes stop
-// above it so the last turn stays visible and clickable.
-const MINIMAP_BOTTOM_PADDING = 36 + MINIMAP_PADDING;
-const PREVIEW_HIDE_DELAY = 250;
+const PREVIEW_HIDE_DELAY = 260;
 const NAVIGATION_ACTIVE_LOCK_MS = 1600;
+const MAX_PILL_TICKS = 28;
 
 interface AssistantPreview {
   markdown: string;
@@ -46,15 +48,16 @@ interface AssistantPreview {
 }
 
 interface TurnInfo {
+  entryId?: string;
   userMessage: UserMessage | CustomMessage;
-  assistantPreviews: AssistantPreview[];
+  /** 1-A：仅保留本轮最终回答，过滤中途过程回复。 */
+  finalAssistant: AssistantPreview | null;
   scrollTop: number | null;
   /** Tool calls issued anywhere in this turn's assistant replies. */
   toolCount: number;
 }
 
 interface NodeInfo {
-  topRatio: number;
   targetTurn: TurnInfo;
   index: number;
   /** 会话中的轮次编号（从 1 开始），与 index 在同一次测量中确定，避免起点与下标来自不同时刻。 */
@@ -94,7 +97,7 @@ function getAssistantAnswerMarkdown(message: AgentMessage | Partial<AgentMessage
 function findRenderedHeadingRoot(scrollEl: HTMLElement, preview: AssistantPreview | null | undefined): HTMLElement | null {
   if (!preview?.entryId) return preview?.element ?? null;
   const roots = scrollEl.querySelectorAll<HTMLElement>(`[data-entry-id="${CSS.escape(preview.entryId)}"]`);
-  return Array.from(roots).find((root) => root.querySelector("h1, h2, h3")) ?? preview.element;
+  return Array.from(roots).find((root) => root.querySelector("h1, h2")) ?? preview.element;
 }
 
 function PreviewHeading({
@@ -103,7 +106,7 @@ function PreviewHeading({
   headingIndex,
   onClick,
 }: {
-  level: 1 | 2 | 3;
+  level: 1 | 2;
   children: React.ReactNode;
   headingIndex: number | null;
   onClick?: (headingIndex: number) => void;
@@ -133,27 +136,23 @@ interface PreviewAstNode {
   };
 }
 
+/** 1-A 大纲仅提取一级/二级标题，避免 h3 和正文段落挤满大纲。 */
 function remarkPreviewOutline() {
   return (tree: { children?: PreviewAstNode[] }) => {
     if (!Array.isArray(tree.children)) return;
     const headings = tree.children.filter((node) => (
-      node.type === "heading" && typeof node.depth === "number" && node.depth <= 3
+      node.type === "heading" && typeof node.depth === "number" && node.depth <= 2
     ));
-    if (headings.length > 0) {
-      headings.forEach((node, headingIndex) => {
-        node.data = {
-          ...node.data,
-          hProperties: {
-            ...node.data?.hProperties,
-            "data-preview-heading-index": headingIndex,
-          },
-        };
-      });
-      tree.children = headings;
-      return;
-    }
-    const firstParagraph = tree.children.find((node) => node.type === "paragraph");
-    tree.children = firstParagraph ? [firstParagraph] : [];
+    headings.forEach((node, headingIndex) => {
+      node.data = {
+        ...node.data,
+        hProperties: {
+          ...node.data?.hProperties,
+          "data-preview-heading-index": headingIndex,
+        },
+      };
+    });
+    tree.children = headings;
   };
 }
 
@@ -176,44 +175,34 @@ function getPreviewHeadingIndex(node: unknown): number | null {
 export const AssistantOutline = memo(function AssistantOutline({
   markdown,
   onHeadingClick,
-  onAnswerClick,
 }: {
   markdown: string;
   onHeadingClick?: (headingIndex: number) => void;
   onAnswerClick?: () => void;
 }) {
   const normalizedMarkdown = useMemo(() => normalizeDisplayMath(markdown), [markdown]);
-  if (!markdown) return null;
+  const components = useMemo<ReactMarkdownOptions["components"]>(() => ({
+    h1: ({ node, children }) => (
+      <PreviewHeading level={1} headingIndex={getPreviewHeadingIndex(node)} onClick={onHeadingClick}>
+        {children}
+      </PreviewHeading>
+    ),
+    h2: ({ node, children }) => (
+      <PreviewHeading level={2} headingIndex={getPreviewHeadingIndex(node)} onClick={onHeadingClick}>
+        {children}
+      </PreviewHeading>
+    ),
+    a: ({ children }) => <span>{children}</span>,
+  }), [onHeadingClick]);
+
+  if (!normalizedMarkdown) return null;
+
   return (
     <div className={styles.outline}>
       <ReactMarkdown
         remarkPlugins={previewRemarkPlugins}
         rehypePlugins={previewRehypePlugins}
-        components={{
-          h1: ({ children, node }) => <PreviewHeading level={1} headingIndex={getPreviewHeadingIndex(node)} onClick={onHeadingClick}>{children}</PreviewHeading>,
-          h2: ({ children, node }) => <PreviewHeading level={2} headingIndex={getPreviewHeadingIndex(node)} onClick={onHeadingClick}>{children}</PreviewHeading>,
-          h3: ({ children, node }) => <PreviewHeading level={3} headingIndex={getPreviewHeadingIndex(node)} onClick={onHeadingClick}>{children}</PreviewHeading>,
-          h4: () => null,
-          h5: () => null,
-          h6: () => null,
-          p: ({ children }) => (
-            <button
-              type="button"
-              className={styles.paragraph}
-              onClick={onAnswerClick}
-            >
-              {children}
-            </button>
-          ),
-          blockquote: () => null,
-          ul: () => null,
-          ol: () => null,
-          pre: () => null,
-          table: () => null,
-          hr: () => null,
-          a: ({ children }) => <>{children}</>,
-          code: ({ children }) => <>{children}</>,
-        }}
+        components={components}
       >
         {normalizedMarkdown}
       </ReactMarkdown>
@@ -223,47 +212,67 @@ export const AssistantOutline = memo(function AssistantOutline({
 
 function createTurnNodes(turns: TurnInfo[], turnsBefore: number): NodeInfo[] {
   return turns.map((turn, index) => ({
-    topRatio: 0,
     targetTurn: turn,
     index,
     turnNumber: turnsBefore + index + 1,
   }));
 }
 
-interface NodeLayout {
-  nodes: NodeInfo[];
-  gap: number;
-  fillsHeight: boolean;
+function formatTurnNumber(turnNumber: number): string {
+  return turnNumber < 10 ? `0${turnNumber}` : String(turnNumber);
 }
 
-function layoutNodes(allNodes: NodeInfo[], minimapHeight: number): NodeLayout {
-  if (allNodes.length === 0) {
-    return { nodes: [], gap: MAX_NODE_GAP, fillsHeight: false };
+/** 将超长会话压缩到最多 MAX_PILL_TICKS 个刻度，始终保留首轮和当前轮。 */
+function sampleRailTicks(
+  unloadedCount: number,
+  loadedNodes: readonly NodeInfo[],
+  activeIndex: number | null,
+): Array<{ key: string; loaded: boolean; active: boolean; nodeIndex?: number }> {
+  const ticks: Array<{ key: string; loaded: boolean; active: boolean; nodeIndex?: number }> = [];
+  if (loadedNodes.length === 0) return ticks;
+
+  const unloadedSlotBudget = unloadedCount > 0 ? Math.min(8, unloadedCount, Math.floor(MAX_PILL_TICKS / 3)) : 0;
+  for (let i = 0; i < unloadedSlotBudget; i += 1) {
+    ticks.push({ key: `u-${i}`, loaded: false, active: false });
   }
 
-  const height = Math.max(1, minimapHeight);
-  const usableHeight = Math.max(0, height - MINIMAP_PADDING - MINIMAP_BOTTOM_PADDING);
-  if (allNodes.length === 1) {
-    return {
-      nodes: [{ ...allNodes[0], topRatio: MINIMAP_PADDING / height }],
-      gap: MAX_NODE_GAP,
-      fillsHeight: false,
-    };
+  const loadedBudget = Math.max(2, MAX_PILL_TICKS - unloadedSlotBudget);
+  if (loadedNodes.length <= loadedBudget) {
+    for (const node of loadedNodes) {
+      ticks.push({
+        key: `l-${node.index}`,
+        loaded: true,
+        active: activeIndex === node.index,
+        nodeIndex: node.index,
+      });
+    }
+    return ticks;
   }
 
-  const naturalGap = usableHeight / (allNodes.length - 1);
-  const gap = Math.min(MAX_NODE_GAP, naturalGap);
-  return {
-    nodes: allNodes.map((node, index) => ({
-      ...node,
-      topRatio: (MINIMAP_PADDING + index * gap) / height,
-    })),
-    gap,
-    fillsHeight: naturalGap <= MAX_NODE_GAP,
-  };
+  const picked = new Set<number>([0, loadedNodes.length - 1]);
+  if (activeIndex !== null && activeIndex >= 0 && activeIndex < loadedNodes.length) {
+    picked.add(activeIndex);
+  }
+  const step = (loadedNodes.length - 1) / (loadedBudget - 1);
+  for (let slot = 0; slot < loadedBudget && picked.size < loadedBudget; slot += 1) {
+    picked.add(Math.round(slot * step));
+  }
+  const sorted = [...picked].sort((a, b) => a - b);
+  for (const idx of sorted) {
+    const node = loadedNodes[idx];
+    ticks.push({
+      key: `l-${node.index}`,
+      loaded: true,
+      active: activeIndex === node.index,
+      nodeIndex: node.index,
+    });
+  }
+  return ticks;
 }
 
 export const ChatMinimap = memo(function ChatMinimap({
+  sessionId,
+  leafId,
   messages,
   entryIds,
   getStreamingMessage,
@@ -272,51 +281,100 @@ export const ChatMinimap = memo(function ChatMinimap({
   messageRefs,
   onNavigate,
   onRevealHistory,
+  onLoadUntilEntry,
   turnsBefore,
   turnAnchors,
 }: Props) {
   const { t } = useI18n();
-  const [visible, setVisible] = useState(false);
-  const [allNodes, setAllNodes] = useState<NodeInfo[]>([]);
-  const [activeIndex, setActiveIndex] = useState<number | null>(null);
-  const [minimapHeight, setMinimapHeight] = useState(600);
-  const [minimapHovered, setMinimapHovered] = useState(false);
-  const [locked, setLocked] = useState(loadMinimapPreviewLocked);
-  const [mouseYRatio, setMouseYRatio] = useState<number | null>(null);
-  const draggingRef = useRef(false);
   const containerRef = useRef<HTMLDivElement>(null);
-  const allNodesRef = useRef<NodeInfo[]>([]);
-  const nodeLayoutRef = useRef<NodeLayout>({
-    nodes: [],
-    gap: MAX_NODE_GAP,
-    fillsHeight: false,
-  });
   const previewBoxRef = useRef<HTMLDivElement>(null);
-  const previewItemRefs = useRef(new Map<number, HTMLDivElement>());
+  const previewListRef = useRef<HTMLDivElement>(null);
+  const previewItemRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const previewHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeNodeLockRef = useRef<{ index: number; until: number } | null>(null);
   const headingAnchorRef = useRef<{ heading: HTMLElement; until: number } | null>(null);
+  const searchFocusedRef = useRef(false);
   const pendingNavigationRef = useRef<{
-    nodeIndex: number;
-    target: "user" | "assistant" | "heading";
-    assistantIndex?: number;
+    nodeIndex?: number;
+    entryId?: string;
+    target: "user" | "heading";
     headingIndex?: number;
   } | null>(null);
 
-  const messagesRef = useRef(messages);
-  messagesRef.current = messages;
-  const turnAnchorsRef = useRef(turnAnchors);
-  turnAnchorsRef.current = turnAnchors;
-  // 测量在节流定时器里读取，轮次偏移与已提交消息保持一致。
-  const turnsBeforeRef = useRef(turnsBefore);
-  turnsBeforeRef.current = turnsBefore;
+  const [visible, setVisible] = useState(false);
+  const [minimapHovered, setMinimapHovered] = useState(false);
+  const [locked, setLocked] = useState(() => loadMinimapPreviewLocked());
+  const [activeIndex, setActiveIndex] = useState<number | null>(null);
+  const [allNodes, setAllNodes] = useState<NodeInfo[]>([]);
+  const [searchQuery, setSearchQuery] = useState("");
+  /** 手动展开或收起记录：正数表示展开对应轮次，负数表示手动折叠当前激活轮。 */
+  const [toggledTurns, setToggledTurns] = useState<Set<number>>(() => new Set());
+  const [remoteOutline, setRemoteOutline] = useState<{ key: string; turns: SessionOutlineTurn[] } | null>(null);
+  const [outlineLoading, setOutlineLoading] = useState(false);
+  const [loadingEntryId, setLoadingEntryId] = useState<string | null>(null);
+  /** 按需加载没能把目标轮次带进来时的提示，避免点了大纲却停在原地。 */
+  const [revealFailed, setRevealFailed] = useState(false);
 
-  const nodeLayout = useMemo(
-    () => layoutNodes(allNodes, minimapHeight),
-    [allNodes, minimapHeight],
-  );
-  const { nodes: positionedNodes, gap: nodeGap } = nodeLayout;
-  nodeLayoutRef.current = nodeLayout;
+  const allNodesRef = useRef<NodeInfo[]>([]);
+  const messagesRef = useRef(messages);
+  const entryIdsRef = useRef(entryIds);
+  const turnsBeforeRef = useRef(turnsBefore);
+  const turnAnchorsRef = useRef(turnAnchors);
+  messagesRef.current = messages;
+  entryIdsRef.current = entryIds;
+  turnsBeforeRef.current = turnsBefore;
+  turnAnchorsRef.current = turnAnchors;
+
+
+  // 正在按需加载的轮次：异步回调里判断这次加载是否还有效（会话切走后不再提示）。
+  const jumpTargetRef = useRef<string | null>(null);
+
+  const outlineRequestKey = sessionId ? `${sessionId}:${leafId ?? ""}:${turnsBefore}` : "";
+
+  // 切换会话或分支时清空大纲本地筛选与展开状态。
+  useEffect(() => {
+    setSearchQuery("");
+    setToggledTurns(new Set());
+    setLoadingEntryId(null);
+    setRevealFailed(false);
+    jumpTargetRef.current = null;
+    setRemoteOutline(null);
+  }, [sessionId, leafId]);
+
+  // 打开大纲且存在未加载历史时，按需向服务端拉取全分支轻量目录（不触发主对话翻页）。
+  useEffect(() => {
+    if (!minimapHovered || !sessionId || turnsBefore <= 0) return;
+    if (remoteOutline?.key === outlineRequestKey) return;
+    const controller = new AbortController();
+    setOutlineLoading(true);
+    const params = leafId ? `?leafId=${encodeURIComponent(leafId)}` : "";
+    void fetch(`/api/sessions/${encodeURIComponent(sessionId)}/outline${params}`, {
+      signal: controller.signal,
+      cache: "no-store",
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const payload = await response.json() as SessionOutlineResponse;
+        if (!controller.signal.aborted) {
+          setRemoteOutline({ key: outlineRequestKey, turns: Array.isArray(payload.turns) ? payload.turns : [] });
+        }
+      })
+      .catch((error) => {
+        if (!controller.signal.aborted) {
+          console.error("[pi-web] 无法加载会话全量大纲", error);
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setOutlineLoading(false);
+      });
+    return () => controller.abort();
+  }, [leafId, minimapHovered, outlineRequestKey, remoteOutline?.key, sessionId, turnsBefore]);
+
+  const unloadedOutlineTurns = useMemo(() => {
+    if (turnsBefore <= 0 || !remoteOutline || remoteOutline.key !== outlineRequestKey) return [];
+    const loadedIdSet = new Set(entryIds);
+    return remoteOutline.turns.filter((turn) => turn.turnNumber <= turnsBefore && !loadedIdSet.has(turn.entryId));
+  }, [entryIds, outlineRequestKey, remoteOutline, turnsBefore]);
 
   const lockActiveNode = useCallback((index: number) => {
     activeNodeLockRef.current = {
@@ -354,9 +412,8 @@ export const ChatMinimap = memo(function ChatMinimap({
     const scrollEl = scrollContainer.current;
     if (!scrollEl) return;
     const scrollable = scrollEl.scrollHeight - scrollEl.clientHeight;
-    const currentNodes = allNodesRef.current;
-    setVisible(scrollable > 20);
-    syncActiveNode(scrollEl, currentNodes);
+    setVisible(scrollable > 20 || turnsBeforeRef.current > 0 || allNodesRef.current.length > 0);
+    syncActiveNode(scrollEl, allNodesRef.current);
   }, [scrollContainer, syncActiveNode]);
 
   const measureThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -365,8 +422,7 @@ export const ChatMinimap = memo(function ChatMinimap({
     measureThrottleRef.current = setTimeout(() => {
       measureThrottleRef.current = null;
       const scrollEl = scrollContainer.current;
-      const minimapEl = containerRef.current;
-      if (!scrollEl || !minimapEl) return;
+      if (!scrollEl) return;
 
       const refs = messageRefs.current;
       const containerRect = scrollEl.getBoundingClientRect();
@@ -385,15 +441,15 @@ export const ChatMinimap = memo(function ChatMinimap({
         let element: HTMLDivElement | null = null;
         if (hasTurnRef(message, isAnchor)) {
           element = refs?.[refIndex] ?? null;
-          refIndex++;
+          refIndex += 1;
         }
 
         if (isAnchor) {
-          currentTurn = null;
           const elementRect = element?.getBoundingClientRect();
           currentTurn = {
+            entryId: entryIdsRef.current[messageIndex],
             userMessage: message as UserMessage | CustomMessage,
-            assistantPreviews: [],
+            finalAssistant: null,
             scrollTop: elementRect
               ? elementRect.top - containerRect.top + scrollEl.scrollTop
               : null,
@@ -411,152 +467,98 @@ export const ChatMinimap = memo(function ChatMinimap({
         currentTurn.toolCount += countToolCalls(message);
         const answerMarkdown = getAssistantAnswerMarkdown(message);
         if (answerMarkdown) {
-          currentTurn.assistantPreviews.push({
+          // 1-A：每轮只保留最后一条最终回答，过滤中途过程回复。
+          currentTurn.finalAssistant = {
             markdown: answerMarkdown,
-            entryId: entryIds[messageIndex],
+            entryId: entryIdsRef.current[messageIndex],
             element,
-          });
+          };
         }
       }
 
       const nextNodes = createTurnNodes(turns, turnsBeforeRef.current);
-      setMinimapHeight(minimapEl.clientHeight);
       allNodesRef.current = nextNodes;
       setAllNodes(nextNodes);
-      setVisible(scrollEl.scrollHeight - scrollEl.clientHeight > 20);
+      setVisible(scrollEl.scrollHeight - scrollEl.clientHeight > 20 || turnsBeforeRef.current > 0 || nextNodes.length > 0);
       syncActiveNode(scrollEl, nextNodes);
 
       const pendingNavigation = pendingNavigationRef.current;
-      const pendingNode = pendingNavigation
-        ? nextNodes[pendingNavigation.nodeIndex]
-        : null;
-      if (pendingNavigation && pendingNode) {
-        const assistant = pendingNavigation.assistantIndex === undefined
-          ? null
-          : pendingNode.targetTurn.assistantPreviews[pendingNavigation.assistantIndex];
-        let targetTop: number | null = pendingNode.targetTurn.scrollTop;
-        if (pendingNavigation.target === "assistant") {
-          const assistantRect = assistant?.element?.getBoundingClientRect();
-          targetTop = assistantRect
-            ? assistantRect.top - containerRect.top + scrollEl.scrollTop
-            : null;
-        } else if (pendingNavigation.target === "heading") {
-          const heading = (
-            pendingNavigation.headingIndex === undefined
-              ? null
-              : findRenderedHeadingRoot(scrollEl, assistant)
-                ?.querySelectorAll<HTMLElement>("h1, h2, h3")
-                .item(pendingNavigation.headingIndex)
-          );
-          const headingRect = heading?.getBoundingClientRect();
-          targetTop = headingRect
-            ? headingRect.top - containerRect.top + scrollEl.scrollTop
-            : null;
+      if (pendingNavigation) {
+        const pendingNode = pendingNavigation.entryId
+          ? nextNodes.find((node) => node.targetTurn.entryId === pendingNavigation.entryId)
+          : (pendingNavigation.nodeIndex !== undefined ? nextNodes[pendingNavigation.nodeIndex] : null);
+        if (pendingNode) {
+          let targetTop: number | null = pendingNode.targetTurn.scrollTop;
+          if (pendingNavigation.target === "heading") {
+            const heading = (
+              pendingNavigation.headingIndex === undefined
+                ? null
+                : findRenderedHeadingRoot(scrollEl, pendingNode.targetTurn.finalAssistant)
+                  ?.querySelectorAll<HTMLElement>("h1, h2")
+                  .item(pendingNavigation.headingIndex)
+            );
+            const headingRect = heading?.getBoundingClientRect();
+            targetTop = headingRect
+              ? headingRect.top - containerRect.top + scrollEl.scrollTop
+              : null;
+          }
+          if (targetTop !== null) {
+            pendingNavigationRef.current = null;
+            lockActiveNode(pendingNode.index);
+            const targetOffset = scrollEl.clientHeight * 0.3;
+            scrollEl.scrollTo({
+              top: Math.max(0, targetTop - targetOffset),
+              behavior: "smooth",
+            });
+          }
         }
-        if (targetTop === null) return;
-        pendingNavigationRef.current = null;
-        lockActiveNode(pendingNode.index);
-        const targetOffset = scrollEl.clientHeight * 0.3;
-        scrollEl.scrollTo({ top: Math.max(0, targetTop - targetOffset), behavior: "smooth" });
       }
-    }, 150);
-  }, [entryIds, getStreamingMessage, lockActiveNode, messageRefs, scrollContainer, syncActiveNode]);
+    }, 100);
+  }, [getStreamingMessage, lockActiveNode, messageRefs, scrollContainer, syncActiveNode]);
 
   useEffect(() => {
-    const el = scrollContainer.current;
-    if (!el) return;
-    el.addEventListener("scroll", updateScroll, { passive: true });
-    return () => el.removeEventListener("scroll", updateScroll);
-  }, [scrollContainer, updateScroll]);
-
-  useEffect(() => {
-    const el = scrollContainer.current;
-    if (!el) return;
-    const syncLayout = () => {
-      // 流式内容会高频改变高度；处理期间沿用已有节点位置，结束后再完整测量。
-      if (!isStreaming) measureNodes();
-      updateScroll();
-    };
-    const ro = new ResizeObserver(syncLayout);
-    ro.observe(el);
-    if (el.firstElementChild) ro.observe(el.firstElementChild);
-    syncLayout();
+    measureNodes();
     return () => {
-      ro.disconnect();
       if (measureThrottleRef.current) {
         clearTimeout(measureThrottleRef.current);
         measureThrottleRef.current = null;
       }
     };
-  }, [isStreaming, measureNodes, scrollContainer, updateScroll]);
+  }, [messages, entryIds, isStreaming, turnsBefore, turnAnchors, measureNodes]);
 
   useEffect(() => {
-    const timeout = setTimeout(() => {
-      measureNodes();
-      updateScroll();
-    }, 50);
-    return () => clearTimeout(timeout);
-  }, [messages.length, turnAnchors, measureNodes, updateScroll]);
-
-  const scrollToNode = useCallback((node: NodeInfo, behavior: ScrollBehavior) => {
     const scrollEl = scrollContainer.current;
     if (!scrollEl) return;
-    lockActiveNode(node.index);
+    const onScroll = () => updateScroll();
+    scrollEl.addEventListener("scroll", onScroll, { passive: true });
+    const ro = new ResizeObserver(() => {
+      updateScroll();
+      if (!isStreaming) measureNodes();
+    });
+    ro.observe(scrollEl);
+    if (scrollEl.firstElementChild) ro.observe(scrollEl.firstElementChild);
+    updateScroll();
+    return () => {
+      scrollEl.removeEventListener("scroll", onScroll);
+      ro.disconnect();
+    };
+  }, [isStreaming, scrollContainer, updateScroll, measureNodes]);
+
+  const scrollToNode = useCallback((node: NodeInfo, behavior: ScrollBehavior = "smooth") => {
+    const scrollEl = scrollContainer.current;
+    if (!scrollEl) return;
     if (node.targetTurn.scrollTop === null) {
       pendingNavigationRef.current = { nodeIndex: node.index, target: "user" };
-      onRevealHistory();
+      onRevealHistory(node.targetTurn.entryId);
       return;
     }
-    const targetTop = Math.max(
-      0,
-      node.targetTurn.scrollTop - scrollEl.clientHeight * 0.3,
-    );
-    scrollEl.scrollTo({ top: targetTop, behavior });
-  }, [lockActiveNode, onRevealHistory, scrollContainer]);
-
-  const scrollToAssistant = useCallback((node: NodeInfo, assistantIndex: number) => {
-    const scrollEl = scrollContainer.current;
-    if (!scrollEl) return;
-    const assistantElement = node.targetTurn.assistantPreviews[assistantIndex]?.element;
-    if (!assistantElement) {
-      pendingNavigationRef.current = {
-        nodeIndex: node.index,
-        target: "assistant",
-        assistantIndex,
-      };
-      onRevealHistory();
-      return;
-    }
-    const containerRect = scrollEl.getBoundingClientRect();
-    const assistantRect = assistantElement.getBoundingClientRect();
-    const targetTop = (
-      assistantRect.top
-      - containerRect.top
-      + scrollEl.scrollTop
-      - scrollEl.clientHeight * 0.3
-    );
+    const targetOffset = scrollEl.clientHeight * 0.3;
     lockActiveNode(node.index);
-    scrollEl.scrollTo({ top: Math.max(0, targetTop), behavior: "smooth" });
+    scrollEl.scrollTo({
+      top: Math.max(0, node.targetTurn.scrollTop - targetOffset),
+      behavior,
+    });
   }, [lockActiveNode, onRevealHistory, scrollContainer]);
-
-  const findNearestNode = useCallback((ratio: number): NodeInfo | null => {
-    const { nodes, gap, fillsHeight } = nodeLayoutRef.current;
-    const height = containerRef.current?.clientHeight ?? 0;
-    if (nodes.length === 0 || height <= 0) return null;
-
-    const pointerY = Math.max(0, Math.min(height, ratio * height));
-    const firstNodeY = nodes[0].topRatio * height;
-    const rawIndex = gap > 0 ? Math.round((pointerY - firstNodeY) / gap) : 0;
-    const nodeIndex = Math.max(0, Math.min(nodes.length - 1, rawIndex));
-    const nearestNode = nodes[nodeIndex];
-
-    if (!fillsHeight) {
-      const nodeY = nearestNode.topRatio * height;
-      const hitRadius = Math.max(10, gap / 2);
-      if (Math.abs(pointerY - nodeY) > hitRadius) return null;
-    }
-    return nearestNode;
-  }, []);
 
   useEffect(() => {
     const scrollEl = scrollContainer.current;
@@ -597,40 +599,56 @@ export const ChatMinimap = memo(function ChatMinimap({
     };
   }, [scrollContainer]);
 
-  const scrollToHeading = useCallback((
-    node: NodeInfo,
-    assistantIndex: number,
-    headingIndex: number,
-  ) => {
+  const scrollToHeading = useCallback((node: NodeInfo, headingIndex: number) => {
     const scrollEl = scrollContainer.current;
     if (!scrollEl) return;
-    const preview = node.targetTurn.assistantPreviews[assistantIndex];
-    const answerElement = findRenderedHeadingRoot(scrollEl, preview);
+    const answerElement = findRenderedHeadingRoot(scrollEl, node.targetTurn.finalAssistant);
     if (!answerElement) {
       pendingNavigationRef.current = {
         nodeIndex: node.index,
         target: "heading",
-        assistantIndex,
         headingIndex,
       };
-      onRevealHistory();
+      onRevealHistory(node.targetTurn.entryId);
       return;
     }
-    const heading = answerElement.querySelectorAll<HTMLElement>("h1, h2, h3").item(headingIndex);
+    const heading = answerElement.querySelectorAll<HTMLElement>("h1, h2").item(headingIndex);
     if (!heading) return;
     const containerRect = scrollEl.getBoundingClientRect();
     const headingRect = heading.getBoundingClientRect();
-    const targetTop = (
-      headingRect.top
-      - containerRect.top
-      + scrollEl.scrollTop
-      - scrollEl.clientHeight * 0.3
-    );
+    const targetTop = headingRect.top - containerRect.top + scrollEl.scrollTop - scrollEl.clientHeight * 0.3;
     lockActiveNode(node.index);
     // 首次跳转后内容仍可能补页或重新排版；短暂锚定标题，防止异步布局把阅读位置拉偏。
     headingAnchorRef.current = { heading, until: Date.now() + 2000 };
     scrollEl.scrollTo({ top: Math.max(0, targetTop), behavior: "smooth" });
   }, [lockActiveNode, onRevealHistory, scrollContainer]);
+
+  const jumpToUnloadedTurn = useCallback(async (turn: SessionOutlineTurn) => {
+    if (loadingEntryId) return;
+    onNavigate?.();
+    if (!onLoadUntilEntry) {
+      scrollContainer.current?.scrollTo({ top: 0, behavior: "smooth" });
+      return;
+    }
+    setLoadingEntryId(turn.entryId);
+    setRevealFailed(false);
+    jumpTargetRef.current = turn.entryId;
+    pendingNavigationRef.current = { entryId: turn.entryId, target: "user" };
+    try {
+      const loaded = await onLoadUntilEntry(turn.entryId);
+      if (loaded) {
+        onRevealHistory(turn.entryId);
+        measureNodes();
+      } else {
+        pendingNavigationRef.current = null;
+        // 真的没找到才提示；会话切走时 jumpTargetRef 已清空，不弹无意义的错误。
+        if (jumpTargetRef.current === turn.entryId) setRevealFailed(true);
+      }
+    } finally {
+      if (jumpTargetRef.current === turn.entryId) jumpTargetRef.current = null;
+      setLoadingEntryId(null);
+    }
+  }, [loadingEntryId, measureNodes, onLoadUntilEntry, onNavigate, onRevealHistory, scrollContainer]);
 
   const cancelPreviewHide = useCallback(() => {
     if (!previewHideTimerRef.current) return;
@@ -640,6 +658,7 @@ export const ChatMinimap = memo(function ChatMinimap({
 
   const showPreview = useCallback(() => {
     if (locked) return;
+    setRevealFailed(false);
     cancelPreviewHide();
     setMinimapHovered(true);
   }, [cancelPreviewHide, locked]);
@@ -651,271 +670,296 @@ export const ChatMinimap = memo(function ChatMinimap({
     if (next) {
       cancelPreviewHide();
       setMinimapHovered(false);
-      setMouseYRatio(null);
     }
   }, [cancelPreviewHide, locked]);
 
   const schedulePreviewHide = useCallback(() => {
+    if (searchFocusedRef.current) return;
     cancelPreviewHide();
     previewHideTimerRef.current = setTimeout(() => {
       previewHideTimerRef.current = null;
-      setMinimapHovered(false);
-      setMouseYRatio(null);
+      if (!searchFocusedRef.current) setMinimapHovered(false);
     }, PREVIEW_HIDE_DELAY);
   }, [cancelPreviewHide]);
 
   useEffect(() => () => cancelPreviewHide(), [cancelPreviewHide]);
 
-  const handleMouseDown = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
-    if (!visible) return;
-
-    draggingRef.current = true;
-    showPreview();
-    const rect = event.currentTarget.getBoundingClientRect();
-    const pointerRatio = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
-    setMouseYRatio(pointerRatio);
-    const jumpToPointer = (clientY: number, behavior: ScrollBehavior) => {
-      const ratio = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
-      const node = findNearestNode(ratio);
-      if (node) {
-        scrollToNode(node, behavior);
-      }
-    };
-
-    jumpToPointer(event.clientY, "smooth");
-    const onMove = (moveEvent: MouseEvent) => {
-      if (!draggingRef.current) return;
-      jumpToPointer(moveEvent.clientY, "auto");
-    };
-    const onUp = () => {
-      draggingRef.current = false;
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-  }, [findNearestNode, scrollToNode, showPreview, visible]);
-
-  const nearestNode = mouseYRatio === null ? null : findNearestNode(mouseYRatio);
-  const nearestNodeIndex = nearestNode?.index ?? null;
-
+  // 刚打开大纲时把当前所在轮滚进可视区，方便直接看到上下文位置。
   useEffect(() => {
-    if (!minimapHovered || nearestNodeIndex === null) return;
-    const previewBox = previewBoxRef.current;
-    const previewItem = previewItemRefs.current.get(nearestNodeIndex);
-    if (!previewBox || !previewItem) return;
-    const targetTop = previewItem.offsetTop
-      - (previewBox.clientHeight - previewItem.offsetHeight) / 2;
-    previewBox.scrollTop = Math.max(0, targetTop);
-  }, [allNodes, minimapHovered, nearestNodeIndex]);
+    if (!minimapHovered || activeIndex === null || searchQuery.trim()) return;
+    const targetItem = previewItemRefs.current.get(activeIndex);
+    if (!targetItem) return;
+    targetItem.scrollIntoView({ block: "nearest" });
+  }, [minimapHovered, activeIndex, searchQuery]);
 
-  if (!visible) return null;
+  const toggleTurnExpanded = useCallback((turnNumber: number, isActiveLoaded: boolean) => {
+    setToggledTurns((prev) => {
+      const next = new Set(prev);
+      const key = isActiveLoaded ? -turnNumber : turnNumber;
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
 
-  const lastNodeTop = positionedNodes.length > 0
-    ? positionedNodes[positionedNodes.length - 1].topRatio * minimapHeight
-    : MINIMAP_PADDING;
-  const railHeight = Math.max(1, lastNodeTop - MINIMAP_PADDING);
+  const normalizedQuery = searchQuery.trim().toLowerCase();
+  const filteredUnloadedTurns = useMemo(() => {
+    if (!normalizedQuery) return unloadedOutlineTurns;
+    return unloadedOutlineTurns.filter((turn) => (
+      turn.userText.toLowerCase().includes(normalizedQuery)
+      || turn.answerSummary.toLowerCase().includes(normalizedQuery)
+      || turn.headings.some((heading) => heading.text.toLowerCase().includes(normalizedQuery))
+      || String(turn.turnNumber).includes(normalizedQuery)
+    ));
+  }, [normalizedQuery, unloadedOutlineTurns]);
+
+  const filteredLoadedNodes = useMemo(() => {
+    if (!normalizedQuery) return allNodes;
+    return allNodes.filter((node) => {
+      const userText = isHiddenCustomMessage(node.targetTurn.userMessage)
+        ? t("chatMinimap.extensionTurn", { type: (node.targetTurn.userMessage as CustomMessage).customType })
+        : getUserPreview(node.targetTurn.userMessage);
+      const answerText = node.targetTurn.finalAssistant?.markdown ?? "";
+      return userText.toLowerCase().includes(normalizedQuery)
+        || answerText.toLowerCase().includes(normalizedQuery)
+        || String(node.turnNumber).includes(normalizedQuery);
+    });
+  }, [allNodes, normalizedQuery, t]);
+
+  const railTicks = useMemo(
+    () => sampleRailTicks(turnsBefore, allNodes, activeIndex),
+    [turnsBefore, allNodes, activeIndex],
+  );
+
+  const totalTurnCount = turnsBefore + allNodes.length;
+  const matchedTurnCount = filteredUnloadedTurns.length + filteredLoadedNodes.length;
+
+  if (!visible || totalTurnCount === 0) return null;
 
   return (
     <div
       ref={containerRef}
-      onMouseDown={handleMouseDown}
-      onMouseEnter={showPreview}
-      onMouseLeave={schedulePreviewHide}
-      onMouseMove={(event) => {
-        const rect = event.currentTarget.getBoundingClientRect();
-        setMouseYRatio((event.clientY - rect.top) / rect.height);
-      }}
-      style={{
-        width: MINIMAP_WIDTH,
-        flexShrink: 0,
-        position: "relative",
-        cursor: "pointer",
-        userSelect: "none",
-        borderLeft: "1px solid var(--border)",
-        background: "var(--bg-panel)",
-        overflow: "visible",
-      }}
+      className={styles.rail}
+      data-open={minimapHovered ? "true" : undefined}
     >
-      {turnsBefore > 0 && (
-        <div
-          data-minimap-earlier=""
-          style={{
-            position: "absolute",
-            left: "50%",
-            top: 0,
-            height: MINIMAP_PADDING,
-            width: 1,
-            background: "repeating-linear-gradient(to bottom, var(--text-dim) 0 2px, transparent 2px 4px)",
-            transform: "translateX(-50%)",
-            zIndex: 0,
+      <div
+        className={styles.pill}
+        onMouseEnter={showPreview}
+        onMouseLeave={schedulePreviewHide}
+      >
+        {turnsBefore > 0 && <span data-minimap-earlier="" style={{ display: "none" }} />}
+        <div className={styles.ticks}>
+          {railTicks.map((tick) => (
+            <div
+              key={tick.key}
+              className={styles.tickWrap}
+              data-minimap-node-index={tick.nodeIndex}
+              data-minimap-node-active={tick.active ? "" : undefined}
+            >
+              <span
+                className={`${styles.tick} ${tick.loaded ? styles.tickLoaded : ""} ${tick.active ? styles.tickActive : ""}`}
+              />
+            </div>
+          ))}
+        </div>
+        <div className={styles.pillDivider} />
+        <LockToggle
+          locked={locked}
+          className={styles.lock}
+          data-minimap-lock={locked ? "on" : "off"}
+          title={t(locked ? "chatMinimap.unlockPreview" : "chatMinimap.lockPreview")}
+          aria-label={t("chatMinimap.lockPreview")}
+          onMouseDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            toggleLock();
           }}
         />
-      )}
-      <div
-        style={{
-          position: "absolute",
-          left: "50%",
-          top: MINIMAP_PADDING,
-          height: railHeight,
-          width: 1,
-          background: "var(--border)",
-          transform: "translateX(-50%)",
-          zIndex: 0,
-        }}
-      />
+      </div>
 
-      {positionedNodes.map((node) => {
-        const isNearest = minimapHovered && nearestNode?.index === node.index;
-        const isActive = activeIndex === node.index;
-
-        return (
-          <div
-            key={node.index}
-            data-minimap-node-index={node.index}
-            data-minimap-node-active={isActive ? "" : undefined}
-            style={{
-              position: "absolute",
-              top: `${node.topRatio * 100}%`,
-              transform: "translateY(-50%)",
-              left: 0,
-              right: 0,
-              height: Math.max(1, nodeGap),
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              pointerEvents: "none",
-              zIndex: 2,
-            }}
-          >
-            <div
-              style={{
-                width: 8,
-                height: 8,
-                borderRadius: 2,
-                background: isActive ? "rgba(128,128,128,0.42)" : "rgba(128,128,128,0.16)",
-                border: `1.5px solid ${isActive ? "rgba(128,128,128,0.95)" : "rgba(128,128,128,0.58)"}`,
-                boxShadow: isActive ? "0 0 0 2px var(--bg-panel)" : "none",
-                transition: "transform 0.1s, background 0.1s",
-                transform: isNearest ? "scale(1.25)" : "scale(1)",
-              }}
-            />
-          </div>
-        );
-      })}
-
-      <LockToggle
-        locked={locked}
-        className={styles.lock}
-        data-minimap-lock={locked ? "on" : "off"}
-        title={t(locked ? "chatMinimap.unlockPreview" : "chatMinimap.lockPreview")}
-        aria-label={t("chatMinimap.lockPreview")}
-        onMouseDown={(event) => event.stopPropagation()}
-        onClick={(event) => {
-          event.stopPropagation();
-          toggleLock();
-        }}
-      />
-
-      {minimapHovered && allNodes.length > 0 && (
+      {minimapHovered && totalTurnCount > 0 && (
         <div
           ref={previewBoxRef}
           className={styles.preview}
           data-minimap-preview-box=""
           onMouseEnter={showPreview}
+          onMouseLeave={schedulePreviewHide}
           onMouseDown={(event) => event.stopPropagation()}
-          onMouseMove={(event) => event.stopPropagation()}
         >
-          {turnsBefore > 0 && (
-            <button
-              type="button"
-              className={styles.earlier}
-              data-minimap-preview-earlier=""
-              // The chat's top sentinel pages the older history in.
-              onClick={() => scrollContainer.current?.scrollTo({ top: 0, behavior: "smooth" })}
-            >
-              {t("chatMinimap.earlierTurns", { count: turnsBefore })}
-            </button>
-          )}
-          {allNodes.map((node) => {
-            const isLocated = nearestNodeIndex === node.index;
-            return (
-              <div
-                key={node.index}
-                ref={(element) => {
-                  if (element) previewItemRefs.current.set(node.index, element);
-                  else previewItemRefs.current.delete(node.index);
-                }}
-                className={styles.turn}
-                data-minimap-preview-index={node.index}
-                data-located={isLocated ? "true" : undefined}
+          <div className={styles.header}>
+            <div className={styles.searchWrap}>
+              <svg className={styles.searchIcon} width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="11" cy="11" r="8" />
+                <line x1="21" y1="21" x2="16.65" y2="16.65" />
+              </svg>
+              <input
+                type="text"
+                className={styles.searchInput}
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
+                onFocus={() => { searchFocusedRef.current = true; cancelPreviewHide(); }}
+                onBlur={() => { searchFocusedRef.current = false; }}
+                placeholder={t("chatMinimap.searchPlaceholder", { count: totalTurnCount })}
+                aria-label={t("chatMinimap.searchPlaceholder", { count: totalTurnCount })}
+              />
+            </div>
+            <span className={styles.searchCount}>
+              {normalizedQuery ? `${matchedTurnCount}/${totalTurnCount}` : totalTurnCount}
+            </span>
+          </div>
+
+          <div className={styles.subhint}>
+            <span>{t("chatMinimap.clickHint")}</span>
+            {outlineLoading && <span>{t("chatMinimap.loadingOutline")}</span>}
+            {revealFailed && (
+              <span className={styles.revealFailed} role="status">{t("chatMinimap.revealFailed")}</span>
+            )}
+          </div>
+
+          <div ref={previewListRef} className={styles.list}>
+            {/* 全量目录未就绪或无 sessionId 时回退到早先分页提示 */}
+            {turnsBefore > 0 && unloadedOutlineTurns.length === 0 && !normalizedQuery && (
+              <button
+                type="button"
+                className={styles.earlier}
+                data-minimap-preview-earlier=""
+                onClick={() => scrollContainer.current?.scrollTo({ top: 0, behavior: "smooth" })}
               >
-                <span className={styles.number}>
-                  <span aria-hidden="true">
-                    {String(node.turnNumber).padStart(2, "0")}
-                  </span>
-                  {node.targetTurn.toolCount > 0 && (
-                    <span
-                      className={styles.toolBadge}
-                      role="img"
-                      title={t("chatMinimap.toolCalls", { count: node.targetTurn.toolCount })}
-                      aria-label={t("chatMinimap.toolCalls", { count: node.targetTurn.toolCount })}
-                    >
-                      {node.targetTurn.toolCount > 99 ? "99+" : node.targetTurn.toolCount}
-                    </span>
-                  )}
-                </span>
-                <div className={styles.content}>
+                {t("chatMinimap.earlierTurns", { count: turnsBefore })}
+              </button>
+            )}
+
+            {/* 2-B：全量未加载历史轮次（单击大纲内预览摘要，双击或点按钮才按需加载并跳转） */}
+            {filteredUnloadedTurns.map((turn) => {
+              const isExpanded = toggledTurns.has(turn.turnNumber);
+              const isLoadingThis = loadingEntryId === turn.entryId;
+              const labelText = turn.hiddenAnchor
+                ? t("chatMinimap.extensionTurn", { type: turn.customType ?? "custom" })
+                : (turn.userText || (turn.customType ? t("chatMinimap.extensionTurn", { type: turn.customType }) : ""));
+              return (
+                <div
+                  key={`outline-${turn.entryId}`}
+                  className={`${styles.turn} ${styles.turnUnloaded}`}
+                  data-minimap-outline-entry={turn.entryId}
+                >
                   <button
                     type="button"
-                    className={styles.user}
-                    data-minimap-preview-user={node.index}
-                    onClick={() => {
-                      scrollToNode(node, "smooth");
-                    }}
+                    className={styles.turnRow}
+                    onClick={() => toggleTurnExpanded(turn.turnNumber, false)}
+                    onDoubleClick={() => void jumpToUnloadedTurn(turn)}
                   >
-                    <span className={styles.userText}>
-                      {isHiddenCustomMessage(node.targetTurn.userMessage)
-                        ? t("chatMinimap.extensionTurn", { type: (node.targetTurn.userMessage as CustomMessage).customType })
-                        : getUserPreview(node.targetTurn.userMessage)}
+                    <span className={styles.number}>
+                      <span aria-hidden="true">{formatTurnNumber(turn.turnNumber)}</span>
+                    </span>
+                    <span className={styles.userText}>{labelText}</span>
+                    <span className={`${styles.chevron} ${isExpanded ? styles.chevronExpanded : ""}`} aria-hidden="true">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="9 18 15 12 9 6" />
+                      </svg>
                     </span>
                   </button>
+                  {isExpanded && (
+                    <div className={styles.previewCard}>
+                      {labelText && <div className={styles.previewCardQuestion}>{labelText}</div>}
+                      <div className={styles.previewCardSummary}>
+                        {turn.answerSummary || t("chatMinimap.noAnswerSummary")}
+                      </div>
+                      {turn.headings.length > 0 && (
+                        <div className={styles.previewCardTags}>
+                          {turn.headings.map((heading, idx) => (
+                            <span key={idx} className={styles.previewTag}>{heading.text}</span>
+                          ))}
+                        </div>
+                      )}
+                      <div className={styles.previewCardFooter}>
+                        <span className={styles.previewCardNote}>{t("chatMinimap.unloadedNote")}</span>
+                        <button
+                          type="button"
+                          className={styles.jumpBtn}
+                          disabled={loadingEntryId !== null}
+                          onClick={() => void jumpToUnloadedTurn(turn)}
+                        >
+                          {isLoadingThis ? t("chatMinimap.loadingTurn") : t("chatMinimap.jumpToChat")}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
 
-                  {node.targetTurn.assistantPreviews.map((assistant, assistantIndex) => (
-                    <div
-                      key={assistantIndex}
-                      className={styles.assistant}
-                    >
-                      <button
-                        type="button"
-                        className={styles.assistantJump}
-                        data-minimap-preview-assistant={`${node.index}-${assistantIndex}`}
-                        onClick={() => scrollToAssistant(node, assistantIndex)}
-                        aria-label={t("chatMinimap.locateAssistant")}
-                        title={t("chatMinimap.locateAssistant")}
-                      >
-                        A
-                      </button>
+            {filteredUnloadedTurns.length > 0 && filteredLoadedNodes.length > 0 && (
+              <div className={styles.divider} data-minimap-preview-earlier="">
+                {t("chatMinimap.loadedDivider")}
+              </div>
+            )}
+
+            {/* 1-A：已加载轮次，仅当前所在轮默认展开最终回答的 h1/h2，单击展开/折叠、双击跳转 */}
+            {filteredLoadedNodes.map((node) => {
+              const isActive = activeIndex === node.index;
+              const finalAssistant = node.targetTurn.finalAssistant;
+              const hasHeadings = Boolean(finalAssistant && hasOutlineHeadings(finalAssistant.markdown));
+              const isExpanded = hasHeadings && (
+                isActive ? !toggledTurns.has(-node.turnNumber) : toggledTurns.has(node.turnNumber)
+              );
+              const userText = isHiddenCustomMessage(node.targetTurn.userMessage)
+                ? t("chatMinimap.extensionTurn", { type: (node.targetTurn.userMessage as CustomMessage).customType })
+                : getUserPreview(node.targetTurn.userMessage);
+              return (
+                <div
+                  key={node.index}
+                  ref={(element) => {
+                    if (element) previewItemRefs.current.set(node.index, element);
+                    else previewItemRefs.current.delete(node.index);
+                  }}
+                  className={styles.turn}
+                  data-minimap-preview-index={node.index}
+                  data-located={isActive ? "true" : undefined}
+                >
+                  <button
+                    type="button"
+                    className={styles.turnRow}
+                    data-minimap-preview-user={node.index}
+                    onClick={() => {
+                      if (hasHeadings) toggleTurnExpanded(node.turnNumber, isActive);
+                    }}
+                    onDoubleClick={() => scrollToNode(node, "smooth")}
+                  >
+                    <span className={styles.number}>
+                      <span aria-hidden="true">{formatTurnNumber(node.turnNumber)}</span>
+                    </span>
+                    <span className={styles.userText}>{userText}</span>
+                    {hasHeadings && (
+                      <span className={`${styles.chevron} ${isExpanded ? styles.chevronExpanded : ""}`} aria-hidden="true">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                          <polyline points="9 18 15 12 9 6" />
+                        </svg>
+                      </span>
+                    )}
+                  </button>
+
+                  {isExpanded && finalAssistant && (
+                    <div className={styles.headingsWrap}>
                       <AssistantOutline
-                        markdown={assistant.markdown}
-                        onAnswerClick={() => scrollToAssistant(node, assistantIndex)}
-                        onHeadingClick={(headingIndex) => (
-                          scrollToHeading(node, assistantIndex, headingIndex)
-                        )}
+                        markdown={finalAssistant.markdown}
+                        onHeadingClick={(headingIndex) => scrollToHeading(node, headingIndex)}
                       />
                     </div>
-                  ))}
+                  )}
                 </div>
-              </div>
-            );
-          })}
+              );
+            })}
+
+            {matchedTurnCount === 0 && (
+              <div className={styles.emptyState}>{t("chatMinimap.noMatches")}</div>
+            )}
+          </div>
         </div>
       )}
     </div>
   );
 });
 
-// Hook to create a stable array of refs for messages
 export function useMessageRefs(count: number): RefObject<(HTMLDivElement | null)[]> {
   const refs = useRef<(HTMLDivElement | null)[]>([]);
   refs.current = Array(count).fill(null).map((_, i) => refs.current[i] ?? null);

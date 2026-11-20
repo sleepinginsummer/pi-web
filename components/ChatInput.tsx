@@ -32,7 +32,9 @@ import { readClipboardImageFiles, readServerClipboardImageFiles } from "@/lib/cl
 import { useOptimisticInputSubmission, type OptimisticInputSnapshot } from "@/hooks/useOptimisticInputSubmission";
 import { prependSubmittedInput } from "@/lib/optimistic-input-submission";
 import { ModelPicker, type ModelPickerOption } from "./ModelPicker";
-import { InputControls } from "./InputControls";
+import { ComposerStopButton, ComposerTopUtilities, FastModeControl, InputControls, ThinkingControl } from "./InputControls";
+import { ContextUsageIndicator, type ContextUsageSnapshot } from "./ContextUsageIndicator";
+import type { SessionStatsInfo } from "@/lib/pi-types";
 import { MessageStash } from "./MessageStash";
 import type { StashedContent } from "@/lib/message-stash-protocol";
 import { ImagePreview } from "./ImagePreview";
@@ -68,6 +70,8 @@ interface Props {
   allModelList?: { id: string; name: string; provider: string; providerName?: string }[] | null;
   /** Set only while `enabledModels` narrows the list: loads `allModelList`. */
   onLoadAllModels?: () => void;
+  contextUsage?: ContextUsageSnapshot | null;
+  sessionStats?: SessionStatsInfo | null;
   onCompact?: () => void;
   onAbortCompaction?: () => void;
   isCompacting?: boolean;
@@ -512,7 +516,7 @@ export function ModelDataDiagnosticBanner({ diagnostics }: { diagnostics?: Model
 }
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, sendError, onAbort, onSideChat, onQueuedSubmit, isStreaming, creationSettingsLocked = false, extensionsInitializing = false, modelState, modelActions, missingCwd, allModelList, onLoadAllModels,
-  onCompact, onAbortCompaction, isCompacting, compactError, onDismissCompactError, compactResult, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames, toolSelectionKnown, onToolPresetChange,
+  contextUsage, sessionStats, onCompact, onAbortCompaction, isCompacting, compactError, onDismissCompactError, compactResult, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames, toolSelectionKnown, onToolPresetChange,
   retryInfo, queuedMessages, inputHistory = [], onRecallQueue,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   extensionUiOpen = false,
@@ -1654,6 +1658,129 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   }, [textPreviewOpen]);
 
 
+  const messageStashElement = !compact && cwd && !missingCwd && !extensionUiOpen ? (
+    <MessageStash
+      key={draftKey ?? cwd}
+      cwd={cwd}
+      mobile={isMobile}
+      hasDraft={Boolean(value.trim() || attachedImages.length || textAttachment)}
+      session={stashSession}
+      sendMode={stashSendDisabled || extensionsInitializing ? "unavailable" : onQueuedSubmit ? "running" : isStreaming ? "unavailable" : "idle"}
+      onSaveDraft={saveCurrentToStash}
+      onSendDraft={sendFromStash}
+    />
+  ) : null;
+
+  const primaryActionButtons = isStreaming && !bashMode ? (
+    <div style={{ display: "flex", alignItems: "center", gap: 5, flexShrink: 0, alignSelf: isMobile || compact ? "flex-end" : "center" }}>
+      {onSideChat && (
+        <button
+          type="button"
+          onClick={sendToSideChat}
+          disabled={!value.trim() || attachedImages.length > 0}
+          title={t("chat.sideChatHint")}
+          aria-label={t("chat.sideChat")}
+          className={`bg-transparent ${value.trim() && !attachedImages.length ? "cursor-pointer text-text-muted hover:bg-bg-hover hover:text-text" : "cursor-not-allowed text-text-dim"}`}
+          style={{
+            width: 34,
+            height: 32,
+            display: "grid", placeItems: "center",
+            padding: 0,
+            border: "1px solid var(--border)",
+            borderRadius: 8,
+            transition: "background 0.12s",
+          }}
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M21 12a8 8 0 0 1-8 8H5.5a2 2 0 0 1-1.4-3.4A8 8 0 1 1 21 12z" /><path d="M13 8.5v7M9.5 12h7" />
+          </svg>
+        </button>
+      )}
+      {onQueuedSubmit && (
+        <button
+          onClick={() => void sendQueued("steer")}
+          disabled={!canQueueStreamingMessage}
+          title={t("chat.steerHint")}
+          aria-label={t("chat.steer")}
+          style={{
+            display: "flex", alignItems: "center", gap: 5,
+            height: 32,
+            padding: "0 11px",
+            background: canQueueStreamingMessage ? "rgba(234,179,8,0.12)" : "none",
+            border: "1px solid rgba(234,179,8,0.35)",
+            borderRadius: 8,
+            color: canQueueStreamingMessage ? "rgba(180,130,0,1)" : "var(--text-dim)",
+            cursor: canQueueStreamingMessage ? "pointer" : "not-allowed",
+            fontSize: 12.5, fontWeight: 600, letterSpacing: "-0.01em",
+            transition: "background 0.12s",
+          }}
+        >
+          <svg width="11" height="11" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M5 1 L9 5 L5 9" /><line x1="1" y1="5" x2="9" y2="5" />
+          </svg>
+          <span className="chat-composer-run-label">{t("chat.steer")}</span>
+        </button>
+      )}
+      {onQueuedSubmit && (
+        <button
+          onClick={() => void sendQueued("followup")}
+          disabled={!canQueueStreamingMessage}
+          title={`${t("chat.followUpHint")} (${isMobile ? "Ctrl/Cmd+" : ""}Alt/Option+Enter)`}
+          aria-label={t("chat.followUp")}
+          aria-keyshortcuts={isMobile ? "Control+Alt+Enter Meta+Alt+Enter" : "Alt+Enter"}
+          style={{
+            display: "flex", alignItems: "center", gap: 5,
+            height: 32,
+            padding: "0 11px",
+            background: canQueueStreamingMessage ? "rgba(129,140,248,0.12)" : "none",
+            border: "1px solid rgba(129,140,248,0.35)",
+            borderRadius: 8,
+            color: canQueueStreamingMessage ? "rgba(99,102,241,1)" : "var(--text-dim)",
+            cursor: canQueueStreamingMessage ? "pointer" : "not-allowed",
+            fontSize: 12.5, fontWeight: 600, letterSpacing: "-0.01em",
+            transition: "background 0.12s",
+          }}
+        >
+          <svg width="11" height="11" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="5" y1="1" x2="5" y2="6" /><polyline points="2.5 3.5 5 1 7.5 3.5" />
+            <line x1="2" y1="9" x2="8" y2="9" />
+          </svg>
+          <span className="chat-composer-run-label">{t("chat.followUp")}</span>
+        </button>
+      )}
+      {!isMobile && !compact && <ComposerStopButton onAbort={onAbort} />}
+    </div>
+  ) : (
+    <button
+      onClick={handleSend}
+      disabled={sendButtonDisabled}
+      title={t("chat.send")}
+      aria-label={t("chat.send")}
+      aria-busy={extensionsInitializing}
+      style={{
+        flexShrink: 0,
+        alignSelf: isMobile || compact ? "flex-end" : "center",
+        display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
+        ...(isMobile ? { width: 34, height: 34, padding: 0 } : { height: 32, padding: "0 13px" }),
+        background: sendButtonDisabled ? "var(--bg-panel)" : "var(--accent)",
+        border: sendButtonDisabled ? "1px solid var(--border)" : "none",
+        borderRadius: 9,
+        color: sendButtonDisabled ? "var(--text-dim)" : "#fff",
+        cursor: sendButtonDisabled ? "not-allowed" : "pointer",
+        fontSize: 12.5,
+        fontWeight: 600,
+        letterSpacing: "-0.01em",
+        boxShadow: sendButtonDisabled ? "none" : "0 1px 3px rgba(37,99,235,0.25)",
+        transition: "background 0.15s, box-shadow 0.15s",
+      }}
+    >
+      <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <line x1="2" y1="7" x2="11" y2="7" />
+        <polyline points="7.5 3 12 7 7.5 11" />
+      </svg>
+      {!isMobile && t("chat.send")}
+    </button>
+  );
 
 
   return (
@@ -1916,38 +2043,78 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             </button>
           </div>
         )}
-        {/* Image previews */}
-        {attachedImages.length > 0 && (
-          <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
-            {/* 同图可从多条队列恢复，base64 预览 URL 不唯一，必须区分各附件位置。 */}
-            {attachedImages.map((img, i) => (
-              <div key={`${i}:${img.previewUrl}`} style={{ position: "relative", flexShrink: 0 }}>
-                <ImagePreview src={img.previewUrl}>
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={img.previewUrl}
-                    alt=""
-                    style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 6, border: "1px solid var(--border)", display: "block" }}
-                  />
-                </ImagePreview>
-                <button
-                  type="button"
-                  aria-label={t("chat.removeImage")}
-                  onClick={() => removeImage(i)}
-                  style={{
-                    position: "absolute", top: -4, right: -4,
-                    width: 16, height: 16, borderRadius: "50%",
-                    background: "var(--bg-panel)", border: "1px solid var(--border)",
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                    cursor: "pointer", padding: 0, color: "var(--text-muted)",
-                  }}
-                >
-                  <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
-                    <line x1="1" y1="1" x2="7" y2="7" /><line x1="7" y1="1" x2="1" y2="7" />
-                  </svg>
-                </button>
+        {/* 输入框上方同一排：左侧悬浮粘贴图片（多图自动向上换行），右侧固定工具条（贴着输入框右上角，互不冲突） */}
+        {(!compact || attachedImages.length > 0) && (
+          <div
+            className="composer-top-row"
+            style={{
+              display: "flex",
+              alignItems: "flex-end",
+              justifyContent: "space-between",
+              gap: 10,
+              marginBottom: compact ? 6 : 5,
+              padding: compact ? 0 : "0 2px",
+            }}
+          >
+            <div style={{ flex: "1 1 auto", minWidth: 0, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end", paddingTop: attachedImages.length > 0 ? 4 : 0 }}>
+              {/* 同图可从多条队列恢复，base64 预览 URL 不唯一，必须区分各附件位置。 */}
+              {attachedImages.map((img, i) => (
+                <div key={`${i}:${img.previewUrl}`} style={{ position: "relative", flexShrink: 0 }}>
+                  <ImagePreview src={img.previewUrl}>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={img.previewUrl}
+                      alt=""
+                      style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 8, border: "1px solid var(--border)", display: "block" }}
+                    />
+                  </ImagePreview>
+                  <button
+                    type="button"
+                    aria-label={t("chat.removeImage")}
+                    onClick={() => removeImage(i)}
+                    style={{
+                      position: "absolute", top: -5, right: -5,
+                      width: 18, height: 18, borderRadius: "50%",
+                      background: "var(--bg)", border: "1px solid var(--border)",
+                      boxShadow: "0 1px 3px rgba(0,0,0,0.14)",
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      cursor: "pointer", padding: 0, color: "var(--text-muted)",
+                    }}
+                  >
+                    <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+                      <line x1="1" y1="1" x2="7" y2="7" /><line x1="7" y1="1" x2="1" y2="7" />
+                    </svg>
+                  </button>
+                </div>
+              ))}
+            </div>
+            {!compact && !isMobile && (
+              <ComposerTopUtilities
+                isStreaming={isStreaming}
+                contextUsage={contextUsage}
+                sessionStats={sessionStats}
+                toolPreset={toolPreset}
+                customToolNames={customToolNames}
+                activeBuiltinTools={activeBuiltinTools}
+                pinnedToolNames={pinnedToolNames}
+                toolSelectionKnown={toolSelectionKnown}
+                onToolPresetChange={creationSettingsLocked ? undefined : onToolPresetChange}
+                onCompact={onCompact}
+                onAbortCompaction={onAbortCompaction}
+                isCompacting={isCompacting}
+                soundEnabled={soundEnabled}
+                onSoundToggle={onSoundToggle}
+                notificationEnabled={notificationEnabled}
+                notificationPermission={notificationPermission}
+                onNotificationToggle={onNotificationToggle}
+                endAction={messageStashElement}
+              />
+            )}
+            {!compact && isMobile && contextUsage && contextUsage.contextWindow > 0 && contextUsage.percent !== null && (
+              <div className="composer-top-mobile-meta" style={{ flex: "0 0 auto", display: "flex", alignItems: "center" }}>
+                <ContextUsageIndicator contextUsage={contextUsage} sessionStats={sessionStats} compact />
               </div>
-            ))}
+            )}
           </div>
         )}
 
@@ -1991,6 +2158,21 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             />
           )}
           <div
+            className={compact ? undefined : "composer-card"}
+            style={{
+              minWidth: 0,
+              display: "flex",
+              flexDirection: "column",
+              background: "var(--bg)",
+              border: compact ? "none" : `1px solid ${bashMode ? "var(--tool-bg)" : isStreaming && onQueuedSubmit
+                ? "rgba(234,179,8,0.42)"
+                : "color-mix(in srgb, var(--border) 78%, transparent)"}`,
+              borderRadius: compact ? 0 : isMobile ? 14 : 16,
+              boxShadow: compact ? "none" : "0 1px 2px rgba(15,23,42,0.04), 0 8px 24px -12px rgba(15,23,42,0.10)",
+              transition: "border-color 0.15s, background 0.15s, box-shadow 0.15s",
+            } as React.CSSProperties}
+          >
+          <div
             className={stackedComposer ? undefined : "chat-composer-row"}
             style={{
               minWidth: 0,
@@ -1998,15 +2180,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               flexDirection: stackedComposer ? "column" : "row",
               gap: 8,
               alignItems: stackedComposer ? "stretch" : "center",
-              background: "var(--bg)",
-              border: compact ? "none" : `1px solid ${bashMode ? "var(--tool-bg)" : isStreaming && onQueuedSubmit
-                ? "rgba(234,179,8,0.4)"
-                : "color-mix(in srgb, var(--border) 70%, transparent)"}`,
-              borderRadius: compact ? 0 : 14,
-              padding: compact ? 0 : isMobile ? "6px 6px 6px 12px" : "10px 10px 10px 14px",
-              boxShadow: compact ? "none" : "0 1px 2px rgba(15,23,42,0.04), 0 8px 24px -12px rgba(15,23,42,0.10)",
-              transition: "border-color 0.15s, background 0.15s, box-shadow 0.15s",
-            } as React.CSSProperties}
+              padding: compact ? 0 : isMobile ? "6px 6px 6px 12px" : "10px 14px 4px",
+            }}
           >
           <textarea
             ref={textareaRef}
@@ -2066,112 +2241,113 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             }}
           />
 
-          {isStreaming && !bashMode ? (
-            <div style={{ display: "flex", alignItems: "stretch", gap: 6, flexShrink: 0, alignSelf: "flex-end" }}>
-              {onSideChat && (
-                <button
-                  type="button"
-                  onClick={sendToSideChat}
-                  disabled={!value.trim() || attachedImages.length > 0}
-                  title={t("chat.sideChatHint")}
-                  aria-label={t("chat.sideChat")}
-                  className={`bg-transparent ${value.trim() && !attachedImages.length ? "cursor-pointer text-text-muted hover:bg-bg-hover hover:text-text" : "cursor-not-allowed text-text-dim"}`}
-                  style={{
-                    width: 38,
-                    display: "grid", placeItems: "center",
-                    padding: 0,
-                    border: "1px solid var(--border)",
-                    borderRadius: 8,
-                    transition: "background 0.12s",
-                  }}
-                >
-                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                    <path d="M21 12a8 8 0 0 1-8 8H5.5a2 2 0 0 1-1.4-3.4A8 8 0 1 1 21 12z" /><path d="M13 8.5v7M9.5 12h7" />
-                  </svg>
-                </button>
-              )}
-              {onQueuedSubmit && (
-                <button
-                  onClick={() => void sendQueued("steer")}
-                  disabled={!canQueueStreamingMessage}
-                  title={t("chat.steerHint")}
-                  aria-label={t("chat.steer")}
-                  style={{
-                    display: "flex", alignItems: "center", gap: 5,
-                    padding: "7px 12px",
-                    background: canQueueStreamingMessage ? "rgba(234,179,8,0.12)" : "none",
-                    border: "1px solid rgba(234,179,8,0.35)",
-                    borderRadius: 8,
-                    color: canQueueStreamingMessage ? "rgba(180,130,0,1)" : "var(--text-dim)",
-                    cursor: canQueueStreamingMessage ? "pointer" : "not-allowed",
-                    fontSize: 13, fontWeight: 600, letterSpacing: "-0.01em",
-                    transition: "background 0.12s",
-                  }}
-                >
-                  <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M5 1 L9 5 L5 9" /><line x1="1" y1="5" x2="9" y2="5" />
-                  </svg>
-                  <span className="chat-composer-run-label">{t("chat.steer")}</span>
-                </button>
-              )}
-              {onQueuedSubmit && (
-                <button
-                  onClick={() => void sendQueued("followup")}
-                  disabled={!canQueueStreamingMessage}
-                  title={`${t("chat.followUpHint")} (${isMobile ? "Ctrl/Cmd+" : ""}Alt/Option+Enter)`}
-                  aria-label={t("chat.followUp")}
-                  aria-keyshortcuts={isMobile ? "Control+Alt+Enter Meta+Alt+Enter" : "Alt+Enter"}
-                  style={{
-                    display: "flex", alignItems: "center", gap: 5,
-                    padding: "7px 12px",
-                    background: canQueueStreamingMessage ? "rgba(129,140,248,0.12)" : "none",
-                    border: "1px solid rgba(129,140,248,0.35)",
-                    borderRadius: 8,
-                    color: canQueueStreamingMessage ? "rgba(99,102,241,1)" : "var(--text-dim)",
-                    cursor: canQueueStreamingMessage ? "pointer" : "not-allowed",
-                    fontSize: 13, fontWeight: 600, letterSpacing: "-0.01em",
-                    transition: "background 0.12s",
-                  }}
-                >
-                  <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                    <line x1="5" y1="1" x2="5" y2="6" /><polyline points="2.5 3.5 5 1 7.5 3.5" />
-                    <line x1="2" y1="9" x2="8" y2="9" />
-                  </svg>
-                  <span className="chat-composer-run-label">{t("chat.followUp")}</span>
-                </button>
+          {(isMobile || compact) && primaryActionButtons}
+          </div>
+
+          {/* 一体化卡片内部底栏：桌面端放附件/模型/推理/Fast + 右侧发送/停止；移动端放附件/模型 + 折叠控制菜单 */}
+          {!compact && <div className="chat-input-controls" style={{
+            padding: isMobile ? "4px 6px 6px 6px" : "4px 8px 7px 8px",
+            borderTop: isMobile ? "1px solid color-mix(in srgb, var(--border) 45%, transparent)" : undefined,
+            display: isMobile ? "grid" : "flex",
+            gridTemplateColumns: isMobile ? "minmax(0, 1fr) auto" : undefined,
+            alignItems: "center",
+            gap: isMobile ? 4 : 6,
+          }}>
+            {/* 工具组：窄屏键盘打开时会被收起，主操作不在这一组里。 */}
+            <div className="chat-input-controls-tools" style={{ flex: isMobile ? "1 1 auto" : "1 1 auto", minWidth: 0, display: "flex", alignItems: "center", gap: 2 }}>
+              {/* 图片附件按钮：用 <label htmlFor> 原生触发，避免 JS click() 在移动端被浏览器拦截 */}
+              <label
+                htmlFor="chat-attach-input"
+                title={t(onAttachFiles ? "chat.attachFiles" : "chat.attachImage")}
+                style={{
+                  flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
+                  width: controlSize, height: controlSize, padding: 0,
+                  background: "none", border: "none",
+                  borderRadius: 9,
+                  color: attachedImages.length ? "var(--accent)" : "var(--text-muted)",
+                  cursor: "pointer",
+                  transition: "background 0.12s, color 0.12s",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = "var(--bg-hover)";
+                  e.currentTarget.style.color = attachedImages.length ? "var(--accent)" : "var(--text)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = "none";
+                  e.currentTarget.style.color = attachedImages.length ? "var(--accent)" : "var(--text-muted)";
+                }}
+              >
+                <svg width={isMobile ? 18 : 15} height={isMobile ? 18 : 15} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                  <circle cx="8.5" cy="8.5" r="1.5" />
+                  <polyline points="21 15 16 10 5 21" />
+                </svg>
+              </label>
+              <ModelPicker
+                isMobile={isMobile}
+                options={modelPickerOptions}
+                value={modelState.model}
+                onChange={onModelChange}
+                onReselect={onModelChange}
+                allOptions={allModelList?.map((m) => ({ provider: m.provider, providerName: m.providerName, modelId: m.id, name: m.name }))}
+                onShowAll={onLoadAllModels}
+                disabled={creationSettingsLocked}
+                busy={modelState.modelSwitching}
+                isAutoSelection={modelState.isAutoModelSelection}
+                variant="toolbar"
+              />
+              {!isMobile && (
+                <>
+                  <span style={{ width: 1, height: 14, background: "color-mix(in srgb, var(--border) 80%, transparent)", margin: "0 3px", flexShrink: 0 }} aria-hidden="true" />
+                  <ThinkingControl
+                    isMobile={false}
+                    align="left"
+                    modelState={modelState}
+                    isStreaming={isStreaming}
+                    onChange={creationSettingsLocked ? undefined : onThinkingLevelChange}
+                  />
+                  {!isStreaming && (
+                    <FastModeControl
+                      isMobile={false}
+                      modelState={modelState}
+                      onChange={modelActions.changeFastEnabled}
+                    />
+                  )}
+                </>
               )}
             </div>
-          ) : (
-            <button
-              onClick={handleSend}
-              disabled={sendButtonDisabled}
-              title={t("chat.send")}
-              aria-label={t("chat.send")}
-              aria-busy={extensionsInitializing}
-              style={{
-                flexShrink: 0,
-                alignSelf: "flex-end",
-                display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-                ...(isMobile ? { width: 36, height: 36, padding: 0 } : { padding: "7px 14px" }),
-                background: sendButtonDisabled ? "var(--bg-panel)" : "var(--accent)",
-                border: "none",
-                borderRadius: 8,
-                color: sendButtonDisabled ? "var(--text-dim)" : "#fff",
-                cursor: sendButtonDisabled ? "not-allowed" : "pointer",
-                fontSize: 13,
-                fontWeight: 600,
-                letterSpacing: "-0.01em",
-                boxShadow: sendButtonDisabled ? "none" : "0 1px 3px rgba(37,99,235,0.25)",
-                transition: "background 0.15s, box-shadow 0.15s",
-              }}
-            >
-              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="2" y1="7" x2="11" y2="7" />
-                <polyline points="7.5 3 12 7 7.5 11" />
-              </svg>
-              {!isMobile && t("chat.send")}
-            </button>
-          )}
+
+            {isMobile ? (
+              <InputControls
+                isMobile
+                endAction={messageStashElement}
+                isStreaming={isStreaming}
+                modelState={modelState}
+                modelActions={modelActions}
+                onThinkingLevelChange={creationSettingsLocked ? undefined : onThinkingLevelChange}
+                toolPreset={toolPreset}
+                customToolNames={customToolNames}
+                activeBuiltinTools={activeBuiltinTools}
+                pinnedToolNames={pinnedToolNames}
+                toolSelectionKnown={toolSelectionKnown}
+                onToolPresetChange={creationSettingsLocked ? undefined : onToolPresetChange}
+                onCompact={onCompact}
+                onAbortCompaction={onAbortCompaction}
+                isCompacting={isCompacting}
+                onAbort={onAbort}
+                soundEnabled={soundEnabled}
+                onSoundToggle={onSoundToggle}
+                notificationEnabled={notificationEnabled}
+                notificationPermission={notificationPermission}
+                onNotificationToggle={onNotificationToggle}
+              />
+            ) : (
+              // 发送/停止/队列：独立成组，横屏手机弹出键盘时也只收起左侧工具组。
+              <div className="chat-input-controls-actions" style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 4 }}>
+                {primaryActionButtons}
+              </div>
+            )}
+          </div>}
           </div>
         </div>
 
@@ -2181,98 +2357,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
              {t("chat.shell")} · {bashExcluded ? t("chat.outputLocal") : t("chat.outputModel")}
           </div>
         )}
-
-        {/* Bottom bar: left | center (context) | right */}
-        {!compact && <div className="chat-input-controls" style={{
-          marginTop: isMobile ? 4 : 8,
-          display: isMobile ? "grid" : "flex",
-          gridTemplateColumns: isMobile ? "minmax(0, 1fr) auto" : undefined,
-          alignItems: "center",
-          gap: 6,
-        }}>
-
-          {/* LEFT: attach + model selector (idle) or steer/followup toggle (streaming) */}
-          <div style={{ flex: isMobile ? "1 1 auto" : "0 1 auto", minWidth: 0, display: "flex", alignItems: "center", gap: 2 }}>
-            {/* 图片附件按钮：用 <label htmlFor> 原生触发，避免 JS click() 在移动端被浏览器拦截 */}
-            <label
-              htmlFor="chat-attach-input"
-              title={t(onAttachFiles ? "chat.attachFiles" : "chat.attachImage")}
-              style={{
-                flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
-                width: controlSize, height: controlSize, padding: 0,
-                background: "none", border: "none",
-                borderRadius: 9,
-                color: attachedImages.length ? "var(--accent)" : "var(--text-muted)",
-                cursor: "pointer",
-                transition: "background 0.12s, color 0.12s",
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.background = "var(--bg-hover)";
-                e.currentTarget.style.color = attachedImages.length ? "var(--accent)" : "var(--text)";
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = "none";
-                e.currentTarget.style.color = attachedImages.length ? "var(--accent)" : "var(--text-muted)";
-              }}
-            >
-              <svg width={isMobile ? 18 : 15} height={isMobile ? 18 : 15} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-                <circle cx="8.5" cy="8.5" r="1.5" />
-                <polyline points="21 15 16 10 5 21" />
-              </svg>
-            </label>
-            <ModelPicker
-              isMobile={isMobile}
-              options={modelPickerOptions}
-              value={modelState.model}
-              onChange={onModelChange}
-              onReselect={onModelChange}
-              allOptions={allModelList?.map((m) => ({ provider: m.provider, providerName: m.providerName, modelId: m.id, name: m.name }))}
-              onShowAll={onLoadAllModels}
-              disabled={creationSettingsLocked}
-              busy={modelState.modelSwitching}
-              isAutoSelection={modelState.isAutoModelSelection}
-              variant="toolbar"
-            />
-          </div>
-
-          {/* spacer */}
-          {!isMobile && <div style={{ flex: 1 }} />}
-
-          <InputControls
-            isMobile={isMobile}
-            endAction={cwd && !missingCwd && !extensionUiOpen ? <MessageStash
-              key={draftKey ?? cwd}
-              cwd={cwd}
-              mobile={isMobile}
-              hasDraft={Boolean(value.trim() || attachedImages.length || textAttachment)}
-              session={stashSession}
-              sendMode={stashSendDisabled || extensionsInitializing ? "unavailable" : onQueuedSubmit ? "running" : isStreaming ? "unavailable" : "idle"}
-              onSaveDraft={saveCurrentToStash}
-              onSendDraft={sendFromStash}
-            /> : null}
-            isStreaming={isStreaming}
-            modelState={modelState}
-            modelActions={modelActions}
-            onThinkingLevelChange={creationSettingsLocked ? undefined : onThinkingLevelChange}
-            toolPreset={toolPreset}
-            customToolNames={customToolNames}
-            activeBuiltinTools={activeBuiltinTools}
-            pinnedToolNames={pinnedToolNames}
-            toolSelectionKnown={toolSelectionKnown}
-            onToolPresetChange={creationSettingsLocked ? undefined : onToolPresetChange}
-            onCompact={onCompact}
-            onAbortCompaction={onAbortCompaction}
-            isCompacting={isCompacting}
-            onAbort={onAbort}
-            soundEnabled={soundEnabled}
-            onSoundToggle={onSoundToggle}
-            notificationEnabled={notificationEnabled}
-            notificationPermission={notificationPermission}
-            onNotificationToggle={onNotificationToggle}
-          />
-
-        </div>}
       </div>
       {textPreviewOpen && textAttachment && (
         <div role="dialog" aria-modal="true" aria-label="文本附件预览" onMouseDown={(event) => { if (event.target === event.currentTarget) setTextPreviewOpen(false); }} style={{ position: "fixed", inset: 0, zIndex: 1200, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, background: "rgba(0,0,0,0.42)" }}>

@@ -8,8 +8,9 @@ import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecuti
 import { normalizeCustomPanelLines, parseAnsiLine } from "@/lib/ansi";
 import { stripAnsi } from "@/lib/ansi";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
-import { collapsesProcessDetails, countToolCallBlocks, hasAssistantAnswer, getDisplayableAssistantBlocks, isHiddenCustomMessage, getTurnAnchors, hasTurnRef, LIVE_OUTPUT_PREVIEW_LINES, liveOutputPreview, splitFinalAssistantBlocks } from "@/lib/message-display";
+import { collapsesProcessDetails, countToolCallBlocks, hasAssistantAnswer, hasAssistantFinalAnswer, getDisplayableAssistantBlocks, isHiddenCustomMessage, getTurnAnchors, hasTurnRef, LIVE_OUTPUT_PREVIEW_LINES, liveOutputPreview } from "@/lib/message-display";
 import { EXTENSION_DIALOG_BASE_WIDTH, fitExtensionDialogWidth } from "@/lib/extension-dialog-fit";
+import { windowOffsetForGroup } from "@/lib/render-window-offset";
 import { getTurnDurationMs } from "@/lib/turn-duration";
 import { compactNotificationText, getAssistantNotificationPreview, NOTIFICATION_TITLE_CHARS } from "@/lib/notification-text";
 import { dropMentionText, splitDroppedItems, uploadFiles, type DroppedItem } from "@/lib/file-upload-client";
@@ -169,11 +170,9 @@ function NewSessionUpdateLink({ label }: { label: (version: string) => string })
   );
 }
 
+/** 与服务端大纲 / minimap 共用同一条「最终回答」判断（lib/message-display.ts）。 */
 function hasFinalAssistantAnswer(message: AgentMessage): boolean {
-  if (message.role !== "assistant") return false;
-  return splitFinalAssistantBlocks(message as AssistantMessage).answerBlocks.some((block) => (
-    block.type === "image" || (block.type === "text" && block.text.trim().length > 0)
-  ));
+  return message.role === "assistant" && hasAssistantFinalAnswer(message as AssistantMessage);
 }
 
 function findFinalAssistantIndex(messages: AgentMessage[], userIdx: number, endIdx: number): number {
@@ -273,7 +272,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
     isNew, creationSettingsLocked, scrollPositionRequest,
     activeToolResults, toolClocks, editEntryId, handleEditContent, cancelEdit, addNotice,
     sessionIdRef,
-    handleSend, handleAbort, startSideChat, handleFork, handleNavigate, loadEarlierMessages,
+    handleSend, handleAbort, startSideChat, handleFork, handleNavigate, loadEarlierMessages, loadUntilEntryId,
     handleCompact, handleQueuedSubmit, handleAbortCompaction, dismissCompactError,
     handleRecallQueue,
     handleBuiltinSlashCommand,
@@ -686,8 +685,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
     if (!searchTarget || loading || searchLoading) return;
     if (entryIds.includes(searchTarget.entryId)) {
       const { entryGroups, total } = historyGroupWindowRef.current;
-      const groupIndex = entryGroups.get(searchTarget.entryId);
-      const offset = groupIndex === undefined ? 0 : Math.max(0, total - groupIndex - MAX_MOUNTED_HISTORY_GROUPS);
+      const offset = windowOffsetForGroup(entryGroups.get(searchTarget.entryId), total, MAX_MOUNTED_HISTORY_GROUPS);
       setRenderWindow({ key: renderWindowKey, count: MAX_MOUNTED_HISTORY_GROUPS, offset });
       setPendingSearchScroll(searchTarget);
       return;
@@ -951,8 +949,31 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
     return history.reverse();
   }, [messages]);
   const messageRefs = useMessageRefs(messageRenderIndex.visibleCount);
-  const revealHistoryForMinimap = useCallback(() => {
+  // 大纲跳转的目标轮次：等它进入已加载消息后，再按分组表把窗口移到它所在的那一段。
+  // （在大纲里点开之前，目标可能还在未加载的历史页里。）
+  const [revealEntryId, setRevealEntryId] = useState<string | null>(null);
+  const revealHistoryForMinimap = useCallback((entryId?: string) => {
+    if (entryId) {
+      setRevealEntryId(entryId);
+      return;
+    }
     setRenderWindow({ key: renderWindowKey, count: MAX_MOUNTED_HISTORY_GROUPS, offset: 0 });
+  }, [renderWindowKey]);
+
+  // 长会话只挂载最新 160 个消息组：目标组不在窗口里时，大纲拿不到对应节点，跳转会静默停在原地。
+  // 这里与全局搜索用同一套偏移计算（offset 从末尾回退的组数），并等 entryIds 真正包含目标后才算。
+  useEffect(() => {
+    if (!revealEntryId) return;
+    if (!entryIds.includes(revealEntryId)) return;
+    const { entryGroups, total } = historyGroupWindowRef.current;
+    const offset = windowOffsetForGroup(entryGroups.get(revealEntryId), total, MAX_MOUNTED_HISTORY_GROUPS);
+    setRenderWindow({ key: renderWindowKey, count: MAX_MOUNTED_HISTORY_GROUPS, offset });
+    setRevealEntryId(null);
+  }, [entryIds, renderWindowKey, revealEntryId]);
+
+  // 切换会话时丢弃上一会话遗留的跳转目标。
+  useEffect(() => {
+    setRevealEntryId(null);
   }, [renderWindowKey]);
 
   const isEmptyNew = isNew && messages.length === 0 && !isStreaming && !sessionBusy;
@@ -980,6 +1001,8 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
       missingCwd={missingCwd}
       allModelList={allModelList}
       onLoadAllModels={isModelScopeActive ? loadAllModels : undefined}
+      contextUsage={contextUsage}
+      sessionStats={sessionStats}
       onCompact={session || isNew ? handleCompact : undefined}
       onAbortCompaction={handleAbortCompaction}
       isCompacting={isCompacting}
@@ -1212,7 +1235,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
           className={`scrollbar-subtle min-w-0 flex-1 overflow-x-hidden overflow-y-auto pt-4 [scrollbar-gutter:stable]${askDialogElement ? " chat-scroll-ask-reserve" : ""}`}
           style={{ visibility: pendingScrollRestore ? "hidden" : undefined }}
         >
-          <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
+          <div style={{ padding: `0 ${isMobile ? CHAT_COLUMN_PADDING : CHAT_INPUT_RIGHT_PADDING}px 0 ${CHAT_COLUMN_PADDING}px` }}>
             <div ref={messageContentRef} style={{ maxWidth: "var(--chat-content-max-width, 820px)", margin: "0 auto" }}>
             {(() => {
               const { toolResults, visibleRefIndexByMessage, writtenFilesByFinalAssistant } = messageRenderIndex;
@@ -1566,6 +1589,8 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
         )}
         {isMobile || pendingScrollRestore ? null : (
           <ChatMinimap
+            sessionId={session?.id}
+            leafId={activeLeafId}
             messages={messages}
             entryIds={entryIds}
             getStreamingMessage={getStreamingMessage}
@@ -1578,6 +1603,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
               pauseFollowing();
             }}
             onRevealHistory={revealHistoryForMinimap}
+            onLoadUntilEntry={loadUntilEntryId}
             turnsBefore={earlierTurnCount}
             turnAnchors={turnAnchors}
           />

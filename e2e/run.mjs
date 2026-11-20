@@ -311,10 +311,10 @@ try {
       // 哨兵可额外预取一页；核对同一 DOM 快照中的实际历史边界，不能假设只有手动触发的两页。
       await page.waitForFunction(() => {
         const preview = document.querySelector("[data-minimap-preview-box]");
-        const earlier = preview?.querySelector("[data-minimap-preview-earlier]")?.textContent;
         const ids = [...document.querySelectorAll("[data-chat-scroll-container] [data-entry-id]")]
           .map((element) => element.dataset.entryId).filter((id) => /^e\d+$/.test(id)).map((id) => Number(id.slice(1)));
-        return ids.length > 0 && earlier === `Earlier turns not loaded: ${Math.min(...ids) / 2}. Click to load`;
+        const unloadedCount = preview?.querySelectorAll("[data-minimap-outline-entry]").length ?? 0;
+        return ids.length > 0 && unloadedCount === Math.min(...ids) / 2;
       });
       const result = await turn.evaluate((element) => {
         const preview = element.closest("[data-minimap-preview-box]");
@@ -322,7 +322,7 @@ try {
           .map((entry) => entry.dataset.entryId).filter((id) => /^e\d+$/.test(id)).map((id) => Number(id.slice(1)));
         return {
           number: element.querySelector("span[aria-hidden='true']").textContent,
-          earlier: preview.querySelector("[data-minimap-preview-earlier]").textContent,
+          unloadedCount: preview.querySelectorAll("[data-minimap-outline-entry]").length,
           firstRendered: Math.min(...ids),
         };
       });
@@ -334,7 +334,33 @@ try {
     if (viewport.width > 600) {
       const firstPage = await readMinimapTurn("minimap-turns-first-page.png");
       assert.equal(firstPage.number, "2500", "Minimap turns are numbered from the session's first turn");
-      assert.match(firstPage.earlier, /^Earlier turns not loaded: \d+\. Click to load$/);
+      assert.equal(firstPage.unloadedCount, firstPage.firstRendered / 2, "Full outline lists all unloaded earlier turns without loading the chat");
+
+      // 双击大纲里最早的一轮：它还没加载，客户端要连续翻页把它带进来，再把渲染窗口
+      // 移到它所在的消息组。只挂载最近 160 组或卡在翻页上限时，跳转会静默停在原地。
+      const railNode = page.locator("[data-minimap-node-index='0']");
+      const railRect = await railNode.boundingBox();
+      assert.ok(railRect);
+      await page.mouse.move(railRect.x + railRect.width / 2, railRect.y + railRect.height / 2);
+      const outlineFirstTurn = page.locator("[data-minimap-preview-box] [data-minimap-outline-entry='e0']");
+      await outlineFirstTurn.waitFor();
+      await outlineFirstTurn.dblclick();
+      const firstTurnAnchor = page.locator('[data-chat-scroll-container] [data-entry-id="e0"]');
+      await firstTurnAnchor.first().waitFor({ state: "attached", timeout: 90_000 });
+      await page.waitForFunction(() => {
+        const container = document.querySelector("[data-chat-scroll-container]");
+        const element = container?.querySelector('[data-entry-id="e0"]');
+        if (!container || !element) return false;
+        const box = element.getBoundingClientRect();
+        const view = container.getBoundingClientRect();
+        return box.bottom > view.top && box.top < view.bottom;
+      }, undefined, { timeout: 30_000 });
+      await page.screenshot({ path: join(artifacts, "minimap-jump-first-turn.png") });
+      await page.mouse.move(0, 0);
+      // 回到首屏状态：后面的历史分页断言仍从只有页尾开始。
+      await page.goto(`${base}/?session=${LONG}`, { waitUntil: "domcontentloaded" });
+      await page.getByText(text(4999), { exact: true }).waitFor();
+      await sentinel.waitFor({ state: "attached" });
     }
     const triggerOlderPage = async (seen) => {
       const responsePromise = page.waitForResponse((response) => isOlderContextResponse(response)
@@ -407,7 +433,7 @@ try {
     if (viewport.width > 600) {
       const pagedTurn = await readMinimapTurn("minimap-turns-paged.png");
       assert.equal(pagedTurn.number, "2500", "Loading older pages must not renumber minimap turns");
-      assert.equal(pagedTurn.earlier, `Earlier turns not loaded: ${pagedTurn.firstRendered / 2}. Click to load`);
+      assert.equal(pagedTurn.unloadedCount, pagedTurn.firstRendered / 2);
     }
     await page.screenshot({ path: join(artifacts, `history-${viewport.width}.png`) });
 

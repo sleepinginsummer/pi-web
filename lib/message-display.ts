@@ -240,6 +240,19 @@ export function hasAssistantAnswer(message: AssistantMessage): boolean {
   });
 }
 
+/**
+ * Whether this reply's final answer is something the chat shows: text or an
+ * image. A reply that only called tools, only reasoned, or was aborted with an
+ * empty body has none, and a turn ending on one keeps the answer above it as
+ * its visible result — the chat, the minimap and the server's outline all pick
+ * a turn's final answer with this rule.
+ */
+export function hasAssistantFinalAnswer(message: AssistantMessage): boolean {
+  return splitFinalAssistantBlocks(message).answerBlocks.some((block) => (
+    block.type === "image" || (block.type === "text" && block.text.trim().length > 0)
+  ));
+}
+
 function isFinalAnswerBlock(block: AssistantContentBlock): boolean {
   return block.type === "text" || block.type === "image";
 }
