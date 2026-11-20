@@ -28,6 +28,8 @@ function setup() {
     fetch: (url) => { const request = Promise.withResolvers(); requests.push({ ...request, url }); return request.promise; },
     agentStatusUrl: (sid) => `/api/agent/${sid}?systemPrompt=0`, setLiveTotalActiveMs() {},
     syncLiveModel() {}, setIsCompacting() {}, setAutoCompactionEnabled() {}, setQueuedMessages() {},
+    // applyRuntimeState 也把正在跑的扩展命令写回顶栏提示。
+    setRunningCommands() {},
     // applyRuntimeState 也会把扩展绑定状态交给唯一状态机（新会话等待态）。
     newSessionCwd: null, onPendingNewSessionEvent() {},
     projectExtensionBinding: () => "bound",
