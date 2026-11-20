@@ -21,7 +21,8 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { AssistantOutline, cachedAssistantAnswer, canLocateAnswerHeadings, getAssistantAnswer, getAssistantAnswerMarkdown } = await jiti.import("./ChatMinimap.tsx");
+const { AssistantOutline, ChatMinimap, cachedAssistantAnswer, canLocateAnswerHeadings, getAssistantAnswer, getAssistantAnswerMarkdown } = await jiti.import("./ChatMinimap.tsx");
+const { I18nProvider } = await jiti.import("@/hooks/useI18n");
 const source = await readFile(new URL("./ChatMinimap.tsx", import.meta.url), "utf8");
 const bodySource = await readFile(new URL("./MarkdownBody.tsx", import.meta.url), "utf8");
 const messageSource = await readFile(new URL("./MessageView.tsx", import.meta.url), "utf8");
@@ -208,8 +209,8 @@ test("锁定浮层后仍能展开：悬停不展开，点胶囊钉住", () => {
   assert.match(source, /onClick=\{togglePreviewPinned\}/);
   assert.match(source, /title=\{locked \? t\("chatMinimap\.pinPreview"\) : undefined\}/);
 
-  // 展开状态是「悬停」或「钉住」的并集，渲染与取大纲都看它。
-  assert.match(source, /const previewOpen = minimapHovered \|\| previewPinned;/);
+  // 展开状态是「悬停」「钉住」「移动端抽屉」的并集，渲染与取大纲都看它。
+  assert.match(source, /const previewOpen = minimapHovered \|\| previewPinned \|\| variant === "sheet";/);
   assert.match(source, /\{previewOpen && totalTurnCount > 0 && \(/);
   assert.match(source, /if \(!previewOpen \|\| !sessionId \|\| turnsBefore <= 0\) \{/);
   assert.doesNotMatch(source, /\{minimapHovered && totalTurnCount > 0 && \(/);
@@ -281,4 +282,38 @@ test("按需加载的跳转在切会话/分支后作废", () => {
   );
   assert.match(reset, /jumpTargetRef\.current = null;/);
   assert.match(reset, /pendingNavigationRef\.current = null;/);
+});
+
+test("移动端抽屉：同一份大纲摊成底部抽屉，空会话给一句说明，点背景关闭", () => {
+  const emptyProps = {
+    sessionId: "s1",
+    leafId: null,
+    messages: [],
+    entryIds: [],
+    getStreamingMessage: () => null,
+    isStreaming: false,
+    scrollContainer: { current: null },
+    messageRefs: { current: [] },
+    onRevealHistory() {},
+    turnsBefore: 0,
+    turnAnchors: [],
+    variant: "sheet",
+    onClose() {},
+  };
+  const wrap = (element) => renderToStaticMarkup(React.createElement(I18nProvider, null, element));
+  const empty = wrap(React.createElement(ChatMinimap, emptyProps));
+  assert.match(empty, /data-sheet="true"/, "抽屉形态");
+  assert.doesNotMatch(empty, /class="pill"/, "抽屉里不出现轨道胶囊");
+  // 空会话要有说明（文案随语言，断言「渲染出了非空说明」而不是某一种文案）。
+  assert.match(empty, /class="emptyState">[^<]+</, "空会话要说清楚，不能点开像没反应");
+  assert.match(source, /<div className=\{styles\.emptyState\}>\{t\("chatMinimap\.noTurns"\)\}<\/div>/);
+
+  // 抽屉只在打开时挂载；轨道形态下没有轮次照样不渲染。
+  const rail = wrap(React.createElement(ChatMinimap, { ...emptyProps, variant: undefined }));
+  assert.equal(rail, "");
+
+  // 点抽屉内部（轮次、搜索框）不能冒泡到背景把抽屉关掉。
+  assert.match(source, /onClick=\{\(event\) => event\.stopPropagation\(\)\}/);
+  assert.match(source, /data-sheet=\{variant === "sheet" \? "true" : undefined\}/);
+  assert.match(source, /onClick=\{variant === "sheet" \? onClose : undefined\}/);
 });

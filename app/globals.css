@@ -4660,3 +4660,15 @@ span.token.table {
   display: flex;
   align-items: stretch;
 }
+
+/* 移动端顶栏「大纲」按钮：夹在统计/Agents 与「更多」之间的方图标位。 */
+.mobile-top-bar-outline {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--top-bar-height);
+  min-width: var(--top-bar-height);
+  color: var(--text);
+}
+
+.mobile-top-bar-outline[aria-pressed="true"] { background: var(--bg-selected); }

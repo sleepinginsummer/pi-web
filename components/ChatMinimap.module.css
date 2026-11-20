@@ -487,3 +487,57 @@
   overflow: hidden;
   text-align: left;
 }
+
+/* 移动端：同一份浮层摊成底部抽屉（顶栏按钮打开）。轨道胶囊在这个模式下不出现。 */
+.rail[data-sheet="true"] {
+  position: fixed;
+  inset: 0;
+  width: auto;
+  padding: 0 8px calc(8px + env(safe-area-inset-bottom));
+  z-index: 70;
+  justify-content: flex-end;
+  background: color-mix(in srgb, #000 45%, transparent);
+  pointer-events: auto;
+}
+
+.rail[data-sheet="true"] .pill {
+  display: none;
+}
+
+.rail[data-sheet="true"] .preview {
+  position: relative;
+  top: auto;
+  bottom: auto;
+  right: auto;
+  width: 100%;
+  max-width: none;
+  max-height: min(70dvh, 640px);
+  height: auto;
+  min-height: 0;
+  border-radius: 14px;
+  box-shadow: 0 -6px 28px rgba(0, 0, 0, 0.35);
+}
+
+/* 抽屉里不需要「鼠标横移不闪烁」的桥接块。 */
+.rail[data-sheet="true"] .preview::after {
+  content: none;
+}
+
+.sheetClose {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  margin-inline-start: 2px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.sheetClose:hover {
+  background: var(--bg-selected);
+  color: var(--text);
+}

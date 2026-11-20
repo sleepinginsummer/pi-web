@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useId, useRef, useState, type ReactNode, type RefObject } from "react";
-import { Bot, Bug, Eye, GitBranch, History, MoreHorizontal, ScrollText, SlidersHorizontal, Sparkles, Wrench } from "lucide-react";
+import { Bot, Bug, Eye, GitBranch, History, ListTree, MoreHorizontal, ScrollText, SlidersHorizontal, Sparkles, Wrench } from "lucide-react";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { SessionTreeNode } from "@/lib/types";
 import type { TopPanel } from "@/hooks/useTopPanel";
@@ -31,6 +31,8 @@ interface AppTopBarProps {
     topBarRef: RefObject<HTMLDivElement | null>;
   };
   onTogglePanel: (panel: TopPanel) => void;
+  /** 移动端「大纲」按钮：打开会话大纲的底部抽屉（桌面不经过这里）。 */
+  outline: { available: boolean; open: boolean; onToggle: () => void };
   /** 顶栏「工具设置」：扩展工具的模型/思考强度面板。 */
   onOpenToolSettings: () => void;
   session: {
@@ -223,7 +225,7 @@ function SessionTopBarControls({ activePanel, hideAgents = false, hideStats = fa
 }
 
 export function AppTopBar(props: AppTopBarProps) {
-  const { activePanel, endAction, locale, navigation, onOpenToolSettings, onTogglePanel, session, translate, trust } = props;
+  const { activePanel, endAction, locale, navigation, onOpenToolSettings, onTogglePanel, outline, session, translate, trust } = props;
   const mobileMenuId = useId();
   const moreButtonRef = useRef<HTMLButtonElement>(null);
   const [mobileToolbarMoreOpen, setMobileToolbarMoreOpen] = useState(false);
@@ -293,6 +295,19 @@ export function AppTopBar(props: AppTopBarProps) {
                   translate={translate}
                 />
                 <AgentsButton {...{ activePanel, session, translate }} onTogglePanel={(panel) => { setMobileToolbarMoreOpen(false); onTogglePanel(panel); }} />
+                {outline.available && (
+                  <button
+                    type="button"
+                    className="mobile-top-bar-outline"
+                    data-mobile-outline-button=""
+                    aria-pressed={outline.open}
+                    title={translate("chatMinimap.mobileOpen")}
+                    aria-label={translate("chatMinimap.mobileOpen")}
+                    onClick={() => { setMobileToolbarMoreOpen(false); outline.onToggle(); }}
+                  >
+                    <ListTree size={18} aria-hidden="true" />
+                  </button>
+                )}
                 <button
                   ref={moreButtonRef}
                   type="button"

@@ -29,7 +29,7 @@ const labels = {
 };
 const translate = (key) => labels[key] ?? key;
 
-function renderTopBar(isMobile) {
+function renderTopBar(isMobile, outline = { available: false, open: false, onToggle() {} }) {
   return renderToStaticMarkup(
     React.createElement(I18nProvider, null,
       React.createElement(AppTopBar, {
@@ -46,6 +46,7 @@ function renderTopBar(isMobile) {
           topBarRef: React.createRef(),
         },
         onTogglePanel() {},
+        outline,
         session: {
           agentsBadge: null,
           autoNameStatus: { kind: "idle" },
@@ -93,4 +94,17 @@ test("desktop top bar keeps text labels", () => {
   assert.match(html, />Generate title<\/button>/);
   assert.match(html, />System<\/button>/);
   assert.doesNotMatch(html, /Language|theme/);
+});
+
+test("mobile outline button sits right before More and follows availability", () => {
+  const html = renderTopBar(true, { available: true, open: false, onToggle() {} });
+  const outlineAt = html.indexOf('data-mobile-outline-button');
+  const moreAt = html.indexOf('class="mobile-top-bar-more"');
+  assert.ok(outlineAt > 0, "有轮次时出现大纲按钮");
+  assert.ok(outlineAt < moreAt, "大纲按钮排在「更多」前面");
+  assert.match(html, /data-mobile-outline-button="" aria-pressed="false"/);
+
+  // 没有轮次（新会话）时不出现，避免点开是空的。
+  const none = renderTopBar(true, { available: false, open: false, onToggle() {} });
+  assert.doesNotMatch(none, /data-mobile-outline-button/);
 });

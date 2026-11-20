@@ -73,6 +73,8 @@ interface Props {
   isNavigationActive: (key: number) => boolean;
   session: SessionInfo | null;
   observerPanel?: { onClose: () => void };
+  /** 移动端顶栏「大纲」按钮打开的底部抽屉（桌面轨道不经过这里）。 */
+  mobileOutline?: { open: boolean; onClose: () => void };
   searchTarget?: { sessionId: string; entryId: string; blockIndex?: number } | null;
   onSearchTargetHandled?: (target: { sessionId: string; entryId: string }) => void;
   initialScrollPosition?: ChatReadingPosition | null;
@@ -249,7 +251,7 @@ function LiveProcessDetailsGroup({ hiddenCount, renderAll, renderRecent, t }: { 
   );
 }
 
-export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSession, onDebugSnapshotReaderChange, navigationKey, isNavigationActive, session, observerPanel, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, newSessionCwd, newSessionWorktrees, pendingNewSessionControl, onPendingNewSessionEvent, notificationController, onAgentEnd, onSessionEnded, onSessionCreated, onSessionCreatedInBackground, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onShadowMindControlChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenSettings, onContextUsageChange, onOpenFile, onFilesUploaded, onOpenSubagent, onOpenServerPreview, onToolEnd, onNewSessionCwdChange, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed }: Props) {
+export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSession, onDebugSnapshotReaderChange, navigationKey, isNavigationActive, session, observerPanel, mobileOutline, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, newSessionCwd, newSessionWorktrees, pendingNewSessionControl, onPendingNewSessionEvent, notificationController, onAgentEnd, onSessionEnded, onSessionCreated, onSessionCreatedInBackground, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onShadowMindControlChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenSettings, onContextUsageChange, onOpenFile, onFilesUploaded, onOpenSubagent, onOpenServerPreview, onToolEnd, onNewSessionCwdChange, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed }: Props) {
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio, holdAudio } = useAudio();
   const {
@@ -892,6 +894,34 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
 
   const messageCwd = session?.cwd ?? newSessionCwd ?? undefined;
   const turnAnchors = useMemo(() => getTurnAnchors(messages, { openTail: agentRunning || isStreaming }), [messages, agentRunning, isStreaming]);
+
+  /**
+   * 大纲只有一份实现：桌面渲染右侧轨道，移动端把同一份浮层摊成底部抽屉。
+   * `sheet` 传入时是抽屉形态；收起由大纲自己在跳转**完成**后触发（见 `finishNavigation`），
+   * 这里不要在 `onNavigate` 里关——那会在分页/补测还没落地时把它卸载掉。
+   */
+  const renderMinimap = (extra: { variant?: "sheet"; onClose?: () => void }) => (
+    <ChatMinimap
+      sessionId={session?.id}
+      leafId={activeLeafId}
+      messages={messages}
+      entryIds={entryIds}
+      getStreamingMessage={getStreamingMessage}
+      isStreaming={isStreaming}
+      scrollContainer={scrollContainerRef}
+      messageRefs={messageRefs}
+      onNavigate={() => {
+        // 主动跳转优先于尚未完成的历史补页位置恢复，避免把标题定位拉回旧位置。
+        prevScrollDistanceRef.current = null;
+        pauseFollowing();
+      }}
+      onRevealHistory={revealHistoryForMinimap}
+      onLoadUntilEntry={loadUntilEntryId}
+      turnsBefore={earlierTurnCount}
+      turnAnchors={turnAnchors}
+      {...extra}
+    />
+  );
   const messageRenderIndex = useMemo(() => {
     const toolResults = new Map<string, ToolResultMessage>(activeToolResults);
     const visibleRefIndexByMessage = new Map<number, number>();
@@ -1669,27 +1699,9 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
             onClick={() => scrollToLatest("smooth")}
           />
         )}
-        {isMobile || pendingScrollRestore ? null : (
-          <ChatMinimap
-            sessionId={session?.id}
-            leafId={activeLeafId}
-            messages={messages}
-            entryIds={entryIds}
-            getStreamingMessage={getStreamingMessage}
-            isStreaming={isStreaming}
-            scrollContainer={scrollContainerRef}
-            messageRefs={messageRefs}
-            onNavigate={() => {
-              // 主动跳转优先于尚未完成的历史补页位置恢复，避免把标题定位拉回旧位置。
-              prevScrollDistanceRef.current = null;
-              pauseFollowing();
-            }}
-            onRevealHistory={revealHistoryForMinimap}
-            onLoadUntilEntry={loadUntilEntryId}
-            turnsBefore={earlierTurnCount}
-            turnAnchors={turnAnchors}
-          />
-        )}
+        {isMobile
+          ? mobileOutline?.open && renderMinimap({ variant: "sheet", onClose: mobileOutline.onClose })
+          : pendingScrollRestore ? null : renderMinimap({})}
       </div>
 
       {quoteSelectionEnabled && quotedSelection && createPortal(

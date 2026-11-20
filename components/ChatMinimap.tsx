@@ -35,6 +35,13 @@ interface Props {
   turnsBefore: number;
   /** ChatWindow's getTurnAnchors() over `messages`: the minimap groups and reads refs as it renders. */
   turnAnchors: readonly boolean[];
+  /**
+   * `rail`（默认）是桌面右侧的胶囊轨道；`sheet` 把同一份浮层摊成底部抽屉，
+   * 供移动端顶栏按钮打开——手机上不渲染轨道，宽度也不够放浮卡。
+   */
+  variant?: "rail" | "sheet";
+  /** 抽屉模式的关闭（点背景、点 ✕）。 */
+  onClose?: () => void;
 }
 
 const PREVIEW_HIDE_DELAY = 260;
@@ -408,6 +415,8 @@ export const ChatMinimap = memo(function ChatMinimap({
   onLoadUntilEntry,
   turnsBefore,
   turnAnchors,
+  variant = "rail",
+  onClose,
 }: Props) {
   const { t } = useI18n();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -437,8 +446,8 @@ export const ChatMinimap = memo(function ChatMinimap({
   /** 指针是否还在胶囊/浮层上：搜索框失焦时要靠它决定该不该收起。 */
   const hoveringRef = useRef(false);
   const [locked, setLocked] = useState(() => loadMinimapPreviewLocked());
-  /** 浮层此刻是否展开：悬停打开的那一份，或锁定后点胶囊钉住的那一份。 */
-  const previewOpen = minimapHovered || previewPinned;
+  /** 浮层此刻是否展开：悬停打开的那一份、锁定后点胶囊钉住的那一份，或移动端抽屉。 */
+  const previewOpen = minimapHovered || previewPinned || variant === "sheet";
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
   const [allNodes, setAllNodes] = useState<NodeInfo[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
@@ -530,6 +539,14 @@ export const ChatMinimap = memo(function ChatMinimap({
     setActiveIndex(index);
     onNavigate?.();
   }, [onNavigate]);
+
+  /**
+   * 抽屉在跳转**完成**后收起。不能挂在 `onNavigate` 上：未加载轮次要等分页、
+   * 未挂载的节点要等 `measureNodes` 的补测，提前卸载会把待定位目标一起带走。
+   */
+  const finishNavigation = useCallback(() => {
+    if (variant === "sheet") onClose?.();
+  }, [onClose, variant]);
 
   const syncActiveNode = useCallback((scrollEl: HTMLDivElement, nextNodes: NodeInfo[]) => {
     const activeLock = activeNodeLockRef.current;
@@ -664,11 +681,12 @@ export const ChatMinimap = memo(function ChatMinimap({
               top: Math.max(0, targetTop - targetOffset),
               behavior: "smooth",
             });
+            finishNavigation();
           }
         }
       }
     }, 100);
-  }, [getStreamingMessage, lockActiveNode, messageRefs, scrollContainer, syncActiveNode]);
+  }, [finishNavigation, getStreamingMessage, lockActiveNode, messageRefs, scrollContainer, syncActiveNode]);
 
   useEffect(() => {
     measureNodes();
@@ -712,7 +730,8 @@ export const ChatMinimap = memo(function ChatMinimap({
       top: Math.max(0, node.targetTurn.scrollTop - targetOffset),
       behavior,
     });
-  }, [lockActiveNode, onRevealHistory, scrollContainer]);
+    finishNavigation();
+  }, [finishNavigation, lockActiveNode, onRevealHistory, scrollContainer]);
 
   useEffect(() => {
     const scrollEl = scrollContainer.current;
@@ -778,13 +797,15 @@ export const ChatMinimap = memo(function ChatMinimap({
     // 首次跳转后内容仍可能补页或重新排版；短暂锚定标题，防止异步布局把阅读位置拉偏。
     headingAnchorRef.current = { heading, until: Date.now() + 2000 };
     scrollEl.scrollTo({ top: Math.max(0, targetTop), behavior: "smooth" });
-  }, [lockActiveNode, onRevealHistory, scrollContainer]);
+    finishNavigation();
+  }, [finishNavigation, lockActiveNode, onRevealHistory, scrollContainer]);
 
   const jumpToUnloadedTurn = useCallback(async (turn: SessionOutlineTurn) => {
     if (loadingEntryId) return;
     onNavigate?.();
     if (!onLoadUntilEntry) {
       scrollContainer.current?.scrollTo({ top: 0, behavior: "smooth" });
+      finishNavigation();
       return;
     }
     setLoadingEntryId(turn.entryId);
@@ -816,7 +837,7 @@ export const ChatMinimap = memo(function ChatMinimap({
         setLoadingEntryId(null);
       }
     }
-  }, [loadingEntryId, measureNodes, onLoadUntilEntry, onNavigate, onRevealHistory, scrollContainer]);
+  }, [finishNavigation, loadingEntryId, measureNodes, onLoadUntilEntry, onNavigate, onRevealHistory, scrollContainer]);
 
   const cancelPreviewHide = useCallback(() => {
     if (!previewHideTimerRef.current) return;
@@ -943,13 +964,26 @@ export const ChatMinimap = memo(function ChatMinimap({
   const totalTurnCount = turnsBefore + allNodes.length;
   const matchedTurnCount = filteredUnloadedTurns.length + filteredLoadedNodes.length;
 
-  if (!visible || totalTurnCount === 0) return null;
+  if (totalTurnCount === 0) {
+    // 抽屉是用户主动打开的，空着要说明一句，否则点完像没反应。
+    if (variant !== "sheet") return null;
+    return (
+      <div className={styles.rail} data-sheet="true" onClick={onClose}>
+        <div className={styles.preview} onClick={(event) => event.stopPropagation()}>
+          <div className={styles.emptyState}>{t("chatMinimap.noTurns")}</div>
+        </div>
+      </div>
+    );
+  }
+  if (!visible && variant !== "sheet") return null;
 
   return (
     <div
       ref={containerRef}
       className={styles.rail}
       data-open={previewOpen ? "true" : undefined}
+      data-sheet={variant === "sheet" ? "true" : undefined}
+      onClick={variant === "sheet" ? onClose : undefined}
     >
       <div
         className={styles.pill}
@@ -997,6 +1031,7 @@ export const ChatMinimap = memo(function ChatMinimap({
           onMouseEnter={enterPreview}
           onMouseLeave={leavePreview}
           onMouseDown={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
         >
           <div className={styles.header}>
             <div className={styles.searchWrap}>
@@ -1022,6 +1057,19 @@ export const ChatMinimap = memo(function ChatMinimap({
             <span className={styles.searchCount}>
               {normalizedQuery ? `${matchedTurnCount}/${totalTurnCount}` : totalTurnCount}
             </span>
+            {variant === "sheet" && (
+              <button
+                type="button"
+                className={styles.sheetClose}
+                onClick={onClose}
+                title={t("chatMinimap.sheetClose")}
+                aria-label={t("chatMinimap.sheetClose")}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+                  <path d="M18 6 6 18M6 6l12 12" />
+                </svg>
+              </button>
+            )}
           </div>
 
           <div className={styles.subhint}>

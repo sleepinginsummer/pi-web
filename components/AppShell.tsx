@@ -114,6 +114,8 @@ export function AppShell() {
   const [searchTarget, setSearchTarget] = useState<{ sessionId: string; entryId: string; blockIndex?: number } | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(() => !initialNavigation.sidebarCollapsed);
   const [observerPanelSessionId, setObserverPanelSessionId] = useState<string | null>(null);
+  /** 移动端大纲抽屉：按会话 id 记，切会话自然关闭。 */
+  const [mobileOutlineSessionId, setMobileOutlineSessionId] = useState<string | null>(null);
   const [agentStripLocked, setAgentStripLocked] = useState(false);
   useEffect(() => setAgentStripLocked(loadAgentStripLocked()), []);
   const toggleAgentStripLock = useCallback(() => {
@@ -1004,6 +1006,7 @@ export function AppShell() {
   const observerDraftView = selectPendingNewSession(pendingNewSessionControl);
   const showChat = selectedSession !== null || effectiveNewSessionCwd !== null;
   const observerPanelOpen = Boolean(selectedSession && observerPanelSessionId === selectedSession.id);
+  const mobileOutlineOpen = Boolean(selectedSession && mobileOutlineSessionId === selectedSession.id);
   const projectTrustCwd = selectedSession?.cwd ?? effectiveNewSessionCwd;
   // While restoring initial session from URL, don't show the placeholder
   const showPlaceholder = initialSessionRestored && !showChat;
@@ -1261,6 +1264,11 @@ export function AppShell() {
         <AppTopBar
           activePanel={activeTopPanel}
           endAction={filePanelToggle}
+          outline={{
+            available: Boolean(selectedSession && selectedSession.messageCount > 0),
+            open: mobileOutlineOpen,
+            onToggle: () => setMobileOutlineSessionId(mobileOutlineOpen ? null : selectedSession?.id ?? null),
+          }}
           locale={locale}
           navigation={{
             activeLeafId: branchActiveLeafId,
@@ -1365,6 +1373,10 @@ export function AppShell() {
                   observerPanel={observerPanelOpen ? {
                     onClose: () => setObserverPanelSessionId(null),
                   } : undefined}
+                  mobileOutline={{
+                    open: mobileOutlineOpen,
+                    onClose: () => setMobileOutlineSessionId(null),
+                  }}
                   searchTarget={searchTarget?.sessionId === selectedSession?.id ? searchTarget : null}
                   onSearchTargetHandled={handleSearchTargetHandled}
                   initialScrollPosition={selectedSession ? sessionScrollPositionsRef.current.get(selectedSession.id) ?? null : null}

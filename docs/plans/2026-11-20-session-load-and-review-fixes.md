@@ -323,3 +323,16 @@ hooks/useAgentSession.ts:3462   missing: handleCompact, opts.chatInputRef, sessi
 | 旧项目的操作成功会抹掉新项目的失败提示 | 失败分支按 `cwdRef` 判断了，成功分支无条件 `setActionError(null)` | `useScheduledTasks`、`useBackgroundCommands` 的成功分支同样只在 `cwdRef.current === cwd` 时清提示；`useDevServers` 的 `setError(null)` 同理。新增 `hooks/useScheduledTasks.test.mjs`：真 React + JSDOM 复现「A 未完成 → 切 B → B 失败 → A 成功」，去掉守卫即失败 |
 
 验证：全量 570 文件 / 4128 通过 / 0 失败 / 77 跳过；`tsc --noEmit` 通过；`eslint .` 0 error（40 条既存 warning）。
+
+## 13. 移动端大纲入口（0.17.0-merge.20）
+
+移动端此前完全没有大纲：`ChatWindow` 在 `isMobile` 时直接不渲染 `ChatMinimap`（阈值 `max-width: 640px`），所以手机上读长回答翻不回去。
+
+- **入口**：顶栏移动端主操作组里新增一个图标按钮，位置固定在「更多」之前，`aria-pressed` 反映开关；只在有消息的会话出现（新会话点了也没内容）。
+- **形态**：不复制一套实现。`ChatMinimap` 增加 `variant="sheet"`，同一份浮层（搜索、轮次列表、展开预览、标题跳转）摊成底部抽屉：`.rail[data-sheet]` 铺满视口当背景，`.preview` 改成贴底的圆角卡片，胶囊轨道在抽屉里隐藏；点背景或头部 ✕ 关闭。
+- **收起时机**：不能挂在 `onNavigate` 上。未加载轮次要先分页、未挂载的节点要等 `measureNodes` 补测，抽屉提前卸载会把 `pendingNavigationRef` 一起带走，跳转就落空。改成大纲自己在跳转**完成**时调用 `finishNavigation()`（同步滚动后、或待定位目标被消费后）。
+- **状态**：`AppShell` 按会话 id 记（`mobileOutlineSessionId`），切会话自动关闭，与观察面板同一套做法。
+
+验证：`tsc --noEmit` 通过；`eslint` 0 error；`AppTopBar`/`ChatMinimap` 新增用例（按钮排在「更多」前且随可用性出现、抽屉形态渲染、空会话说明）；真机式 400px 窗口实测：按钮出现 → 抽屉列出 15 轮 → 点背景/✕/跳转都能收起。
+
+已知（与本改动无关，桌面同样复现）：大纲里对**未加载轮次**点「跳到对话」会把历史翻出来（18 → 43 行），但视口没有滚到目标轮次（1440px 桌面轨道上同样 `scrollTop` 保持 0）。这条走的是 `jumpToUnloadedTurn` → `pendingNavigationRef` → `measureNodes` 的既有路径，需要单独排查 `targetTurn.scrollTop` 的测量时机。
