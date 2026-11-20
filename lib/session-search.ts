@@ -65,8 +65,25 @@ export async function searchSessionContents(
   // A query of nothing but quotes (`""`) holds no term: search it as one literal string.
   const terms = parseTerms(needle);
   // Escape every operator: each term is literal, with offsets in the original text.
-  const matchers = [...new Set(terms.length ? terms : [needle])]
+  const uniqueTerms = [...new Set(terms.length ? terms : [needle])];
+  const matchers = uniqueTerms
     .map((term) => new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"));
+  /*
+   * 粗筛：大块工具输出不该进 JSON.parse。
+   *
+   * 结构字段可以在原始行上判——每一轮都必须给出 user/assistant 的消息角色，
+   * `"role":"toolResult"` 这类大行直接跳过。关键词**只**用来排除：术语里不含
+   * JSON 会转义的字符（引号、反斜杠、控制字符）时，解码后的正文里出现它，原始行
+   * 里就一定有它；反过来不成立（`\u0068` 形式的转义），所以带 `\u` 的行照旧解析。
+   * 大小写不敏感和 matcher 一致，免得「排除」比「命中」更严。
+   */
+  const RAW_SAFE_TERM = /^[^"\\\u0000-\u001f]+$/;
+  const rawTermTests = uniqueTerms
+    .filter((term) => RAW_SAFE_TERM.test(term))
+    .map((term) => new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"));
+  // 每个词都能在原始行上判，才敢按「一个都没有」排除；有词带引号/反斜杠时就整行解析。
+  const rawFilterable = rawTermTests.length > 0 && rawTermTests.length === uniqueTerms.length;
+  const MESSAGE_ROLE = /"role"\s*:\s*"(?:user|assistant)"/;
   const deadline = Date.now() + TIME_BUDGET_MS;
   const timeout = AbortSignal.timeout(TIME_BUDGET_MS);
   const signal = requestSignal ? AbortSignal.any([requestSignal, timeout]) : timeout;
@@ -105,6 +122,18 @@ export async function searchSessionContents(
         if (line.length > MAX_LINE_CHARS) {
           response.truncated = true;
           continue;
+        }
+        /*
+         * 粗筛只在边界之后做：边界那一行本身要解析（它负责把 pastBoundary 打开），
+         * 在它之前跳过任何一行都可能永远打不开，后面的正文就全丢了。
+         *
+         * 结构：只有 user/assistant 消息可能命中，工具结果和自定义记录直接丢。
+         * 关键词：没有 `\u` 转义、连一个词都没出现在原始行里时，这一行既不可能命中，
+         * 也不可能满足别的词（多词查询里各词可以落在不同行上）。
+         */
+        if (pastBoundary) {
+          if (!MESSAGE_ROLE.test(line)) continue;
+          if (rawFilterable && !line.includes("\\u") && !rawTermTests.some((test) => test.test(line))) continue;
         }
         let entry;
         try { entry = JSON.parse(line); } catch { continue; }

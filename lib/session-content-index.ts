@@ -5,6 +5,7 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { writePrivateFileAtomicSync } from "./atomic-file";
 import { projectTreeForResponse } from "./project-tree";
 import { countTurnsBefore, turnAnchorShape } from "./session-turns";
+import { createPageWalker } from "./session-page-budget";
 import { getTurnAnchors, type TurnAnchorMessage } from "./message-display";
 import { hasOutlineFinalAnswer } from "./outline-final-answer";
 import type { SessionContext, SessionEntry, SessionTreeNode } from "./types";
@@ -58,9 +59,30 @@ declare global {
   var __piSessionContentIndexPromises: Map<string, Promise<PersistedSessionContentIndex>> | undefined;
 }
 
+/**
+ * 内存里最多留几份内容索引。
+ *
+ * 索引本身已经落盘（`writePrivateFileAtomicSync`），淘汰只是让下次重新读一遍文件；
+ * 不设上限时，每个浏览过的会话的 `records` + `tree` 会一直驻留，长时间开着页面
+ * 会把几百万条记录留在内存里。128 份足够覆盖最近浏览的几个项目。
+ */
+const MAX_CACHED_INDEXES = 128;
+
 function indexes(): Map<string, PersistedSessionContentIndex> {
   globalThis.__piSessionContentIndexes ??= new Map();
   return globalThis.__piSessionContentIndexes;
+}
+
+/** 写入最近使用的一份，并按 LRU 从最久未用的开始淘汰。 */
+function rememberIndex(filePath: string, index: PersistedSessionContentIndex): void {
+  const map = indexes();
+  map.delete(filePath);
+  map.set(filePath, index);
+  while (map.size > MAX_CACHED_INDEXES) {
+    const oldest = map.keys().next().value;
+    if (oldest === undefined) break;
+    map.delete(oldest);
+  }
 }
 
 function promises(): Map<string, Promise<PersistedSessionContentIndex>> {
@@ -294,7 +316,7 @@ async function buildOrUpdateIndex(filePath: string, attempt = 1): Promise<Persis
   const memory = indexes().get(filePath);
   const persisted = (memory?.format === 4 ? memory : null) ?? loadPersisted(filePath);
   if (persisted && persisted.identity.size === current.size && persisted.identity.mtimeNs === current.mtimeNs && persisted.identity.ctimeNs === current.ctimeNs) {
-    indexes().set(filePath, persisted);
+    rememberIndex(filePath, persisted);
     return persisted;
   }
 
@@ -314,7 +336,7 @@ async function buildOrUpdateIndex(filePath: string, attempt = 1): Promise<Persis
   index.version = versionOf(finalIdentity, index.indexedBytes, index.boundaryHash);
   index.tree = buildProjectedTree(index.records);
   writePrivateFileAtomicSync(indexPath(filePath), JSON.stringify(index));
-  indexes().set(filePath, index);
+  rememberIndex(filePath, index);
   return index;
 }
 
@@ -397,15 +419,19 @@ export async function readIndexedContextPage(
   let current = byId.get(options.before ?? activeLeafId ?? "");
   if (options.before) current = current?.parentId ? byId.get(current.parentId) : undefined;
   const selected: IndexedRecord[] = [];
-  let visibleCount = 0;
-  const rawLimit = Math.max(200, options.tail * 6);
-  while (current && selected.length < rawLimit) {
+  // 与内存路径共用同一份页预算：尾部连续的非消息记录不占 tail，按条数一刀切会
+  // 让首屏一条消息都没有。索引里有每条记录的字节长度，顺带限制单页读取量。
+  const walker = createPageWalker(options.tail);
+  // 环检测：分页本身有上限，但父链成环时会把同一条记录反复算进页面。
+  const visited = new Set<string>();
+  while (current && !visited.has(current.id)) {
+    visited.add(current.id);
     selected.push(current);
     // 索引中只需读取元信息即可按可见消息分页，不用解析全部历史内容。
-    if (current.type === "compaction" || current.previewRole === "user" || current.previewRole === "assistant") {
-      visibleCount += 1;
-    }
-    if (visibleCount >= options.tail) break;
+    const countsAsVisible = current.type === "compaction"
+      || current.previewRole === "user"
+      || current.previewRole === "assistant";
+    if (walker.accept(countsAsVisible, current.length)) break;
     current = current.parentId ? byId.get(current.parentId) : undefined;
   }
   let thinkingLevel: string | undefined;
@@ -477,7 +503,10 @@ export async function readIndexedBranchOutlineRecords(
   const activeLeafId = leafId ?? index.leafId;
   const branch: IndexedRecord[] = [];
   let cursor = byId.get(activeLeafId ?? "");
-  while (cursor) {
+  // 环检测：走不到头就不会卡死（文件损坏时最多走一圈）。
+  const visited = new Set<string>();
+  while (cursor && !visited.has(cursor.id)) {
+    visited.add(cursor.id);
     if (cursor.turn) branch.push(cursor);
     cursor = cursor.parentId ? byId.get(cursor.parentId) : undefined;
   }

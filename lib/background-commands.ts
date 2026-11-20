@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { writePrivateFileAtomicSync } from "./atomic-file";
+import { trimLogPrefix } from "./bounded-log";
 import { createProjectCommandBashOperations, type ProjectShellSettings } from "./project-command-env";
 import type { WakeDelivery, WakeSessionInput } from "./session-wake";
 import { BACKGROUND_COMMAND_MESSAGE_TYPE } from "./wake-message-types";
@@ -27,6 +28,14 @@ export { BACKGROUND_COMMAND_MESSAGE_TYPE };
 export const MAX_RUNNING_PER_SESSION = 10;
 export const MAX_RUNNING_TOTAL = 30;
 export const MIN_CHECK_IN_SECONDS = 60;
+/**
+ * 检查间隔的上限（一天）。
+ *
+ * 超过 2147483 秒时 Node 的 `setInterval` 会溢出被压成 1ms（实测
+ * `TimeoutOverflowWarning: Timeout duration was set to 1`），于是「最多 12 次」的
+ * 检查会在几毫秒内烧完并连写 12 次盘。24 小时已经远超这个功能的意义。
+ */
+export const MAX_CHECK_IN_SECONDS = 24 * 60 * 60;
 export const MAX_CHECK_INS = 12;
 const MAX_FINISHED_RECORDS = 30;
 const MAX_LOG_CHARS = 256 * 1024;
@@ -138,10 +147,7 @@ export function isBackgroundCommandActive(status: BackgroundCommandSnapshot["sta
 
 function appendLine(record: CommandRecord, line: string): void {
   record.lines.push(line);
-  record.logChars += line.length + 1;
-  while (record.logChars > MAX_LOG_CHARS && record.lines.length > 1) {
-    record.logChars -= record.lines.shift()!.length + 1;
-  }
+  record.logChars = trimLogPrefix(record.lines, record.logChars + line.length + 1, MAX_LOG_CHARS, (entry) => entry.length + 1);
 }
 
 function appendOutput(record: CommandRecord, chunk: string): void {
@@ -328,6 +334,9 @@ export function startBackgroundCommand(input: StartBackgroundCommandInput): Back
   if (input.checkInSeconds !== undefined) {
     if (!Number.isFinite(input.checkInSeconds) || input.checkInSeconds < MIN_CHECK_IN_SECONDS) {
       throw new Error(`check_in_seconds must be at least ${MIN_CHECK_IN_SECONDS}.`);
+    }
+    if (input.checkInSeconds > MAX_CHECK_IN_SECONDS) {
+      throw new Error(`check_in_seconds must be at most ${MAX_CHECK_IN_SECONDS} (24 hours).`);
     }
     checkInSeconds = Math.round(input.checkInSeconds);
   }

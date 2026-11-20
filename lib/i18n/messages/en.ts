@@ -1188,6 +1188,7 @@ export const enLocale: LocalePlugin = {
     "chatMinimap.toolCalls": "Tool calls this turn: {count}",
     "chatMinimap.extensionTurn": "Started by an extension ({type})",
     "chatMinimap.lockPreview": "Lock: don't open the preview on hover",
+    "chatMinimap.pinPreview": "Locked: click to open the outline",
     "chatMinimap.unlockPreview": "Unlock the hover preview",
     "chatMinimap.searchPlaceholder": "Filter {count} turns…",
     "chatMinimap.clickHint": "Click: expand · Double-click: jump",

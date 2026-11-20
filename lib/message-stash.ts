@@ -106,7 +106,8 @@ export function saveStashedMessage(project: string, draft: StashedContent, ident
     if (item?.claim) throw new StashError(409, "Draft delivery is pending");
     const revision = randomUUID();
     const attachment = draft.images.length ? revision : undefined;
-    const next: Item = { ...item, project, id: item?.id ?? randomUUID(), revision, text: draft.text, imageCount: draft.images.length, attachment };
+    // 编辑保存等于重新排队：上一次投递失败的标记必须清掉，否则界面还显示「失败」。
+    const next: Item = { ...item, project, id: item?.id ?? randomUUID(), revision, text: draft.text, imageCount: draft.images.length, attachment, failed: false };
     if (item) items[items.indexOf(item)] = next;
     else items.unshift(next);
     if (attachment) writePrivateFileAtomicSync(imageFile(path, attachment), JSON.stringify(draft.images));

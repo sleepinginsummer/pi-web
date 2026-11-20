@@ -64,16 +64,37 @@ export function stripInlineMarkdown(text: string): string {
     .trim();
 }
 
-/** 逐行扫描 Markdown，按出现顺序返回标题行与正文行（代码块整体跳过）。 */
+/** 列表项标记：缩进 + 标记 + 分隔空白，用来算出列表项内容的缩进。 */
+const LIST_MARKER = /^( {0,3})([-*+]|\d{1,9}[.)])([ \t]+)/;
+
+/**
+ * 分隔线：三个以上同一种 `-` / `*` / `_`，字符之间允许空格。
+ *
+ * CommonMark 里分隔线优先于列表项——`- - -` 是分隔线，不是「内容为 `- -` 的列表项」。
+ * 当成列表项会让它下面的 `  ## 标题` 变成列表内部的嵌套标题：正文照样渲染成标题，
+ * 大纲却因为「列表里不算顶层标题」而丢掉它，展开入口也不出现。
+ */
+const THEMATIC_BREAK = /^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/;
+
+/**
+ * 逐行扫描 Markdown，按出现顺序返回标题行与正文行（代码块整体跳过）。
+ *
+ * 只认**顶层**标题：正文给最终回答的每个文本块单独渲染 Markdown，remark 只会给
+ * 顶层 h1/h2 打 `data-answer-heading` 标记，列表项里的 `  ## 标题` 在正文里是
+ * 嵌套标题，点不到。这里按 CommonMark 的列表缩进规则判一下，让大纲与服务端摘要
+ * 跟正文认同一批标题。
+ */
 export function scanOutlineLines(markdown: string): OutlineLine[] {
   if (!markdown) return [];
   const lines: OutlineLine[] = [];
   let inFence: { char: string; length: number } | null = null;
-  // 上一行正文：下一行若是 Setext 下划线，它其实是标题文字。
-  let pending: string | null = null;
+  // 上一行正文：下一行若是 Setext 下划线，它其实是标题文字。`topLevel` 记住它是否在列表外。
+  let pending: { text: string; topLevel: boolean } | null = null;
+  // 每层打开着的列表项的内容缩进；空行不关闭列表，只有缩进回到外面才关闭。
+  const listContentIndents: number[] = [];
 
   const flush = () => {
-    if (pending !== null) lines.push({ kind: "text", text: pending });
+    if (pending !== null) lines.push({ kind: "text", text: pending.text });
     pending = null;
   };
 
@@ -91,13 +112,33 @@ export function scanOutlineLines(markdown: string): OutlineLine[] {
     }
     if (inFence) continue;
 
+    const indent = rawLine.length - rawLine.trimStart().length;
+    const thematicBreak = THEMATIC_BREAK.test(rawLine);
+    const marker = thematicBreak ? null : rawLine.match(LIST_MARKER);
+    let insideList = false;
+    if (marker) {
+      const markerIndent = marker[1].length;
+      const contentIndent = markerIndent + marker[2].length + marker[3].length;
+      while (listContentIndents.length > 0 && markerIndent < listContentIndents[listContentIndents.length - 1]) {
+        listContentIndents.pop();
+      }
+      listContentIndents.push(contentIndent);
+      insideList = true;
+    } else if (rawLine.trim()) {
+      // 缩进回到当前列表项内容之外，这一项（以及更外层的列表）就结束了。
+      while (listContentIndents.length > 0 && indent < listContentIndents[listContentIndents.length - 1]) {
+        listContentIndents.pop();
+      }
+      insideList = listContentIndents.length > 0;
+    }
+
     const setext = rawLine.match(SETEXT_UNDERLINE);
     if (setext && pending !== null) {
-      if (isSetextTextLine(pending)) {
-        const text = stripInlineMarkdown(pending);
+      if (pending.topLevel && isSetextTextLine(pending.text)) {
+        const text = stripInlineMarkdown(pending.text);
         if (text) lines.push({ kind: "heading", level: setext[1][0] === "=" ? 1 : 2, text });
       } else {
-        lines.push({ kind: "text", text: pending });
+        lines.push({ kind: "text", text: pending.text });
       }
       pending = null;
       continue;
@@ -106,18 +147,23 @@ export function scanOutlineLines(markdown: string): OutlineLine[] {
     const atx = rawLine.match(ATX_HEADING);
     if (atx) {
       flush();
+      // 列表项里的标题在正文里是嵌套节点，没有标记，不算大纲标题。
+      if (insideList) continue;
       const text = stripInlineMarkdown(atx[2]);
       if (text) lines.push({ kind: "heading", level: atx[1].length === 1 ? 1 : 2, text });
       continue;
     }
 
     flush();
+    // 分隔线不是正文：上面已经按缩进关掉了更深的列表，这里不要再把它当成待定段落。
+    if (thematicBreak) continue;
     const trimmed = rawLine.trim();
-    if (trimmed) pending = trimmed;
+    if (trimmed) pending = { text: trimmed, topLevel: !insideList };
   }
   flush();
   return lines;
 }
+
 
 /** 提取一级与二级标题（1-A 大纲只展示这两级，避免 h3 刷屏）。 */
 export function extractOutlineHeadings(markdown: string, limit = Number.POSITIVE_INFINITY): OutlineHeading[] {
@@ -152,6 +198,25 @@ function closeTrailingFence(markdown: string): string {
 /** 按正文的块边界拼接最终回答的文本块：先封住每块末尾的围栏，拼成一篇的解析结果才和逐块渲染一致。 */
 export function joinAnswerBlocks(blocks: readonly string[]): string {
   return blocks.map(closeTrailingFence).join("\n\n");
+}
+
+/**
+ * 逐块解析顶层标题（可截断）。
+ *
+ * 正文把最终回答的每个文本块单独渲染成 Markdown，拼接后的顶层结构可能不同：
+ * 第二块以两格缩进的标题开头时，拼进前一块的列表里就成了嵌套。服务端目录、
+ * 前端展开判断都用这一份逐块结果，未加载轮次和已加载轮次才认同一批标题。
+ */
+export function outlineHeadingsFromBlocks(
+  blocks: readonly string[],
+  limit = Number.POSITIVE_INFINITY,
+): OutlineHeading[] {
+  const headings: OutlineHeading[] = [];
+  for (const block of blocks) {
+    if (headings.length >= limit) break;
+    headings.push(...extractOutlineHeadings(block, limit - headings.length));
+  }
+  return headings;
 }
 
 /** 快速判断是否含一/二级标题：大纲行没有可展开的标题时不必渲染标题区。 */

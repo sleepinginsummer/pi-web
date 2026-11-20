@@ -151,6 +151,20 @@ export async function readSessionBrowseSnapshot(sessionId: string): Promise<Sess
   throw new Error("会话文件读取失败");
 }
 
+/**
+ * 只读存活会话的版本，不建树。
+ *
+ * `/context` 先用它比对 `If-None-Match`：命中 304 时就不必 `projectSessionTree`，
+ * 而那是这份快照里最贵的一步（每条记录一个节点）。版本算法与
+ * `readSessionBrowseSnapshot` 的 live 分支完全一致，否则 ETag 永远对不上。
+ */
+export function liveSessionBrowseVersion(sessionId: string): string | null {
+  const rpc = getRpcSession(sessionId);
+  if (!rpc?.isAlive()) return null;
+  const manager = rpc.inner.sessionManager;
+  return liveVersion(manager.getEntries() as unknown as SessionEntry[], manager.getLeafId());
+}
+
 export function sessionVersionEtag(version: string): string {
   return `"${version}"`;
 }

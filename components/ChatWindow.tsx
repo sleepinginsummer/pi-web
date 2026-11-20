@@ -44,6 +44,7 @@ import type { SessionListRefreshRequest } from "@/lib/session-list-refresh-coord
 import { findChatScrollAnchor, type ChatReadingPosition } from "@/lib/chat-scroll-position";
 import type { SettingsSection } from "@/lib/settings-navigation";
 import { getTranscriptNotices, summarizeCacheMisses } from "@/lib/transcript-notices";
+import type { TranscriptNotice } from "@/lib/transcript-notices";
 import { TranscriptNoticeLines } from "@/components/TranscriptNotices";
 import { ProcessDetailsGroup } from "./ProcessDetailsGroup";
 import {
@@ -477,7 +478,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
     // clears the composer's own selection and drops its caret to offset 0
     // (#1319), so the quote would be typed in front of instead of after.
     closeQuotedSelection();
-  }, [chatInputRef, closeQuotedSelection, quotedSelection, t]);
+  }, [chatInputRef, closeQuotedSelection, quotedSelection]);
 
   const askSelectionInSideChat = useCallback(async (prompt: string) => {
     if (quoteSubmitting || !prompt.trim() || !quotedSelection) return;
@@ -498,7 +499,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
     } finally {
       setQuoteSubmitting(false);
     }
-  }, [quotedSelection, quoteSubmitting, closeQuotedSelection, startSideChat]);
+  }, [quotedSelection, quoteSubmitting, closeQuotedSelection, startSideChat, unlockAudio]);
 
   // The composer's Side chat button: its draft goes back on a refusal, as a failed send's does.
   const askInSideChat = useCallback(async (message: string) => {
@@ -575,9 +576,15 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
   pendingScrollRestoreRef.current = pendingScrollRestore;
   historyCursorRef.current = historyCursor;
   const [pendingSearchScroll, setPendingSearchScroll] = useState<Props["searchTarget"]>(null);
+  // 卸载时读的是这两个值，不能读挂载那一帧的闭包：`sessionKey` 是导航计数器，
+  // pending 新会话转正时并不自增，闭包里的 `session?.id` 会永远是 undefined，
+  // 那个会话切走时阅读位置就存不下来。会话 id 用 hook 里那份（它跟着创建更新）。
+  const onScrollPositionChangeRef = useRef(onScrollPositionChange);
+  onScrollPositionChangeRef.current = onScrollPositionChange;
 
   useLayoutEffect(() => () => {
-    const sessionId = session?.id;
+    const sessionId = sessionIdRef.current;
+    const onScrollPositionChange = onScrollPositionChangeRef.current;
     const container = scrollContainerRef.current;
     const content = messageContentRef.current;
     if (!sessionId || !onScrollPositionChange || !container || !content || pendingScrollRestoreRef.current) return;
@@ -600,7 +607,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
       ...anchor,
       oldestEntryId: historyCursorRef.current,
     });
-  }, []);
+  }, [scrollContainerRef, sessionIdRef]);
 
   useEffect(() => {
     if (searchTarget) {
@@ -1426,8 +1433,17 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                 const finalViews = getFinalAnswerViews(finalAnswerViewCache, messages[finalAssistantIdx] as AssistantMessage);
                 const finalAnswerMessage = finalViews.answer;
 
-                const processViews: ReactNode[] = [];
-                // processViews also holds the notice lines of steps that show nothing else.
+                /*
+                 * 过程详情默认折叠：这里只收集轻量描述，真正的 JSX 等展开时再构造
+                 * （`ProcessDetailsGroup` 只在展开/需要显示时才调 `renderChildren`）。
+                 * 20 轮 × 20 步的会话里，折叠态不必每帧都造几百个元素和闭包。
+                 */
+                type ProcessDescriptor =
+                  | { kind: "plain"; index: number }
+                  | { kind: "notices"; index: number; notices: TranscriptNotice[] }
+                  | { kind: "message"; index: number; message: AssistantMessage; showTimestamp: boolean; withNotices: boolean };
+                const processDescriptors: ProcessDescriptor[] = [];
+                // 也收「只有提示行、没有内容」的步骤。
                 let processMessageCount = 0;
                 let processToolCount = 0;
                 let processRefIdx: number | undefined;
@@ -1439,7 +1455,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                     if (isHiddenCustomMessage(processMessage)) continue;
                     revealProcess ||= Boolean(pendingSearchScroll && pendingSearchScroll.entryId === entryIds[processIdx]);
                     processMessageCount += 1;
-                    processViews.push(renderMessage(processIdx, { attachRef: false, keyPrefix: "process" }));
+                    processDescriptors.push({ kind: "plain", index: processIdx });
                     continue;
                   }
                   if (processMessage.role !== "assistant") continue;
@@ -1449,7 +1465,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                   const blocks = getDisplayableAssistantBlocks(message);
                   if (blocks.length === 0) {
                     const notices = withNotices ? getTranscriptNotices(processMessage) : [];
-                    if (notices.length > 0) processViews.push(<TranscriptNoticeLines key={`process-notices-${messageKeys[processIdx]}`} notices={notices} />);
+                    if (notices.length > 0) processDescriptors.push({ kind: "notices", index: processIdx, notices });
                     continue;
                   }
                   processRefIdx ??= visibleRefIndexByMessage.get(processIdx);
@@ -1463,19 +1479,36 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                       || blocks.some((block) => processMessage.content.indexOf(block) === pendingSearchScroll.blockIndex)
                     )
                   );
-                  processViews.push(renderMessage(processIdx, {
-                    attachRef: false,
-                    keyPrefix: "process",
-                    messageOverride: message,
+                  processDescriptors.push({
+                    kind: "message",
+                    index: processIdx,
+                    message,
                     // 同一条消息拆成过程和答复时，只在答复处显示时间。
                     showTimestamp: processIdx !== finalAssistantIdx || !finalAnswerMessage,
                     withNotices,
-                  }));
+                  });
                 }
+                const renderProcessViews = (): ReactNode => processDescriptors.map((entry) => {
+                  if (entry.kind === "notices") {
+                    return <TranscriptNoticeLines key={`process-notices-${messageKeys[entry.index]}`} notices={entry.notices} />;
+                  }
+                  if (entry.kind === "plain") {
+                    return renderMessage(entry.index, { attachRef: false, keyPrefix: "process" });
+                  }
+                  return renderMessage(entry.index, {
+                    attachRef: false,
+                    keyPrefix: "process",
+                    messageOverride: entry.message,
+                    showTimestamp: entry.showTimestamp,
+                    withNotices: entry.withNotices,
+                  });
+                });
 
                 // 只有提示行（其余步骤不显示内容）时不折叠。
-                if (processMessageCount === 0) nodes.push(...processViews);
-                else if (processViews.length > 0) {
+                if (processMessageCount === 0) nodes.push(
+                  <Fragment key={`process-only-${messageKeys[start] ?? start}`}>{renderProcessViews()}</Fragment>,
+                );
+                else if (processDescriptors.length > 0) {
                   // 过程详情一律默认折叠，历史轮次折起来只留摘要行。列表末尾这一轮若看不到答复
                   // （跑完或中断却没有答复，或被压缩卡片、唤醒消息切开的前一段），折叠时先亮出最新几条：
                   // 既不会一次摊开几十张工具卡，也不会连它刚做了什么都看不到（#906）。
@@ -1526,7 +1559,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                         reveal={revealProcess}
                         renderRecent={showsRecentWhenFolded ? renderFoldPreview : undefined}
                         t={t}
-                        renderChildren={() => <>{processViews}</>}
+                        renderChildren={() => <>{renderProcessViews()}</>}
                       />
                     </div>,
                   );
@@ -1538,7 +1571,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                   // 最终回答的顶层标题带标记：右侧大纲跳转靠它和预览的编号逐个对上。
                   finalAnswer: true,
                   // 没有过程详情时，本轮耗时显示在答复下方。
-                  turnDurationMs: processViews.length === 0 ? turnDurationMs : undefined,
+                  turnDurationMs: processDescriptors.length === 0 ? turnDurationMs : undefined,
                   recoverTruncation: end === messages.length && !isStreaming && !hasAssistantAnswer(finalAnswerMessage),
                 }));
                 for (let index = finalAssistantIdx + 1; index < end; index++) nodes.push(renderMessage(index));

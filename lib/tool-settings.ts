@@ -153,9 +153,6 @@ function validateModel(model: unknown): ToolModelSelection | null {
     || !fullId.includes("/") || fullId.startsWith("/") || fullId.endsWith("/")) {
     throw new Error("model 必须是 provider/modelId，例如 anthropic/claude-sonnet-4");
   }
-  if (!provider || !modelId || !fullId.includes("/") || fullId.startsWith("/") || fullId.endsWith("/")) {
-    throw new Error("model 必须是 provider/modelId，例如 anthropic/claude-sonnet-4");
-  }
   return { provider, modelId };
 }
 

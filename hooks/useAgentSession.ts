@@ -70,6 +70,7 @@ import {
   type SessionDetails,
   invalidateSessionContext,
 } from "@/lib/session-load-client";
+import { backfillFirstPage, mergeOlderPage } from "@/lib/first-page-backfill";
 import { LatestContextLoader } from "@/lib/latest-context-loader";
 import { createIdleMessageReads, entriesAfter } from "@/lib/idle-message-read";
 import { SessionContextRefreshScheduler } from "@/lib/session-context-refresh-scheduler";
@@ -1302,6 +1303,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (showLoading) setLoading(true);
     try {
       const readSeq = ++sessionReadSeqRef.current;
+      // 实际提交进界面的那一份：恢复的更大窗口可能是它，而不是服务端这一页。
+      // 补页要从它继续往前翻，否则会把已经恢复的历史换掉。
+      let committedSnapshot: SessionContextSnapshot | null = null;
       const contextResult = await contextLoaderRef.current.run(
         sid,
         (signal) => fetchSessionContext(sid, signal, { skipCache: options.validateView }),
@@ -1333,12 +1337,50 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             // 版本及活动 leaf 均一致才保留已分页的大窗口；其它元数据以服务端为准。
             const wider = { ...loaded.snapshot, messages: saved.messages, entryIds: saved.entryIds,
               oldestEntryId: saved.oldestEntryId, hasMore: saved.hasMore, turnsBefore: saved.turnsBefore };
-            return commitContextSnapshot(sid, wider, loaded.leafId, { preserveScroll: true }) ? loaded : null;
+            if (!commitContextSnapshot(sid, wider, loaded.leafId, { preserveScroll: true })) return null;
+            committedSnapshot = wider;
+            return loaded;
           }
           if (saved) deleteSessionViewSnapshot(sid);
-          return commitContextSnapshot(sid, loaded.snapshot, loaded.leafId, options) ? loaded : null;
+          if (!commitContextSnapshot(sid, loaded.snapshot, loaded.leafId, options)) return null;
+          committedSnapshot = loaded.snapshot;
+          return loaded;
       });
       if (!contextResult.committed || !contextResult.value) return { loaded: false, agentState: null };
+      // 首屏一页可能全是过程记录（见 lib/session-page-budget.ts）：补几页再交给界面，
+      // 否则打开会话看到的是空白。翻页只看服务端响应：游标、有没有消息都来自刚拿到的页，
+      // 不读 ref 或 state —— 它们在同一个异步续体里可能还是上一帧、甚至上一个会话的值。
+      const firstSnapshot = committedSnapshot ?? contextResult.value.snapshot;
+      const firstLeafId = contextResult.value.leafId;
+      await backfillFirstPage({
+        first: firstSnapshot,
+        readOlder: async (before) => {
+          const older = await contextLoaderRef.current.run(
+            sid,
+            (signal) => fetchSessionContext(sid, signal, { before, tail: SESSION_CONTEXT_PAGE_SIZE, skipCache: true }),
+            (loaded) => loaded,
+          ).catch((error: unknown) => {
+            if (!(error instanceof DOMException && error.name === "AbortError")) {
+              console.error("Failed to backfill the first session page:", error);
+            }
+            return { committed: false as const };
+          });
+          if (!older.committed || older.value.kind !== "loaded") return null;
+          if (sessionIdRef.current !== sid) return null;
+          return older.value;
+        },
+        commit: (page) => {
+          if (sessionIdRef.current !== sid) return false;
+          // 合并时只取旧页的消息、entryId 和游标；模型/思考强度/版本以首屏那页为准，
+          // 否则会话尾部改过的设置会被「从 before 往上算」的旧值覆盖。
+          return commitContextSnapshot(
+            sid,
+            mergeOlderPage(firstSnapshot, page.snapshot),
+            firstLeafId,
+            options,
+          );
+        },
+      });
       if (showLoading) {
         performance.clearMarks(`${performancePrefix}:data`);
         performance.mark(`${performancePrefix}:data`);
@@ -1537,6 +1579,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     eventStreamConnectionRef.current = null;
   }, []);
 
+  // 建连实现依赖 applyRuntimeState 等一串回调，直接写进 executeBash 的依赖会让它每次渲染
+  // 都换代；这里用 ref 取最新实现，executeBash 才能稳定地挂在 executeBashRef 上。
+  const ensureConnectedRef = useRef<(sid: string) => Promise<void>>(async () => {});
   const connectEvents = useCallback((sid: string): Promise<EventStreamConnectionResult> => {
     // 并行的初始化请求复用同一条 SSE，避免互相关闭等待审批的连接。
     const existing = eventStreamConnectionRef.current;
@@ -1607,6 +1652,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     result.source.close();
     throw new EventStreamConnectionError(result.status);
   }, [connectEvents]);
+  ensureConnectedRef.current = ensureEventsConnected;
 
   // The model and reasoning level a fresh composer's session started with, unless the user
   // picked others since `selectedModel` / `selectedThinkingLevel` were read.
@@ -1716,7 +1762,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const loadSystemPrompt = useCallback(async () => {
     const sid = sessionIdRef.current ?? await ensureNewSession();
     if (!sid) return;
-    const state = await sendAgentCommand<AgentRuntimeState>(sid, { type: "get_state" });
+    // 只有这里需要整份提示词：其它 get_state 读取（思考强度、压缩开关、创建快照）不带它。
+    const state = await sendAgentCommand<AgentRuntimeState>(sid, { type: "get_state", includeSystemPrompt: true });
     if (sessionIdRef.current !== sid) return;
     setSystemPrompt(state.systemPrompt ?? "");
   }, [ensureNewSession]);
@@ -1901,6 +1948,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const translateRef = useRef(opts.t);
   translateRef.current = opts.t;
   const translate = useCallback((key: string, params?: TranslationParams) => translateRef.current(key, params), []);
+  // /session 的摘要读运行时统计：它每次刷新都是新对象，读 ref 免得整个命令分发器跟着换代。
+  const sessionStatsRef = useRef(sessionStats);
+  sessionStatsRef.current = sessionStats;
   // A steer or follow-up whose request failed without the server's refusal (the
   // network dropped, a proxy answered) may still have been accepted. Its text
   // goes back to the composer all the same (restoreSubmission merges it in front
@@ -2994,7 +3044,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // A `user_bash` handler's dialog (ctx.ui.confirm…) reaches the page only
       // through the stream, which a fresh composer has not opened yet. The
       // output streams through it too; without one it comes at the end.
-      await ensureEventsConnected(sid).catch(() => {});
+      await ensureConnectedRef.current(sid).catch(() => {});
       const result = await sendAgentCommand<PendingBash["result"]>(sid, {
         type: "bash",
         command,
@@ -3024,7 +3074,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       idleReadAfterBashRef.current = null;
       if (idleRead) idleMessageReadsRef.current?.(idleRead);
     }
-  }, [addNotice, ensureNewSession, loadSession, opts.chatInputRef, promoteNewSession]);
+  }, [addNotice, ensureNewSession, loadSession, promoteNewSession]);
   executeBashRef.current = executeBash;
 
   /** Stop 交还的排队消息（含附件）回到输入框；请求期间切走会话时只恢复到原会话草稿。 */
@@ -3390,7 +3440,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
         case "session": {
           if (!sid) return complete({ handled: true, error: "No active session" });
-          if (!onSessionStatsPanelOpen) return complete({ handled: true, message: formatSessionSummary(sessionStats, translate) });
+          if (!onSessionStatsPanelOpen) return complete({ handled: true, message: formatSessionSummary(sessionStatsRef.current, translate) });
           const stats = await sendAgentCommand<SessionStatsInfo>(sid, { type: "get_session_stats" });
           if (stats) {
             setSessionStatsOverride(stats);
@@ -3459,7 +3509,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch (e) {
       return complete({ handled: true, error: e instanceof Error ? e.message : String(e) });
     }
-  }, [startSideChat, activeLeafId, addNotice, ensureNewSession, isCompacting, loadCompactedSession, loadModels, loadSession, loadSlashCommands, loadTools, onSessionForked, promoteNewSession, onSessionStatsPanelOpen, runShadowSlashCommand, onOpenSettings, slashCommandsForMcp]);
+  }, [startSideChat, activeLeafId, addNotice, ensureNewSession, isCompacting, loadModels, loadSession, loadSlashCommands, loadTools, onSessionForked, promoteNewSession, onSessionStatsPanelOpen, runShadowSlashCommand, onOpenSettings, slashCommandsForMcp, handleCompact, opts.chatInputRef, translate]);
 
   // 运行中提交统一走确认式契约：只有服务端确认 Pi 已接受后才允许输入框清空。
   // 斜杠命令需要保留 prompt 的模板展开语义，普通文本则使用原生 steer/followUp 队列。
@@ -3951,7 +4001,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }), [
     missingCwd,
     details, loading, error, sendError, activeLeafId, messages, entryIds, messageKeys, streamingStore, historyPage,
-    agentRunning, modelViewState, modelViewActions, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames, toolSelectionKnown,
+    agentRunning, allModelList, loadAllModels, modelSelectionState.isScoped, startSideChat,
+    modelViewState, modelViewActions, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames, toolSelectionKnown,
     retryInfo, contextUsage, systemPrompt, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,

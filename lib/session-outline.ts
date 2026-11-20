@@ -1,12 +1,12 @@
 import { getTurnAnchors, splitFinalAssistantBlocks } from "./message-display";
 import { normalizeAssistantMessage } from "./normalize";
 import { hasOutlineFinalAnswer, pickOutlineFinalAssistant } from "./outline-final-answer";
-import { extractOutlineHeadings, joinAnswerBlocks, scanOutlineLines, stripInlineMarkdown } from "./outline-headings";
+import { extractOutlineHeadings, joinAnswerBlocks, outlineHeadingsFromBlocks, scanOutlineLines, stripInlineMarkdown } from "./outline-headings";
 import { readIndexedBranchOutlineRecords, readIndexedOutlineIdentity } from "./session-content-index";
 import { turnAnchorShape } from "./session-turns";
 import type { AssistantMessage, SessionEntry, TextContent } from "./types";
 
-import type { SessionOutlineTurn } from "./session-outline-types";
+import type { OutlineHeading, SessionOutlineTurn } from "./session-outline-types";
 export type { OutlineHeading, SessionOutlineTurn } from "./session-outline-types";
 export { extractOutlineHeadings } from "./outline-headings";
 
@@ -114,18 +114,30 @@ function extractEntryAnchorText(entry: SessionEntry): {
   return { kind: "user", text: "" };
 }
 
-function extractFinalAssistantMarkdown(entry: SessionEntry | null): string {
-  if (!entry || entry.type !== "message" || !entry.message || entry.message.role !== "assistant") return "";
-  if (!Array.isArray(entry.message.content)) return "";
+/** 最终回答的文本块（按正文渲染顺序）。保留原始缩进：四空格缩进的围栏是缩进代码。 */
+function extractFinalAssistantBlocks(entry: SessionEntry | null): string[] {
+  if (!entry || entry.type !== "message" || !entry.message || entry.message.role !== "assistant") return [];
+  if (!Array.isArray(entry.message.content)) return [];
   const normalized = normalizeAssistantMessage(entry.message) as AssistantMessage;
   const { answerBlocks } = splitFinalAssistantBlocks(normalized);
-  // 保留原始缩进：四空格缩进的第一个围栏是缩进代码，trim 掉缩进会让它变成顶格围栏，
-  // 把后面的标题全吞掉。只用 trim 判断「有没有正文」。
-  const blocks = answerBlocks
+  return answerBlocks
     .filter((block): block is TextContent => block.type === "text")
     .map((block) => block.text);
-  const markdown = joinAnswerBlocks(blocks);
+}
+
+function extractFinalAssistantMarkdown(entry: SessionEntry | null): string {
+  const markdown = joinAnswerBlocks(extractFinalAssistantBlocks(entry));
   return markdown.trim() ? markdown : "";
+}
+
+/**
+ * 逐块取标题，和正文、右侧大纲预览同一套口径（共用 `outlineHeadingsFromBlocks`）。
+ *
+ * 拼接后再扫会把后一块的两格缩进标题并进前一块的列表（`joinAnswerBlocks` 用空行拼接，
+ * 而列表项内容可以跨空行延续），服务端会给未加载轮次少算一个标题，与已加载轮次对不上。
+ */
+function extractFinalAssistantHeadings(entry: SessionEntry | null): OutlineHeading[] {
+  return outlineHeadingsFromBlocks(extractFinalAssistantBlocks(entry), MAX_HEADINGS_PER_TURN);
 }
 
 export function buildOutlineTurnsFromPairs(
@@ -143,7 +155,7 @@ export function buildOutlineTurnsFromPairs(
       userText: anchorInfo.text,
       ...(finalAssistant ? { finalAssistantEntryId: finalAssistant.id } : {}),
       answerSummary: extractOutlineSummary(answerMarkdown),
-      headings: extractOutlineHeadings(answerMarkdown, MAX_HEADINGS_PER_TURN),
+      headings: extractFinalAssistantHeadings(finalAssistant),
     };
   });
 }
@@ -157,7 +169,10 @@ export function buildSessionOutlineFromEntries(
   const activeLeafId = leafId ?? entries.at(-1)?.id ?? null;
   const branch: Array<{ entry: SessionEntry; shape: NonNullable<ReturnType<typeof turnAnchorShape>> }> = [];
   let cursor = byId.get(activeLeafId ?? "");
-  while (cursor) {
+  // 环检测：文件被改坏（自己当自己的祖先）时不能原地打转。
+  const visited = new Set<string>();
+  while (cursor && !visited.has(cursor.id)) {
+    visited.add(cursor.id);
     const shape = turnAnchorShape(cursor);
     if (shape) branch.push({ entry: cursor, shape });
     cursor = cursor.parentId ? byId.get(cursor.parentId) : undefined;

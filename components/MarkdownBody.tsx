@@ -57,6 +57,12 @@ interface MarkdownBodyProps {
   keepTextLayout?: boolean;
   /** 本轮最终回答：给顶层 h1/h2 打标记，供大纲跳到正文时逐个对上（预览用同一套规则）。 */
   markAnswerHeadings?: boolean;
+  /**
+   * 这段文本是最终回答里的第几个内容块（`splitFinalAssistantBlocks` 的下标）。
+   * 大纲预览逐块渲染，点击标题时用「块下标 + 块内标题下标」定位正文，
+   * 不依赖跨块的累计编号 —— 拼接解析与逐块渲染的顶层结构本来就可能不同。
+   */
+  answerBlockIndex?: number;
 }
 
 function MarkdownImage({
@@ -144,7 +150,7 @@ function renderListItems(children: ReactNode, ordered: boolean, start = 1) {
 }
 
 // 整体 memo：父组件因无关状态重渲染时，相同正文不再重新解析。
-export const MarkdownBody = memo(function MarkdownBody({ children, className, isStreaming, cwd, sessionId, onOpenFile, onNavigateLink, keepLineBreaks, keepTextLayout, markAnswerHeadings }: MarkdownBodyProps) {
+export const MarkdownBody = memo(function MarkdownBody({ children, className, isStreaming, cwd, sessionId, onOpenFile, onNavigateLink, keepLineBreaks, keepTextLayout, markAnswerHeadings, answerBlockIndex }: MarkdownBodyProps) {
   const normalizedMarkdown = useMemo(() => normalizeDisplayMath(children), [children]);
   // 回调和配置都通过 ref 读取，让 components 只随 cwd / 流式状态 / 是否有打开文件
   // 能力变化，块级 memo 才能在上游回调换身份时依然命中。
@@ -160,6 +166,8 @@ export const MarkdownBody = memo(function MarkdownBody({ children, className, is
   // Stable renderer identities keep stateful blocks mounted across message hover updates.
   const components = useMemo<Components>(() => ({
     code({ className, children, ...props }) {
+      // node 是 hast 节点，不能当 DOM 属性透传（和下面 ul 一样先摘掉）。
+      delete props.node;
       const lang = className?.replace("language-", "").toLowerCase() ?? "";
       const raw = String(children);
       const isBlock = className?.includes("language-") || raw.includes("\n");
@@ -282,7 +290,7 @@ export const MarkdownBody = memo(function MarkdownBody({ children, className, is
   );
 
   return (
-    <div className={["markdown-body", className].filter(Boolean).join(" ")}>
+    <div className={["markdown-body", className].filter(Boolean).join(" ")} data-answer-block={answerBlockIndex}>
       {streamingSplit ? (
         <>
           {streamingSplit.blocks.map((block, index) => (

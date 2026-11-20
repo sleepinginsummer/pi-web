@@ -205,9 +205,10 @@ export async function GET(
   const { id } = await params;
 
   try {
-    const snapshot = await getRpcSessionSnapshot(id);
     // Status reads leave out the system prompt, most of the reply (agentStatusUrl()).
-    if (snapshot.state && new URL(req.url).searchParams.get("systemPrompt") === "0") {
+    const includeSystemPrompt = new URL(req.url).searchParams.get("systemPrompt") !== "0";
+    const snapshot = await getRpcSessionSnapshot(id, { includeSystemPrompt });
+    if (snapshot.state && !includeSystemPrompt) {
       const { systemPrompt: _omitted, ...state } = snapshot.state;
       return NextResponse.json({ ...snapshot, state });
     }

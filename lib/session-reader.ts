@@ -12,6 +12,7 @@ import { normalizeToolCalls } from "./normalize";
 import { getThinkingPreview } from "./message-display";
 import { withoutMessageSignatures } from "./message-signatures";
 import { countTurnsBefore, turnAnchorShape } from "./session-turns";
+import { createPageWalker } from "./session-page-budget";
 import { projectIdentityKey } from "./project-identity";
 import { sessionPathKey } from "./session-path";
 import { skillExpansionToCommand } from "./slash-display";
@@ -884,10 +885,13 @@ function countsTowardTail(entry: SessionEntry): boolean {
   return role === "user" || role === "assistant";
 }
 
-const MIN_RAW_WINDOW_ENTRIES = 200;
-const rawWindowCap = (tail: number) => Math.max(MIN_RAW_WINDOW_ENTRIES, tail * 6);
-
-/** 从叶子迭代遍历祖先，避免长会话递归溢出。 */
+/**
+ * 从叶子迭代遍历祖先，避免长会话递归溢出。
+ *
+ * 页大小由 `lib/session-page-budget.ts` 统一判定：尾部连续的非消息记录
+ * （shadow-mind-event、plan-mode-state…）不占 `tail`，但可能长达几百条，
+ * 到点就停会让首屏一条消息都没有。
+ */
 export function sliceActiveBranch(
   entries: SessionEntry[],
   leafId: string | null,
@@ -905,12 +909,10 @@ export function sliceActiveBranch(
   if (!leaf) return [];
   const chain: SessionEntry[] = [];
   let current: SessionEntry | undefined = leaf;
-  let visible = 0;
-  const rawCap = rawWindowCap(tail);
+  const walker = createPageWalker(tail);
   while (current) {
     chain.push(current);
-    if (countsTowardTail(current)) visible++;
-    if (visible >= tail || chain.length >= rawCap) break;
+    if (walker.accept(countsTowardTail(current))) break;
     current = current.parentId ? byId.get(current.parentId) : undefined;
   }
 

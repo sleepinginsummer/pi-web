@@ -8,6 +8,8 @@ export async function GET(
 ) {
   const { id } = await params;
   try {
+    // 状态读取（挂载、每 15 秒的 reconcile）从不显示提示词：`systemPrompt` 几乎就是
+    // 整份回复的大小，只在顶栏「系统」面板里按需单独读取。
     const snapshot = await getRpcSessionSnapshot(id);
     if (snapshot.alive) return NextResponse.json(snapshot);
 

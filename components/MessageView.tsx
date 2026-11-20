@@ -66,6 +66,7 @@ export function getModelDisplayName(provider: string, responseModel: string, mod
 
 const MAX_THINKING_CACHE_ENTRIES = 100;
 const thinkingContentCache = new Map<string, Promise<string>>();
+const MAX_DEFERRED_CONTENT_ENTRIES = 100;
 const deferredContentCache = new Map<string, Promise<unknown>>();
 const MAX_MARKDOWN_CHARS = 100_000;
 const CJK_PATTERN = /[\u3000-\u30ff\u3400-\u9fff\uf900-\ufaff\u{20000}-\u{2fa1f}\uac00-\ud7af]/u;
@@ -86,6 +87,13 @@ async function loadDeferredContent(url: string): Promise<unknown> {
       throw error;
     });
     deferredContentCache.set(url, pending);
+    // 按需加载的图片/附件地址可以很多，不设上限会一直留在页面里。
+    if (deferredContentCache.size > MAX_DEFERRED_CONTENT_ENTRIES) {
+      for (const stale of deferredContentCache.keys()) {
+        if (deferredContentCache.size <= MAX_DEFERRED_CONTENT_ENTRIES) break;
+        if (stale !== url) deferredContentCache.delete(stale);
+      }
+    }
   }
   return pending;
 }
@@ -831,7 +839,7 @@ function AssistantMessageView({
 
 function BlockView({ block, searchTarget, toolResults, toolsNotRun, toolClocks, isStreaming, streamingDuration, toolCallDurations, cwd, onOpenFile, onOpenSubagent, sessionId, entryId, blockIndex, markAnswerHeadings }: { block: AssistantContentBlock; searchTarget?: boolean; toolResults?: Map<string, ToolResultMessage>; toolsNotRun?: boolean; toolClocks?: ToolClocks; isStreaming?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; onOpenSubagent?: (sessionId: string, label: string) => void; sessionId?: string; entryId?: string; blockIndex: number; markAnswerHeadings?: boolean }) {
   if (block.type === "text") {
-    return <div data-search-target={searchTarget || undefined}><TextBlock block={block as TextContent} isStreaming={isStreaming} cwd={cwd} sessionId={sessionId} onOpenFile={onOpenFile} markAnswerHeadings={markAnswerHeadings} /></div>;
+    return <div data-search-target={searchTarget || undefined}><TextBlock block={block as TextContent} isStreaming={isStreaming} cwd={cwd} sessionId={sessionId} onOpenFile={onOpenFile} markAnswerHeadings={markAnswerHeadings} answerBlockIndex={blockIndex} /></div>;
   }
   if (block.type === "image") {
     return <ImageBlock block={block as ImageContent} />;
@@ -848,7 +856,7 @@ function BlockView({ block, searchTarget, toolResults, toolsNotRun, toolClocks, 
   return null;
 }
 
-function TextBlock({ block, isStreaming, cwd, sessionId, onOpenFile, markAnswerHeadings }: { block: TextContent; isStreaming?: boolean; cwd?: string; sessionId?: string; onOpenFile?: (filePath: string) => void; markAnswerHeadings?: boolean }) {
+function TextBlock({ block, isStreaming, cwd, sessionId, onOpenFile, markAnswerHeadings, answerBlockIndex }: { block: TextContent; isStreaming?: boolean; cwd?: string; sessionId?: string; onOpenFile?: (filePath: string) => void; markAnswerHeadings?: boolean; answerBlockIndex?: number }) {
   // 普通文本始终读当前块；只有按需加载的完整正文进入 state，避免稳定块 key 冻结流式内容。
   const [loaded, setLoaded] = useState<{ url: string; text: string } | null>(null);
   const fullContentLoaded = loaded !== null && loaded.url === block.deferredUrl;
@@ -866,7 +874,7 @@ function TextBlock({ block, isStreaming, cwd, sessionId, onOpenFile, markAnswerH
     }).catch((cause) => setError(String(cause))).finally(() => setLoading(false));
   };
   return <>
-    <SafeMarkdownBody isStreaming={isStreaming} cwd={cwd} sessionId={sessionId} onOpenFile={onOpenFile} markAnswerHeadings={markAnswerHeadings}>{text}</SafeMarkdownBody>
+    <SafeMarkdownBody isStreaming={isStreaming} cwd={cwd} sessionId={sessionId} onOpenFile={onOpenFile} markAnswerHeadings={markAnswerHeadings} answerBlockIndex={answerBlockIndex}>{text}</SafeMarkdownBody>
     {block.deferredUrl && !fullContentLoaded && (
       <button type="button" onClick={load} disabled={loading} style={{ padding: 0, border: 0, background: "none", color: "var(--accent)", cursor: loading ? "default" : "pointer", fontSize: 11 }}>
         {loading ? "loading..." : "view full content"}

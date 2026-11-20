@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
+import { usePolledJson } from "@/hooks/usePolledJson";
 import type { DevServerListResponse, DevServerSnapshot } from "@/lib/types";
 
 const IDLE_POLL_MS = 4000;
@@ -28,54 +29,17 @@ async function postJson(url: string, body: unknown): Promise<void> {
  * for; polling speeds up while any server is starting or stopping.
  */
 export function useDevServers(cwd: string | null | undefined) {
-  const [data, setData] = useState<DevServerListResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set());
-  const requestRef = useRef(0);
-
-  const refresh = useCallback(async () => {
-    if (!cwd) return;
-    const request = ++requestRef.current;
-    try {
-      const response = await fetch(`/api/servers?cwd=${encodeURIComponent(cwd)}`, { cache: "no-store" });
-      const next = await response.json() as DevServerListResponse & { error?: string };
-      if (request !== requestRef.current) return;
-      if (!response.ok || next.error) throw new Error(next.error ?? `HTTP ${response.status}`);
-      setData(next);
-      setError(null);
-    } catch (cause) {
-      if (request === requestRef.current) setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  }, [cwd]);
-
-  useEffect(() => {
-    setData(null);
-    setError(null);
-  }, [cwd]);
-
-  const busy = Boolean(data?.servers.some((server) => server.status === "starting" || server.status === "stopping"))
-    || pending.size > 0;
-
-  useEffect(() => {
-    if (!cwd) return;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    let stopped = false;
-    const tick = async () => {
-      if (stopped) return;
-      if (document.visibilityState === "visible") await refresh();
-      if (!stopped) timer = setTimeout(tick, busy ? BUSY_POLL_MS : IDLE_POLL_MS);
-    };
-    void tick();
-    const onVisible = () => {
-      if (document.visibilityState === "visible") void refresh();
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => {
-      stopped = true;
-      if (timer) clearTimeout(timer);
-      document.removeEventListener("visibilitychange", onVisible);
-    };
-  }, [busy, cwd, refresh]);
+  // 轮询快慢看最近一次结果：ref 每次渲染更新，poller 的下一拍读它，
+  // 于是「有服务在启动」时不必重启轮询、也不会多发一次请求。
+  const latestRef = useRef<DevServerListResponse | null>(null);
+  const busy = (data: DevServerListResponse | null) => pending.size > 0
+    || Boolean(data?.servers.some((server) => server.status === "starting" || server.status === "stopping"));
+  const { data, error, refresh, setError } = usePolledJson<DevServerListResponse>(
+    cwd ? `/api/servers?cwd=${encodeURIComponent(cwd)}` : null,
+    () => (busy(latestRef.current) ? BUSY_POLL_MS : IDLE_POLL_MS),
+  );
+  latestRef.current = data;
 
   const run = useCallback(async (key: string, action: () => Promise<void>) => {
     setPending((current) => new Set(current).add(key));
@@ -92,7 +56,7 @@ export function useDevServers(cwd: string | null | undefined) {
       });
       await refresh();
     }
-  }, [refresh]);
+  }, [refresh, setError]);
 
   const start = useCallback((name: string) => run(`start:${name}`, () => postJson("/api/servers", { cwd, name })), [cwd, run]);
   const stop = useCallback((id: string) => run(id, () => postJson(`/api/servers/${encodeURIComponent(id)}`, { action: "stop" })), [run]);

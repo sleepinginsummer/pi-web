@@ -217,8 +217,28 @@ test("context loads atomically through the shared latest loader", () => {
     source.indexOf("const handleModelChange"),
   );
 
-  assert.equal((loadSource.match(/contextLoaderRef\.current\.run\(/g) ?? []).length, 4);
+  // 4 条固定路径（首屏、缓存复验、清空后的重读、最近一次提交）加上首屏空页的有界补页，
+  // 全部经由同一个 loader 串行。
+  assert.equal((loadSource.match(/contextLoaderRef\.current\.run\(/g) ?? []).length, 5);
   assert.equal((loadSource.match(/commitContextSnapshot\(sid, loaded\.snapshot, loaded\.leafId/g) ?? []).length, 4);
+  // 补页的游标与「是否已有消息」必须读同步值：viewSnapshotRef.current.page 要等下一次
+  // 渲染才同步，在那里判 page.sid === sid 会让补页一次都不发生。
+  const backfillSource = loadSource.slice(
+    loadSource.indexOf("await backfillFirstPage("),
+    loadSource.indexOf("if (showLoading) {", loadSource.indexOf("await backfillFirstPage(")),
+  );
+  // 补页只看服务端响应：首屏那一页是刚提交的那一份，客户端状态（ref / state / 上一帧
+  // 的分页快照）一律不参与判断——它们在同一个异步续体里可能还是上一个会话的值，
+  // 读它们会让补页一次都不发生，或者误以为「已经有消息了」。
+  assert.match(loadSource, /let committedSnapshot: SessionContextSnapshot \| null = null;/);
+  assert.match(backfillSource, /first: firstSnapshot/);
+  assert.match(loadSource, /const firstSnapshot = committedSnapshot \?\? contextResult\.value\.snapshot;/);
+  assert.doesNotMatch(backfillSource, /loadedCount|loadedEntryIds|viewSnapshotRef\.current\.page|messagesRef\.current\.length/);
+  // 元数据沿用首屏那页，滚动行为沿用本次加载的 options：补页不该把模型/思考强度改回旧值，
+  // 也不该因为 preserveScroll 让首屏停在顶部。
+  assert.match(backfillSource, /mergeOlderPage\(firstSnapshot, page\.snapshot\)/);
+  assert.match(backfillSource, /firstLeafId,[\s\S]*?options,/);
+  assert.doesNotMatch(backfillSource, /preserveScroll: true/);
   assert.match(loadSource, /contextResult\.value\.cached[\s\S]*?skipCache: true/);
   assert.match(loadSource, /skipCache: true[\s\S]*?preserveScroll: true/);
   assert.match(navigationSource, /navigationChainRef\.current\.get\(sid\)/);

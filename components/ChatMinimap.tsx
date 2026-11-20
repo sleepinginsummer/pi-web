@@ -42,8 +42,10 @@ const NAVIGATION_ACTIVE_LOCK_MS = 1600;
 const MAX_PILL_TICKS = 28;
 
 interface AssistantPreview {
-  /** 最终回答的正文（文本块按块边界拼接，围栏不跨块），用于搜索和标题预览。 */
+  /** 最终回答的正文（文本块按块边界拼接，围栏不跨块），用于搜索。 */
   markdown: string;
+  /** 按正文渲染顺序排列的文本块；预览按块渲染，标题编号与正文一致。 */
+  blocks: AssistantAnswerBlock[];
   entryId?: string;
   element: HTMLDivElement | null;
   /** 正在流式输出的这条回复：正文每帧都变，不用进标题缓存。 */
@@ -93,15 +95,62 @@ export function countToolCalls(message: AgentMessage | Partial<AgentMessage>): n
  * 让上一段过程回复的标题从大纲里消失，而不是继续显示一个点不到的文字预览。
  * 保留原始缩进（四空格缩进的围栏是缩进代码），只用 trim 判断有没有正文。
  */
-export function getAssistantAnswerMarkdown(message: AgentMessage | Partial<AgentMessage>): string | null {
+/** 最终回答里的一个文本块，`blockIndex` 是它在 `answerBlocks` 里的下标。 */
+export interface AssistantAnswerBlock {
+  blockIndex: number;
+  text: string;
+}
+
+/**
+ * 本轮最终回答的正文。`markdown` 用于搜索与摘要，`blocks` 用于逐块渲染与标题定位。
+ *
+ * 拼接后的整篇结构和逐块渲染的顶层结构可能不同（例如第二块以两格缩进的标题开头时，
+ * 拼进前一块的列表里就成了嵌套），所以大纲预览必须按块渲染，编号也按块来算，
+ * 点击时再用「块下标 + 块内标题下标」定位正文。
+ */
+export function getAssistantAnswer(
+  message: AgentMessage | Partial<AgentMessage>,
+): { markdown: string; blocks: AssistantAnswerBlock[] } | null {
   if (message.role !== "assistant") return null;
   const { answerBlocks } = splitFinalAssistantBlocks(message as AssistantMessage);
   if (answerBlocks.length === 0) return null;
-  const blocks = answerBlocks
-    .filter((block): block is TextContent => block.type === "text")
-    .map((block) => block.text);
-  const markdown = joinAnswerBlocks(blocks);
-  return markdown.trim() ? markdown : "";
+  const blocks: AssistantAnswerBlock[] = [];
+  answerBlocks.forEach((block, blockIndex) => {
+    if (block.type === "text") blocks.push({ blockIndex, text: block.text });
+  });
+  const markdown = joinAnswerBlocks(blocks.map((block) => block.text));
+  return { markdown: markdown.trim() ? markdown : "", blocks };
+}
+
+/**
+ * 本轮最终回答的正文；没有回答时返回 null。
+ *
+ * 和主对话一样按「文本或图片」判断有没有回答：纯图片的答复也是回答，返回空正文，
+ * 让上一段过程回复的标题从大纲里消失，而不是继续显示一个点不到的文字预览。
+ * 保留原始缩进（四空格缩进的围栏是缩进代码），只用 trim 判断有没有正文。
+ */
+export function getAssistantAnswerMarkdown(message: AgentMessage | Partial<AgentMessage>): string | null {
+  return getAssistantAnswer(message)?.markdown ?? null;
+}
+
+/**
+ * 按消息对象缓存回答提取结果。
+ *
+ * `measureNodes` 在挂载、滚动、尺寸变化时都会跑（100ms 节流），每次都要对每条回答做
+ * 一次 `joinAnswerBlocks`（逐块 split + 正则）。回答本身很少变，消息对象又是不可变的，
+ * 所以用 WeakMap 缓存：消息被替换后旧值自动回收，也不占引用让它活着。
+ *
+ * 顺带让 `blocks` 的引用稳定下来：大纲预览里 `AssistantOutline` 按 `blocks` 做 memo，
+ * 命中就整段跳过重新解析。
+ */
+const assistantAnswerCache = new WeakMap<object, ReturnType<typeof getAssistantAnswer>>();
+
+export function cachedAssistantAnswer(message: AgentMessage | Partial<AgentMessage>) {
+  const cached = assistantAnswerCache.get(message);
+  if (cached !== undefined) return cached;
+  const answer = getAssistantAnswer(message);
+  assistantAnswerCache.set(message, answer);
+  return answer;
 }
 
 /**
@@ -217,42 +266,73 @@ function getPreviewHeadingIndex(node: unknown): number | null {
 }
 
 export const AssistantOutline = memo(function AssistantOutline({
-  markdown,
+  blocks,
   onHeadingClick,
 }: {
-  markdown: string;
-  onHeadingClick?: (headingIndex: number) => void;
-  onAnswerClick?: () => void;
+  blocks: readonly AssistantAnswerBlock[];
+  onHeadingClick?: (blockIndex: number, headingIndex: number) => void;
 }) {
-  const normalizedMarkdown = useMemo(() => normalizeDisplayMath(markdown), [markdown]);
-  const components = useMemo<ReactMarkdownOptions["components"]>(() => ({
-    h1: ({ node, children }) => (
-      <PreviewHeading level={1} headingIndex={getPreviewHeadingIndex(node)} onClick={onHeadingClick}>
-        {children}
-      </PreviewHeading>
-    ),
-    h2: ({ node, children }) => (
-      <PreviewHeading level={2} headingIndex={getPreviewHeadingIndex(node)} onClick={onHeadingClick}>
-        {children}
-      </PreviewHeading>
-    ),
-    a: ({ children }) => <span>{children}</span>,
-  }), [onHeadingClick]);
+  // 逐块渲染：正文里每个文本块也是单独解析的，拼接后的顶层结构可能不同
+  // （第二块以两格缩进开头时会被并进前一块的列表），编号必须按块算才对得上。
+  const rendered = useMemo(() => blocks
+    .filter((block) => block.text.trim())
+    .map((block) => {
+      const components: ReactMarkdownOptions["components"] = {
+        h1: ({ node, children }) => (
+          <PreviewHeading
+            level={1}
+            headingIndex={getPreviewHeadingIndex(node)}
+            onClick={onHeadingClick ? (headingIndex) => onHeadingClick(block.blockIndex, headingIndex) : undefined}
+          >
+            {children}
+          </PreviewHeading>
+        ),
+        h2: ({ node, children }) => (
+          <PreviewHeading
+            level={2}
+            headingIndex={getPreviewHeadingIndex(node)}
+            onClick={onHeadingClick ? (headingIndex) => onHeadingClick(block.blockIndex, headingIndex) : undefined}
+          >
+            {children}
+          </PreviewHeading>
+        ),
+        a: ({ children }) => <span>{children}</span>,
+      };
+      return (
+        <ReactMarkdown
+          key={block.blockIndex}
+          remarkPlugins={previewRemarkPlugins}
+          rehypePlugins={previewRehypePlugins}
+          components={components}
+        >
+          {normalizeDisplayMath(block.text)}
+        </ReactMarkdown>
+      );
+    }), [blocks, onHeadingClick]);
 
-  if (!normalizedMarkdown) return null;
+  if (rendered.length === 0) return null;
 
-  return (
-    <div className={styles.outline}>
-      <ReactMarkdown
-        remarkPlugins={previewRemarkPlugins}
-        rehypePlugins={previewRehypePlugins}
-        components={components}
-      >
-        {normalizedMarkdown}
-      </ReactMarkdown>
-    </div>
-  );
+  return <div className={styles.outline}>{rendered}</div>;
 });
+
+/** 两次测量的结果是否等价：滚动位置、条目、回答和元素都没变就不用重渲染。 */
+function sameTurnNodes(previous: readonly NodeInfo[], next: readonly NodeInfo[]): boolean {
+  if (previous.length !== next.length) return false;
+  for (let index = 0; index < next.length; index += 1) {
+    const before = previous[index];
+    const after = next[index];
+    if (before.index !== after.index || before.turnNumber !== after.turnNumber) return false;
+    const a = before.targetTurn;
+    const b = after.targetTurn;
+    if (a.entryId !== b.entryId || a.userMessage !== b.userMessage) return false;
+    if (a.scrollTop !== b.scrollTop || a.toolCount !== b.toolCount) return false;
+    if (a.finalAssistant?.entryId !== b.finalAssistant?.entryId) return false;
+    if (a.finalAssistant?.blocks !== b.finalAssistant?.blocks) return false;
+    if (a.finalAssistant?.element !== b.finalAssistant?.element) return false;
+    if (a.finalAssistant?.streaming !== b.finalAssistant?.streaming) return false;
+  }
+  return true;
+}
 
 function createTurnNodes(turns: TurnInfo[], turnsBefore: number): NodeInfo[] {
   return turns.map((turn, index) => ({
@@ -342,12 +422,23 @@ export const ChatMinimap = memo(function ChatMinimap({
     nodeIndex?: number;
     entryId?: string;
     target: "user" | "heading";
+    /** 标题定位用「块下标 + 块内下标」，与逐块渲染的正文一致。 */
+    headingBlockIndex?: number;
     headingIndex?: number;
   } | null>(null);
 
   const [visible, setVisible] = useState(false);
   const [minimapHovered, setMinimapHovered] = useState(false);
+  /**
+   * 锁定时悬停不再展开（`showPreview` 直接返回），所以另留一个显式入口：
+   * 点一下胶囊把浮层钉住。锁定解除时一起收掉。
+   */
+  const [previewPinned, setPreviewPinned] = useState(false);
+  /** 指针是否还在胶囊/浮层上：搜索框失焦时要靠它决定该不该收起。 */
+  const hoveringRef = useRef(false);
   const [locked, setLocked] = useState(() => loadMinimapPreviewLocked());
+  /** 浮层此刻是否展开：悬停打开的那一份，或锁定后点胶囊钉住的那一份。 */
+  const previewOpen = minimapHovered || previewPinned;
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
   const [allNodes, setAllNodes] = useState<NodeInfo[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
@@ -384,6 +475,8 @@ export const ChatMinimap = memo(function ChatMinimap({
     setLoadingEntryId(null);
     setRevealFailed(false);
     jumpTargetRef.current = null;
+    // 上一分支的待定位目标在新分支上永远不会出现，留着只会等一个不存在的条目。
+    pendingNavigationRef.current = null;
     setRemoteOutline(null);
     // 旧会话的正文不会被再问到，缓存跟着会话/分支一起清掉。
     headingScanCache.clear();
@@ -391,7 +484,7 @@ export const ChatMinimap = memo(function ChatMinimap({
 
   // 打开大纲且存在未加载历史时，按需向服务端拉取全分支轻量目录（不触发主对话翻页）。
   useEffect(() => {
-    if (!minimapHovered || !sessionId || turnsBefore <= 0) {
+    if (!previewOpen || !sessionId || turnsBefore <= 0) {
       // 历史翻完了（turnsBefore 归零）或预览已关闭：被取消的请求不会自己收尾，
       // 这里清掉加载态，否则面板会一直显示「正在读取完整大纲」。
       setOutlineLoading(false);
@@ -421,7 +514,7 @@ export const ChatMinimap = memo(function ChatMinimap({
         if (!controller.signal.aborted) setOutlineLoading(false);
       });
     return () => controller.abort();
-  }, [leafId, minimapHovered, outlineRequestKey, remoteOutline?.key, sessionId, turnsBefore]);
+  }, [leafId, outlineRequestKey, previewOpen, remoteOutline?.key, sessionId, turnsBefore]);
 
   const unloadedOutlineTurns = useMemo(() => {
     if (turnsBefore <= 0 || !remoteOutline || remoteOutline.key !== outlineRequestKey) return [];
@@ -518,12 +611,13 @@ export const ChatMinimap = memo(function ChatMinimap({
           currentTurn.scrollTop = element.getBoundingClientRect().top - containerRect.top + scrollEl.scrollTop;
         }
         currentTurn.toolCount += countToolCalls(message);
-        const answerMarkdown = getAssistantAnswerMarkdown(message);
+        const answer = cachedAssistantAnswer(message);
         // 纯图片答复返回空正文（而不是 null）：它是回答，只是没有文字标题。
-        if (answerMarkdown !== null) {
+        if (answer !== null) {
           // 1-A：每轮只保留最后一条最终回答，过滤中途过程回复。
           currentTurn.finalAssistant = {
-            markdown: answerMarkdown,
+            markdown: answer.markdown,
+            blocks: answer.blocks,
             entryId: entryIdsRef.current[messageIndex],
             element,
             // 最后一条并带流式正文时就是正在输出的回复。
@@ -533,8 +627,10 @@ export const ChatMinimap = memo(function ChatMinimap({
       }
 
       const nextNodes = createTurnNodes(turns, turnsBeforeRef.current);
+      // 位置和内容都没变时不必换新数组：`allNodes` 一变，整份预览就重渲染一遍。
+      const changed = !sameTurnNodes(allNodesRef.current, nextNodes);
       allNodesRef.current = nextNodes;
-      setAllNodes(nextNodes);
+      if (changed) setAllNodes(nextNodes);
       setVisible(scrollEl.scrollHeight - scrollEl.clientHeight > 20 || turnsBeforeRef.current > 0 || nextNodes.length > 0);
       syncActiveNode(scrollEl, nextNodes);
 
@@ -546,10 +642,14 @@ export const ChatMinimap = memo(function ChatMinimap({
         if (pendingNode) {
           let targetTop: number | null = pendingNode.targetTurn.scrollTop;
           if (pendingNavigation.target === "heading") {
+            const headingRoot = findRenderedHeadingRoot(scrollEl, pendingNode.targetTurn.finalAssistant);
+            const headingBlock = headingRoot && pendingNavigation.headingBlockIndex !== undefined
+              ? headingRoot.querySelector<HTMLElement>(`[data-answer-block="${pendingNavigation.headingBlockIndex}"]`)
+              : null;
             const heading = (
               pendingNavigation.headingIndex === undefined
                 ? null
-                : answerHeadingElements(findRenderedHeadingRoot(scrollEl, pendingNode.targetTurn.finalAssistant))[pendingNavigation.headingIndex]
+                : answerHeadingElements(headingBlock ?? headingRoot)[pendingNavigation.headingIndex]
             );
             const headingRect = heading?.getBoundingClientRect();
             targetTop = headingRect
@@ -653,7 +753,7 @@ export const ChatMinimap = memo(function ChatMinimap({
     };
   }, [scrollContainer]);
 
-  const scrollToHeading = useCallback((node: NodeInfo, headingIndex: number) => {
+  const scrollToHeading = useCallback((node: NodeInfo, headingBlockIndex: number, headingIndex: number) => {
     const scrollEl = scrollContainer.current;
     if (!scrollEl) return;
     const answerElement = findRenderedHeadingRoot(scrollEl, node.targetTurn.finalAssistant);
@@ -661,12 +761,15 @@ export const ChatMinimap = memo(function ChatMinimap({
       pendingNavigationRef.current = {
         nodeIndex: node.index,
         target: "heading",
+        headingBlockIndex,
         headingIndex,
       };
       onRevealHistory(node.targetTurn.entryId);
       return;
     }
-    const heading = answerHeadingElements(answerElement)[headingIndex];
+    // 正文按块渲染，每块各自带 data-answer-block：先定位块，再取块内第几个标题。
+    const blockElement = answerElement.querySelector<HTMLElement>(`[data-answer-block="${headingBlockIndex}"]`);
+    const heading = (blockElement ? answerHeadingElements(blockElement) : answerHeadingElements(answerElement))[headingIndex];
     if (!heading) return;
     const containerRect = scrollEl.getBoundingClientRect();
     const headingRect = heading.getBoundingClientRect();
@@ -690,17 +793,26 @@ export const ChatMinimap = memo(function ChatMinimap({
     pendingNavigationRef.current = { entryId: turn.entryId, target: "user" };
     try {
       const loaded = await onLoadUntilEntry(turn.entryId);
+      // 加载期间切了会话或分支：这次的结果属于旧分支，展开新分支的窗口会跳到错的条目。
+      // `jumpTargetRef` 在会话/分支变化时被清空，这里用它判断这次跳转是否还是当前目标。
+      if (jumpTargetRef.current !== turn.entryId) {
+        pendingNavigationRef.current = null;
+        return;
+      }
       if (loaded) {
         onRevealHistory(turn.entryId);
         measureNodes();
       } else {
         pendingNavigationRef.current = null;
-        // 真的没找到才提示；会话切走时 jumpTargetRef 已清空，不弹无意义的错误。
-        if (jumpTargetRef.current === turn.entryId) setRevealFailed(true);
+        // 真的没找到才提示，不弹无意义的错误。
+        setRevealFailed(true);
       }
     } finally {
-      if (jumpTargetRef.current === turn.entryId) jumpTargetRef.current = null;
-      setLoadingEntryId(null);
+      // 已经被新的跳转接管时，别清掉它的加载态。
+      if (jumpTargetRef.current === turn.entryId) {
+        jumpTargetRef.current = null;
+        setLoadingEntryId(null);
+      }
     }
   }, [loadingEntryId, measureNodes, onLoadUntilEntry, onNavigate, onRevealHistory, scrollContainer]);
 
@@ -710,41 +822,61 @@ export const ChatMinimap = memo(function ChatMinimap({
     previewHideTimerRef.current = null;
   }, []);
 
+  const schedulePreviewHide = useCallback(() => {
+    // 搜索框聚焦、浮层被钉住时都不自动收起；定时器到点时再确认一次指针已经离开。
+    if (searchFocusedRef.current || previewPinned) return;
+    cancelPreviewHide();
+    previewHideTimerRef.current = setTimeout(() => {
+      previewHideTimerRef.current = null;
+      if (!searchFocusedRef.current && !hoveringRef.current) setMinimapHovered(false);
+    }, PREVIEW_HIDE_DELAY);
+  }, [cancelPreviewHide, previewPinned]);
+
   const showPreview = useCallback(() => {
+    // 锁定的语义就是这个（#1128）：悬停不展开预览，免得划过大纲时被挡住。
     if (locked) return;
     setRevealFailed(false);
     cancelPreviewHide();
     setMinimapHovered(true);
   }, [cancelPreviewHide, locked]);
 
+  const enterPreview = useCallback(() => {
+    hoveringRef.current = true;
+    showPreview();
+  }, [showPreview]);
+
+  const leavePreview = useCallback(() => {
+    hoveringRef.current = false;
+    schedulePreviewHide();
+  }, [schedulePreviewHide]);
+
   const toggleLock = useCallback(() => {
     const next = !locked;
     setLocked(next);
     saveMinimapPreviewLocked(next);
-    if (next) {
-      cancelPreviewHide();
-      setMinimapHovered(false);
-    }
+    cancelPreviewHide();
+    // 上锁收起悬停打开的那一份；解锁收起钉住的那一份，两种状态互不残留。
+    setMinimapHovered(false);
+    setPreviewPinned(false);
   }, [cancelPreviewHide, locked]);
 
-  const schedulePreviewHide = useCallback(() => {
-    if (searchFocusedRef.current) return;
+  /** 锁定时的显式入口：点胶囊把浮层钉住/放开。 */
+  const togglePreviewPinned = useCallback(() => {
+    if (!locked) return;
+    setRevealFailed(false);
     cancelPreviewHide();
-    previewHideTimerRef.current = setTimeout(() => {
-      previewHideTimerRef.current = null;
-      if (!searchFocusedRef.current) setMinimapHovered(false);
-    }, PREVIEW_HIDE_DELAY);
-  }, [cancelPreviewHide]);
+    setPreviewPinned((current) => !current);
+  }, [cancelPreviewHide, locked]);
 
   useEffect(() => () => cancelPreviewHide(), [cancelPreviewHide]);
 
   // 刚打开大纲时把当前所在轮滚进可视区，方便直接看到上下文位置。
   useEffect(() => {
-    if (!minimapHovered || activeIndex === null || searchQuery.trim()) return;
+    if (!previewOpen || activeIndex === null || searchQuery.trim()) return;
     const targetItem = previewItemRefs.current.get(activeIndex);
     if (!targetItem) return;
     targetItem.scrollIntoView({ block: "nearest" });
-  }, [minimapHovered, activeIndex, searchQuery]);
+  }, [activeIndex, previewOpen, searchQuery]);
 
   const toggleTurnExpanded = useCallback((turnNumber: number, isActiveLoaded: boolean) => {
     setToggledTurns((prev) => {
@@ -788,9 +920,14 @@ export const ChatMinimap = memo(function ChatMinimap({
     for (const node of allNodes) {
       const finalAssistant = node.targetTurn.finalAssistant;
       // 流式正文每帧都是新内容，进缓存只会占位并把它挤掉，直接扫这一份。
-      const hasHeadings = finalAssistant?.streaming
-        ? hasOutlineHeadings(finalAssistant.markdown)
-        : finalAssistant ? cachedHasOutlineHeadings(headingScanCache, finalAssistant.markdown) : false;
+      // 逐块判断：预览也按块渲染，拼接后才出现的标题不该让折叠箭头出现。
+      const hasHeadings = finalAssistant
+        ? finalAssistant.blocks.some((block) => (
+          finalAssistant.streaming
+            ? hasOutlineHeadings(block.text)
+            : cachedHasOutlineHeadings(headingScanCache, block.text)
+        ))
+        : false;
       if (hasHeadings) indexes.add(node.index);
     }
     return indexes;
@@ -810,12 +947,14 @@ export const ChatMinimap = memo(function ChatMinimap({
     <div
       ref={containerRef}
       className={styles.rail}
-      data-open={minimapHovered ? "true" : undefined}
+      data-open={previewOpen ? "true" : undefined}
     >
       <div
         className={styles.pill}
-        onMouseEnter={showPreview}
-        onMouseLeave={schedulePreviewHide}
+        title={locked ? t("chatMinimap.pinPreview") : undefined}
+        onClick={togglePreviewPinned}
+        onMouseEnter={enterPreview}
+        onMouseLeave={leavePreview}
       >
         {turnsBefore > 0 && <span data-minimap-earlier="" style={{ display: "none" }} />}
         <div className={styles.ticks}>
@@ -847,13 +986,14 @@ export const ChatMinimap = memo(function ChatMinimap({
         />
       </div>
 
-      {minimapHovered && totalTurnCount > 0 && (
+      {previewOpen && totalTurnCount > 0 && (
         <div
           ref={previewBoxRef}
           className={styles.preview}
           data-minimap-preview-box=""
-          onMouseEnter={showPreview}
-          onMouseLeave={schedulePreviewHide}
+          data-minimap-preview-pinned={previewPinned ? "" : undefined}
+          onMouseEnter={enterPreview}
+          onMouseLeave={leavePreview}
           onMouseDown={(event) => event.stopPropagation()}
         >
           <div className={styles.header}>
@@ -868,7 +1008,11 @@ export const ChatMinimap = memo(function ChatMinimap({
                 value={searchQuery}
                 onChange={(event) => setSearchQuery(event.target.value)}
                 onFocus={() => { searchFocusedRef.current = true; cancelPreviewHide(); }}
-                onBlur={() => { searchFocusedRef.current = false; }}
+                onBlur={() => {
+                  searchFocusedRef.current = false;
+                  // 失焦后不再挡住收起：指针已经离开就交给正常的延迟收起。
+                  if (!hoveringRef.current) schedulePreviewHide();
+                }}
                 placeholder={t("chatMinimap.searchPlaceholder", { count: totalTurnCount })}
                 aria-label={t("chatMinimap.searchPlaceholder", { count: totalTurnCount })}
               />
@@ -1011,8 +1155,10 @@ export const ChatMinimap = memo(function ChatMinimap({
                   {isExpanded && finalAssistant && (
                     <div className={styles.headingsWrap}>
                       <AssistantOutline
-                        markdown={finalAssistant.markdown}
-                        onHeadingClick={canLocateAnswerHeadings(finalAssistant) ? (headingIndex) => scrollToHeading(node, headingIndex) : undefined}
+                        blocks={finalAssistant.blocks}
+                        onHeadingClick={canLocateAnswerHeadings(finalAssistant)
+                          ? (blockIndex, headingIndex) => scrollToHeading(node, blockIndex, headingIndex)
+                          : undefined}
                       />
                     </div>
                   )}

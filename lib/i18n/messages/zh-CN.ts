@@ -1192,6 +1192,7 @@ export const zhCNLocale: LocalePlugin = {
     "chatMinimap.toolCalls": "本轮 {count} 次工具调用",
     "chatMinimap.extensionTurn": "由扩展发起（{type}）",
     "chatMinimap.lockPreview": "锁定：悬停时不展开预览",
+    "chatMinimap.pinPreview": "锁定中：点击展开大纲",
     "chatMinimap.unlockPreview": "解锁悬停预览",
     "chatMinimap.searchPlaceholder": "筛选全部 {count} 轮…",
     "chatMinimap.clickHint": "单击展开/折叠 · 双击跳转",

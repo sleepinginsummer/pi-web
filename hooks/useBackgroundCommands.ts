@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { usePolledJson } from "@/hooks/usePolledJson";
 import type { BackgroundCommandListResponse } from "@/lib/types";
 
 const IDLE_POLL_MS = 6000;
@@ -8,56 +9,20 @@ const BUSY_POLL_MS = 2000;
 
 /** The project's background commands, polled while the tab is visible; faster while one runs. */
 export function useBackgroundCommands(cwd: string | null | undefined) {
-  const [data, setData] = useState<BackgroundCommandListResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
   // 操作失败单独记：轮询刷新只清读取错误，不该把「移除失败」这类提示一并抹掉。
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set());
-  const requestRef = useRef(0);
-
-  const refresh = useCallback(async () => {
-    if (!cwd) return;
-    const request = ++requestRef.current;
-    try {
-      const response = await fetch(`/api/background-commands?cwd=${encodeURIComponent(cwd)}`, { cache: "no-store" });
-      const next = await response.json() as BackgroundCommandListResponse & { error?: string };
-      if (request !== requestRef.current) return;
-      if (!response.ok || next.error) throw new Error(next.error ?? `HTTP ${response.status}`);
-      setData(next);
-      setError(null);
-    } catch (cause) {
-      if (request === requestRef.current) setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  }, [cwd]);
+  const latestRef = useRef<BackgroundCommandListResponse | null>(null);
+  const busy = Boolean(latestRef.current?.commands.some((command) => command.status === "running" || command.status === "stopping"));
+  const { data, error, refresh } = usePolledJson<BackgroundCommandListResponse>(
+    cwd ? `/api/background-commands?cwd=${encodeURIComponent(cwd)}` : null,
+    () => (busy ? BUSY_POLL_MS : IDLE_POLL_MS),
+  );
+  latestRef.current = data;
 
   useEffect(() => {
-    setData(null);
-    setError(null);
     setActionError(null);
   }, [cwd]);
-
-  const busy = Boolean(data?.commands.some((command) => command.status === "running" || command.status === "stopping"));
-
-  useEffect(() => {
-    if (!cwd) return;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    let stopped = false;
-    const tick = async () => {
-      if (stopped) return;
-      if (document.visibilityState === "visible") await refresh();
-      if (!stopped) timer = setTimeout(tick, busy ? BUSY_POLL_MS : IDLE_POLL_MS);
-    };
-    void tick();
-    const onVisible = () => {
-      if (document.visibilityState === "visible") void refresh();
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => {
-      stopped = true;
-      if (timer) clearTimeout(timer);
-      document.removeEventListener("visibilitychange", onVisible);
-    };
-  }, [busy, cwd, refresh]);
 
   const act = useCallback(async (id: string, action: "stop" | "dismiss") => {
     setPending((current) => new Set(current).add(id));

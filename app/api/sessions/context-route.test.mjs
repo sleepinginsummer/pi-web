@@ -28,6 +28,17 @@ test("context route parses ?tail and ?before, excluding the boundary on paging",
   assert.match(routeSrc, /"X-Session-Version": version/);
 });
 
+test("存活会话的 304 判断发生在建树之前", () => {
+  // 建树是这份快照里最贵的一步（每条记录一个节点）：版本没变就别建。
+  const probeIndex = routeSrc.indexOf("liveSessionBrowseVersion(id)");
+  const snapshotIndex = routeSrc.indexOf("await readSessionBrowseSnapshot(id)");
+  assert.ok(probeIndex > 0, "先探版本");
+  assert.ok(snapshotIndex > probeIndex, "304 之后才建快照");
+  assert.match(routeSrc, /if \(ifNoneMatch === etag\) \{/);
+  // 带 before 的分页请求不参与 304（要拿到下一页，不是复用上一页）。
+  assert.match(routeSrc, /const ifNoneMatch = before \? null : req\.headers\.get\("if-none-match"\);/);
+});
+
 test("context route: ?before pages upward without duplicating the boundary", () => {
   const entries = [];
   for (let i = 0; i < 100; i++) {

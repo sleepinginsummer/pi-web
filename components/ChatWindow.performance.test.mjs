@@ -51,3 +51,13 @@ test("本地渲染窗口耗尽后继续请求服务端历史页", () => {
   assert.match(source, /const hasMore = boundedStartIndex > 0 \|\| hasEarlierMessages/);
   assert.match(source, /groups\.slice\(boundedStartIndex, endIndex\)/);
 });
+
+test("折叠的过程详情只在展开时构造，不在每次渲染时提前造 JSX", () => {
+  // 20 轮 × 20 步的会话里，折叠态每帧都造几百个元素和闭包是白费。
+  assert.doesNotMatch(source, /const processViews: ReactNode\[\] = \[\];/);
+  assert.match(source, /const renderProcessViews = \(\): ReactNode => processDescriptors\.map/);
+  assert.match(source, /renderChildren=\{\(\) => <>\{renderProcessViews\(\)\}<\/>\}/);
+  // 计数、耗时和 ref 下标仍要先算出来（摘要行要用），只是不再构造节点。
+  assert.match(source, /processToolCount \+= countToolCallBlocks\(blocks\);/);
+  assert.match(source, /processRefIdx \?\?= visibleRefIndexByMessage\.get\(processIdx\);/);
+});

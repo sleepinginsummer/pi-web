@@ -1459,7 +1459,7 @@ export class AgentSessionWrapper {
         deliveredCommand = multiSkill.text.trim();
         this.runningCommands.push(deliveredCommand);
       }
-      await this.inner.prompt(multiSkill.text, {
+      const promptPromise = this.inner.prompt(multiSkill.text, {
         ...(multiSkill.expanded ? { expandPromptTemplates: false } : {}),
         ...(entry.images?.length ? { images: entry.images } : {}),
         source: "rpc",
@@ -1469,6 +1469,11 @@ export class AgentSessionWrapper {
           release();
         },
       });
+      // pi 对扩展命令要等 handler 返回才回调 preflightResult；等到那时才释放，整段命令
+      // 都会占着提交锁，后面的消息连命令自己的 `cancel` 都进不了 SDK。派发即视为接受，
+      // 与直接提交路径（见 prompt case 的 acceptPreflight）一致；命令结束再结算队列状态。
+      if (deliveredCommand) release();
+      await promptPromise;
     } catch (error) {
       failure = error;
     }
@@ -2259,9 +2264,10 @@ export class AgentSessionWrapper {
           // pi never queues an extension command: it runs one the moment it arrives, mid-run too.
           // The composer's follow-up button means "after this turn", so hold the command here — it
           // becomes a queue row, the run's end delivers it (flushParkedPrompts), and Stop or Recall
-          // hands it back. The same parked list takes compaction's refusals.
-          if (commandText && streamingBehavior === "followUp" && this.inner.isStreaming
-            && this.runningCommands.length === 0) {
+          // hands it back. The same parked list takes compaction's refusals. A command already
+          // running changes nothing: still wait for this turn, whose settle is what flushes the
+          // queue (delivery no longer holds prompt admission for the command's lifetime).
+          if (commandText && streamingBehavior === "followUp" && this.inner.isStreaming) {
             this.parkDuringCompaction({
               message: command.message as string,
               images: promptImages,
@@ -2443,9 +2449,16 @@ export class AgentSessionWrapper {
           // so a session that has not sent anything yet falls back to the session getter, which
           // renders the prompt from the current options. The getter alone would drop those
           // per-run changes again once the run ends.
-          systemPrompt: this.projectSystemPromptAddon(
-            this.exactSystemPrompt?.() ?? (this.inner.agent.state?.systemPrompt || this.inner.systemPrompt || ""),
-          ),
+          // 系统提示词几乎就是整份回复的大小（几十到几百 KB，含上下文文件、技能与
+          // 工具说明）。只有顶栏「系统」面板需要它，读的时候显式带上 includeSystemPrompt：
+          // 思考强度偏好、自动压缩开关、状态轮询这些读取不该拖着一整份提示词。
+          ...(command.includeSystemPrompt === true
+            ? {
+                systemPrompt: this.projectSystemPromptAddon(
+                  this.exactSystemPrompt?.() ?? (this.inner.agent.state?.systemPrompt || this.inner.systemPrompt || ""),
+                ),
+              }
+            : {}),
           thinkingLevel: this.inner.agent.state?.thinkingLevel ?? "off",
           fastEnabled: this.fastSessionSetting.current,
           fastAvailable: this.fastSessionSetting.available,
@@ -4219,11 +4232,17 @@ export function getRpcSessionInfos(options: { includeTransient?: boolean } = {})
 }
 
 /** 统一生成会话运行快照，避免 alive/running/busy 在不同路由中产生不同语义。 */
-export async function getRpcSessionSnapshot(sessionId: string): Promise<AgentRuntimeSnapshot> {
+export async function getRpcSessionSnapshot(
+  sessionId: string,
+  options: { includeSystemPrompt?: boolean } = {},
+): Promise<AgentRuntimeSnapshot> {
   const session = getRpcSession(sessionId);
   if (!session?.isAlive()) return { alive: false, busy: false };
 
-  const state = await session.send({ type: "get_state" }) as AgentRuntimeState;
+  const state = await session.send({
+    type: "get_state",
+    ...(options.includeSystemPrompt ? { includeSystemPrompt: true } : {}),
+  }) as AgentRuntimeState;
   return { alive: true, busy: session.isRunning(), state };
 }
 

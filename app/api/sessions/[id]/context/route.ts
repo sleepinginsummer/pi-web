@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { buildSessionContext, openSessionManager, readSessionHeader, resolveSessionPath } from "@/lib/session-reader";
-import { readSessionBrowseSnapshot, sessionVersionEtag } from "@/lib/session-browse-snapshot";
+import { liveSessionBrowseVersion, readSessionBrowseSnapshot, sessionVersionEtag } from "@/lib/session-browse-snapshot";
 import { computeSessionTotalActiveMs } from "@/lib/session-timing";
 import { getRpcSession } from "@/lib/rpc-manager";
 import { readIndexedContextPage, readIndexedSessionDetails } from "@/lib/session-content-index";
@@ -34,6 +34,26 @@ export async function GET(
           sessionExternalWritePayload("会话文件正在被外部修改，请等待写入完成后刷新"),
           { status: 409 },
         );
+      }
+    }
+    // 304 前置判断：存活会话只要版本没变就直接回，不必先建整棵树。
+    const ifNoneMatch = before ? null : req.headers.get("if-none-match");
+    if (ifNoneMatch) {
+      const liveVersion = liveSessionBrowseVersion(id);
+      if (liveVersion) {
+        const etag = sessionVersionEtag(liveVersion);
+        if (ifNoneMatch === etag) {
+          return new Response(null, {
+            status: 304,
+            headers: {
+              "Cache-Control": "no-store",
+              ETag: etag,
+              "X-Session-Cache": "live",
+              "X-Session-Version": liveVersion,
+              "Server-Timing": `resolve;dur=${(performance.now() - requestStartedAt).toFixed(1)}, read;dur=0`,
+            },
+          });
+        }
       }
     }
     const live = liveRpc?.isAlive() ? await readSessionBrowseSnapshot(id) : null;

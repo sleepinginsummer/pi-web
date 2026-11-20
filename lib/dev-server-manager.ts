@@ -1,3 +1,4 @@
+import { trimLogPrefix } from "./bounded-log";
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { connect } from "node:net";
@@ -60,10 +61,7 @@ function snapshotOf(record: DevServerRecord): DevServerSnapshot {
 
 function appendLog(record: DevServerRecord, stream: DevServerLogLine["stream"], text: string): void {
   record.logs.push({ stream, text, time: Date.now() });
-  record.logChars += text.length;
-  while (record.logChars > MAX_LOG_CHARS && record.logs.length > 1) {
-    record.logChars -= record.logs.shift()!.text.length;
-  }
+  record.logChars = trimLogPrefix(record.logs, record.logChars + text.length, MAX_LOG_CHARS, (entry) => entry.text.length);
 }
 
 function appendOutput(record: DevServerRecord, stream: "stdout" | "stderr", chunk: string): void {
