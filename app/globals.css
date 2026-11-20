@@ -3476,7 +3476,7 @@ span.token.table {
 /* 待办独占左侧容器，宽度上限只适用于右侧多组件列表。 */
 .extension-widget-left-shelf > .extension-widget-triggers { max-width: 100%; }
 .dev-servers-panel { width: min(420px, calc(100vw - 24px)); }
-.mobile-activity-label, .dev-servers-trigger .mobile-activity-count { display: none; }
+.mobile-activity-label { display: none; }
 
 .mobile-composer-more,
 .mobile-controls-close {
@@ -3633,9 +3633,8 @@ span.token.table {
     background: var(--bg-selected);
     color: var(--text);
   }
-  .extension-status-bar .dev-servers-trigger > :is(.extension-widget-placement, .extension-widget-key, .dev-servers-count:not(.mobile-activity-count)) { display: none; }
+  .extension-status-bar .dev-servers-trigger > :is(.extension-widget-placement, .extension-widget-key) { display: none; }
   .mobile-activity-label { display: inline-flex; align-items: center; gap: 4px; }
-  .dev-servers-trigger .mobile-activity-count { display: inline-block; }
   .dev-servers-trigger[aria-expanded="true"] .mobile-activity-chevron { rotate: 180deg; }
   .extension-status-bar .extension-widget-panels {
     inset: auto 8px 49px;
@@ -3712,12 +3711,10 @@ span.token.table {
 .dev-server-errors { padding: 0 9px 8px; color: #f59e0b; font: 11px/1.5 var(--font-mono); word-break: break-word; }
 .dev-server-errors .dev-server-subheading { padding-left: 0; }
 .scheduled-tasks-heading { border-top: 1px solid var(--border); }
-.other-session-tasks { border-top: 1px solid var(--border); }
-.other-session-tasks > summary { display: list-item; cursor: pointer; padding-left: 9px; }
-.scheduled-task-session-link { color: var(--accent); font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.finished-tasks { border-top: 1px solid var(--border); }
+.finished-tasks > summary { display: list-item; cursor: pointer; }
 .scheduled-task-row .dev-server-name { display: flex; flex-direction: column; line-height: 1.3; }
 .scheduled-task-owner { overflow: hidden; color: var(--text-dim); font-family: var(--font-sans, inherit); font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
-.scheduled-task-row.is-own .scheduled-task-owner { color: var(--accent); }
 .scheduled-task-row.is-stopped > .dev-server-dot { background: transparent; border: 1px solid var(--text-dim); }
 .dev-servers-trigger .scheduled-tasks-count { display: inline-flex; align-items: center; gap: 2px; }
 .dev-servers-panel { max-height: min(70vh, 560px); overflow-y: auto; }

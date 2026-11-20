@@ -7,8 +7,6 @@ import { browserServerUrl, isDevServerActive, useDevServers } from "@/hooks/useD
 import { isScheduledTaskPending, useScheduledTasks } from "@/hooks/useScheduledTasks";
 import { useBackgroundCommandOutput, useBackgroundCommands } from "@/hooks/useBackgroundCommands";
 import type { BackgroundCommandSnapshot, DevServerSnapshot, ScheduledTask } from "@/lib/types";
-import { sessionDeepLink } from "@/lib/session-links";
-import { samePortablePath } from "@/lib/path-equality";
 
 function hostLabel(url: string | undefined): string {
   if (!url) return "";
@@ -65,13 +63,11 @@ function useNow(enabled: boolean): number {
 
 function BackgroundCommandRow({
   command,
-  own,
   busy,
   onStop,
   onDismiss,
 }: {
   command: BackgroundCommandSnapshot;
-  own: boolean;
   busy: boolean;
   onStop: () => void;
   onDismiss: () => void;
@@ -97,12 +93,11 @@ function BackgroundCommandRow({
             : t("bg.failed", { code: String(command.exitCode ?? "?"), time });
   const dot = command.status === "exited" || command.status === "stopped" ? "stopped" : command.status === "interrupted" ? "failed" : command.status;
   return (
-    <li className={`background-command-item${own ? " is-own" : ""}`}>
-      <div className={`dev-server-row scheduled-task-row is-${dot}${own ? " is-own" : ""}`}>
+    <li className="background-command-item">
+      <div className={`dev-server-row scheduled-task-row is-${dot}`}>
         <span className="dev-server-dot" aria-hidden="true" />
         <span className="dev-server-name" title={command.command}>
           {command.label ?? command.command}
-          {!own && <a className="scheduled-task-session-link" href={sessionDeepLink(command.sessionId)}>{command.sessionId.slice(0, 8)} ↗</a>}
           <TaskTime value={command.startedAt} label={t("tasks.startedAt")} />
           {command.notifyError && <span className="scheduled-task-owner is-error">{t("bg.notifyFailed", { error: command.notifyError })}</span>}
         </span>
@@ -200,15 +195,18 @@ export function DevServersShelf({
   const launchErrors = data?.errors ?? [];
   const activeNames = new Set(servers.filter(isDevServerActive).map((server) => server.name));
   const declared = data?.enabled ? data.configs.filter((config) => !activeNames.has(config.name)) : [];
-  // 当前会话保持在上方，其他会话仅取同目录记录，避免混入其他 worktree。
+  // 只显示当前会话自己的定时任务与后台命令；其他会话的记录不进这个入口。
   const tasks = (scheduled.data?.tasks ?? []).filter((task) => task.sessionId === sessionId);
   const commands = (background.data?.commands ?? []).filter((command) => command.sessionId === sessionId);
-  const otherTasks = (scheduled.data?.tasks ?? []).filter((task) => task.sessionId !== sessionId && cwd != null && samePortablePath(task.cwd, cwd));
-  const otherCommands = (background.data?.commands ?? []).filter((command) => command.sessionId !== sessionId && cwd != null && samePortablePath(command.cwd, cwd));
-  const otherCount = otherTasks.length + otherCommands.length;
   const showServers = servers.length > 0 || launchErrors.length > 0;
-  if (!showServers && tasks.length === 0 && commands.length === 0 && otherCount === 0) return null;
+  if (!showServers && tasks.length === 0 && commands.length === 0) return null;
   const runningCommandCount = commands.filter((command) => command.status === "running" || command.status === "stopping").length;
+  // 已结束的（一次性任务触发完、命令已退出/停止）收进折叠区，不占面板正文。
+  const finishedTasks = tasks.filter((task) => task.nextRunAt === null);
+  const openTasks = tasks.filter((task) => task.nextRunAt !== null);
+  const finishedCommands = commands.filter((command) => command.status !== "running" && command.status !== "stopping");
+  const openCommands = commands.filter((command) => command.status === "running" || command.status === "stopping");
+  const finishedCount = finishedTasks.length + finishedCommands.length;
 
   const runningCount = servers.filter(isDevServerActive).length;
   const pendingTaskCount = scheduled.data?.enabled ? tasks.filter(isScheduledTaskPending).length : 0;
@@ -223,20 +221,18 @@ export function DevServersShelf({
     showServers ? serverLabel : "",
     tasks.length > 0 ? t("tasks.triggerLabel", { count: pendingTaskCount }) : "",
     commands.length > 0 ? t("bg.triggerLabel", { count: runningCommandCount }) : "",
-    otherCount > 0 ? t("tasks.otherSessions", { count: otherCount }) : "",
   ].filter(Boolean).join("; ");
+  // 定时任务和后台命令共用「任务」一个词，具体数量交给图标徽标。
+  const hasTaskEntries = tasks.length > 0 || commands.length > 0;
   const triggerText = [
     showServers ? t("servers.trigger") : "",
-    tasks.length > 0 ? t("tasks.trigger") : "",
-    commands.length > 0 ? t("bg.trigger") : "",
-    otherCount > 0 ? t("tasks.otherSessions", { count: otherCount }) : "",
+    hasTaskEntries ? t("tasks.triggerShort") : "",
   ].filter(Boolean).join(" · ");
 
   const renderTask = (task: ScheduledTask) => {
     const live = isScheduledTaskPending(task);
     const status = task.lastStatus === "error" && live ? "failed" : live ? (scheduled.data?.enabled ? "running" : "stopped") : "stopped";
     const busy = scheduled.pending.has(task.id);
-    const own = task.sessionId === sessionId;
     const schedule = (task.schedule.kind === "cron" ? task.schedule.expression : t("tasks.once"))
       + (task.delivery === "steer" ? ` · ${t("tasks.steer")}` : "");
     const state = task.nextRunAt === null
@@ -244,18 +240,16 @@ export function DevServersShelf({
       : !task.enabled
         ? t("tasks.paused")
         : t("tasks.next", { time: shortTime(task.nextRunAt) });
-    const owner = own ? t("tasks.thisSession") : task.sessionLabel ?? task.sessionId.slice(0, 8);
+    // 列表里只剩当前会话的任务，归属会话既不用标注也不用链接。
     const title = [
       task.prompt,
-      `${owner}`,
       task.lastStatus === "error" && task.lastError ? t("tasks.lastFailed", { error: task.lastError }) : "",
     ].filter(Boolean).join("\n\n");
     return (
-      <li key={task.id} className={`dev-server-row scheduled-task-row is-${status}${own ? " is-own" : ""}`}>
+      <li key={task.id} className={`dev-server-row scheduled-task-row is-${status}`}>
         <span className="dev-server-dot" aria-hidden="true" />
         <span className="dev-server-name" title={title}>
           {task.name}
-          {own ? <span className="scheduled-task-owner">{owner}</span> : <a className="scheduled-task-session-link" href={sessionDeepLink(task.sessionId)}>{owner} ↗</a>}
           <TaskTime value={task.createdAt} label={t("tasks.createdAt")} />
         </span>
         <span className="dev-server-meta" title={task.lastError}>{schedule} · {state}</span>
@@ -291,7 +285,7 @@ export function DevServersShelf({
             title={t("tasks.delete")}
             aria-label={`${t("tasks.delete")} ${task.name}`}
             onClick={() => {
-              if (tasks.length + otherTasks.length === 1 && !showServers && commands.length + otherCommands.length === 0) setOpen(false);
+              if (tasks.length === 1 && !showServers && commands.length === 0) setOpen(false);
               void scheduled.act(task.id, "delete");
             }}
           >
@@ -306,11 +300,10 @@ export function DevServersShelf({
     <BackgroundCommandRow
       key={command.id}
       command={command}
-      own={command.sessionId === sessionId}
       busy={background.pending.has(command.id)}
       onStop={() => void background.act(command.id, "stop")}
       onDismiss={() => {
-        if (commands.length + otherCommands.length === 1 && !showServers && tasks.length + otherTasks.length === 0) setOpen(false);
+        if (commands.length === 1 && !showServers && tasks.length === 0) setOpen(false);
         void background.act(command.id, "dismiss");
       }}
     />
@@ -430,30 +423,30 @@ export function DevServersShelf({
             )}
             {error && <p role="alert" className="dev-server-error">{error}</p>}
             </>}
-            {tasks.length > 0 && <>
+            {openTasks.length > 0 && <>
               <div className={`extension-widget-panel-heading${showServers ? " scheduled-tasks-heading" : ""}`}>{t("tasks.title")}</div>
-              <ul className="dev-server-list">{tasks.map(renderTask)}</ul>
+              <ul className="dev-server-list">{openTasks.map(renderTask)}</ul>
               {scheduled.error && <p role="alert" className="dev-server-error">{scheduled.error}</p>}
             </>}
-            {commands.length > 0 && <>
-              <div className={`extension-widget-panel-heading${showServers || tasks.length > 0 ? " scheduled-tasks-heading" : ""}`}>{t("bg.title")}</div>
+            {openCommands.length > 0 && <>
+              <div className={`extension-widget-panel-heading${showServers || openTasks.length > 0 ? " scheduled-tasks-heading" : ""}`}>{t("bg.title")}</div>
               <ul className="dev-server-list">
-                {commands.map(renderCommand)}
+                {openCommands.map(renderCommand)}
               </ul>
               {background.error && <p role="alert" className="dev-server-error">{background.error}</p>}
             </>}
-            {otherCount > 0 && (
-              <details key={sessionId} className="other-session-tasks">
-                <summary className="extension-widget-panel-heading">{t("tasks.otherSessions", { count: otherCount })}</summary>
-                {otherTasks.length > 0 && <>
+            {finishedCount > 0 && (
+              <details className="finished-tasks">
+                <summary className={`extension-widget-panel-heading${showServers || openTasks.length > 0 || openCommands.length > 0 ? " scheduled-tasks-heading" : ""}`}>
+                  {t("tasks.finishedSection", { count: finishedCount })}
+                </summary>
+                {finishedTasks.length > 0 && <>
                   <div className="dev-server-subheading">{t("tasks.title")}</div>
-                  <ul className="dev-server-list">{otherTasks.map(renderTask)}</ul>
-                  {scheduled.error && <p role="alert" className="dev-server-error">{scheduled.error}</p>}
+                  <ul className="dev-server-list">{finishedTasks.map(renderTask)}</ul>
                 </>}
-                {otherCommands.length > 0 && <>
+                {finishedCommands.length > 0 && <>
                   <div className="dev-server-subheading">{t("bg.title")}</div>
-                  <ul className="dev-server-list">{otherCommands.map(renderCommand)}</ul>
-                  {background.error && <p role="alert" className="dev-server-error">{background.error}</p>}
+                  <ul className="dev-server-list">{finishedCommands.map(renderCommand)}</ul>
                 </>}
               </details>
             )}
@@ -472,20 +465,18 @@ export function DevServersShelf({
         <span className="extension-widget-placement" aria-hidden="true"><ChevronUp size={12} className="extension-widget-chevron" /></span>
         <span className="extension-widget-key">{triggerText}</span>
         <span className="mobile-activity-label" aria-hidden="true"><Activity size={15} />{t("servers.activity")}<ChevronUp className="mobile-activity-chevron" size={12} /></span>
-        {isMobile && runningCount + pendingTaskCount + runningCommandCount > 0 && (
-          <span className="dev-servers-count mobile-activity-count" aria-hidden="true">{runningCount + pendingTaskCount + runningCommandCount}</span>
-        )}
-        {!isMobile && runningCount > 0 && <span className="dev-servers-count">{runningCount}</span>}
-        {!isMobile && pendingTaskCount > 0 && (
-          <span className="dev-servers-count scheduled-tasks-count">
+        {runningCount > 0 && <span className="dev-servers-count">{runningCount}</span>}
+        {/* 两类各一个图标+数量，只有一类就不出现另一个（桌面和手机同一套）。 */}
+        {tasks.length > 0 && (
+          <span className="dev-servers-count scheduled-tasks-count" aria-hidden="true">
             <svg {...iconProps} width={9} height={9}><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>
-            {pendingTaskCount}
+            {tasks.length}
           </span>
         )}
-        {!isMobile && runningCommandCount > 0 && (
-          <span className="dev-servers-count scheduled-tasks-count">
+        {commands.length > 0 && (
+          <span className="dev-servers-count scheduled-tasks-count" aria-hidden="true">
             <svg {...iconProps} width={9} height={9}><path d="M5 7l5 5-5 5M12 17h7" /></svg>
-            {runningCommandCount}
+            {commands.length}
           </span>
         )}
         {hasErrors && <span className="dev-servers-error-dot" aria-hidden="true" />}

@@ -68,29 +68,56 @@ test("运行中的服务器与配置错误同时存在时两个标记都保留",
   assert.match(html, /class="dev-servers-error-dot"/);
 });
 
-test("其他会话按目录折叠展示，链接指向归属会话，两类记录均显示时间", () => {
+test("只列当前会话自己的定时任务与后台命令", () => {
   const createdAt = Date.UTC(2026, 0, 2, 3, 4);
-  const task = { id: "task", sessionId: "other", cwd: "/project/", name: "other-task", sessionLabel: "其他会话名称", prompt: "check", schedule: { kind: "once" }, enabled: true, nextRunAt: createdAt + 60000, createdAt };
-  const command = { id: "cmd", sessionId: "other", cwd: "/project", command: "test", label: "other-command", status: "exited", startedAt: createdAt, endedAt: createdAt + 1000 };
+  const task = { id: "task", sessionId: "current", cwd: "/project", name: "current-task", prompt: "check", schedule: { kind: "once" }, enabled: true, nextRunAt: createdAt + 60000, createdAt };
+  const command = { id: "cmd", sessionId: "current", cwd: "/project", command: "test", label: "current-command", status: "exited", startedAt: createdAt, endedAt: createdAt + 1000 };
+  const foreignTask = { ...task, id: "other", sessionId: "other", cwd: "/project", name: "other-task", sessionLabel: "其他会话名称" };
+  const foreignCommand = { ...command, id: "other-cmd", sessionId: "other", label: "other-command" };
   const data = { enabled: true, servers: [], configs: [], errors: [] };
-  const options = { tasks: [task, { ...task, id: "hidden", cwd: "/other", name: "hidden-task" }], commands: [command], open: true };
-  const html = render(data, options);
-  assert.match(html, /<details[^>]*class="other-session-tasks"/);
-  assert.doesNotMatch(html, /<details[^>]*\bopen/);
-  assert.match(html, /other-task/);
-  assert.match(html, /other-command/);
-  assert.doesNotMatch(html, /hidden-task/);
-  assert.equal((html.match(/href="\?session=other"/g) ?? []).length, 2);
+  const html = render(data, { tasks: [task, foreignTask], commands: [command, foreignCommand], open: true });
+
+  assert.match(html, /current-task/);
+  assert.match(html, /current-command/);
+  // 其他会话的记录既不渲染，也不再留折叠区或入口计数。
+  assert.doesNotMatch(html, /other-task/);
+  assert.doesNotMatch(html, /other-command/);
+  assert.doesNotMatch(html, /其他会话名称/);
+  assert.doesNotMatch(html, /other-session-tasks/);
+  assert.doesNotMatch(html, /tasks\.otherSessions/);
+  assert.doesNotMatch(html, /tasks\.thisSession/, "全是当前会话，不再逐条标注归属");
+  // 面板结构不变：两类记录仍带完整时间。
   assert.equal((html.match(/dateTime="2026-01-02T03:04:00.000Z"/g) ?? []).length, 2);
-  assert.match(html, /tasks.createdAt/);
-  assert.match(html, /tasks.startedAt/);
-  assert.doesNotMatch(html, /dev-servers-count/);
-  const switched = render(data, { ...options, sessionId: "other" });
-  assert.doesNotMatch(switched, /other-session-tasks/);
-  assert.match(switched, /other-task/);
-  assert.match(switched, /other-command/);
-  assert.equal(render(data, { tasks: [{ ...task, cwd: "/elsewhere" }] }), "");
+  assert.match(html, /tasks\.createdAt/);
+  assert.match(html, /tasks\.startedAt/);
+  // 只有其他会话的后台记录时，入口不出现。
+  assert.equal(render(data, { tasks: [foreignTask], commands: [foreignCommand] }), "");
 });
+test("入口只说「任务」，两类各一个图标计数，已结束的收进折叠区", () => {
+  const createdAt = Date.UTC(2026, 0, 2, 3, 4);
+  const task = { id: "task", sessionId: "current", cwd: "/project", name: "open-task", prompt: "check", schedule: { kind: "cron", expression: "0 9 * * *" }, enabled: true, nextRunAt: createdAt + 60000, createdAt };
+  const finishedTask = { ...task, id: "done", name: "finished-task", schedule: { kind: "once", at: createdAt }, nextRunAt: null };
+  const running = { id: "run", sessionId: "current", cwd: "/project", command: "npm test", label: "running-command", status: "running", startedAt: createdAt };
+  const exited = { ...running, id: "exited", label: "finished-command", status: "exited", endedAt: createdAt + 1000 };
+  const data = { enabled: true, servers: [], configs: [], errors: [] };
+
+  const collapsed = render(data, { tasks: [task, finishedTask], commands: [running, exited] });
+  assert.match(collapsed, /class="extension-widget-key">tasks\.triggerShort<\/span>/, "定时任务和后台命令合并成一个词");
+  assert.equal((collapsed.match(/scheduled-tasks-count/g) ?? []).length, 2, "两类各一个图标计数");
+
+  // 只有一类时只出现那一类的图标计数。
+  assert.equal((render(data, { commands: [running] }).match(/scheduled-tasks-count/g) ?? []).length, 1);
+  assert.equal((render(data, { tasks: [task] }).match(/scheduled-tasks-count/g) ?? []).length, 1);
+
+  const panel = render(data, { tasks: [task, finishedTask], commands: [running, exited], open: true });
+  const details = panel.indexOf('class="finished-tasks"');
+  assert.ok(details > 0, "已结束的记录放进折叠区");
+  assert.ok(panel.indexOf("open-task") < details, "没结束的留在正文");
+  assert.ok(panel.indexOf("running-command") < details);
+  assert.ok(panel.indexOf("finished-task") > details, "已结束的任务折叠");
+  assert.ok(panel.indexOf("finished-command") > details, "已结束的命令折叠");
+});
+
 test.after(async () => {
   delete globalThis.__devServersShelfData;
   delete globalThis.__shelfTasks;
