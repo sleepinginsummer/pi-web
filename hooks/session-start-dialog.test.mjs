@@ -78,7 +78,7 @@ test("a fresh composer holds the stream while get_commands waits on session_star
   const responding = hook.result.respondToExtensionUi(hook.result.extensionDialog, { confirmed: true });
   await settle();
   hook.flush();
-  assert.deepEqual(commands, ["s1 get_tools", "s1 get_commands", "s1 extension_ui_response"]);
+  assert.deepEqual(commands, ["s1 get_tools", "s1 get_tool_selection", "s1 get_commands", "s1 extension_ui_response"]);
   await responding;
   sources[0].emit({ type: "extensions_bound", model: { provider: "p", modelId: "after" }, thinkingLevel: "high" });
   answer("get_commands", { commands: [{ name: "ext", source: "extension" }] });
@@ -138,7 +138,7 @@ test("the System panel uses the staged runtime and reads its prompt without send
     assert.deepEqual(open(), ["/api/agent/s1/events"]);
     sources[0].connect();
     await settle();
-    assert.deepEqual(commands, ["s1 get_tools", "s1 get_state"]);
+    assert.deepEqual(commands, ["s1 get_tools", "s1 get_tool_selection", "s1 get_state"]);
     answer("get_state", { systemPrompt: "project instructions" });
     await loading;
     hook.flush();

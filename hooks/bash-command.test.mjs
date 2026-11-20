@@ -113,7 +113,7 @@ test("a fresh composer's first ! command opens the session's stream before it ru
     await settle();
     assert.deepEqual(env.log, ["stream"], "the command waits for the stream");
     await env.connect();
-    assert.deepEqual(env.log, ["stream", "get_tools", "bash"]);
+    assert.deepEqual(env.log, ["stream", "get_tools", "get_tool_selection", "bash"]);
     env.server.bash.resolve(json({ success: true, data: { output: "", exitCode: 0 } }));
     await sending;
   });
