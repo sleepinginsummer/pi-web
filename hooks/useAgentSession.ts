@@ -660,6 +660,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [toolPreset, setToolPreset] = useState<ToolPreset>("default");
   const [customToolNames, setCustomToolNames] = useState<string[] | null>(null);
   const [activeBuiltinTools, setActiveBuiltinTools] = useState<string[] | undefined>();
+  // 会话文件里钉死的内置工具名单；null 表示跟随 settings.json（configured）。只用于解释
+  // "设置里开着、本会话却没有"的工具（例如扩展把 edit 换掉了），不决定控件显示哪一档。
+  const [pinnedToolNames, setPinnedToolNames] = useState<string[] | null>(null);
+  // 没有存活运行时时（刚打开一个旧会话）读不到工具名单：此时不给预设标签，免得显示
+  // 一个初始值冒充用户的选择。第一次 loadTools、或用户自己选一档后才变成已知。
+  const [toolSelectionKnown, setToolSelectionKnown] = useState(false);
   // Every available model, fetched only when the selector switches to "all" or the
   // shown model is outside the scope; null until then and after each loadModels.
   const [allModelList, setAllModelList] = useState<ModelEntry[] | null>(null);
@@ -855,6 +861,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!isNew || sessionIdRef.current) return;
     setToolPresetState(getPreferredToolPreset());
     setCustomToolNames(getPreferredCustomTools());
+    // 新会话的档位来自浏览器里记住的选择，本身就是"已知"。
+    setToolSelectionKnown(true);
   }, [isNew, setToolPresetState]);
 
   const currentModel = currentModelOverride ?? contextModel ?? pendingModel ?? null;
@@ -1348,17 +1356,42 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const loadTools = useCallback(async (sid: string) => {
     try {
       const tools = await sendAgentCommand<ToolEntry[]>(sid, { type: "get_tools" });
+      // 钉死名单要单独问：`get_tools` 只知道此刻激活了哪些，分不清"用户没要"和"被扩展拿掉"。
+      // 命令失败（旧服务端）时保持 null，界面上就不标注。
+      const selection = await sendAgentCommand<{ pinned: string[] | null }>(sid, { type: "get_tool_selection" })
+        .catch(() => null);
       if (tools) {
         const { getPresetFromTools } = await import("@/lib/tool-presets");
         if (sessionIdRef.current === sid) {
           const names = tools.filter((tool) => tool.active)
             .map((tool) => tool.name === "powershell" ? "bash" : tool.name)
             .filter((name) => SETTINGS_BUILTIN_TOOLS.includes(name));
-          const preset = getPresetFromTools(tools);
-          const matches = getToolNamesForPreset(preset);
-          setToolPresetState(preset);
           setActiveBuiltinTools(names);
-          setCustomToolNames(names.length > 0 && (matches?.length !== names.length || !names.every((name) => matches.includes(name))) ? names : null);
+          setPinnedToolNames(selection ? selection.pinned : null);
+          setToolSelectionKnown(true);
+          // 显示哪一档以会话记录的名单为准：扩展拿掉一个内置工具（如 hashline 替换 edit）
+          // 不该把 configured/full 变成"自定义"。拿不到名单时才退回按实际激活的工具反推。
+          if (selection) {
+            const pinned = selection.pinned;
+            if (pinned === null) {
+              // 没有钉死名单 = 跟随 settings.json。
+              setToolPresetState("configured");
+              setCustomToolNames(null);
+            } else {
+              const preset = getPresetFromToolNames(pinned);
+              const matches = getToolNamesForPreset(preset);
+              setToolPresetState(preset);
+              setCustomToolNames(matches && (matches.length !== pinned.length || !pinned.every((name) => matches.includes(name)))
+                ? [...pinned]
+                : null);
+            }
+          } else {
+            // 旧服务端没有这条命令：只能按实际激活的工具反推。
+            const preset = getPresetFromTools(tools);
+            const matches = getToolNamesForPreset(preset);
+            setToolPresetState(preset);
+            setCustomToolNames(names.length > 0 && (matches?.length !== names.length || !names.every((name) => matches.includes(name))) ? names : null);
+          }
         }
         return tools;
       }
@@ -3437,6 +3470,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (creationSettingsLocked) return;
     setPreferredCustomTools(customNames);
     setCustomToolNames(customNames);
+    setToolSelectionKnown(true);
     const toolNames = customNames ?? getToolNamesForPreset(preset);
     setToolPresetState(preset);
     const sid = sessionIdRef.current;
@@ -3568,6 +3602,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     applyRuntimeState(undefined);
     contextUsageAppliedIdRef.current = contextUsageRequestIdRef.current;
     setActiveToolResults(new Map());
+    // 换会话先清掉上一份工具状态：冷会话读不到名单，不能继承上一个会话的档位和差异标注。
+    setActiveBuiltinTools(undefined);
+    setPinnedToolNames(null);
+    setCustomToolNames(null);
+    setToolSelectionKnown(false);
     if (session) {
       sessionIdRef.current = session.id;
       void connectEvents(session.id);
@@ -3764,7 +3803,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     hasEarlierMessages: historyPage.sid === sessionIdRef.current && historyPage.hasMore,
     loadingEarlierMessages: historyPage.sid === sessionIdRef.current && historyPage.loading,
     earlierTurnCount: historyPage.sid === sessionIdRef.current ? historyPage.turnsBefore : 0,
-    missingCwd, isModelScopeActive: modelSelectionState.isScoped, allModelList, loadAllModels, agentRunning, modelState: modelViewState, modelActions: modelViewActions, toolPreset, customToolNames, activeBuiltinTools,
+    missingCwd, isModelScopeActive: modelSelectionState.isScoped, allModelList, loadAllModels, agentRunning, modelState: modelViewState, modelActions: modelViewActions, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames, toolSelectionKnown,
     retryInfo, contextUsage, systemPrompt, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
@@ -3790,7 +3829,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }), [
     missingCwd,
     details, loading, error, sendError, activeLeafId, messages, entryIds, messageKeys, streamingStore, historyPage,
-    agentRunning, modelViewState, modelViewActions, toolPreset, customToolNames, activeBuiltinTools,
+    agentRunning, modelViewState, modelViewActions, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames, toolSelectionKnown,
     retryInfo, contextUsage, systemPrompt, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,

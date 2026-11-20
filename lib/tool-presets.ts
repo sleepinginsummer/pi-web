@@ -66,3 +66,33 @@ export function getToolNamesForPreset(preset: ToolPreset): string[] | undefined 
   if (preset === "full") return [...PRESET_FULL];
   return [...PRESET_DEFAULT];
 }
+
+/**
+ * 预设的界面名字（i18n key）。菜单行和输入框上的 chip 共用这一套，
+ * 否则会出现一半用英文标识符（full/configured）、一半用译名（自定义）的混搭。
+ */
+export function toolPresetLabelKey(preset: ToolPreset): string {
+  if (preset === "none") return "chat.presetOff";
+  if (preset === CONFIGURED_TOOL_PRESET) return "chat.presetConfigured";
+  if (preset === "read-only") return "chat.presetReadOnly";
+  if (preset === "full") return "chat.presetFull";
+  return "chat.presetDefault";
+}
+
+/**
+ * 设置里启用（settings.json `defaultTools`）、但这个会话拿不到的内置工具。
+ *
+ * `expected` 是会话要的那份：有钉死名单就用名单，跟随 settings.json 时就是设置本身。
+ * 只有"要了却没激活"的名字才算进来 —— 被预设主动排除的（例如 read-only 里的 bash/edit）
+ * 不在 `expected` 里，不会被误标。差出来的通常是扩展用自己的工具接替了它
+ * （`pi-hashline-edit-pro` 把 edit 换成 replace/insert 一族）。任一输入未知时返回空，
+ * 不猜。
+ */
+export function missingBuiltinTools(
+  settingsTools: readonly string[] | null | undefined,
+  expectedTools: readonly string[] | null | undefined,
+  liveTools: readonly string[] | null | undefined,
+): string[] {
+  if (!settingsTools || !expectedTools || !liveTools) return [];
+  return expectedTools.filter((name) => settingsTools.includes(name) && !liveTools.includes(name));
+}

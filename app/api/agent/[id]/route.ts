@@ -23,6 +23,7 @@ function shouldInvalidateSessionList(commandType: string): boolean {
   return !new Set([
     "get_state",
     "get_tools",
+    "get_tool_selection",
     "get_commands",
     "get_session_stats",
     "save_session_observer_settings",

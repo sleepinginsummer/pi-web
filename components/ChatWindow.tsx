@@ -264,7 +264,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
 
   const {
     loading, error, sendError, activeLeafId, messages, entryIds, messageKeys, historyCursor, streamingStore, hasEarlierMessages, loadingEarlierMessages, earlierTurnCount,
-    agentRunning, bashRunning, pendingBash, modelState, modelActions, missingCwd, isModelScopeActive, allModelList, loadAllModels, toolPreset, customToolNames, activeBuiltinTools,
+    agentRunning, bashRunning, pendingBash, modelState, modelActions, missingCwd, isModelScopeActive, allModelList, loadAllModels, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames, toolSelectionKnown,
     retryInfo, contextUsage, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
@@ -989,6 +989,8 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
       toolPreset={toolPreset}
       customToolNames={customToolNames}
       activeBuiltinTools={activeBuiltinTools}
+      pinnedToolNames={pinnedToolNames}
+      toolSelectionKnown={toolSelectionKnown}
       onToolPresetChange={(session && !isHiddenRelation(session.relation)) || isNew ? handleToolPresetChange : undefined}
       retryInfo={retryInfo}
       queuedMessages={queuedMessages}

@@ -77,6 +77,8 @@ interface Props {
   toolPreset?: ToolPreset;
   customToolNames?: readonly string[] | null;
   activeBuiltinTools?: readonly string[];
+  pinnedToolNames?: readonly string[] | null;
+  toolSelectionKnown?: boolean;
   onToolPresetChange?: (preset: ToolPreset, customNames?: string[] | null) => void;
   retryInfo?: { attempt: number; maxAttempts: number; errorMessage?: string } | null;
   queuedMessages?: QueuedMessages | null;
@@ -510,7 +512,7 @@ export function ModelDataDiagnosticBanner({ diagnostics }: { diagnostics?: Model
 }
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, sendError, onAbort, onSideChat, onQueuedSubmit, isStreaming, creationSettingsLocked = false, extensionsInitializing = false, modelState, modelActions, missingCwd, allModelList, onLoadAllModels,
-  onCompact, onAbortCompaction, isCompacting, compactError, onDismissCompactError, compactResult, toolPreset, customToolNames, activeBuiltinTools, onToolPresetChange,
+  onCompact, onAbortCompaction, isCompacting, compactError, onDismissCompactError, compactResult, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames, toolSelectionKnown, onToolPresetChange,
   retryInfo, queuedMessages, inputHistory = [], onRecallQueue,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   extensionUiOpen = false,
@@ -2256,6 +2258,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             toolPreset={toolPreset}
             customToolNames={customToolNames}
             activeBuiltinTools={activeBuiltinTools}
+            pinnedToolNames={pinnedToolNames}
+            toolSelectionKnown={toolSelectionKnown}
             onToolPresetChange={creationSettingsLocked ? undefined : onToolPresetChange}
             onCompact={onCompact}
             onAbortCompaction={onAbortCompaction}

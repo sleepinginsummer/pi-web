@@ -7,7 +7,7 @@ import type { ModelSelectionViewActions, ModelSelectionViewState } from "@/lib/m
 import { THINKING_LEVEL_OPTIONS, type ThinkingLevelOption } from "@/lib/thinking-levels";
 import { Ellipsis, Zap } from "lucide-react";
 import type { ToolPreset } from "@/lib/tool-presets";
-import { getPresetFromToolNames, getToolNamesForPreset, SETTINGS_BUILTIN_TOOLS, TOOL_PRESET_VALUES } from "@/lib/tool-presets";
+import { getPresetFromToolNames, getToolNamesForPreset, missingBuiltinTools, SETTINGS_BUILTIN_TOOLS, TOOL_PRESET_VALUES, toolPresetLabelKey } from "@/lib/tool-presets";
 import { useRunEndStrayClick } from "@/lib/run-end-click";
 const TOOL_PRESET_LABELS = ["off", ...TOOL_PRESET_VALUES.filter((preset) => preset !== "none")] as const;
 type ToolPresetLabel = typeof TOOL_PRESET_LABELS[number];
@@ -176,17 +176,24 @@ interface ToolPresetControlProps {
   toolPreset?: ToolPreset;
   customToolNames?: readonly string[] | null;
   activeBuiltinTools?: readonly string[];
+  /** 会话钉死的内置工具名单；null/undefined 表示跟随 settings.json。只用于标注被扩展接替的工具。 */
+  pinnedToolNames?: readonly string[] | null;
+  /** 拿不到会话的工具名单时（刚打开、没有存活运行时）为 false：不显示预设标签。 */
+  toolSelectionKnown?: boolean;
   onChange?: (preset: ToolPreset, customNames?: string[] | null) => void;
   isStrayClick: (event: { detail: number }) => boolean;
+  /** 运行中服务端会拒绝 set_tools：控件保留在原来的位置，只收起菜单并禁用点击。 */
+  disabled?: boolean;
 }
 
-const ToolPresetControl = memo(function ToolPresetControl({ isMobile, toolPreset, customToolNames, activeBuiltinTools, onChange, isStrayClick }: ToolPresetControlProps) {
+const ToolPresetControl = memo(function ToolPresetControl({ isMobile, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames, toolSelectionKnown = true, onChange, isStrayClick, disabled = false }: ToolPresetControlProps) {
   const { t } = useI18n();
   const [toolDropdownOpen, setToolDropdownOpen] = useState(false);
   const toolDropdownRef = useRef<HTMLDivElement>(null);
   const [configuredTools, setConfiguredTools] = useState<string[] | null>(null);
   useEffect(() => {
-    if (!toolDropdownOpen || toolPreset !== "configured" || activeBuiltinTools) return;
+    // 设置里的名单既是 configured 的展示来源，也是"设置开着、本会话却没有"的对照基准。
+    if (!toolDropdownOpen || configuredTools) return;
     const controller = new AbortController();
     void fetch("/api/tools/settings", { signal: controller.signal })
       .then(async (response) => {
@@ -198,9 +205,26 @@ const ToolPresetControl = memo(function ToolPresetControl({ isMobile, toolPreset
         if (!controller.signal.aborted) console.error("[pi-web] 无法读取内置工具默认设置", error);
       });
     return () => controller.abort();
-  }, [activeBuiltinTools, toolDropdownOpen, toolPreset]);
-  const selectedTools = customToolNames ?? getToolNamesForPreset(toolPreset ?? "default") ?? activeBuiltinTools ?? configuredTools;
-  const toolPresetLabel = toolPreset === "none" ? "off" : (customToolNames ? t("chat.customToolSelection") : toolPreset ?? "default");
+  }, [configuredTools, toolDropdownOpen]);
+  // configured 展示设置本身（跟随它变化），其它预设展示预设名单；自定义勾选优先。
+  const presetTools = toolPreset === "configured"
+    ? (configuredTools ?? activeBuiltinTools)
+    : getToolNamesForPreset(toolPreset ?? "default");
+  // 名单未知（刚打开、没有存活运行时）时不假装有选择：勾选留空，chip 用中性名字。
+  const selectedTools = toolSelectionKnown ? (customToolNames ?? presetTools) : undefined;
+  // chip 与菜单行同一套名字：预设用译名，自定义单独一个词，不再混英文标识符。
+  const toolPresetLabel = !toolSelectionKnown
+    ? t("settings.builtinTools")
+    : customToolNames
+      ? t("chat.customToolSelection")
+      : t(toolPresetLabelKey(toolPreset ?? "default"));
+  // configured 的名单是全局设置（Settings › General 写 defaultTools）解析出来的，
+  // 只能在那里改：这里仅作为"这个会话会拿到哪些工具"的展示，勾选不改写它。
+  const followsSettings = toolPreset === "configured" && !customToolNames;
+  // 设置里启用、这个会话却拿不到的工具：通常是扩展用自己的实现接替了它
+  // （例如 pi-hashline-edit-pro 把 edit 换成 replace/insert）。没有钉死名单时会话
+  // 想要的就是设置本身，所以那时用设置当对照。
+  const missingHere = missingBuiltinTools(configuredTools, pinnedToolNames ?? configuredTools, activeBuiltinTools);
   useEffect(() => {
     if (!toolDropdownOpen) return;
     const close = (event: MouseEvent) => {
@@ -209,28 +233,35 @@ const ToolPresetControl = memo(function ToolPresetControl({ isMobile, toolPreset
     document.addEventListener("mousedown", close);
     return () => document.removeEventListener("mousedown", close);
   }, [toolDropdownOpen]);
+  // 一轮开始时收起已打开的菜单，否则它会留在浮层里而每一项都点不动。
+  useEffect(() => {
+    if (disabled) setToolDropdownOpen(false);
+  }, [disabled]);
   const onToolPresetChange = onChange;
   if (!onToolPresetChange) return null;
   return (
               <div ref={toolDropdownRef} style={{ position: "relative" }}>
                 <button
-                  onClick={(event) => { if (!isStrayClick(event)) setToolDropdownOpen((open) => !open); }}
-                   title={t("chat.changeToolPreset") + `: ${toolPresetLabel}`}
+                  onClick={(event) => { if (disabled || isStrayClick(event)) return; setToolDropdownOpen((open) => !open); }}
+                   title={disabled ? t("chat.toolsLockedWhileRunning") : t("chat.changeToolPreset") + `: ${toolPresetLabel}`}
                    aria-label={t("chat.changeToolPreset")}
+                   aria-disabled={disabled ? true : undefined}
                   style={{
                     display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
                     padding: isMobile ? "0 6px" : "8px 12px",
                     width: isMobile ? "auto" : undefined,
                     height: 32,
-                    background: toolDropdownOpen ? "var(--bg-hover)" : "none",
+                    background: toolDropdownOpen && !disabled ? "var(--bg-hover)" : "none",
                     border: "none",
                     borderRadius: 9,
                     color: "var(--text-muted)",
-                    cursor: "pointer",
+                    opacity: disabled ? 0.5 : 1,
+                    cursor: disabled ? "default" : "pointer",
                     fontSize: 12,
                                         transition: "background 0.12s, color 0.12s",
                   }}
                   onMouseEnter={(e) => {
+                                if (disabled) return;
                                 e.currentTarget.style.background = "var(--bg-hover)";
                     e.currentTarget.style.color = "var(--text)";
                   }}
@@ -244,7 +275,7 @@ const ToolPresetControl = memo(function ToolPresetControl({ isMobile, toolPreset
                   </svg>
                   <span style={{ whiteSpace: "nowrap" }}>{toolPresetLabel}</span>
                 </button>
-                {toolDropdownOpen && (
+                {toolDropdownOpen && !disabled && (
                   <div style={{
                     position: "absolute", bottom: "calc(100% + 6px)", right: 0,
                     zIndex: 100, background: "var(--bg)", border: "1px solid var(--border)",
@@ -253,7 +284,9 @@ const ToolPresetControl = memo(function ToolPresetControl({ isMobile, toolPreset
                   }}>
                     {TOOL_PRESET_LABELS.map((label) => {
                       const preset = presetForLabel(label);
-                      const isActive = !customToolNames && (toolPreset ?? "default") === preset;
+                      const isActive = toolSelectionKnown && !customToolNames && (toolPreset ?? "default") === preset;
+                      // 名字和 chip 共用一套译名；说明只是补充，和名字重复时不再重复显示。
+                      const name = t(toolPresetLabelKey(preset));
                       let desc: string;
                       if (label === "off") desc = t("chat.noTools");
                       // configured 不钉死工具列表，由 settings.json 的 defaultTools 解析
@@ -281,17 +314,19 @@ const ToolPresetControl = memo(function ToolPresetControl({ isMobile, toolPreset
                           {isActive
                             ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
                             : <span style={{ width: 10, flexShrink: 0 }} />}
-                          <span style={{ flex: 1 }}>{label}</span>
-                          <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: 8 }}>{desc}</span>
+                          <span style={{ flex: 1 }}>{name}</span>
+                          {desc !== name && (
+                            <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: 8 }}>{desc}</span>
+                          )}
                         </button>
                       );
                     })}
                     <div className="border-t border-border px-3 py-2" role="group" aria-label={t("settings.builtinTools")}>
                       {SETTINGS_BUILTIN_TOOLS.map((name) => (
-                        <label key={name} className="flex cursor-pointer items-center gap-2 py-1 text-xs text-text-muted">
+                        <label key={name} className={`flex items-center gap-2 py-1 text-xs text-text-muted ${followsSettings ? "cursor-default" : "cursor-pointer"}`}>
                           <input
                             type="checkbox"
-                            disabled={!selectedTools}
+                            disabled={!selectedTools || followsSettings}
                             checked={selectedTools?.includes(name) ?? false}
                             onChange={(event) => {
                               if (!selectedTools) return;
@@ -303,8 +338,16 @@ const ToolPresetControl = memo(function ToolPresetControl({ isMobile, toolPreset
                             }}
                           />
                           {name}
+                          {missingHere.includes(name) && (
+                            <span className="text-[10px] text-text-dim" title={t("chat.toolMissingTooltip")}>
+                              · {t("chat.toolMissingHere")}
+                            </span>
+                          )}
                         </label>
                       ))}
+                      {followsSettings && (
+                        <p className="pt-1 text-[11px] leading-snug text-text-dim">{t("chat.toolsFollowSettingsHint")}</p>
+                      )}
                     </div>
                   </div>
                 )}
@@ -519,6 +562,8 @@ interface InputControlsProps {
   toolPreset?: ToolPreset;
   customToolNames?: readonly string[] | null;
   activeBuiltinTools?: readonly string[];
+  pinnedToolNames?: readonly string[] | null;
+  toolSelectionKnown?: boolean;
   onToolPresetChange?: (preset: ToolPreset, customNames?: string[] | null) => void;
   onCompact?: () => void;
   onAbortCompaction?: () => void;
@@ -534,7 +579,7 @@ interface InputControlsProps {
 
 /** 输入控制栏自行管理下拉菜单，输入文字变化时无需重建控制栏。 */
 export const InputControls = memo(function InputControls({
-  isMobile, isStreaming, modelState, modelActions, onThinkingLevelChange, toolPreset, customToolNames, activeBuiltinTools, onToolPresetChange,
+  isMobile, isStreaming, modelState, modelActions, onThinkingLevelChange, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames, toolSelectionKnown, onToolPresetChange,
   onCompact, onAbortCompaction, isCompacting, onAbort, soundEnabled, onSoundToggle,
   notificationEnabled, notificationPermission, onNotificationToggle,
   endAction,
@@ -586,7 +631,7 @@ export const InputControls = memo(function InputControls({
                 <>
                   <ThinkingControl isMobile={isMobile} modelState={modelState} isStreaming={isStreaming} onChange={onThinkingLevelChange} />
                   {!isStreaming && <FastModeControl isMobile={isMobile} modelState={modelState} onChange={modelActions.changeFastEnabled} />}
-                  {!isStreaming && <ToolPresetControl isMobile={isMobile} toolPreset={toolPreset} customToolNames={customToolNames} activeBuiltinTools={activeBuiltinTools} onChange={onToolPresetChange} isStrayClick={isStrayClick} />}
+                  <ToolPresetControl isMobile={isMobile} toolPreset={toolPreset} customToolNames={customToolNames} activeBuiltinTools={activeBuiltinTools} pinnedToolNames={pinnedToolNames} toolSelectionKnown={toolSelectionKnown} onChange={onToolPresetChange} isStrayClick={isStrayClick} disabled={isStreaming} />
                 </>
               ) : null}
               runControls={(!isMobile || (!isStreaming && !isCompacting)) ? (

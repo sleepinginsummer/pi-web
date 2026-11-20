@@ -2604,6 +2604,14 @@ export class AgentSessionWrapper {
         }));
       }
 
+      case "get_tool_selection": {
+        // 当前分支上钉死的内置工具名单；null 表示没有钉死，跟随 settings.json 的 defaultTools。
+        // 按分支读：`get_tools` 的激活集合也跟着分支，两处口径一致，翻到旧分支时不会拿着
+        // 后来那条名单显示。`readSessionToolSelection` 取最新一条有效记录，`cleared` 等于没钉死。
+        const entries = this.inner.sessionManager.getBranch() as unknown as SessionEntry[];
+        return { pinned: readSessionToolSelection(entries) ?? null };
+      }
+
       case "get_commands": {
         const commands: SlashCommandInfo[] = [];
         for (const registered of this.inner.extensionRunner.getRegisteredCommands()) {

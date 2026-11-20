@@ -260,7 +260,8 @@ test("ignores a pointer click that reaches Stop's slot just as the run ends", ()
   assert.match(hook, /useLayoutEffect\(\(\) => \{\s*if \(!isStreaming\) return;\s*return \(\) => \{ runEndedAtRef\.current = performance\.now\(\); \};\s*\}, \[isStreaming\]\);/);
   assert.match(controls, /const isStrayClick = useRunEndStrayClick\(isStreaming\);/);
   assert.match(controls, /onClick=\{isCompacting \? onAbortCompaction : \(event\) => \{ if \(!isStrayClick\(event\)\) onCompact\?\.\(\); \}\}/);
-  assert.match(controls, /onClick=\{\(event\) => \{ if \(!isStrayClick\(event\)\) setToolDropdownOpen\(\(open\) => !open\); \}\}/);
+  // 运行中控件禁用，误触判断排在禁用之后（disabled 时直接返回）。
+  assert.match(controls, /onClick=\{\(event\) => \{ if \(disabled \|\| isStrayClick\(event\)\) return; setToolDropdownOpen\(\(open\) => !open\); \}\}/);
   assert.match(controls, /onClick=\{onAbort\}/, "Stop itself is never delayed");
 });
 
