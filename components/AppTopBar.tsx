@@ -12,8 +12,7 @@ import { DraftObserverSessionToggle, ObserverSessionToggle } from "./ObserverSes
 import { SYSTEM_PROMPT_ADDON_EDITOR_ATTR, SystemPromptAddonToggle } from "./SystemPromptAddonToggle";
 import { SessionStatsButton } from "./SessionInfoControls";
 
-// app/globals.css: 36px, 44px on a phone or touch screen.
-const ICON_BUTTON_SIZE = "var(--top-bar-height)";
+// app/globals.css: 42px desktop, 44px on a phone or touch screen.
 const NOOP = () => {};
 type Translate = (key: string, params?: Record<string, string | number>) => string;
 type AutoNameStatus = { kind: "idle" | "naming" | "success" } | { kind: "error"; message: string };
@@ -86,7 +85,7 @@ function AgentsBadge({ badge }: { badge: { count: number; running: boolean } }) 
 
 function IconButton({ active = false, children, debugButton = false, label, onClick }: { active?: boolean; children: React.ReactNode; debugButton?: boolean; label: string; onClick: (event: React.MouseEvent<HTMLButtonElement>) => void }) {
   return (
-    <button type="button" data-debug-button={debugButton ? "" : undefined} onClick={onClick} title={label} aria-label={label} aria-pressed={active} style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "center", width: ICON_BUTTON_SIZE, height: ICON_BUTTON_SIZE, padding: 0, fontFamily: "inherit", fontSize: "inherit", lineHeight: 1, background: active ? "var(--bg-selected)" : "none", border: "none", borderRight: "1px solid var(--border)", color: active ? "var(--text)" : "var(--text-muted)", cursor: "pointer", flexShrink: 0 }}>
+    <button type="button" data-debug-button={debugButton ? "" : undefined} onClick={onClick} title={label} aria-label={label} aria-pressed={active} className={`top-bar-btn top-bar-icon-btn${active ? " is-active" : ""}`}>
       {children}
     </button>
   );
@@ -143,11 +142,11 @@ function SessionTopBarControls({ activePanel, hideAgents = false, hideStats = fa
 
   return (
     <>
-      <div className={stacked ? "mobile-top-bar-menu-rows" : undefined} style={{ display: "flex", alignItems: "stretch", height: "100%", flexShrink: 0 }}>
-        <button type="button" onClick={session.onHistory} disabled={!session.hasPersistedSession} title={session.hasPersistedSession ? translate("history.full") : translate("history.unsaved")} aria-label={translate("history.label")} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: navigation.isMobile ? ICON_BUTTON_SIZE : undefined, height: "100%", padding: navigation.isMobile ? 0 : "0 12px", background: "none", border: 0, borderRight: "1px solid var(--border)", color: "var(--text-muted)", cursor: session.hasPersistedSession ? "pointer" : "not-allowed" }}>
+      <div className={stacked ? "mobile-top-bar-menu-rows" : "top-bar-controls-row"}>
+        <button type="button" onClick={session.onHistory} disabled={!session.hasPersistedSession} title={session.hasPersistedSession ? translate("history.full") : translate("history.unsaved")} aria-label={translate("history.label")} className="top-bar-btn top-bar-text-btn">
           {stacked && <History size={16} aria-hidden="true" />}{translate("history.label")}
         </button>
-        <button type="button" onClick={session.onAutoName} disabled={autoNameDisabled} title={autoNameLabel} aria-label={autoNameLabel} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: navigation.isMobile ? ICON_BUTTON_SIZE : undefined, height: "100%", padding: navigation.isMobile ? 0 : "0 12px", background: "none", border: 0, borderRight: "1px solid var(--border)", color: autoNameDisabled ? "var(--text-dim)" : "var(--text-muted)", cursor: autoNameDisabled ? "not-allowed" : "pointer" }}>
+        <button type="button" onClick={session.onAutoName} disabled={autoNameDisabled} title={autoNameLabel} aria-label={autoNameLabel} className="top-bar-btn top-bar-text-btn">
           {stacked && <Sparkles size={16} aria-hidden="true" />}{autoNameLabel}
         </button>
         {!hideAgents && <AgentsButton {...{ activePanel, onTogglePanel, session, translate }} />}
@@ -168,13 +167,14 @@ function SessionTopBarControls({ activePanel, hideAgents = false, hideStats = fa
             hasSession
           />
         ))}
-        <button type="button" onClick={() => onTogglePanel("system")} title={translate("system.prompt")} aria-label={translate("system.label")} aria-pressed={activePanel === "system"} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: navigation.isMobile ? ICON_BUTTON_SIZE : undefined, height: "100%", padding: navigation.isMobile ? 0 : "0 12px", background: activePanel === "system" ? "var(--bg-selected)" : "none", border: 0, borderRight: "1px solid var(--border)", color: session.systemPrompt ? "var(--accent)" : "var(--text-muted)", cursor: "pointer" }}>
+        <button type="button" onClick={() => onTogglePanel("system")} title={translate("system.prompt")} aria-label={translate("system.label")} aria-pressed={activePanel === "system"} className={`top-bar-btn top-bar-text-btn${activePanel === "system" ? " is-active" : ""}${session.systemPrompt ? " has-accent" : ""}`}>
           {stacked && <ScrollText size={16} aria-hidden="true" />}{translate("system.label")}
         </button>
-        <button type="button" onClick={() => onTogglePanel("tools")} title={translate("tools.title")} aria-label={translate("tools.title")} aria-pressed={activePanel === "tools"} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: navigation.isMobile ? ICON_BUTTON_SIZE : undefined, height: "100%", padding: navigation.isMobile ? 0 : "0 12px", background: activePanel === "tools" ? "var(--bg-selected)" : "none", border: 0, borderRight: "1px solid var(--border)", color: "var(--text-muted)", cursor: "pointer" }}>
+        <button type="button" onClick={() => onTogglePanel("tools")} title={translate("tools.title")} aria-label={translate("tools.title")} aria-pressed={activePanel === "tools"} className={`top-bar-btn top-bar-text-btn${activePanel === "tools" ? " is-active" : ""}`}>
           {stacked && <Wrench size={16} aria-hidden="true" />}{translate("tools.label")}
         </button>
         <DebugTopBarButton {...{ activePanel, onTogglePanel, translate }} showLabel={stacked} />
+        {!stacked && <span className="top-bar-group-sep" aria-hidden="true" />}
         <ShadowSessionToggle
           enabled={shadow?.enabled ?? true}
           pending={shadow?.pending ?? false}
@@ -183,7 +183,7 @@ function SessionTopBarControls({ activePanel, hideAgents = false, hideStats = fa
         />
         <SystemPromptAddonToggle scopeKey={shadow?.scopeKey ?? null} sessionId={shadow?.sessionId ?? null} onChange={session.onSystemPromptAddonChange} />
         {(session.observerPanel || session.observerDraft) && (
-          <div className="flex shrink-0 items-stretch border-r border-border">
+          <div className="top-bar-toggle-group">
             {session.observerPanel && (
               <button
                 type="button"
@@ -192,10 +192,9 @@ function SessionTopBarControls({ activePanel, hideAgents = false, hideStats = fa
                 aria-controls={session.observerPanel.open ? "session-observer-panel" : undefined}
                 aria-label={translate("observer.label")}
                 title={translate("observer.label")}
-                className="flex shrink-0 items-center justify-center gap-1.5 px-3 text-text-muted hover:bg-[var(--bg-selected)] aria-expanded:bg-[var(--bg-selected)]"
-                style={{ width: navigation.isMobile ? ICON_BUTTON_SIZE : undefined, paddingInline: navigation.isMobile ? 0 : undefined }}
+                className={`top-bar-toggle-part top-bar-toggle-label${session.observerPanel.open ? " is-active" : ""}`}
               >
-                <Eye size={15} aria-hidden="true" />
+                <Eye size={14} aria-hidden="true" />
                 {translate("observer.label")}
               </button>
             )}
@@ -258,7 +257,8 @@ export function AppTopBar(props: AppTopBarProps) {
       onClick={trust.onOpen}
       title={translate("trust.resourcesNotLoaded")}
       data-mobile-trust-banner={navigation.isMobile ? "true" : undefined}
-      style={{ height: navigation.isMobile ? 30 : "100%", width: navigation.isMobile ? "100%" : undefined, padding: navigation.isMobile ? "0 10px" : "0 12px", background: "var(--bg-panel)", border: 0, borderBottom: navigation.isMobile ? "1px solid var(--border)" : undefined, borderRight: navigation.isMobile ? undefined : "1px solid var(--border)", color: "#d97706", cursor: "pointer", textAlign: navigation.isMobile ? "left" : "center" }}
+      className={navigation.isMobile ? undefined : "top-bar-trust-pill"}
+      style={navigation.isMobile ? { height: 30, width: "100%", padding: "0 10px", background: "var(--bg-panel)", border: 0, borderBottom: "1px solid var(--border)", color: "#d97706", cursor: "pointer", textAlign: "left" } : undefined}
     >
       {translate("trust.resourcesNotLoaded")}
     </button>
@@ -267,7 +267,7 @@ export function AppTopBar(props: AppTopBarProps) {
   return (
     <div ref={toolbarShellRef} className="app-top-bar-container" style={{ position: "relative", flexShrink: 0, minWidth: 0 }}>
       <div className="app-top-bar-shell" data-mobile-toolbar={navigation.isMobile ? "true" : undefined} style={{ display: "flex", minWidth: 0, height: "var(--top-bar-height)" }}>
-        <div ref={navigation.topBarRef} className="app-top-bar" style={{ position: "relative", display: "flex", flex: "1 1 auto", alignItems: "center", minWidth: 0, overflow: "hidden", borderBottom: "1px solid var(--border)", height: "100%", background: "var(--bg-panel)", fontFamily: "inherit", fontSize: 11, fontWeight: 400, lineHeight: 1 }}>
+        <div ref={navigation.topBarRef} className="app-top-bar">
           <IconButton label={navigation.sidebarOpen ? translate("sidebar.hide") : translate("sidebar.show")} onClick={() => { setMobileToolbarMoreOpen(false); navigation.onSidebarToggle(); }}>
             {navigation.sidebarOpen ? (
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" /><line x1="9" y1="3" x2="9" y2="21" /></svg>
@@ -303,12 +303,13 @@ export function AppTopBar(props: AppTopBarProps) {
             )
           ) : (
             <>
+              {(session.show || projectTrustWarning) && <span className="top-bar-group-sep" aria-hidden="true" />}
               {projectTrustWarning}
               <SessionTopBarControls {...{ activePanel, navigation, onTogglePanel, session, translate, locale }} />
             </>
           )}
         </div>
-        <div className="app-top-bar-end" onClick={() => setMobileToolbarMoreOpen(false)} style={{ display: "flex", flex: "0 0 auto" }}>
+        <div className="app-top-bar-end" onClick={() => setMobileToolbarMoreOpen(false)}>
           {endAction}
         </div>
       </div>

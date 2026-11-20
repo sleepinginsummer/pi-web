@@ -802,157 +802,78 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
         </div>
       )}
       {/* Header */}
-      <div
-        style={{
-          padding: "12px 10px 10px",
-          borderBottom: "1px solid var(--border)",
-          flexShrink: 0,
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-          <div style={{ display: "flex", alignItems: "center", minWidth: 0 }}>
-            <PiWebTitle />
-            {hasOtherWorkspaceActivity && (
-              <span
-                title={t("sidebar.newActivity")}
-                aria-label={t("sidebar.newActivity")}
-                style={{ width: 7, height: 7, marginLeft: 6, borderRadius: "50%", background: "var(--accent)", flexShrink: 0 }}
-              />
-            )}
-          </div>
-          <div style={{ display: "flex", gap: 6 }}>
-            <button
-              onClick={handleCustomPathClick}
-              style={{
-                display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
-                background: "var(--bg-hover)",
-                border: "1px solid var(--border)",
-                color: "var(--text-muted)",
-                cursor: "pointer",
-                width: 32,
-                height: 32,
-                padding: 0,
-                borderRadius: 7,
-                fontSize: 12,
-                fontWeight: 500,
-                letterSpacing: "-0.01em",
-                flexShrink: 0,
-                transition: "background 0.12s, color 0.12s, border-color 0.12s",
-              }}
-              title={t("sidebar.customPath")}
-              aria-label={t("sidebar.customPath")}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.background = "var(--bg-selected)";
-                e.currentTarget.style.color = "var(--accent)";
-                e.currentTarget.style.borderColor = "rgba(37,99,235,0.35)";
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = "var(--bg-hover)";
-                e.currentTarget.style.color = "var(--text-muted)";
-                e.currentTarget.style.borderColor = "var(--border)";
-              }}
-            >
-              <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
-                <line x1="6" y1="1" x2="6" y2="11" />
-                <line x1="1" y1="6" x2="11" y2="6" />
-              </svg>
-            </button>
-            <button
-              type="button"
-              onClick={() => setSessionSearchOpen((open) => !open)}
-              title={t("sidebar.toggleSessionSearch")}
-              aria-label={t("sidebar.toggleSessionSearch")}
-              aria-expanded={sessionSearchOpen}
-              aria-controls="session-search-input"
-              style={{
-                display: "flex", alignItems: "center", justifyContent: "center",
-                background: sessionSearchOpen ? "var(--bg-selected)" : "var(--bg-hover)",
-                border: "1px solid var(--border)",
-                color: sessionSearchOpen ? "var(--accent)" : "var(--text-muted)",
-                cursor: "pointer", width: 32, height: 32, padding: 0,
-                borderRadius: 7, flexShrink: 0,
-              }}
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" />
-              </svg>
-            </button>
-            <button
-              onClick={() => loadSessions(false)}
-              style={{
-                display: "flex", alignItems: "center", justifyContent: "center",
-                background: sessionRefreshDone ? "rgba(74,222,128,0.18)" : "var(--bg-hover)",
-                border: `1px solid ${sessionRefreshDone ? "rgba(74,222,128,0.4)" : "var(--border)"}`,
-                color: sessionRefreshDone ? "#4ade80" : "var(--text-muted)",
-                cursor: "pointer",
-                width: 32, height: 32,
-                borderRadius: 7,
-                padding: 0,
-                flexShrink: 0,
-                transition: "background 0.3s, color 0.3s, border-color 0.3s",
-              }}
-              onMouseEnter={(e) => {
-                if (sessionRefreshDone) return;
-                e.currentTarget.style.background = "var(--bg-selected)";
-                e.currentTarget.style.color = "var(--accent)";
-                e.currentTarget.style.borderColor = "rgba(37,99,235,0.35)";
-              }}
-              onMouseLeave={(e) => {
-                if (sessionRefreshDone) return;
-                e.currentTarget.style.background = "var(--bg-hover)";
-                e.currentTarget.style.color = "var(--text-muted)";
-                e.currentTarget.style.borderColor = "var(--border)";
-              }}
-               title={t("sidebar.refresh")}
-            >
-              {sessionRefreshDone ? (
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#4ade80" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="20 6 9 17 4 12" />
-                </svg>
-              ) : (
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-                  <path d="M3 3v5h5" />
-                </svg>
-              )}
-            </button>
-            <button
-              onClick={() => setTrashOpen(true)}
-              title={t("trash.title")}
-              style={{
-                display: "flex", alignItems: "center", justifyContent: "center",
-                background: "var(--bg-hover)",
-                border: "1px solid var(--border)",
-                color: "var(--text-muted)",
-                cursor: "pointer",
-                width: 32, height: 32,
-                borderRadius: 7,
-                padding: 0,
-                flexShrink: 0,
-                transition: "background 0.12s, color 0.12s, border-color 0.12s",
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.background = "var(--bg-selected)";
-                e.currentTarget.style.color = "var(--accent)";
-                e.currentTarget.style.borderColor = "rgba(37,99,235,0.35)";
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = "var(--bg-hover)";
-                e.currentTarget.style.color = "var(--text-muted)";
-                e.currentTarget.style.borderColor = "var(--border)";
-              }}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="3 6 5 6 21 6" />
-                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-                <path d="M10 11v6M14 11v6" />
-                <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
-              </svg>
-            </button>
-          </div>
+      <div className="sidebar-header">
+        <div style={{ display: "flex", alignItems: "center", minWidth: 0 }}>
+          <PiWebTitle />
+          {hasOtherWorkspaceActivity && (
+            <span
+              title={t("sidebar.newActivity")}
+              aria-label={t("sidebar.newActivity")}
+              style={{ width: 7, height: 7, marginLeft: 6, borderRadius: "50%", background: "var(--accent)", flexShrink: 0 }}
+            />
+          )}
         </div>
+        <div className="sidebar-header-actions">
+          <button
+            type="button"
+            onClick={handleCustomPathClick}
+            className="sidebar-header-icon-btn"
+            title={t("sidebar.customPath")}
+            aria-label={t("sidebar.customPath")}
+          >
+            <svg width="13" height="13" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round">
+              <line x1="6" y1="1" x2="6" y2="11" />
+              <line x1="1" y1="6" x2="11" y2="6" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            onClick={() => setSessionSearchOpen((open) => !open)}
+            className={`sidebar-header-icon-btn${sessionSearchOpen ? " is-active" : ""}`}
+            title={t("sidebar.toggleSessionSearch")}
+            aria-label={t("sidebar.toggleSessionSearch")}
+            aria-expanded={sessionSearchOpen}
+            aria-controls="session-search-input"
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            onClick={() => loadSessions(false)}
+            className={`sidebar-header-icon-btn${sessionRefreshDone ? " is-done" : ""}`}
+            title={t("sidebar.refresh")}
+          >
+            {sessionRefreshDone ? (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#4ade80" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="20 6 9 17 4 12" />
+              </svg>
+            ) : (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                <path d="M3 3v5h5" />
+              </svg>
+            )}
+          </button>
+          <button
+            type="button"
+            onClick={() => setTrashOpen(true)}
+            className="sidebar-header-icon-btn"
+            title={t("trash.title")}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="3 6 5 6 21 6" />
+              <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+              <path d="M10 11v6M14 11v6" />
+              <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+            </svg>
+          </button>
+        </div>
+      </div>
 
-        {sessionSearchOpen && (
+      {sessionSearchOpen && (
+        <div className="sidebar-search-bar">
           <input
             id="session-search-input"
             type="search"
@@ -967,15 +888,10 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
               event.stopPropagation();
               setSessionSearchQuery("");
             }}
-            style={{
-              display: "block", width: "100%", minWidth: 0, height: 29,
-              marginTop: 6, padding: "0 10px", border: "1px solid var(--border)",
-              borderRadius: 7, background: "var(--bg)", color: "var(--text)", fontSize: 12,
-            }}
+            className="sidebar-search-input"
           />
-        )}
-
-      </div>
+        </div>
+      )}
 
       <SessionSearch
         open={sessionSearchOpen}
@@ -987,7 +903,11 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
         sessions={visibleSessions}
       >
       {/* 项目目录与会话组成同一棵导航树。 */}
-      <div data-session-scroll ref={listScrollRef} className="scrollbar-subtle" style={{ flex: explorerOpen && (selectedCwdProp || selectedCwd) ? "1 1 0" : "1 1 auto", overflowY: "auto", padding: "0", minHeight: 80 }}>
+      <div
+        className="sidebar-session-list-wrap"
+        style={{ flex: explorerOpen && (selectedCwdProp || selectedCwd) ? "1 1 0" : "1 1 auto" }}
+      >
+      <div data-session-scroll ref={listScrollRef} className="scrollbar-subtle" style={{ flex: "1 1 0", overflowY: "auto", padding: "0 0 12px", minHeight: 0 }}>
         {loading && (
           <div style={{ padding: "16px 14px", color: "var(--text-muted)", fontSize: 12 }}>
             {t("sidebar.loading")}
@@ -1069,43 +989,26 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
           );
         })}
       </div>
+      </div>
       </SessionSearch>
 
       {/* File Explorer section */}
       {(selectedCwdProp || selectedCwd) && (
         <div
+          className={`sidebar-explorer-section${explorerOpen ? " is-open" : ""}`}
           style={{
-            borderTop: "1px solid var(--border)",
-            display: "flex",
-            flexDirection: "column",
             flex: explorerOpen ? "1 1 0" : "0 0 auto",
-            minHeight: 0,
-            overflow: "hidden",
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", flexShrink: 0 }}>
+          <div className="sidebar-explorer-header">
             <button
+              type="button"
+              className="sidebar-explorer-toggle"
               onClick={() => setExplorerOpen((open) => {
                 const nextOpen = !open;
                 saveExplorerOpen(nextOpen);
                 return nextOpen;
               })}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                flex: 1,
-                padding: "6px 10px",
-                background: "none",
-                border: "none",
-                color: "var(--text-muted)",
-                cursor: "pointer",
-                fontSize: 11,
-                fontWeight: 600,
-                letterSpacing: "0.05em",
-                textTransform: "uppercase",
-                textAlign: "left",
-              }}
             >
               <svg
                 width="9" height="9" viewBox="0 0 10 10" fill="none"
@@ -1116,6 +1019,7 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
               </svg>
               {t("files.explorer")}
             </button>
+            <div className="sidebar-explorer-actions">
             <ToolbarIconButton
               onClick={() => { void openInFileManager(); }}
               disabled={fileManagerUnavailable}
@@ -1193,7 +1097,6 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
               skipHover={explorerRefreshDone}
               color={explorerRefreshDone ? "#4ade80" : "var(--text-dim)"}
               background={explorerRefreshDone ? "rgba(74,222,128,0.18)" : "none"}
-              marginRight={6}
             >
               {explorerRefreshDone ? (
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#4ade80" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
@@ -1206,6 +1109,7 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
                 </svg>
               )}
             </ToolbarIconButton>
+            </div>
           </div>
           {fileManagerErrorMessage && (
             <div role="alert" style={{ display: "flex", alignItems: "flex-start", gap: 6, padding: "0 10px 6px", fontSize: 10, lineHeight: 1.35, color: "#f87171" }}>

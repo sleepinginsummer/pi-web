@@ -55,8 +55,7 @@ export function ObserverSessionToggle({ sessionId, compact, showLabel = false }:
       title={failed ? t("observer.error") : label}
       disabled={disabled}
       onClick={() => void toggle()}
-      className="flex h-full shrink-0 items-center gap-1.5 hover:bg-[var(--bg-selected)] disabled:cursor-not-allowed"
-      style={{ paddingInline: compact ? 8 : 10 }}
+      className={`top-bar-toggle${enabled === true ? " is-on" : ""}${compact ? " is-compact" : ""}`}
     >
       {showLabel && <span>{t("observer.label")}</span>}
       <SessionSwitchTrack checked={enabled === true} pending={disabled} />
@@ -77,7 +76,7 @@ export function DraftObserverSessionToggle({ cwd, disabled, compact }: { cwd: st
       title={label}
       disabled={disabled}
       onClick={() => setObserverStaged(cwd, !enabled)}
-      className="flex h-full shrink-0 items-center gap-1.5 px-2 text-text-muted hover:bg-[var(--bg-selected)] disabled:cursor-not-allowed"
+      className={`top-bar-toggle${enabled ? " is-on" : ""}${compact ? " is-compact" : ""}`}
     >
       {!compact && <span>{t("observer.label")}</span>}
       <SessionSwitchTrack checked={enabled} pending={disabled} />

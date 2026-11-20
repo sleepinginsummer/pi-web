@@ -122,7 +122,7 @@ export function SessionStatsButton({ active, contextUsage, isMobile, locale, onC
   ].join("  |  ") : translate("session.title");
 
   return (
-    <button type="button" onClick={onClick} title={tooltip} aria-label={translate("session.title")} aria-pressed={active} style={{ marginLeft: "auto", display: "flex", flex: isMobile ? "0 0 36px" : undefined, alignItems: "center", justifyContent: "center", gap: isMobile ? 0 : 10, width: isMobile ? 36 : undefined, paddingLeft: isMobile ? 0 : 12, paddingRight: isMobile ? 0 : 12, height: "100%", background: active ? "var(--bg-selected)" : "none", border: "none", borderTop: active ? "2px solid var(--accent)" : "2px solid transparent", fontSize: 11, color: "var(--text-muted)", whiteSpace: "nowrap", cursor: "pointer", fontVariantNumeric: "tabular-nums" }}>
+    <button type="button" onClick={onClick} title={tooltip} aria-label={translate("session.title")} aria-pressed={active} className={`top-bar-btn top-bar-stats-btn${active ? " is-active" : ""}${isMobile ? " is-mobile" : ""}`}>
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
       {!isMobile && tokens && tokens.input > 0 && <span>in {formatCompact(tokens.input)}</span>}
       {!isMobile && tokens && tokens.output > 0 && <span>out {formatCompact(tokens.output)}</span>}

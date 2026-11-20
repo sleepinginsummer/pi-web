@@ -167,7 +167,7 @@ export function ExtensionStatusBar({
   return (
     <div
       className={`extension-status-bar${widgets.length > 0 ? " has-widgets" : ""}${cells.length === 0 && widgets.length === 0 ? " has-only-leading" : ""}${cells.length > 0 ? " has-statuses" : ""}${hasCommands ? " has-commands" : ""}`}
-      style={{ display: "flex", alignItems: "center", flexShrink: 0, minWidth: 0, ...(isMobile ? {} : { height: 36, padding: "0 12px" }), borderTop: "1px solid var(--border)", background: "transparent" }}
+      style={{ display: "flex", alignItems: "center", flexShrink: 0, minWidth: 0, ...(isMobile ? {} : { height: 36, padding: "0 10px" }), borderTop: "1px solid var(--border)", background: "transparent" }}
     >
       {leading}
       {todo && <ExtensionWidgetShelf widgets={[todo]} left compactLabel={isMobile ? "chat.todos" : undefined} />}

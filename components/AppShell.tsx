@@ -1069,7 +1069,7 @@ export function AppShell() {
         hiddenFinishedSessionIds={hiddenFinishedSessionIds}
         onSessionsChange={setSessionCatalog}
       />
-      <div style={{ padding: "8px", flexShrink: 0, display: "flex", justifyContent: "space-between", gap: 4 }}>
+      <div className="sidebar-footer">
         {([
           ["models", translate("common.models")],
           ["skills", translate("common.skills")],
@@ -1083,15 +1083,7 @@ export function AppShell() {
               disabled={disabled}
               title={disabled ? translate("settings.projectRequired") : label}
               aria-label={label}
-              style={{
-                flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-                height: 32, padding: 0, background: "none", border: "none",
-                borderRadius: 9, color: "var(--text-muted)", cursor: disabled ? "default" : "pointer",
-                fontSize: 12, opacity: disabled ? 0.35 : 1,
-                transition: "background 0.12s, color 0.12s",
-              }}
-              onMouseEnter={(event) => { if (!disabled) { event.currentTarget.style.background = "var(--bg-hover)"; event.currentTarget.style.color = "var(--text)"; } }}
-              onMouseLeave={(event) => { event.currentTarget.style.background = "none"; event.currentTarget.style.color = "var(--text-muted)"; }}
+              className="sidebar-footer-btn"
             >
               <SettingsSectionIcon section={section} size={14} strokeWidth={2} />
               <span>{label}</span>
@@ -1106,14 +1098,7 @@ export function AppShell() {
           }}
           title={translate("common.settings")}
           aria-label={translate("common.settings")}
-          style={{
-            flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-            height: 32, padding: 0, background: "none", border: "none",
-            borderRadius: 9, color: "var(--text-muted)", cursor: "pointer",
-            fontSize: 12, transition: "background 0.12s, color 0.12s",
-          }}
-          onMouseEnter={(event) => { event.currentTarget.style.background = "var(--bg-hover)"; event.currentTarget.style.color = "var(--text)"; }}
-          onMouseLeave={(event) => { event.currentTarget.style.background = "none"; event.currentTarget.style.color = "var(--text-muted)"; }}
+          className="sidebar-footer-btn"
         >
           <SettingsSectionIcon section="general" size={14} strokeWidth={2} />
           <span>{translate("common.settings")}</span>
@@ -1130,15 +1115,7 @@ export function AppShell() {
       aria-expanded={rightPanelOpen}
       title={rightPanelOpen ? translate("files.hidePanel") : translate("files.showPanel")}
       aria-label={rightPanelOpen ? translate("files.hidePanel") : translate("files.showPanel")}
-      style={{
-        display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
-        width: "var(--top-bar-height)", height: "var(--top-bar-height)", padding: 0,
-        background: "var(--bg-panel)", border: "none", borderLeft: "1px solid var(--border)", borderBottom: "1px solid var(--border)",
-        color: rightPanelOpen ? "var(--text)" : "var(--text-muted)",
-        cursor: "pointer", transition: "color 0.12s",
-      }}
-      onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-      onMouseLeave={(e) => { e.currentTarget.style.color = rightPanelOpen ? "var(--text)" : "var(--text-muted)"; }}
+      className={`top-bar-btn top-bar-icon-btn top-bar-end-btn${rightPanelOpen ? " is-active" : ""}`}
     >
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" />
@@ -1498,7 +1475,7 @@ export function AppShell() {
         } as React.CSSProperties}
       >
         {/* Right panel tab bar */}
-        <div style={{ display: "flex", alignItems: "center", flexShrink: 0, background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", height: 36 }}>
+        <div style={{ display: "flex", alignItems: "center", flexShrink: 0, background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", height: "var(--top-bar-height)" }}>
           <div style={{ flex: 1, overflow: "hidden" }}>
             <TabBar
               tabs={panelTabs}

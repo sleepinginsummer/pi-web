@@ -28,22 +28,9 @@ export const ShadowSessionToggle = memo(function ShadowSessionToggle({
       title={title}
       aria-label={title}
       aria-pressed={enabled}
+      className={`top-bar-toggle${enabled ? " is-on" : ""}${compact ? " is-compact" : ""}`}
       style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 7,
-        height: "100%",
-        padding: compact ? "0 9px" : "0 12px",
-        border: "none",
-        borderTop: "2px solid transparent",
-        borderRight: "1px solid var(--border)",
-        background: "none",
-        color: enabled ? "var(--text-muted)" : "var(--text-dim)",
-        cursor: disabled ? "not-allowed" : "pointer",
         opacity: available ? 1 : 0.45,
-        fontSize: 11,
-        whiteSpace: "nowrap",
-        transition: "color 0.15s, background 0.15s, opacity 0.15s",
       }}
     >
       <svg

@@ -143,7 +143,7 @@ export function ExtensionWidgetShelf({ widgets, left = false, compactLabel }: { 
               onClick={() => toggle(widget.key)}
             >
               <span className="extension-widget-update-pulse" aria-hidden="true" />
-              <span className="extension-widget-placement" aria-hidden="true">{compactLabel ? <ChevronUp size={12} /> : widget.placement === "belowEditor" ? "v" : "^"}</span>
+              <span className="extension-widget-placement" aria-hidden="true"><ChevronUp size={12} className={`extension-widget-chevron${widget.placement === "belowEditor" ? " is-below" : ""}`} /></span>
               <span className="extension-widget-key">{compactLabel ? t(compactLabel) : widget.key}</span>
             </button>
           ) : (
@@ -155,7 +155,7 @@ export function ExtensionWidgetShelf({ widgets, left = false, compactLabel }: { 
               title={label}
             >
               <span className="extension-widget-update-pulse" aria-hidden="true" />
-              <span className="extension-widget-placement" aria-hidden="true">{widget.placement === "belowEditor" ? "v" : "^"}</span>
+              <span className="extension-widget-placement" aria-hidden="true"><ChevronUp size={12} className={`extension-widget-chevron${widget.placement === "belowEditor" ? " is-below" : ""}`} /></span>
               <span className="extension-widget-key">{widget.key}</span>
             </div>
           );

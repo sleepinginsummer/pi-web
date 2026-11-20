@@ -11,6 +11,7 @@ import {
   setSystemPromptAddonStaged,
   type SystemPromptAddonState,
 } from "@/lib/system-prompt-addon-client";
+import { SessionSwitchTrack } from "./SessionSwitchTrack";
 
 /** 顶栏点击收起“更多”菜单时据此放行：编辑框 portal 在工具栏 DOM 之外。 */
 export const SYSTEM_PROMPT_ADDON_EDITOR_ATTR = "data-system-prompt-addon-editor";
@@ -171,7 +172,7 @@ export const SystemPromptAddonToggle = memo(function SystemPromptAddonToggle({
   const switchTitle = enabled ? t("systemPromptAddon.disable") : t("systemPromptAddon.enable");
 
   return (
-    <div ref={anchorRef} style={{ display: "flex", alignItems: "center", height: "100%", borderRight: "1px solid var(--border)", flexShrink: 0 }}>
+    <div ref={anchorRef} className={`top-bar-toggle-group${enabled ? " is-on" : ""}${compact ? " is-compact" : ""}`}>
       <button
         type="button"
         onClick={() => { if (editor) closeEditor(); else void openEditor(false); }}
@@ -179,7 +180,7 @@ export const SystemPromptAddonToggle = memo(function SystemPromptAddonToggle({
         aria-label={t("systemPromptAddon.edit")}
         aria-expanded={editor !== null}
         disabled={!addon}
-        style={{ display: "flex", alignItems: "center", gap: 7, height: "100%", padding: compact ? "0 4px 0 9px" : "0 6px 0 12px", border: "none", background: "none", color: enabled ? "var(--text-muted)" : "var(--text-dim)", cursor: addon ? "pointer" : "not-allowed", fontSize: 11, whiteSpace: "nowrap" }}
+        className="top-bar-toggle-part top-bar-toggle-label"
       >
         <FilePlus2 size={13} aria-hidden="true" style={{ color: enabled ? "var(--accent)" : "var(--text-dim)", flexShrink: 0 }} />
         {!compact && <span>{t("systemPromptAddon.label")}</span>}
@@ -192,11 +193,9 @@ export const SystemPromptAddonToggle = memo(function SystemPromptAddonToggle({
         disabled={!addon || pending}
         title={switchTitle}
         aria-label={switchTitle}
-        style={{ display: "flex", alignItems: "center", height: "100%", padding: compact ? "0 9px 0 4px" : "0 12px 0 6px", border: "none", background: "none", cursor: addon && !pending ? "pointer" : "not-allowed" }}
+        className="top-bar-toggle-part top-bar-toggle-switch"
       >
-        <span aria-hidden="true" style={{ position: "relative", width: 24, height: 14, borderRadius: 999, background: enabled ? "var(--accent)" : "var(--border)", opacity: pending ? 0.55 : 1, transition: "background 0.15s, opacity 0.15s" }}>
-          <span style={{ position: "absolute", top: 2, left: enabled ? 12 : 2, width: 10, height: 10, borderRadius: "50%", background: "var(--bg-panel)", boxShadow: "0 1px 2px rgba(0,0,0,0.22)", transition: "left 0.15s" }} />
-        </span>
+        <SessionSwitchTrack checked={enabled} pending={pending} />
       </button>
       {editor && createPortal(
         <div

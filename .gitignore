@@ -49,3 +49,6 @@ prod.log*
 .prod.pid
 
 .idea
+
+# 本机的开发服务声明（含本机绝对路径，不进仓库）；pi-web 优先读它，其次 .claude/launch.json
+.pi/launch.json

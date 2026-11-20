@@ -321,28 +321,14 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
 
   if (inline) {
     return (
-      <div style={{ height: "100%", display: "flex", alignItems: "stretch" }}>
+      <div style={{ height: "100%", display: "flex", alignItems: "center" }}>
         <button
           ref={btnRef}
           onClick={() => onToggle ? onToggle() : setOpenInternal((v) => !v)}
+          className={`top-bar-btn top-bar-text-btn${open ? " is-active" : ""}`}
           style={{
-            display: hideInlineButton ? "none" : "flex",
-            alignItems: "center",
-            gap: 6,
-            height: "100%",
-            padding: "0 12px",
-            background: open ? "var(--bg-selected)" : "none",
-            border: "none",
-            borderTop: open ? "2px solid var(--accent)" : "2px solid transparent",
-            borderRight: "1px solid var(--border)",
-            cursor: "pointer",
-            color: open ? "var(--text)" : "var(--text-muted)",
-            fontSize: 11,
-            whiteSpace: "nowrap",
-            transition: "color 0.1s, background 0.1s",
+            display: hideInlineButton ? "none" : undefined,
           }}
-          onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-          onMouseLeave={(e) => { e.currentTarget.style.color = open ? "var(--text)" : "var(--text-muted)"; }}
            title={t("i18n.branches")}
            aria-label={t("i18n.branches")}
           aria-pressed={open}

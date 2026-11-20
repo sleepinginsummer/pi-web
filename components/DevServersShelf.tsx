@@ -469,7 +469,7 @@ export function DevServersShelf({
         title={label}
         onClick={() => setOpen((current) => !current)}
       >
-        <span className="extension-widget-placement" aria-hidden="true">^</span>
+        <span className="extension-widget-placement" aria-hidden="true"><ChevronUp size={12} className="extension-widget-chevron" /></span>
         <span className="extension-widget-key">{triggerText}</span>
         <span className="mobile-activity-label" aria-hidden="true"><Activity size={15} />{t("servers.activity")}<ChevronUp className="mobile-activity-chevron" size={12} /></span>
         {isMobile && runningCount + pendingTaskCount + runningCommandCount > 0 && (
