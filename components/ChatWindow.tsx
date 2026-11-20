@@ -1476,8 +1476,42 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                 // 只有提示行（其余步骤不显示内容）时不折叠。
                 if (processMessageCount === 0) nodes.push(...processViews);
                 else if (processViews.length > 0) {
-                  // 只有错误或截断提示不算回答：工具调用前写的正文在过程详情里，必须保持可见（#906）。
-                  const answered = collapsesProcessDetails(finalAnswerMessage);
+                  // 过程详情一律默认折叠，历史轮次折起来只留摘要行。列表末尾这一轮若看不到答复
+                  // （跑完或中断却没有答复，或被压缩卡片、唤醒消息切开的前一段），折叠时先亮出最新几条：
+                  // 既不会一次摊开几十张工具卡，也不会连它刚做了什么都看不到（#906）。
+                  const showsRecentWhenFolded = end === messages.length && !collapsesProcessDetails(finalAnswerMessage);
+                  // 预览与运行中的处理组共用同一套「最新几条」窗口规则。
+                  const renderFoldPreview = (): ReactNode => {
+                    const sources: Array<{ index: number; itemCount: number; message: AgentMessage }> = [];
+                    for (let index = processStart; index <= finalAssistantIdx; index++) {
+                      const message = messages[index];
+                      if (message.role === "custom") {
+                        if (isHiddenCustomMessage(message)) continue;
+                        sources.push({ index, itemCount: 1, message });
+                        continue;
+                      }
+                      const view = message.role === "assistant" && index === finalAssistantIdx ? finalViews.process : message;
+                      if (view.role === "bashExecution") {
+                        sources.push({ index, itemCount: 1, message: view });
+                        continue;
+                      }
+                      if (view.role !== "assistant") continue;
+                      const blocks = getDisplayableAssistantBlocks(view);
+                      if (blocks.length > 0) sources.push({ index, itemCount: blocks.length, message: view });
+                    }
+                    const previewWindow = buildRecentItemWindow(sources.map((source) => source.itemCount), LIVE_PROCESS_ITEM_LIMIT);
+                    return sources.map((source, sourceIndex) => {
+                      const visibleBlockOffset = previewWindow.visibleOffsets[sourceIndex];
+                      if (visibleBlockOffset >= source.itemCount) return null;
+                      return renderMessage(source.index, {
+                        attachRef: false,
+                        keyPrefix: "process-recent",
+                        messageOverride: source.message,
+                        visibleBlockOffset: source.message.role === "assistant" ? visibleBlockOffset : undefined,
+                        showTimestamp: source.index !== finalAssistantIdx || !finalAnswerMessage,
+                      });
+                    });
+                  };
                   const processCacheMisses = summarizeCacheMisses(messages.slice(processStart, finalAnswerMessage ? finalAssistantIdx : finalAssistantIdx + 1));
                   nodes.push(
                     <div
@@ -1485,13 +1519,12 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                       ref={processRefIdx === undefined ? undefined : (el) => { messageRefs.current[processRefIdx] = el; }}
                     >
                       <ProcessDetailsGroup
-                        key={answered ? "answered" : "unanswered"}
                         messageCount={processMessageCount}
                         toolCallCount={processToolCount}
                         durationMs={turnDurationMs}
                         cacheMisses={processCacheMisses}
-                        defaultExpanded={!answered}
                         reveal={revealProcess}
+                        renderRecent={showsRecentWhenFolded ? renderFoldPreview : undefined}
                         t={t}
                         renderChildren={() => <>{processViews}</>}
                       />

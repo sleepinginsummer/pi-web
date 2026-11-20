@@ -22,11 +22,14 @@ test("历史页从轮次中途开始时仍将前缀处理消息分为一组", ()
   assert.match(source, /if \(hasAnchor\) nodes\.push\(renderMessage\(start\)\)/);
 });
 
-test("无最终答复的结束轮次默认展开处理过程", () => {
+test("过程详情一律默认折叠，只有列表末尾这一轮折叠时先亮出最新几条", () => {
   assert.match(processSource, /const \[expanded, setExpanded\] = useState\(defaultExpanded\)/);
-  assert.match(source, /<ProcessDetailsGroup[\s\S]*?defaultExpanded=\{!answered\}/);
-  assert.match(source, /const answered = collapsesProcessDetails\(finalAnswerMessage\);/);
-  assert.match(source, /key=\{answered \? "answered" : "unanswered"\}/);
+  // 折叠时给最新几条：运行中的组和列表末尾的无答复轮次共用同一套窗口规则。
+  assert.match(processSource, /contentVisible \? \([\s\S]*?: renderRecent \? \(/);
+  assert.match(source, /<ProcessDetailsGroup[\s\S]*?renderRecent=\{showsRecentWhenFolded \? renderFoldPreview : undefined\}/);
+  assert.match(source, /const showsRecentWhenFolded = end === messages\.length && !collapsesProcessDetails\(finalAnswerMessage\);/);
+  // 不再按「有没有答复」决定整组展开（#906 的正文由折叠预览兜住）。
+  assert.doesNotMatch(source, /defaultExpanded=\{!/);
 });
 
 test("运行中的处理过程只挂载最近三项并可按需展开", () => {

@@ -6,7 +6,7 @@ import type { CacheMissSummary } from "@/lib/transcript-notices";
 import { cacheMissSummaryText, TRANSCRIPT_NOTICE_WARNING_COLOR } from "./TranscriptNotices";
 
 // 主会话与回收站共用过程折叠样式和交互。
-export function ProcessDetailsGroup({ messageCount, toolCallCount, durationMs, cacheMisses, defaultExpanded = false, reveal = false, renderChildren, t }: { messageCount: number; toolCallCount: number; durationMs?: number; cacheMisses?: CacheMissSummary; defaultExpanded?: boolean; reveal?: boolean; renderChildren: () => ReactNode; t: (key: string, params?: Record<string, string | number>) => string }) {
+export function ProcessDetailsGroup({ messageCount, toolCallCount, durationMs, cacheMisses, defaultExpanded = false, reveal = false, renderRecent, renderChildren, t }: { messageCount: number; toolCallCount: number; durationMs?: number; cacheMisses?: CacheMissSummary; defaultExpanded?: boolean; reveal?: boolean; renderRecent?: () => ReactNode; renderChildren: () => ReactNode; t: (key: string, params?: Record<string, string | number>) => string }) {
   const [expanded, setExpanded] = useState(defaultExpanded);
   const contentVisible = expanded || reveal;
   // 折叠箭头已表达可展开，「过程详情」文字只保留在无障碍名称中。
@@ -48,11 +48,16 @@ export function ProcessDetailsGroup({ messageCount, toolCallCount, durationMs, c
           {cacheMissText && <span style={{ color: TRANSCRIPT_NOTICE_WARNING_COLOR }}>{` · ${cacheMissText}`}</span>}
         </span>
       </button>
-      {contentVisible && (
+      {/* 折叠时也可以先亮出最新几条（当前轮用），点开才是全部。 */}
+      {contentVisible ? (
         <div style={{ marginTop: 8 }}>
           {renderChildren()}
         </div>
-      )}
+      ) : renderRecent ? (
+        <div style={{ marginTop: 8 }}>
+          {renderRecent()}
+        </div>
+      ) : null}
     </div>
   );
 }
