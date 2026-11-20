@@ -45,6 +45,8 @@ interface Props {
 }
 
 const PREVIEW_HIDE_DELAY = 260;
+/** 待定位目标最多等这么多次测量：每次测量都还量不到就认输并提示，别一直挂着。 */
+const PENDING_NAVIGATION_MAX_ATTEMPTS = 10;
 const NAVIGATION_ACTIVE_LOCK_MS = 1600;
 const MAX_PILL_TICKS = 28;
 
@@ -179,6 +181,23 @@ function answerHeadingElements(root: HTMLElement | null | undefined): HTMLElemen
  * `data-answer` 容器，其次才是含标题标记的节点（未拆分的过程与答复合成一个节点时），
  * 最后退回测量时记下的元素。只按“有没有 h1/h2”挑会选到过程详情里的标题。
  */
+/**
+ * 这一轮在正文里的元素：按 `data-entry-id` 找。
+ *
+ * 位置一律从这里量，不用 `measureNodes()` 缓存的 `scrollTop`：翻页刚挂进来的消息还没
+ * 经过 `messageRefs`（缓存是 `null`），换过窗口宽度后旧数字也已经作废。
+ */
+function findTurnElement(scrollEl: HTMLElement, entryId: string | null | undefined): HTMLElement | null {
+  if (!entryId) return null;
+  return scrollEl.querySelector<HTMLElement>(`[data-entry-id="${CSS.escape(entryId)}"]`);
+}
+
+/** 元素相对滚动容器的顶端偏移；元素不在 DOM 里时返回 null。 */
+function elementScrollTop(scrollEl: HTMLElement, element: HTMLElement | null): number | null {
+  if (!element) return null;
+  return element.getBoundingClientRect().top - scrollEl.getBoundingClientRect().top + scrollEl.scrollTop;
+}
+
 function findRenderedHeadingRoot(scrollEl: HTMLElement, preview: AssistantPreview | null | undefined): HTMLElement | null {
   if (!preview?.entryId) return preview?.element ?? null;
   const roots = Array.from(scrollEl.querySelectorAll<HTMLElement>(`[data-entry-id="${CSS.escape(preview.entryId)}"]`));
@@ -434,6 +453,8 @@ export const ChatMinimap = memo(function ChatMinimap({
     /** 标题定位用「块下标 + 块内下标」，与逐块渲染的正文一致。 */
     headingBlockIndex?: number;
     headingIndex?: number;
+    /** 已经等了几次测量还没量到目标：分页/挂载是异步的，但不能无限等。 */
+    attempts?: number;
   } | null>(null);
 
   const [visible, setVisible] = useState(false);
@@ -656,32 +677,52 @@ export const ChatMinimap = memo(function ChatMinimap({
         const pendingNode = pendingNavigation.entryId
           ? nextNodes.find((node) => node.targetTurn.entryId === pendingNavigation.entryId)
           : (pendingNavigation.nodeIndex !== undefined ? nextNodes[pendingNavigation.nodeIndex] : null);
-        if (pendingNode) {
-          let targetTop: number | null = pendingNode.targetTurn.scrollTop;
-          if (pendingNavigation.target === "heading") {
-            const headingRoot = findRenderedHeadingRoot(scrollEl, pendingNode.targetTurn.finalAssistant);
-            const headingBlock = headingRoot && pendingNavigation.headingBlockIndex !== undefined
-              ? headingRoot.querySelector<HTMLElement>(`[data-answer-block="${pendingNavigation.headingBlockIndex}"]`)
-              : null;
-            const heading = (
-              pendingNavigation.headingIndex === undefined
-                ? null
-                : answerHeadingElements(headingBlock ?? headingRoot)[pendingNavigation.headingIndex]
-            );
-            const headingRect = heading?.getBoundingClientRect();
-            targetTop = headingRect
-              ? headingRect.top - containerRect.top + scrollEl.scrollTop
-              : null;
-          }
-          if (targetTop !== null) {
+        const entryId = pendingNavigation.entryId ?? pendingNode?.targetTurn.entryId;
+        /*
+         * 位置一律按**当前 DOM** 量，不用 `targetTurn.scrollTop` 那份缓存偏移。
+         *
+         * 缓存偏移只在这条消息经 `messageRefs` 量过时才有值：翻页刚把历史挂进来时它还是
+         * `null`（窗口与 ref 的下标要等这一帧之后才对上），于是「回到目标轮次」只能干等。
+         * 直接读目标元素的 rect，量到什么就滚到哪儿；元素还没进 DOM 时才退回缓存偏移。
+         */
+        const targetElement = findTurnElement(scrollEl, entryId);
+        let targetTop: number | null = null;
+        if (pendingNavigation.target === "heading") {
+          // 回答可能不在目标行的行内（过程详情与答复是两个节点），先用 answered 容器，再退到这一行。
+          const headingRoot = findRenderedHeadingRoot(scrollEl, pendingNode?.targetTurn.finalAssistant ?? null) ?? targetElement;
+          const headingBlock = headingRoot && pendingNavigation.headingBlockIndex !== undefined
+            ? headingRoot.querySelector<HTMLElement>(`[data-answer-block="${pendingNavigation.headingBlockIndex}"]`)
+            : null;
+          const heading = (
+            pendingNavigation.headingIndex === undefined
+              ? null
+              : answerHeadingElements(headingBlock ?? headingRoot)[pendingNavigation.headingIndex]
+          );
+          const headingRect = heading?.getBoundingClientRect();
+          if (headingRect) targetTop = headingRect.top - containerRect.top + scrollEl.scrollTop;
+        } else {
+          targetTop = elementScrollTop(scrollEl, targetElement);
+        }
+        // 兜底：目标还没进 DOM，就用这一轮刚量到的偏移（同一份布局里它是新鲜的）。
+        if (targetTop === null && pendingNode?.targetTurn.scrollTop != null) {
+          targetTop = pendingNode.targetTurn.scrollTop;
+        }
+        if (targetTop !== null) {
+          pendingNavigationRef.current = null;
+          if (pendingNode) lockActiveNode(pendingNode.index);
+          const targetOffset = scrollEl.clientHeight * 0.3;
+          scrollEl.scrollTo({
+            top: Math.max(0, targetTop - targetOffset),
+            behavior: "smooth",
+          });
+          finishNavigation();
+        } else if (jumpTargetRef.current === null) {
+          // 目标这一帧还量不到：等下一次测量（挂载会触发）。按需加载还在跑时不计数——
+          // 那段时间目标本来就还没翻出来，等它结束再从 0 开始给这几次机会。
+          pendingNavigation.attempts = (pendingNavigation.attempts ?? 0) + 1;
+          if (pendingNavigation.attempts >= PENDING_NAVIGATION_MAX_ATTEMPTS) {
             pendingNavigationRef.current = null;
-            lockActiveNode(pendingNode.index);
-            const targetOffset = scrollEl.clientHeight * 0.3;
-            scrollEl.scrollTo({
-              top: Math.max(0, targetTop - targetOffset),
-              behavior: "smooth",
-            });
-            finishNavigation();
+            setRevealFailed(true);
           }
         }
       }
@@ -719,7 +760,10 @@ export const ChatMinimap = memo(function ChatMinimap({
   const scrollToNode = useCallback((node: NodeInfo, behavior: ScrollBehavior = "smooth") => {
     const scrollEl = scrollContainer.current;
     if (!scrollEl) return;
-    if (node.targetTurn.scrollTop === null) {
+    // 先按 DOM 量（和待定位那条同一份规则），量不到才退回这一轮刚缓存下来的偏移。
+    const targetTop = elementScrollTop(scrollEl, findTurnElement(scrollEl, node.targetTurn.entryId))
+      ?? node.targetTurn.scrollTop;
+    if (targetTop === null) {
       pendingNavigationRef.current = { nodeIndex: node.index, target: "user" };
       onRevealHistory(node.targetTurn.entryId);
       return;
@@ -727,7 +771,7 @@ export const ChatMinimap = memo(function ChatMinimap({
     const targetOffset = scrollEl.clientHeight * 0.3;
     lockActiveNode(node.index);
     scrollEl.scrollTo({
-      top: Math.max(0, node.targetTurn.scrollTop - targetOffset),
+      top: Math.max(0, targetTop - targetOffset),
       behavior,
     });
     finishNavigation();

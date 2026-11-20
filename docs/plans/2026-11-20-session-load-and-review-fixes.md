@@ -381,3 +381,17 @@ hooks/useAgentSession.ts:3462   missing: handleCompact, opts.chatInputRef, sessi
 - `data-answer-block` 的下标在 `getAssistantAnswer()` 与 `MessageView` 里用的是同一个 `answerBlocks` 数组，逐块标题定位不会错位。
 
 验证：全量 570 文件 / 4132 通过 / 0 失败；`tsc --noEmit` 通过；`eslint` 0 error。
+
+## 16. 大纲「跳到对话」落空（0.17.0-merge.23）
+
+**现象**：长会话里点大纲中「未加载」轮次的「跳到对话」，历史会翻进来（18 → 43 行），但视口不动，`scrollTop` 还是 0，目标在 3600px 之外。
+
+**根因**：待定位目标的落点取的是 `targetTurn.scrollTop` —— `measureNodes()` 在遍历 `messageRefs` 时缓存的偏移。翻页刚挂进来的消息这一轮还没经过 `messageRefs`，缓存值是 `null`，于是「有目标但量不到位置」，代码什么都不做，pending 就一直挂着。
+
+**修法**（按用户拍板的方案）：待定位时**直接量 DOM** —— 用 `[data-entry-id]` 找到目标元素，读它的 `getBoundingClientRect()` 减去容器 rect 得到落点，量到什么滚什么；缓存偏移只在元素还没进 DOM 时兜底。标题跳转本来就量的 DOM（块 + 块内标题），这次把「回到目标轮次」也统一过来。另外加了退出条件：连续 10 次测量都量不到就清掉 pending 并在面板提示，不再无限挂着（按需加载期间不计数，那段时间目标本来就还没翻出来）。
+
+**验证**（真浏览器，非 background tab）：
+- 移动端 400px：抽屉 → 第 03 轮「跳到对话」→ `scrollTop` 0 → **3474**（目标距容器顶 146px，正好落在设计的三分之一处），抽屉自动收起（截图 `/tmp/jump-fixed.png`）
+- 桌面 1440px 轨道：同一次跳转 `scrollTop` **2473**，目标距顶 156px
+- 顺带确认：此前「滚动位置一直是 0」的观测有一半是**后台标签页**造成的——隐藏标签页里 `requestAnimationFrame` 与 smooth 滚动都不跑，`scrollTo` 被调用但不动。测这类滚动必须先把窗口激活。
+- 同一份规则也接到**已加载轮次的双击跳转**（`scrollToNode`）：先量 DOM，量不到才退回缓存偏移。桌面 1440px 实测双击第 10 轮，落点距容器顶 156px（设计的三分之一处）。

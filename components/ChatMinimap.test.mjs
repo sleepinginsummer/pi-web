@@ -317,3 +317,26 @@ test("移动端抽屉：同一份大纲摊成底部抽屉，空会话给一句�
   assert.match(source, /data-sheet=\{variant === "sheet" \? "true" : undefined\}/);
   assert.match(source, /onClick=\{variant === "sheet" \? onClose : undefined\}/);
 });
+
+test("待定位目标按当前 DOM 量，不用缓存偏移", async () => {
+  // 翻页刚挂进来的消息经 messageRefs 量不到，缓存偏移是 null；只读它会让「回到目标轮次」
+  // 一直干等。这里必须按 data-entry-id 找元素、用 getBoundingClientRect 算位置。
+  const pending = source.slice(
+    source.indexOf("const pendingNavigation = pendingNavigationRef.current;"),
+    source.indexOf("    }, 100);"),
+  );
+  assert.match(source, /function findTurnElement\(scrollEl: HTMLElement, entryId: string \| null \| undefined\)[\s\S]*?scrollEl\.querySelector<HTMLElement>\(`\[data-entry-id="\$\{CSS\.escape\(entryId\)\}"\]`\)/);
+  assert.match(pending, /const targetElement = findTurnElement\(scrollEl, entryId\);/);
+  assert.match(pending, /targetTop = elementScrollTop\(scrollEl, targetElement\);/);
+  // 缓存偏移只作兜底：元素还不在 DOM 里时才用。
+  const fallbackAt = pending.indexOf("pendingNode?.targetTurn.scrollTop != null");
+  const domAt = pending.indexOf("elementScrollTop(scrollEl, targetElement)");
+  assert.ok(domAt > 0 && fallbackAt > domAt, "DOM 测量在前，缓存偏移在后");
+  // 一直量不到要提示，而不是静默挂着。
+  assert.match(pending, /setRevealFailed\(true\)/);
+
+  // 已加载轮次的双击跳转走同一份规则：先量 DOM，再退回缓存偏移。
+  const scrollToNode = source.slice(source.indexOf("const scrollToNode = useCallback"), source.indexOf("const scrollToHeading = useCallback"));
+  assert.match(scrollToNode, /elementScrollTop\(scrollEl, findTurnElement\(scrollEl, node\.targetTurn\.entryId\)\)/);
+  assert.ok(scrollToNode.indexOf("elementScrollTop") < scrollToNode.indexOf("?? node.targetTurn.scrollTop"), "DOM 在前，缓存偏移在后");
+});
