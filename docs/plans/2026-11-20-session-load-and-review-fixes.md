@@ -359,3 +359,25 @@ hooks/useAgentSession.ts:3462   missing: handleCompact, opts.chatInputRef, sessi
 验证：`InputControls`/`ChatInput` 相关用例改为断言新位置（下方那一行不再有「更多」、菜单里不再有思考强度）；400px 窗口实测：更多在输入框右上方、思考强度常驻、菜单向上展开。
 
 最长名称实测：把会话模型换成当前列表里最长的那条（`sleepinsum-deepseek` / `DeepSeek V4.1 Flash 0910`，44 字符），400px 宽下输入框下方那一行仍放得下——模型名占两行（198px）、后面接思考强度 `max`（51px）、右侧暂存库按钮，行内没有横向溢出（`scrollWidth === clientWidth`）。
+
+## 15. 全量复查（0.17.0-merge.22）
+
+按文件逐个复查 merge.15~21 的 41 个改动源文件（3,134 行新增），发现并修掉三处**父链成环时**的漏洞——都属于「手改坏的文件会让某条遍历重复取同一条记录或走不到头」：
+
+| 位置 | 表现 | 修法 |
+|---|---|---|
+| `lib/session-reader.ts` `sliceActiveBranch()` | 内存分页路径没有环检测：分页预算改成 walker 后，条数上限不再等于「只走一圈」，成环时同一记录会重复进页 | 加 `visited`（与磁盘索引路径一致）；用例：成环只走一圈、页内不重复 |
+| `lib/transcript-notices-server.ts` `ancestor()` | 找「缓存预热被计费的那条消息」时成环会原地打转 | 加 `visited`，找不到就返回 undefined |
+| 同上 `onBranch` 构建 | 沿父链收集分支成员时成环会死循环 | 用集合自身当 `visited` |
+
+其余复查结论（读过 + 实测）：
+
+- `/context` 的 304 前置判断：外部改写检查仍在它之前，ETag 命中返回 304（`resolve;dur=0.4`），带 `before` 时不走 304。
+- `get_state` 拆分：不带 `includeSystemPrompt` 为 1,027 B 且无 `systemPrompt`；带上为 30,587 B（提示词 28,602 字符），所有状态轮询都走 `agentStatusUrl()`（`systemPrompt=0`），`state.systemPrompt` 的消费方都有 undefined 守卫。
+- 命令 admission 的提前 `release()` 与 preflight 回调里的 `release()` 共用 `released` 幂等标志，安全。
+- `usePolledJson` 的请求序号 + URL 双重校验、`usePolledJson` 的可见性判断、`sameTurnNodes` 的引用比较（回答缓存按消息对象 WeakMap，blocks 引用稳定）均正确。
+- `hasOutlineHeadings` 的字符粗筛只可能对 ATX/Setext 漏判，而这正是 remark 能给出标题的两种形状，不会漏。
+- `finishNavigation` 只在用户主动跳转的三条路径上触发（已核对全部调用点），不会因为滚动重测误关抽屉。
+- `data-answer-block` 的下标在 `getAssistantAnswer()` 与 `MessageView` 里用的是同一个 `answerBlocks` 数组，逐块标题定位不会错位。
+
+验证：全量 570 文件 / 4132 通过 / 0 失败；`tsc --noEmit` 通过；`eslint` 0 error。

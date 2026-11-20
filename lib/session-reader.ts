@@ -910,7 +910,10 @@ export function sliceActiveBranch(
   const chain: SessionEntry[] = [];
   let current: SessionEntry | undefined = leaf;
   const walker = createPageWalker(tail);
-  while (current) {
+  // 环检测：父链成环（文件被改坏）时，页里不能出现同一条记录两遍，也不能走不到头。
+  const visited = new Set<string>();
+  while (current && !visited.has(current.id)) {
+    visited.add(current.id);
     chain.push(current);
     if (walker.accept(countsTowardTail(current))) break;
     current = current.parentId ? byId.get(current.parentId) : undefined;

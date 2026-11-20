@@ -226,15 +226,21 @@ export function collectTranscriptNotices(
   for (const entry of entries) byId.set(entry.id, entry);
   const ancestor = (entry: SessionEntry, match: (candidate: SessionEntry) => boolean): SessionEntry | undefined => {
     let current = entry.parentId ? byId.get(entry.parentId) : undefined;
-    while (current && !match(current)) current = current.parentId ? byId.get(current.parentId) : undefined;
-    return current;
+    // 环检测：父链成环时停在原处，别把渲染卡死。
+    const visited = new Set<string>();
+    while (current && !visited.has(current.id) && !match(current)) {
+      visited.add(current.id);
+      current = current.parentId ? byId.get(current.parentId) : undefined;
+    }
+    return current && match(current) ? current : undefined;
   };
   // Cache warming hangs on an ancestor that other branches share too, so it
   // shows only on the branch it was billed on, as the TUI renders it from context.
   let onBranch: Set<string> | undefined;
   if (options.leafId) {
     onBranch = new Set();
-    for (let current = byId.get(options.leafId); current; current = current.parentId ? byId.get(current.parentId) : undefined) {
+    // 环检测同上：同一份记录不会重复加入，也不会原地打转。
+    for (let current = byId.get(options.leafId); current && !onBranch.has(current.id); current = current.parentId ? byId.get(current.parentId) : undefined) {
       onBranch.add(current.id);
     }
   }
