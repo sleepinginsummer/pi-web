@@ -42,7 +42,14 @@ function runFile(file) {
       `--test-timeout=${CASE_TIMEOUT_MS}`,
       "--test-force-exit",
       file,
-    ], { detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    ], {
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+      // React 19.2.x 的入口按 NODE_ENV 选构建，只有开发构建导出 `act`：不设 NODE_ENV 时
+      // 加载的是生产构建，所有用 `act()` 的交互测试一起抛 "act is not a function"。
+      // 测试是开发期工具，这里固定成开发构建，不跟随外面偶然设置的 NODE_ENV。
+      env: { ...process.env, NODE_ENV: "development" },
+    });
     children.add(child);
     let output = "";
     child.stdout.on("data", (chunk) => { output += chunk; });
