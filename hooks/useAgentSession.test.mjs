@@ -241,7 +241,10 @@ test("context loads atomically through the shared latest loader", () => {
   assert.match(backfillSource, /if \(!sameSessionView\(/);
   assert.match(backfillSource, /viewChanged = true;/);
   assert.match(loadSource, /if \(!options\.reloadedAfterRewrite\) \{\s*\n\s*return loadSession\(sid, showLoading, includeState, \{ \.\.\.options, reloadedAfterRewrite: true \}\);/);
-  assert.match(backfillSource, /mergeOlderPage\(firstSnapshot, page\.snapshot\)/);
+  // 在已合并的那一份上累加（连补多页时不丢中间页），而不是每次从首屏重拼。
+  assert.match(loadSource, /let latestSnapshot = firstSnapshot;/);
+  assert.match(backfillSource, /const merged = mergeOlderPage\(latestSnapshot, page\.snapshot\);/);
+  assert.match(backfillSource, /latestSnapshot = merged;/);
   assert.match(backfillSource, /firstLeafId,[\s\S]*?options,/);
   assert.doesNotMatch(backfillSource, /preserveScroll: true/);
   assert.match(loadSource, /contextResult\.value\.cached[\s\S]*?skipCache: true/);

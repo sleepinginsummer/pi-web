@@ -39,7 +39,10 @@ export function countTurnsBefore<T extends Pick<SessionEntry, "id" | "parentId">
 ): number {
   const above: TurnAnchorMessage[] = [];
   let cursor = byId.get(page[0]?.parentId ?? "");
-  while (cursor) {
+  // 环检测：父链成环（文件被改坏）时不能原地打转。
+  const visited = new Set<string>();
+  while (cursor && !visited.has(cursor.id)) {
+    visited.add(cursor.id);
     const message = shape(cursor);
     if (message) above.push(message);
     cursor = byId.get(cursor.parentId ?? "");

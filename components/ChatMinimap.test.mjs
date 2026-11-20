@@ -268,7 +268,8 @@ test("按需加载的跳转在切会话/分支后作废", () => {
     source.indexOf("const cancelPreviewHide = useCallback"),
   );
   // 加载是异步的：回来时可能已经切到别的分支，结果属于旧分支。
-  assert.match(jump, /if \(jumpTargetRef\.current !== turn\.entryId\) \{\s*\n\s*pendingNavigationRef\.current = null;\s*\n\s*return;/);
+  // 旧跳转收尾只清自己写进去的目标，不碰新跳转刚设置的那一份。
+  assert.match(jump, /if \(jumpTargetRef\.current !== turn\.entryId\) \{\s*\n\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*if \(pendingNavigationRef\.current\?\.entryId === turn\.entryId\) pendingNavigationRef\.current = null;/);
   // 失败提示只在目标仍然是当前目标时出现（旧写法把这条守卫放在 else 里）。
   assert.doesNotMatch(jump, /if \(jumpTargetRef\.current === turn\.entryId\) setRevealFailed\(true\);/);
   // finally 不能清掉新一次跳转的加载态。

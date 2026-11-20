@@ -1355,6 +1355,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const firstLeafId = contextResult.value.leafId;
       // 补页期间会话文件被重写时，拿到的页属于另一个视图（版本或分支末端变了）。
       let viewChanged = false;
+      // 已经合并出来的那一份：连补多页时在它上面继续往前接，而不是每次都从首屏重拼。
+      let latestSnapshot = firstSnapshot;
       await backfillFirstPage({
         first: firstSnapshot,
         readOlder: async (before) => {
@@ -1382,14 +1384,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         },
         commit: (page) => {
           if (sessionIdRef.current !== sid) return false;
-          // 合并时只取旧页的消息、entryId 和游标；模型/思考强度/版本以首屏那页为准，
+          // 合并时只取旧页的消息、entryId 和游标；模型/思考强度/版本继承自首屏那页，
           // 否则会话尾部改过的设置会被「从 before 往上算」的旧值覆盖。
-          return commitContextSnapshot(
-            sid,
-            mergeOlderPage(firstSnapshot, page.snapshot),
-            firstLeafId,
-            options,
-          );
+          // 在 latestSnapshot 上累加：以后补页条件放宽到「已有消息也继续翻」时不会丢中间页。
+          const merged = mergeOlderPage(latestSnapshot, page.snapshot);
+          if (!commitContextSnapshot(sid, merged, firstLeafId, options)) return false;
+          latestSnapshot = merged;
+          return true;
         },
       });
       if (viewChanged) {

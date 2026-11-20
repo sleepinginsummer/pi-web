@@ -11,6 +11,16 @@ const CASE_TIMEOUT_MS = 90_000;
 const CONCURRENCY = Math.max(1, Number(process.env.PI_WEB_TEST_CONCURRENCY) || 2);
 
 const args = process.argv.slice(2);
+
+/**
+ * `node --test` 把位置参数当 glob 读：路径里的 `[id]` 会被当成字符集，
+ * 于是 `app/api/sessions/[id]/state/route.test.mjs` 一个用例都没跑、退出码也是 0，
+ * 整份文件被静默跳过（实测 `node --test '<该路径>'` 输出 `tests 0`）。
+ * 用 `[[]` / `[]]` 这类字符集写法转义，让 Node 按字面量匹配。
+ */
+function globLiteral(file) {
+  return file.replace(/[[\]*?{}]/g, (char) => `[${char}]`);
+}
 const files = args.length > 0
   ? args
   : ["app", "components", "hooks", "lib", "public"].flatMap((dir) => globSync(`${dir}/**/*.test.mjs`)).sort();
@@ -41,7 +51,7 @@ function runFile(file) {
       "--test",
       `--test-timeout=${CASE_TIMEOUT_MS}`,
       "--test-force-exit",
-      file,
+      globLiteral(file),
     ], {
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],

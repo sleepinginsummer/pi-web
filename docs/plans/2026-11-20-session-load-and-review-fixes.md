@@ -304,3 +304,12 @@ hooks/useAgentSession.ts:3462   missing: handleCompact, opts.chatInputRef, sessi
 | 补页期间会话文件被重写，聊天停在空白页 | 补页是两次独立请求，合并时只按「元数据取首屏、消息取旧页」拼，没核对两页是否同一视图；旧页的 `hasMore: false` 会把「加载更早消息」入口一起关掉 | `lib/first-page-backfill.ts` 加 `sameSessionView()`（版本 + 分支末端）；`loadSession` 在 `readOlder` 里发现不一致就标记 `viewChanged`、丢弃该页，并**重读一次首屏**（`options.reloadedAfterRewrite` 防止无限重读） | `first-page-backfill.test.mjs`「补页的页必须和首屏属于同一个会话视图」+ `useAgentSession.test.mjs` 源形态断言 |
 | 列表项里的未闭合围栏让大纲漏标题 | 行扫描器只在遇到结束标记时关闭围栏；remark 在列表项结束（缩进退回容器外）时就会收尾，后面的 `##` 在正文里是标题 | `scanOutlineLines` 给围栏记下 `containerIndent`：缩进退回容器之外即视为围栏结束，该行继续按正文扫描；开围栏前先按缩进关掉更深的列表 | `session-outline.test.mjs`「列表项里的围栏随容器结束而结束」5 个用例；另用 remark 逐例对照（含两个「该隐藏」的反例） |
 | 底栏轮询换项目后旧结果覆盖新数据 | `usePolledJson` 只用请求序号挡同一接口的乱序；操作收尾时调用的 `refresh` 属于旧 URL，序号反而更大 | 增加 `urlRef`：`refresh` 发现当前 URL 已变就直接返回（不发请求），提交与错误写入再核对请求序号 + URL；两个任务 hook 的 `actionError`、开发服务 hook 的 `setError` 按 `cwd` 判断 | `hooks/usePolledJson.test.mjs` 用真 React + JSDOM 复现「A 的删除未完成 → 切到 B → A 完成」；去掉守卫即失败（`旧项目的刷新不该再发请求`） |
+
+## 11. 第三轮复核修正
+
+| 问题 | 根因 | 修法 |
+|---|---|---|
+| `app/api/sessions/[id]/state/route.test.mjs` 变红（但全量一直是绿的） | ① 断言写死 `getRpcSessionSnapshot(id)`，agent 路由为了 `?systemPrompt=0` 多了 options 参数；② **测试入口的 glob**：`node --test 'app/.../[id]/...'` 把 `[id]` 当字符集，一个用例都不匹配，退出码仍是 0，整份文件被静默跳过（实测输出 `tests 0`） | 断言放宽到 `\(id\b` 并补「状态读取不带提示词」两条；`scripts/run-tests.mjs` 把路径里的 glob 元字符转义成 `[[]` / `[]]` 再交给 `--test`，三份带方括号的测试文件由此真正跑起来（又暴露出两处同样陈旧的断言：`openSessionManager` 导入清单、`accepted: true, mode` 后新增的 `queued` 回执） |
+| `parentId` 环检测漏了两处同链路遍历 | 上一轮只给每处第一条 `while` 加了 `visited` | `readIndexedContextPage` 的 `settingsCursor` 循环、`lib/session-turns.ts` 的 `countTurnsBefore` 都补 `visited`；新增 `lib/session-turns.test.mjs`（轮次计数 + 成环不卡死，去掉守卫即失败） |
+| 旧大纲跳转收尾误清新跳转的待定位目标 | 早退分支无条件 `pendingNavigationRef.current = null` | 只在 `pendingNavigationRef.current?.entryId === turn.entryId` 时清空 |
+| 补页合并只从首屏重拼 | 连补多页时每次都用 `firstSnapshot`，中间页的记录不会留在视图里（当前条件下可见结果等价，但条件一放宽就会丢） | 改为在 `latestSnapshot` 上累加，提交成功后再更新它 |

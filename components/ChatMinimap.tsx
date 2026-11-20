@@ -796,7 +796,9 @@ export const ChatMinimap = memo(function ChatMinimap({
       // 加载期间切了会话或分支：这次的结果属于旧分支，展开新分支的窗口会跳到错的条目。
       // `jumpTargetRef` 在会话/分支变化时被清空，这里用它判断这次跳转是否还是当前目标。
       if (jumpTargetRef.current !== turn.entryId) {
-        pendingNavigationRef.current = null;
+        // 只清掉自己写进去的那一份：旧请求还没结束时用户可能已经开始了新跳转，
+        // 无条件清空会把新跳转的待定位目标一起抹掉，它就永远不会滚过去。
+        if (pendingNavigationRef.current?.entryId === turn.entryId) pendingNavigationRef.current = null;
         return;
       }
       if (loaded) {

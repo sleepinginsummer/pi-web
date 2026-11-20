@@ -5,14 +5,17 @@ import test from "node:test";
 const source = await readFile(new URL("./route.ts", import.meta.url), "utf8");
 
 test("会话写入命令共用唯一发送与缓存失效路径", () => {
-  assert.match(source, /import \{ invalidateSessionListCache, resolveSessionPath \}/);
+  // 导入清单会随功能增减（`openSessionManager` 是观察员面板加的），这里只要求
+  // 失效仍走 session-reader 那一个入口。
+  assert.match(source, /import \{[^}]*invalidateSessionListCache[^}]*\} from "@\/lib\/session-reader"/);
   assert.equal((source.match(/const result = await session\.send\(body\)/g) ?? []).length, 1);
   assert.match(source, /if \(shouldInvalidateSessionList\(body\.type\)\) invalidateSessionListCache\(\);/);
 });
 
 test("消息提交成功后直接确认，不被后续状态读取推翻", () => {
   const postSource = source.slice(source.indexOf("export async function POST"), source.indexOf("// GET /api/agent/[id]"));
-  assert.match(postSource, /data: \{ accepted: true, mode \}/);
+  // 只认可确认字段：排队回执会多带 `queued`，不影响「先确认、不随后续状态读取推翻」。
+  assert.match(postSource, /data: \{ accepted: true, mode/);
   assert.doesNotMatch(postSource, /getRpcSessionSnapshot/);
 });
 

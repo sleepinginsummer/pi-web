@@ -437,7 +437,11 @@ export async function readIndexedContextPage(
   let thinkingLevel: string | undefined;
   let model: SessionContext["model"] | undefined;
   let settingsCursor = byId.get(options.before ?? activeLeafId ?? "");
-  while (settingsCursor && (thinkingLevel === undefined || model === undefined)) {
+  // 环检测：同一条父链上面的分页遍历也要能停（损坏文件缺少设置时会一直找不到）。
+  const visitedSettings = new Set<string>();
+  while (settingsCursor && !visitedSettings.has(settingsCursor.id)
+    && (thinkingLevel === undefined || model === undefined)) {
+    visitedSettings.add(settingsCursor.id);
     thinkingLevel ??= settingsCursor.thinkingLevel;
     model ??= settingsCursor.model;
     settingsCursor = settingsCursor.parentId ? byId.get(settingsCursor.parentId) : undefined;
