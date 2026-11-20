@@ -3508,6 +3508,15 @@ span.token.table {
 }
 .mobile-composer-more[aria-expanded="true"], .mobile-controls-close:hover { background: var(--bg-selected); }
 
+/* 输入框右上角那一排里的「更多」：和上下文环同高，不再按 44px 的整行按钮撑高。 */
+.mobile-composer-more.is-compact {
+  min-height: 30px;
+  padding-inline: 8px;
+  font-size: 12.5px;
+  border-radius: 8px;
+  color: var(--text-muted);
+}
+
 .message-stash-trigger {
   display: grid;
   place-items: center;

@@ -587,71 +587,59 @@ export const InputControls = memo(function InputControls({
   notificationEnabled, notificationPermission, onNotificationToggle,
   endAction,
 }: InputControlsProps) {
-  const { t } = useI18n();
   // Stop 在运行结束时被 Compact/工具按钮替换，结束后的短时间内的点击视为误触。
   const isStrayClick = useRunEndStrayClick(isStreaming);
-  const [controlsMenuOpen, setControlsMenuOpen] = useState(false);
-  const controlsMenuRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const handleOutsideClick = (event: PointerEvent) => {
-      const target = event.target as Node;
-      if (controlsMenuRef.current && !controlsMenuRef.current.contains(target)) setControlsMenuOpen(false);
-    };
-    document.addEventListener("pointerdown", handleOutsideClick);
-    return () => document.removeEventListener("pointerdown", handleOutsideClick);
-  }, []);
 
-  useEffect(() => {
-    if (!isMobile) setControlsMenuOpen(false);
-  }, [isMobile]);
+  // 移动端：输入框下方只留运行控制与暂存库；「更多」在输入框右上方（见 MobileComposerMenu）。
+  if (isMobile) {
+    return (
+      <div style={{ flex: "0 0 auto", display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 2 }}>
+        {(isStreaming || isCompacting) && (
+          <RunControls isMobile isStreaming={isStreaming} showLabel={false} onCompact={onCompact}
+            onAbortCompaction={onAbortCompaction} isCompacting={isCompacting} onAbort={onAbort} isStrayClick={isStrayClick} />
+        )}
+        {endAction}
+      </div>
+    );
+  }
 
   return (
     <>
           {/* RIGHT: thinking + tools preset + compact + sound (idle) | Stop + sound (streaming) */}
-          <div ref={controlsMenuRef} style={{
+          <div style={{
             flex: "0 0 auto",
             display: "flex",
             alignItems: "center",
             justifyContent: "flex-end",
             position: "relative",
-            marginLeft: isMobile ? 0 : "auto",
+            marginLeft: "auto",
           }}>
-            {isMobile && (isStreaming || isCompacting) && (
-              <RunControls isMobile isStreaming={isStreaming} showLabel={false} onCompact={onCompact}
-                onAbortCompaction={onAbortCompaction} isCompacting={isCompacting} onAbort={onAbort} isStrayClick={isStrayClick} />
-            )}
-            {isMobile && (
-              <button type="button" className="mobile-composer-more" aria-label={t("chat.moreControls")}
-                aria-expanded={controlsMenuOpen} onClick={() => setControlsMenuOpen((open) => !open)}>
-                <Ellipsis size={17} aria-hidden="true" />{t("chat.mobileMore")}
-              </button>
-            )}
             <InputControlsMenu
-              isMobile={isMobile}
-              isOpen={controlsMenuOpen}
-              onClose={() => { setControlsMenuOpen(false); controlsMenuRef.current?.querySelector<HTMLButtonElement>(".mobile-composer-more")?.focus(); }}
-              modelControls={(!isMobile || controlsMenuOpen) ? (
+              isMobile={false}
+              isOpen={false}
+              onClose={() => {}}
+              modelControls={(
                 <>
-                  <ThinkingControl isMobile={isMobile} modelState={modelState} isStreaming={isStreaming} onChange={onThinkingLevelChange} />
-                  {!isStreaming && <FastModeControl isMobile={isMobile} modelState={modelState} onChange={modelActions.changeFastEnabled} />}
-                  <ToolPresetControl isMobile={isMobile} toolPreset={toolPreset} customToolNames={customToolNames} activeBuiltinTools={activeBuiltinTools} pinnedToolNames={pinnedToolNames} toolSelectionKnown={toolSelectionKnown} onChange={onToolPresetChange} isStrayClick={isStrayClick} disabled={isStreaming} />
+                  <ThinkingControl isMobile={false} modelState={modelState} isStreaming={isStreaming} onChange={onThinkingLevelChange} />
+                  {!isStreaming && <FastModeControl isMobile={false} modelState={modelState} onChange={modelActions.changeFastEnabled} />}
+                  <ToolPresetControl isMobile={false} toolPreset={toolPreset} customToolNames={customToolNames} activeBuiltinTools={activeBuiltinTools} pinnedToolNames={pinnedToolNames} toolSelectionKnown={toolSelectionKnown} onChange={onToolPresetChange} isStrayClick={isStrayClick} disabled={isStreaming} />
                 </>
-              ) : null}
-              runControls={(!isMobile || (!isStreaming && !isCompacting)) ? (
+              )}
+              runControls={(
                 <RunControls
-                  isMobile={isMobile}
+                  isMobile={false}
                   isStreaming={isStreaming}
-                  showLabel={!isMobile || controlsMenuOpen}
+                  showLabel
                   onCompact={onCompact}
                   onAbortCompaction={onAbortCompaction}
                   isCompacting={isCompacting}
                   onAbort={onAbort}
                   isStrayClick={isStrayClick}
                 />
-              ) : null}
+              )}
               preferenceControls={(
                 <PreferenceToggles
-                  isMobile={isMobile}
+                  isMobile={false}
                   soundEnabled={soundEnabled}
                   onSoundToggle={onSoundToggle}
                   notificationEnabled={notificationEnabled}
@@ -666,6 +654,75 @@ export const InputControls = memo(function InputControls({
   );
 });
 
+
+/**
+ * 移动端输入框右上角的「更多」：工具预设、Fast、压缩、提示音、通知。
+ *
+ * 思考强度不在菜单里——它和模型名称一起常驻输入框下方那一行，运行中那一行只留给
+ * 模型名称和 Stop，所以菜单按钮挪到输入框上方，不再占下方空间。
+ */
+export const MobileComposerMenu = memo(function MobileComposerMenu({
+  isStreaming, modelState, modelActions, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames,
+  toolSelectionKnown, onToolPresetChange, onCompact, onAbortCompaction, isCompacting, onAbort,
+  soundEnabled, onSoundToggle, notificationEnabled, notificationPermission, onNotificationToggle,
+}: Omit<InputControlsProps, "isMobile" | "endAction">) {
+  const { t } = useI18n();
+  const isStrayClick = useRunEndStrayClick(isStreaming);
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const handleOutsideClick = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (rootRef.current && !rootRef.current.contains(target)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", handleOutsideClick);
+    return () => document.removeEventListener("pointerdown", handleOutsideClick);
+  }, []);
+  return (
+    <div ref={rootRef} style={{ position: "relative", display: "flex", alignItems: "center" }}>
+      <button type="button" className="mobile-composer-more is-compact" aria-label={t("chat.moreControls")}
+        aria-expanded={open} onClick={() => setOpen((current) => !current)}>
+        <Ellipsis size={17} aria-hidden="true" />{t("chat.mobileMore")}
+      </button>
+      <InputControlsMenu
+        isMobile
+        isOpen={open}
+        onClose={() => {
+          setOpen(false);
+          rootRef.current?.querySelector<HTMLButtonElement>(".mobile-composer-more")?.focus();
+        }}
+        modelControls={(
+          <>
+            {!isStreaming && <FastModeControl isMobile modelState={modelState} onChange={modelActions.changeFastEnabled} />}
+            <ToolPresetControl isMobile toolPreset={toolPreset} customToolNames={customToolNames} activeBuiltinTools={activeBuiltinTools} pinnedToolNames={pinnedToolNames} toolSelectionKnown={toolSelectionKnown} onChange={onToolPresetChange} isStrayClick={isStrayClick} disabled={isStreaming} />
+          </>
+        )}
+        runControls={(!isStreaming && !isCompacting) ? (
+          <RunControls
+            isMobile
+            isStreaming={isStreaming}
+            showLabel
+            onCompact={onCompact}
+            onAbortCompaction={onAbortCompaction}
+            isCompacting={isCompacting}
+            onAbort={onAbort}
+            isStrayClick={isStrayClick}
+          />
+        ) : null}
+        preferenceControls={(
+          <PreferenceToggles
+            isMobile
+            soundEnabled={soundEnabled}
+            onSoundToggle={onSoundToggle}
+            notificationEnabled={notificationEnabled}
+            notificationPermission={notificationPermission}
+            onNotificationToggle={onNotificationToggle}
+          />
+        )}
+      />
+    </div>
+  );
+});
 
 interface ComposerTopUtilitiesProps {
   isStreaming: boolean;

@@ -336,3 +336,26 @@ hooks/useAgentSession.ts:3462   missing: handleCompact, opts.chatInputRef, sessi
 验证：`tsc --noEmit` 通过；`eslint` 0 error；`AppTopBar`/`ChatMinimap` 新增用例（按钮排在「更多」前且随可用性出现、抽屉形态渲染、空会话说明）；真机式 400px 窗口实测：按钮出现 → 抽屉列出 15 轮 → 点背景/✕/跳转都能收起。
 
 已知（与本改动无关，桌面同样复现）：大纲里对**未加载轮次**点「跳到对话」会把历史翻出来（18 → 43 行），但视口没有滚到目标轮次（1440px 桌面轨道上同样 `scrollTop` 保持 0）。这条走的是 `jumpToUnloadedTurn` → `pendingNavigationRef` → `measureNodes` 的既有路径，需要单独排查 `targetTurn.scrollTop` 的测量时机。
+
+## 14. 移动端输入行重排（0.17.0-merge.21）
+
+原来移动端把「更多」放在输入框下面那一行，思考强度藏在「更多」菜单里。运行中那一行还要塞 Stop，模型名称被挤成两行、按钮也没地方放。
+
+改成与桌面同一套位置关系：
+
+```
+                       ⌾10%  ⋯更多        ← 输入框右上方（composer-top-row）
+┌───────────────────────────────────────┐
+│ 消息...输入 / 使用命令，输入 @ 查找文件  │
+│  🖼  @                          [→]     │
+└───────────────────────────────────────┘
+  🖼  @  模型名称  │ ◇思考强度      ■Stop  ▤
+```
+
+- 「更多」搬到输入框上方那一排（与桌面 `ComposerTopUtilities` 同一位置），抽成 `MobileComposerMenu`；下方那一行只剩运行控制与暂存库。
+- 思考强度从菜单里拿出来，和桌面一样常驻在模型选择器后面（`ThinkingControl isMobile`）。菜单里只留工具预设、Fast、压缩、提示音、通知。
+- 菜单在输入框上方，展开方向朝上（`.is-compact` 让按钮和上下文环同高，不再按 44px 整行按钮撑高）。
+
+验证：`InputControls`/`ChatInput` 相关用例改为断言新位置（下方那一行不再有「更多」、菜单里不再有思考强度）；400px 窗口实测：更多在输入框右上方、思考强度常驻、菜单向上展开。
+
+最长名称实测：把会话模型换成当前列表里最长的那条（`sleepinsum-deepseek` / `DeepSeek V4.1 Flash 0910`，44 字符），400px 宽下输入框下方那一行仍放得下——模型名占两行（198px）、后面接思考强度 `max`（51px）、右侧暂存库按钮，行内没有横向溢出（`scrollWidth === clientWidth`）。

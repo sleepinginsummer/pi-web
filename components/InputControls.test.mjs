@@ -9,7 +9,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { InputControls } = await jiti.import("./InputControls.tsx");
+const { InputControls, MobileComposerMenu } = await jiti.import("./InputControls.tsx");
 const { InputControlsMenu } = await jiti.import("./InputControlsMenu.tsx");
 const { I18nProvider } = await jiti.import("@/hooks/useI18n");
 
@@ -70,12 +70,19 @@ function renderOpenMobileMenu() {
   );
 }
 
-test("mobile controls expose the closed menu trigger", () => {
-  const html = renderControls(true);
+test("the phone's More trigger lives above the input, not in the bottom row", () => {
+  // 输入框下方那一行只留运行控制与暂存库：模型名称、思考强度、Stop 才排得开。
+  const row = renderControls(true);
+  assert.doesNotMatch(row, /aria-label="More controls"/);
 
-  assert.match(html, /aria-label="More controls"/);
-  assert.match(html, /aria-expanded="false"/);
-  assert.doesNotMatch(html, /class="mobile-controls-menu"/);
+  const menu = renderToStaticMarkup(
+    React.createElement(I18nProvider, null,
+      React.createElement(MobileComposerMenu, { ...sharedProps })),
+  );
+  assert.match(menu, /aria-label="More controls"/);
+  assert.match(menu, /aria-expanded="false"/);
+  assert.match(menu, /mobile-composer-more is-compact/);
+  assert.doesNotMatch(menu, /class="mobile-controls-menu"/);
 });
 
 test("open mobile menu groups model actions and preferences", () => {
@@ -120,14 +127,16 @@ test("leaves the tool preset clickable when idle", () => {
   assert.doesNotMatch(html, /aria-disabled="true"/);
 });
 
-test("keeps the phone's tool row after reasoning, unlocked by streaming", async () => {
+test("the phone's More menu keeps the tool row but no longer hides reasoning", async () => {
   const source = await readFile(new URL("./InputControls.tsx", import.meta.url), "utf8");
-  const menu = source.slice(source.indexOf("modelControls={(!isMobile"), source.indexOf("runControls="));
-
-  assert.ok(menu.includes("ThinkingControl"));
-  assert.ok(menu.indexOf("ThinkingControl") < menu.indexOf("ToolPresetControl"));
+  // 移动端菜单的内容只有一份（MobileComposerMenu）：Fast + 工具预设，思考强度已经移到下方那一行。
+  const menu = source.slice(source.indexOf("export const MobileComposerMenu"), source.indexOf("interface ComposerTopUtilitiesProps"));
+  assert.match(menu, /modelControls=\{/);
+  assert.ok(menu.includes("ToolPresetControl"));
+  assert.ok(!menu.includes("ThinkingControl"), "思考强度不再藏在「更多」里");
   assert.doesNotMatch(menu, /!isStreaming && <ToolPresetControl/);
   assert.match(menu, /<ToolPresetControl[^>]*disabled=\{isStreaming\}/);
+
 });
 
 test("shows the configured preset's tools without editing them from the menu", async () => {

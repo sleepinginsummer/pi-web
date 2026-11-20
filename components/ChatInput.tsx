@@ -32,7 +32,7 @@ import { readClipboardImageFiles, readServerClipboardImageFiles } from "@/lib/cl
 import { useOptimisticInputSubmission, type OptimisticInputSnapshot } from "@/hooks/useOptimisticInputSubmission";
 import { prependSubmittedInput } from "@/lib/optimistic-input-submission";
 import { ModelPicker, type ModelPickerOption } from "./ModelPicker";
-import { ComposerStopButton, ComposerTopUtilities, FastModeControl, InputControls, ThinkingControl } from "./InputControls";
+import { ComposerStopButton, ComposerTopUtilities, FastModeControl, InputControls, MobileComposerMenu, ThinkingControl } from "./InputControls";
 import { ContextUsageIndicator, type ContextUsageSnapshot } from "./ContextUsageIndicator";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import { MessageStash } from "./MessageStash";
@@ -2104,9 +2104,32 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 endAction={messageStashElement}
               />
             )}
-            {!compact && isMobile && contextUsage && contextUsage.contextWindow > 0 && contextUsage.percent !== null && (
-              <div className="composer-top-mobile-meta" style={{ flex: "0 0 auto", display: "flex", alignItems: "center" }}>
-                <ContextUsageIndicator contextUsage={contextUsage} sessionStats={sessionStats} compact />
+            {!compact && isMobile && (
+              <div className="composer-top-mobile-meta" style={{ flex: "0 0 auto", display: "flex", alignItems: "center", gap: 4 }}>
+                {contextUsage && contextUsage.contextWindow > 0 && contextUsage.percent !== null && (
+                  <ContextUsageIndicator contextUsage={contextUsage} sessionStats={sessionStats} compact />
+                )}
+                <MobileComposerMenu
+                  isStreaming={isStreaming}
+                  modelState={modelState}
+                  modelActions={modelActions}
+                  onThinkingLevelChange={creationSettingsLocked ? undefined : onThinkingLevelChange}
+                  toolPreset={toolPreset}
+                  customToolNames={customToolNames}
+                  activeBuiltinTools={activeBuiltinTools}
+                  pinnedToolNames={pinnedToolNames}
+                  toolSelectionKnown={toolSelectionKnown}
+                  onToolPresetChange={creationSettingsLocked ? undefined : onToolPresetChange}
+                  onCompact={onCompact}
+                  onAbortCompaction={onAbortCompaction}
+                  isCompacting={isCompacting}
+                  onAbort={onAbort}
+                  soundEnabled={soundEnabled}
+                  onSoundToggle={onSoundToggle}
+                  notificationEnabled={notificationEnabled}
+                  notificationPermission={notificationPermission}
+                  onNotificationToggle={onNotificationToggle}
+                />
               </div>
             )}
           </div>
@@ -2290,25 +2313,24 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 isAutoSelection={modelState.isAutoModelSelection}
                 variant="toolbar"
               />
-              {!isMobile && (
-                <>
-                  <span style={{ width: 1, height: 14, background: "color-mix(in srgb, var(--border) 80%, transparent)", margin: "0 3px", flexShrink: 0 }} aria-hidden="true" />
-                  <ThinkingControl
+              <>
+                <span style={{ width: 1, height: 14, background: "color-mix(in srgb, var(--border) 80%, transparent)", margin: "0 3px", flexShrink: 0 }} aria-hidden="true" />
+                {/* 移动端也常驻：它从「更多」菜单里搬出来，下方那一行才留得出模型名称与 Stop 的位置。 */}
+                <ThinkingControl
+                  isMobile={isMobile}
+                  align="left"
+                  modelState={modelState}
+                  isStreaming={isStreaming}
+                  onChange={creationSettingsLocked ? undefined : onThinkingLevelChange}
+                />
+                {!isMobile && !isStreaming && (
+                  <FastModeControl
                     isMobile={false}
-                    align="left"
                     modelState={modelState}
-                    isStreaming={isStreaming}
-                    onChange={creationSettingsLocked ? undefined : onThinkingLevelChange}
+                    onChange={modelActions.changeFastEnabled}
                   />
-                  {!isStreaming && (
-                    <FastModeControl
-                      isMobile={false}
-                      modelState={modelState}
-                      onChange={modelActions.changeFastEnabled}
-                    />
-                  )}
-                </>
-              )}
+                )}
+              </>
             </div>
 
             {isMobile ? (
