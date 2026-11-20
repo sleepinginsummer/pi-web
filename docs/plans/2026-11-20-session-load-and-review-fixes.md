@@ -313,3 +313,13 @@ hooks/useAgentSession.ts:3462   missing: handleCompact, opts.chatInputRef, sessi
 | `parentId` 环检测漏了两处同链路遍历 | 上一轮只给每处第一条 `while` 加了 `visited` | `readIndexedContextPage` 的 `settingsCursor` 循环、`lib/session-turns.ts` 的 `countTurnsBefore` 都补 `visited`；新增 `lib/session-turns.test.mjs`（轮次计数 + 成环不卡死，去掉守卫即失败） |
 | 旧大纲跳转收尾误清新跳转的待定位目标 | 早退分支无条件 `pendingNavigationRef.current = null` | 只在 `pendingNavigationRef.current?.entryId === turn.entryId` 时清空 |
 | 补页合并只从首屏重拼 | 连补多页时每次都用 `firstSnapshot`，中间页的记录不会留在视图里（当前条件下可见结果等价，但条件一放宽就会丢） | 改为在 `latestSnapshot` 上累加，提交成功后再更新它 |
+
+## 12. 第四轮复核修正（0.17.0-merge.19）
+
+| 问题 | 根因 | 修法 |
+|---|---|---|
+| 刷新路径遇到文件重写会停在旧首屏 | 重写重试复用了 `options`：首屏请求的 `skipCache` 只跟 `validateView` 走，刷新路径它是 false，于是命中本地缓存（版本没变时会走 304），拿回旧页和旧游标；补页再撞一次视图变化就被「只重试一次」挡住 | 重试前 `invalidateSessionContext(sid)` 丢掉过期缓存，首屏请求改为 `skipCache: options.validateView \|\| options.reloadedAfterRewrite`，强制服务端按版本复验；重试本身仍走完整加载（提交首屏 + 补页） |
+| 大纲仍漏标题 / 多标题 | 行扫描器只能逼近 CommonMark。实测 16 个形状只对上 7 个：反引号围栏的 info string 含反引号（那根本不是围栏）、HTML 块（div/script/注释/CDATA/自定义标签，6 种）、frontmatter、`$$` 数学块 | 大纲标题改为**用正文那条 remark 解析**：`extractOutlineHeadings()` 用 `remark-parse + remark-frontmatter + remark-gfm + remark-math`（即 `markdownRemarkPlugins` 里会改变块结构的那一半）取根节点 h1/h2；`hasOutlineHeadings()` 先用「有没有 `#`/Setext 下划线」的字符粗筛省掉 AST。对照脚本 16/16 一致。新增运行时依赖 `unified`、`remark-parse`，并把 `remark-gfm`/`remark-math` 从 devDependencies 提为 dependencies（正文解析要用它们）。`session-outline.test.mjs` 增加按 `markdownRemarkPlugins` 复算的对照用例，正文插件表一变就会红 |
+| 旧项目的操作成功会抹掉新项目的失败提示 | 失败分支按 `cwdRef` 判断了，成功分支无条件 `setActionError(null)` | `useScheduledTasks`、`useBackgroundCommands` 的成功分支同样只在 `cwdRef.current === cwd` 时清提示；`useDevServers` 的 `setError(null)` 同理。新增 `hooks/useScheduledTasks.test.mjs`：真 React + JSDOM 复现「A 未完成 → 切 B → B 失败 → A 成功」，去掉守卫即失败 |
+
+验证：全量 570 文件 / 4128 通过 / 0 失败 / 77 跳过；`tsc --noEmit` 通过；`eslint .` 0 error（40 条既存 warning）。

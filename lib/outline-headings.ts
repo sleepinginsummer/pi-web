@@ -1,3 +1,9 @@
+import type { Node, Parent } from "mdast";
+import { unified } from "unified";
+import remarkFrontmatter from "remark-frontmatter";
+import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import remarkParse from "remark-parse";
 import type { OutlineHeading } from "./session-outline-types";
 
 /**
@@ -182,13 +188,51 @@ export function scanOutlineLines(markdown: string): OutlineLine[] {
 }
 
 
-/** 提取一级与二级标题（1-A 大纲只展示这两级，避免 h3 刷屏）。 */
+/**
+ * 大纲用的 Markdown 解析器：与正文（`lib/markdown.ts` 的 `markdownRemarkPlugins`）同一条规则。
+ *
+ * 手写的行扫描器只能逼近 CommonMark，凡是「这一行算不算正文」的判断都能出错：列表里
+ * 未闭合的围栏、反引号围栏的 info string 含反引号（那其实不是围栏）、HTML 块里的 `#`
+ * （不是标题）、`$$` 数学块、frontmatter……每漏一条就会出现「正文显示了标题、大纲里却没有」
+ * 或反过来。这里只带上会改变块结构的插件，其余行内插件（cjk-friendly、自动链接、
+ * 货币安全数学、Windows 路径）不影响标题结构：
+ * - remarkFrontmatter：`---` 包住的 frontmatter 不是正文，里面的 `#` 不是标题；
+ * - remarkMath：`$$` 块整块是数学，里面的 `#` 不是标题；
+ * - remarkGfm：与正文一致（表格等扩展本身不产生标题）。
+ * 加新插件前先确认它会不会改变块结构，改了就要同步到这里（`session-outline.test.mjs`
+ * 有按正文插件表复算的对照用例）。
+ */
+const headingProcessor = unified()
+  .use(remarkParse)
+  .use(remarkFrontmatter, ["yaml"])
+  .use(remarkGfm, { singleTilde: false })
+  .use(remarkMath);
+
+type TextLikeNode = Node & { value?: unknown; alt?: unknown; children?: readonly TextLikeNode[] };
+
+/** 标题文字：文本、行内代码、行内数学取 value，链接/强调等取子树，图片取 alt。 */
+function headingText(node: TextLikeNode): string {
+  if (node.type === "image" || node.type === "imageReference") {
+    return typeof node.alt === "string" ? node.alt : "";
+  }
+  if (typeof node.value === "string") return node.value;
+  const children = (node as Parent).children as readonly TextLikeNode[] | undefined;
+  return Array.isArray(children) ? children.map(headingText).join("") : "";
+}
+
+/**
+ * 提取一级与二级标题（1-A 大纲只展示这两级，避免 h3 刷屏）。
+ *
+ * 只认根节点的 h1/h2：引用块、列表、表格和原样 HTML 里的标题在正文里没有跳转标记。
+ */
 export function extractOutlineHeadings(markdown: string, limit = Number.POSITIVE_INFINITY): OutlineHeading[] {
+  if (!markdown || limit <= 0) return [];
   const headings: OutlineHeading[] = [];
-  for (const line of scanOutlineLines(markdown)) {
+  for (const node of headingProcessor.parse(markdown).children) {
     if (headings.length >= limit) break;
-    if (line.kind !== "heading") continue;
-    headings.push({ level: line.level, text: line.text });
+    if (node.type !== "heading" || node.depth > 2) continue;
+    const text = headingText(node).replace(/\s+/g, " ").trim();
+    if (text) headings.push({ level: node.depth === 1 ? 1 : 2, text });
   }
   return headings;
 }
@@ -236,9 +280,18 @@ export function outlineHeadingsFromBlocks(
   return headings;
 }
 
-/** 快速判断是否含一/二级标题：大纲行没有可展开的标题时不必渲染标题区。 */
+/**
+ * 粗筛：整篇里连一个 ATX 记号（`#`/`##`）或 Setext 下划线都没有时，任何解析器都不会
+ * 给出标题。它只做字符判断，宁多勿少——命中的仍交给 remark 定夺。
+ */
+const MAYBE_ATX_HEADING = /^ {0,3}#{1,2}(?:[ \t]|$)/m;
+const MAYBE_SETEXT = /^ {0,3}(?:=+|-+)[ \t]*$/m;
+
+/** 快速判断是否含一/二级标题：没有可展开的标题时不必渲染标题区。 */
 export function hasOutlineHeadings(markdown: string): boolean {
-  return scanOutlineLines(markdown).some((line) => line.kind === "heading");
+  if (!markdown) return false;
+  if (!MAYBE_ATX_HEADING.test(markdown) && !MAYBE_SETEXT.test(markdown)) return false;
+  return extractOutlineHeadings(markdown, 1).length > 0;
 }
 
 /**

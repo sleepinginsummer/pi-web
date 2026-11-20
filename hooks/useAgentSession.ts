@@ -1309,7 +1309,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       let committedSnapshot: SessionContextSnapshot | null = null;
       const contextResult = await contextLoaderRef.current.run(
         sid,
-        (signal) => fetchSessionContext(sid, signal, { skipCache: options.validateView }),
+        // 重写重试必须跳过本地缓存并让服务端按版本复验：否则拿回来的还是旧首屏和旧游标，
+        // 补页再撞一次视图变化就停在那一页上（首次打开走 validateView，刷新路径没有）。
+        (signal) => fetchSessionContext(sid, signal, {
+          skipCache: options.validateView || options.reloadedAfterRewrite === true,
+        }),
         (loaded) => {
           if (loaded.kind !== "missing" && (lastReadContextRef.current?.seq ?? 0) < readSeq) {
             lastReadContextRef.current = { sid, seq: readSeq, messages: loaded.snapshot.messages, entryIds: loaded.snapshot.entryIds ?? [] };
@@ -1397,6 +1401,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // 文件在补页期间被重写：这次的首屏与补页结果都过期了，重读一次（只重试一次，
         // 免得来回重读）；重读失败就保留当前这张带「加载更早消息」入口的页。
         if (!options.reloadedAfterRewrite) {
+          // 磁盘上的文件已经变了，本地缓存的首屏一定过期，先丢掉再重读，重读走同一套补页流程。
+          invalidateSessionContext(sid);
           return loadSession(sid, showLoading, includeState, { ...options, reloadedAfterRewrite: true });
         }
       }

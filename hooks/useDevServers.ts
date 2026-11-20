@@ -48,7 +48,8 @@ export function useDevServers(cwd: string | null | undefined) {
     setPending((current) => new Set(current).add(key));
     try {
       await action();
-      setError(null);
+      // 同上：旧项目的成功不能清掉新项目的读取错误。
+      if (cwdRef.current === cwd) setError(null);
     } catch (cause) {
       if (cwdRef.current === cwd) setError(cause instanceof Error ? cause.message : String(cause));
     } finally {

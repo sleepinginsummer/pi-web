@@ -240,7 +240,9 @@ test("context loads atomically through the shared latest loader", () => {
   // 消息、又标着「没有更早消息」的空白页。丢弃后重读一次首屏，且只重试一次。
   assert.match(backfillSource, /if \(!sameSessionView\(/);
   assert.match(backfillSource, /viewChanged = true;/);
-  assert.match(loadSource, /if \(!options\.reloadedAfterRewrite\) \{\s*\n\s*return loadSession\(sid, showLoading, includeState, \{ \.\.\.options, reloadedAfterRewrite: true \}\);/);
+  assert.match(loadSource, /invalidateSessionContext\(sid\);\s*\n\s*return loadSession\(sid, showLoading, includeState, \{ \.\.\.options, reloadedAfterRewrite: true \}\);/);
+  // 重写重试的首屏要绕过本地缓存让服务端复验版本，否则拿到旧首屏+旧游标，补页会再次撞上视图变化。
+  assert.match(loadSource, /skipCache: options\.validateView \|\| options\.reloadedAfterRewrite === true/);
   // 在已合并的那一份上累加（连补多页时不丢中间页），而不是每次从首屏重拼。
   assert.match(loadSource, /let latestSnapshot = firstSnapshot;/);
   assert.match(backfillSource, /const merged = mergeOlderPage\(latestSnapshot, page\.snapshot\);/);
@@ -477,7 +479,8 @@ test("delegates Shadow runtime, slash, and toggle behavior to the focused hook",
 test("历史页缓存仅在会话版本和 leaf 均与 context 响应一致时恢复", () => {
   assert.match(source, /saved\.revision === loaded\.snapshot\.version && saved\.leafId === loaded\.leafId/);
   assert.match(source, /if \(saved\) deleteSessionViewSnapshot\(sid\)/);
-  assert.match(source, /fetchSessionContext\(sid, signal, \{ skipCache: options\.validateView \}\)/);
+  // 只有确认视图一致的路径才允许读本地缓存（重写重试另加 reloadedAfterRewrite 条件）。
+  assert.match(source, /skipCache: options\.validateView \|\| options\.reloadedAfterRewrite === true/);
   assert.match(source, /setSessionViewSnapshot\(\{ sessionId: sid, revision: contextVersionRef\.current/);
 });
 

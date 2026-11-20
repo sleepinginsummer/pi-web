@@ -39,7 +39,8 @@ export function useScheduledTasks(cwd: string | null | undefined) {
         const body = await response.json().catch(() => null) as { error?: string } | null;
         throw new Error(body?.error ?? `HTTP ${response.status}`);
       }
-      setActionError(null);
+      // 成功也只清自己项目的提示：A 的删除成功不能抹掉 B 刚出现的失败。
+      if (cwdRef.current === cwd) setActionError(null);
     } catch (cause) {
       if (cwdRef.current === cwd) setActionError(cause instanceof Error ? cause.message : String(cause));
     } finally {
