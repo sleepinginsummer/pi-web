@@ -276,7 +276,7 @@ test("历史分页按游标串行前插并拒绝重复 entryId", () => {
   assert.match(paginationSource, /const retryEarlierMessages = useCallback/);
   // 404（会话文件已被删除）先校验归属，再关掉分页并说清楚，不留重试入口。
   assert.match(paginationSource, /if \(result\.kind === "missing"\) \{/);
-  assert.match(paginationSource, /hasMore: false \}/);
+  assert.match(paginationSource, /setHistoryPage\(\(current\) => terminatePagination\(current, sid\)\)/);
   assert.match(paginationSource, /translateRef\.current\("chat\.sessionFileMissing"\)/);
   assert.ok(
     paginationSource.indexOf('result.kind === "missing"') < paginationSource.indexOf('result.kind !== "loaded"'),
@@ -590,5 +590,13 @@ test("大纲跳转逐页请求同样带期限，失败走同一套清理", () =>
   assert.match(jumpSource, /const markJumpFailure = \(isFirstPage: boolean\) => \{/);
   assert.match(jumpSource, /if \(isFirstPage\) firstPageFailed = true;/);
   assert.match(jumpSource, /fetchJumpPage\(before, step === 0\)/);
+  // 404：先校验归属，再与普通翻页共用 terminatePagination（关掉分页 + 提示文件已不存在）。
+  assert.match(source, /function terminatePagination\(current: HistoryPageState, sid: string\): HistoryPageState/);
+  assert.match(jumpSource, /if \(result\.kind === "missing"\) \{/);
+  assert.match(jumpSource, /setHistoryPage\(\(current\) => terminatePagination\(current, sid\)\)/);
+  assert.ok(
+    jumpSource.indexOf('currentRequest.generation !== generation') < jumpSource.indexOf('result.kind === "missing"'),
+    "missing 要在会话/代次校验之后处理",
+  );
   assert.equal((jumpSource.match(/fetchSessionContext\(/g) ?? []).length, 1);
 });

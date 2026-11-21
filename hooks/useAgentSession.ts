@@ -87,6 +87,24 @@ const SESSION_CONTEXT_PAGE_SIZE = 50;
 /** 单页历史的期限：服务端卡住时不能让顶部一直停在「加载中」，超时按失败处理，按钮可重试。 */
 const EARLIER_PAGE_TIMEOUT_MS = 30_000;
 
+interface HistoryPageState {
+  sid: string | null;
+  oldestEntryId: string | null;
+  hasMore: boolean;
+  turnsBefore: number;
+  loading: boolean;
+  /** 上一个游标那一页超时/出错：顶部哨兵不再自动重发，改由用户点「重试」。 */
+  failed: boolean;
+}
+
+/**
+ * 会话文件在页面打开期间被删除/归档（分页接口 404）：关掉历史分页。
+ * 不挂重试——重试一个已经不在的文件只会一直失败；普通翻页和大纲跳转共用这一条。
+ */
+function terminatePagination(current: HistoryPageState, sid: string): HistoryPageState {
+  return current.sid === sid ? { ...current, loading: false, failed: false, hasMore: false } : current;
+}
+
 /**
  * 给单页请求加期限，同时跟随外层的取消信号（切换会话、分支导航）。
  *
@@ -643,15 +661,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [messageKeyAliases, setMessageKeyAliases] = useState<ReadonlyMap<string, string>>(() => new Map());
   messagesRef.current = messages;
   entryIdsRef.current = entryIds;
-  const [historyPage, setHistoryPage] = useState<{
-    sid: string | null;
-    oldestEntryId: string | null;
-    hasMore: boolean;
-    turnsBefore: number;
-    loading: boolean;
-    /** 上一个游标那一页超时/出错：顶部哨兵不再自动重发，改由用户点「重试」。 */
-    failed: boolean;
-  }>({ sid: null, oldestEntryId: null, hasMore: false, turnsBefore: 0, loading: false, failed: false });
+  const [historyPage, setHistoryPage] = useState<HistoryPageState>(
+    { sid: null, oldestEntryId: null, hasMore: false, turnsBefore: 0, loading: false, failed: false },
+  );
   // 卸载时从 ref 读取最终已分页窗口，避免 mount effect 的闭包捕获首帧状态。
   const viewSnapshotRef = useRef({ leafId: activeLeafId, page: historyPage, model: contextModel, thinkingLevel: "off", totalActiveMs: 0 });
   // 仅正文订阅者处理增量，hook 自身不再因每帧文本更新而重渲。
@@ -1153,9 +1165,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // 会话文件在页面打开期间被删掉/归档：再自动重发只会一直 404，也翻不出任何东西。
       // 把分页关掉并说清楚，比在顶部显示一个永远重试失败的按钮好。
       if (result.kind === "missing") {
-        setHistoryPage((current) => (current.sid === sid
-          ? { ...current, loading: false, failed: false, hasMore: false }
-          : current));
+        setHistoryPage((current) => terminatePagination(current, sid));
         addNotice({ type: "error", message: translateRef.current("chat.sessionFileMissing") });
         return false;
       }
@@ -1268,11 +1278,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const result = await fetchJumpPage(before, step === 0);
         const currentRequest = backfillRequestRef.current;
         if (
-          result.kind !== "loaded"
-          || currentRequest.sid !== sid
+          currentRequest.sid !== sid
           || currentRequest.generation !== generation
           || sessionIdRef.current !== sid
         ) return false;
+        // 与普通翻页同一处理：文件已经不在了就别再让大纲重复发同一个请求。
+        if (result.kind === "missing") {
+          setHistoryPage((current) => terminatePagination(current, sid));
+          addNotice({ type: "error", message: translateRef.current("chat.sessionFileMissing") });
+          return false;
+        }
+        if (result.kind !== "loaded") return false;
 
         if (result.snapshot.entryIds.some((id) => seenIds.has(id))) {
           throw new Error("历史分页返回了重复 entryId，已拒绝前插");
@@ -1323,7 +1339,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           : current);
       }
     }
-  }, []);
+  }, [addNotice]);
   const loadSessionDetails = useCallback((sid: string): void => {
     detailsRequestRef.current.controller?.abort();
     const controller = new AbortController();

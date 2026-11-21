@@ -602,3 +602,17 @@ hooks/useAgentSession.ts:3462   missing: handleCompact, opts.chatInputRef, sessi
 
 验证：全量 572 文件 / 4149 通过 / 0 失败；tsc、eslint 通过；新增「missing 先于通用失败分支、
 关闭分页并提示」「只有首页失败才设顶部标记、fetchJumpPage(before, step === 0)」的用例。
+
+## 29. 大纲跳转的 404（merge.38）
+
+审查指出 `loadUntilEntryId` 遇到 `missing` 时只是 `return false`，`hasMore` 仍为真：会话文件被删后
+再点一个未加载的轮次，会再发一次同样的请求，大纲只弹「历史可能已被截断」。
+
+修：把 404 的终止逻辑抽成 `terminatePagination(current, sid)`（`loading:false, failed:false,
+hasMore:false`，且只作用于同一会话）。普通翻页和大纲跳转都先校验会话/代次、再调用它并提示
+「会话文件已不存在，无法加载更早的消息」。大纲跳转的 `missing` 在设 `firstPageFailed` 之前返回，
+所以顶部也不会出现一个注定失败的重试按钮。`loadUntilEntryId` 的依赖因此从 `[]` 变成 `[addNotice]`
+（`addNotice` 自身是 `useCallback(…, [])`，身份稳定，不会让回调每帧变化）。
+
+验证：全量 572 文件 / 4149 通过 / 0 失败；tsc、eslint 40 条既存 warning；用例覆盖
+「missing 在会话/代次校验之后」「两个入口共用 terminatePagination」。
