@@ -504,3 +504,19 @@ hooks/useAgentSession.ts:3462   missing: handleCompact, opts.chatInputRef, sessi
 大纲：对话在底部时抽屉 `scrollTop` 到底（末轮完整可见）；把对话滚到 35% 再开，抽屉把第 2 轮居中。
 用例：`components/InputControls.test.mjs` 改成断言「Stop 不在输入行 + 运行中「更多」有点 + 菜单的运行
 控制不被隐藏」。
+
+## 24. 移动端：暂存库进「更多」，模型名两行放满（0.17.0-merge.33）
+
+1. **暂存库搬进「更多」**：`InputControls` 移动端分支直接 `return null`，那一行只剩附件按钮、
+   模型名称、思考强度。暂存库入口经 `MobileComposerMenu` 的 `endAction` 交给 `PreferenceToggles`
+   渲染，和提示音/通知并排；点开仍是原来的底部抽屉，菜单留在后面。桌面的位置不变。
+2. **模型名称尽量完整**：省下的约 40px 全给模型 chip；另外把 chip 内边距从 `4px 10px` 压到
+   `4px 7px`、分隔线外边距 3px→2px，并给按钮补 `textAlign: left`（按钮默认居中，短的服务商名
+   「magpie/」会缩在中间）。实测 400px：chip 文本宽 213px，`magpie/` + `DeepSeek-V4.1-Flash ·
+   deepseek365`（209px）整段放得下，不省略尾部服务商名。
+
+验证（400px + 触摸）：输入行 = [附件][模型两行][思考强度]，没有 Stop/暂存库；「更多」里依次是
+工具预设、压缩上下文、暂存库、提示音、通知、收起，点暂存库弹出原来的抽屉。截图
+`/tmp/mobile-model-full2.png`（模型名）、`/tmp/mobile-menu-with-stash.png`（菜单）、
+`/tmp/mobile-stash-in-menu.png`（抽屉）。用例：`components/InputControls.test.mjs` 新增「暂存库
+不在输入行 + 由 PreferenceToggles 渲染 + 菜单透传 endAction」。

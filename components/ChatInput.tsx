@@ -2129,6 +2129,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   notificationEnabled={notificationEnabled}
                   notificationPermission={notificationPermission}
                   onNotificationToggle={onNotificationToggle}
+                  endAction={messageStashElement}
                 />
               </div>
             )}
@@ -2314,7 +2315,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 variant="toolbar"
               />
               <>
-                <span style={{ width: 1, height: 14, background: "color-mix(in srgb, var(--border) 80%, transparent)", margin: "0 3px", flexShrink: 0 }} aria-hidden="true" />
+                <span style={{ width: 1, height: 14, background: "color-mix(in srgb, var(--border) 80%, transparent)", margin: isMobile ? "0 2px" : "0 3px", flexShrink: 0 }} aria-hidden="true" />
                 {/* 移动端也常驻：它从「更多」菜单里搬出来，下方那一行才留得出模型名称与 Stop 的位置。 */}
                 <ThinkingControl
                   isMobile={isMobile}
@@ -2336,7 +2337,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             {isMobile ? (
               <InputControls
                 isMobile
-                endAction={messageStashElement}
                 isStreaming={isStreaming}
                 modelState={modelState}
                 modelActions={modelActions}

@@ -9,7 +9,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { InputControls, MobileComposerMenu } = await jiti.import("./InputControls.tsx");
+const { InputControls, MobileComposerMenu, PreferenceToggles } = await jiti.import("./InputControls.tsx");
 const { InputControlsMenu } = await jiti.import("./InputControlsMenu.tsx");
 const { I18nProvider } = await jiti.import("@/hooks/useI18n");
 
@@ -71,7 +71,7 @@ function renderOpenMobileMenu() {
 }
 
 test("the phone's More trigger lives above the input, not in the bottom row", () => {
-  // 输入框下方那一行只留暂存库：模型名称、思考强度、Stop 都在别的行或「更多」里。
+  // 移动端输入行什么都不放：Stop、压缩、暂存库都在「更多」里，空间留给模型名称。
   const row = renderControls(true);
   assert.doesNotMatch(row, /aria-label="More controls"/);
 
@@ -103,6 +103,21 @@ test("Fast switch renders for an available desktop model", () => {
 });
 
 
+test("暂存库也搬进「更多」，输入行只留模型名称", () => {
+  const row = renderControls(true, { endAction: React.createElement("button", { type: "button" }, "Stash") });
+  assert.doesNotMatch(row, /Stash/, "移动端输入行不再渲染暂存库");
+
+  // 菜单里由 PreferenceToggles 渲染同一个入口（菜单只在打开时才渲染内容，所以直接渲染这一层）。
+  const toggles = renderToStaticMarkup(
+    React.createElement(I18nProvider, null,
+      React.createElement(PreferenceToggles, {
+        isMobile: true,
+        endAction: React.createElement("button", { type: "button" }, "Stash"),
+      })),
+  );
+  assert.match(toggles, /Stash/);
+});
+
 test("Stop is out of the phone's input row and behind the More trigger", async () => {
   // 贴着手边的 Stop 一路滑动就会误触（停掉一次运行），所以它只在「更多」里。
   const row = renderControls(true, { isStreaming: true });
@@ -126,6 +141,7 @@ test("Stop is out of the phone's input row and behind the More trigger", async (
   const source = await readFile(new URL("./InputControls.tsx", import.meta.url), "utf8");
   const menu = source.slice(source.indexOf("export const MobileComposerMenu"), source.indexOf("interface ComposerTopUtilitiesProps"));
   assert.match(menu, /runControls=\{\(\s*<RunControls/);
+  assert.match(menu, /endAction=\{endAction\}/, "「更多」要把暂存库交给菜单渲染");
   assert.ok(!menu.includes("(!isStreaming && !isCompacting) ? ("), "运行控制不该被运行状态藏起来");
 });
 

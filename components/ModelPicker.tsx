@@ -258,10 +258,14 @@ export const ModelPicker = memo(function ModelPicker({
       }
     : {
         display: "flex", alignItems: "center", gap: 6, justifyContent: "flex-start",
-        padding: isMobile ? "4px 10px" : "8px 12px", height: isMobile ? 40 : 32,
+        // 移动端两行都放模型标识：内边距压到 7px，长名字（"…/DeepSeek-V4.1-Flash · deepseek365"）
+        // 才整段放得下，不省略尾部的服务商名。
+        padding: isMobile ? "4px 7px" : "8px 12px", height: isMobile ? 40 : 32,
         width: isMobile ? "100%" : undefined, maxWidth: "100%", minWidth: 0,
         overflow: "hidden", background: open ? "var(--bg-hover)" : "none",
         border: "none", borderRadius: 9, color: "var(--text-muted)",
+        // 两行都靠左：按钮默认居中，短的服务商名（"magpie/"）会缩在中间。
+        textAlign: "left" as const,
         cursor: locked ? "not-allowed" : "pointer", fontSize: 12,
         opacity: locked ? 0.5 : 1, transition: "background 0.12s, color 0.12s",
       };

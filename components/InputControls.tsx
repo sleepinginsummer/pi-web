@@ -457,12 +457,15 @@ interface PreferenceTogglesProps {
   notificationEnabled?: boolean;
   notificationPermission?: NotificationPermission | "unsupported";
   onNotificationToggle?: () => void;
+  /** 暂存库入口：移动端从输入行搬进「更多」，和这几个开关并排。 */
+  endAction?: React.ReactNode;
 }
 
-export const PreferenceToggles = memo(function PreferenceToggles({ isMobile, soundEnabled, onSoundToggle, notificationEnabled, notificationPermission, onNotificationToggle }: PreferenceTogglesProps) {
+export const PreferenceToggles = memo(function PreferenceToggles({ isMobile, soundEnabled, onSoundToggle, notificationEnabled, notificationPermission, onNotificationToggle, endAction }: PreferenceTogglesProps) {
   const { t } = useI18n();
   return (
     <>
+            {endAction}
             {onSoundToggle !== undefined && (
               <button
                 onClick={onSoundToggle}
@@ -590,15 +593,9 @@ export const InputControls = memo(function InputControls({
   // Stop 在运行结束时被 Compact/工具按钮替换，结束后的短时间内的点击视为误触。
   const isStrayClick = useRunEndStrayClick(isStreaming);
 
-  // 移动端：输入行只留暂存库。Stop / 压缩都在「更多」里——它们贴着手边，暴露在外
-  // 一路滑动就容易误触，停掉一次运行或触发一次压缩。
-  if (isMobile) {
-    return (
-      <div style={{ flex: "0 0 auto", display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 2 }}>
-        {endAction}
-      </div>
-    );
-  }
+  // 移动端输入行什么都不放：Stop / 压缩 / 暂存库都在「更多」里，空间全留给模型名称。
+  // Stop 贴在手边时拇指一带就停掉一次运行；暂存库搬走后那一行能多放十几个字符的模型名。
+  if (isMobile) return null;
 
   return (
     <>
@@ -653,7 +650,7 @@ export const InputControls = memo(function InputControls({
 
 
 /**
- * 移动端输入框右上角的「更多」：工具预设、Fast、压缩、提示音、通知。
+ * 移动端输入框右上角的「更多」：运行控制（压缩/停止）、工具预设、Fast、暂存库、提示音、通知。
  *
  * 思考强度不在菜单里——它和模型名称一起常驻输入框下方那一行，运行中那一行只留给
  * 模型名称和 Stop，所以菜单按钮挪到输入框上方，不再占下方空间。
@@ -662,7 +659,8 @@ export const MobileComposerMenu = memo(function MobileComposerMenu({
   isStreaming, modelState, modelActions, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames,
   toolSelectionKnown, onToolPresetChange, onCompact, onAbortCompaction, isCompacting, onAbort,
   soundEnabled, onSoundToggle, notificationEnabled, notificationPermission, onNotificationToggle,
-}: Omit<InputControlsProps, "isMobile" | "endAction">) {
+  endAction,
+}: Omit<InputControlsProps, "isMobile">) {
   const { t } = useI18n();
   const isStrayClick = useRunEndStrayClick(isStreaming);
   const [open, setOpen] = useState(false);
@@ -717,6 +715,7 @@ export const MobileComposerMenu = memo(function MobileComposerMenu({
             notificationEnabled={notificationEnabled}
             notificationPermission={notificationPermission}
             onNotificationToggle={onNotificationToggle}
+            endAction={endAction}
           />
         )}
       />
