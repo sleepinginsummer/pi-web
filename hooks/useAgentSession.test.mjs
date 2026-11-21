@@ -267,8 +267,13 @@ test("历史分页按游标串行前插并拒绝重复 entryId", () => {
 
   assert.match(paginationSource, /const before = page\.oldestEntryId/);
   // 单页请求带期限：服务端卡住时顶部不能一直停在「加载中」。
-  assert.match(paginationSource, /AbortSignal\.any\(\[controller\.signal, AbortSignal\.timeout\(EARLIER_PAGE_TIMEOUT_MS\)\]\)/);
+  assert.match(paginationSource, /withPageDeadline\(controller\.signal, EARLIER_PAGE_TIMEOUT_MS/);
   assert.match(paginationSource, /\{ before, tail: SESSION_CONTEXT_PAGE_SIZE, skipCache: true \}/);
+  // Safari 16.2 没有 AbortSignal.any()/timeout()：用 AbortController + 计时器。
+  assert.doesNotMatch(paginationSource, /AbortSignal\.(any|timeout)/);
+  // 超时/出错后标记失败，顶部哨兵不再自动重发同一个游标。
+  assert.match(paginationSource, /loading: false, failed: pageFailed/);
+  assert.match(paginationSource, /const retryEarlierMessages = useCallback/);
   assert.match(paginationSource, /page\.loading/);
   assert.match(paginationSource, /result\.snapshot\.entryIds\.some\(\(id\) => existingIds\.has\(id\)\)/);
   assert.match(paginationSource, /setMessages\(\(current\) => \{[\s\S]*?\.\.\.result\.snapshot\.messages, \.\.\.current/);
@@ -560,4 +565,18 @@ test("new session keeps configured default and known tool selection across mount
   assert.doesNotMatch(beforeSessionBranch, /setToolSelectionKnown\(false\)/, "挂载 effect 不能在新会话分支前把 toolSelectionKnown 覆盖回 false");
   assert.doesNotMatch(beforeSessionBranch, /setCustomToolNames\(null\)/, "挂载 effect 不能在新会话分支前清掉刚从偏好恢复的 customToolNames");
   assert.match(sessionBranch, /setToolSelectionKnown\(false\)/);
+});
+
+test("大纲跳转逐页请求同样带期限，失败走同一套清理", () => {
+  const jumpSource = source.slice(
+    source.indexOf("const loadUntilEntryId = useCallback"),
+    source.indexOf("const loadSessionDetails = useCallback"),
+  );
+
+  assert.match(jumpSource, /const fetchJumpPage = async \(cursor: string\) => \{/);
+  assert.match(jumpSource, /withPageDeadline\(controller\.signal, EARLIER_PAGE_TIMEOUT_MS/);
+  assert.doesNotMatch(jumpSource, /AbortSignal\.(any|timeout)/);
+  // 一页不返回时，顶部和跳转按钮都要能退出加载状态。
+  assert.match(jumpSource, /loading: false, failed: failedWhileJumping/);
+  assert.equal((jumpSource.match(/fetchSessionContext\(/g) ?? []).length, 1);
 });

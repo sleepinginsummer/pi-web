@@ -86,6 +86,30 @@ import type { SessionListRefreshRequest } from "@/lib/session-list-refresh-coord
 const SESSION_CONTEXT_PAGE_SIZE = 50;
 /** 单页历史的期限：服务端卡住时不能让顶部一直停在「加载中」，超时按失败处理，按钮可重试。 */
 const EARLIER_PAGE_TIMEOUT_MS = 30_000;
+
+/**
+ * 给单页请求加期限，同时跟随外层的取消信号（切换会话、分支导航）。
+ *
+ * 不用 `AbortSignal.any()` / `AbortSignal.timeout()`：它们分别要到 Safari 17.4 / 16.4 才有，
+ * 更老的 Safari 会在发出请求前直接抛 TypeError —— 本来能翻的历史就再也翻不出来了。
+ */
+function withPageDeadline(signal: AbortSignal, ms: number, onTimeout: () => void): { signal: AbortSignal; release: () => void } {
+  const controller = new AbortController();
+  const forward = () => controller.abort();
+  if (signal.aborted) forward();
+  else signal.addEventListener("abort", forward, { once: true });
+  const timer = setTimeout(() => {
+    onTimeout();
+    controller.abort();
+  }, ms);
+  return {
+    signal: controller.signal,
+    release: () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", forward);
+    },
+  };
+}
 /** 大纲跳转的按需翻页：页更大、页数更宽，才能从当前页一路走到会话第一轮。 */
 const JUMP_PAGE_SIZE = 200;
 const MAX_JUMP_PAGES = 200;
@@ -625,7 +649,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     hasMore: boolean;
     turnsBefore: number;
     loading: boolean;
-  }>({ sid: null, oldestEntryId: null, hasMore: false, turnsBefore: 0, loading: false });
+    /** 上一个游标那一页超时/出错：顶部哨兵不再自动重发，改由用户点「重试」。 */
+    failed: boolean;
+  }>({ sid: null, oldestEntryId: null, hasMore: false, turnsBefore: 0, loading: false, failed: false });
   // 卸载时从 ref 读取最终已分页窗口，避免 mount effect 的闭包捕获首帧状态。
   const viewSnapshotRef = useRef({ leafId: activeLeafId, page: historyPage, model: contextModel, thinkingLevel: "off", totalActiveMs: 0 });
   // 仅正文订阅者处理增量，hook 自身不再因每帧文本更新而重渲。
@@ -1078,6 +1104,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       hasMore: snapshot.hasMore,
       turnsBefore: snapshot.turnsBefore,
       loading: false,
+      failed: false,
     });
     setCurrentModelOverride((current) => modelSwitchPendingRef.current ? current : null);
     setError(null);
@@ -1105,13 +1132,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const controller = new AbortController();
     backfillRequestRef.current = { sid, generation, controller };
     setHistoryPage((current) => current.sid === sid && current.oldestEntryId === before
-      ? { ...current, loading: true }
+      ? { ...current, loading: true, failed: false }
       : current);
 
+    let timedOut = false;
+    let pageFailed = false;
+    const deadline = withPageDeadline(controller.signal, EARLIER_PAGE_TIMEOUT_MS, () => { timedOut = true; });
     try {
       const result = await fetchSessionContext(
         sid,
-        AbortSignal.any([controller.signal, AbortSignal.timeout(EARLIER_PAGE_TIMEOUT_MS)]),
+        deadline.signal,
         { before, tail: SESSION_CONTEXT_PAGE_SIZE, skipCache: true },
       );
       const currentRequest = backfillRequestRef.current;
@@ -1142,22 +1172,33 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         hasMore: result.snapshot.hasMore,
         turnsBefore: result.snapshot.turnsBefore,
         loading: false,
+        failed: false,
       });
       return true;
     } catch (error) {
-      if (!(error instanceof DOMException && error.name === "AbortError")) {
-        console.error("Failed to load earlier session messages:", error);
+      const abortedElsewhere = !timedOut && error instanceof DOMException && error.name === "AbortError";
+      if (!abortedElsewhere) {
+        if (!timedOut) console.error("Failed to load earlier session messages:", error);
+        // 同一个游标再自动重发一次，栅栏就没了：标记失败，等用户点重试。
+        pageFailed = true;
       }
       return false;
     } finally {
+      deadline.release();
       if (backfillRequestRef.current.generation === generation) {
         backfillRequestRef.current.controller = null;
         setHistoryPage((current) => current.sid === sid && current.loading
-          ? { ...current, loading: false }
+          ? { ...current, loading: false, failed: pageFailed }
           : current);
       }
     }
   }, [historyPage]);
+
+  /** 顶部「重试」：清掉失败标记后重发同一个游标（自动翻页此时是停着的）。 */
+  const retryEarlierMessages = useCallback((): void => {
+    setHistoryPage((current) => (current.failed ? { ...current, failed: false } : current));
+    void loadEarlierMessages();
+  }, [loadEarlierMessages]);
 
   /**
    * 按需连续向前翻页，直到包含指定 entryId 或到达分支起点；
@@ -1181,6 +1222,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     backfillRequestRef.current = { sid, generation, controller };
     setHistoryPage((current) => current.sid === sid ? { ...current, loading: true } : current);
 
+    let failedWhileJumping = false;
     try {
       let before: string | null = initialPage.oldestEntryId;
       let hasMore: boolean = initialPage.hasMore;
@@ -1190,12 +1232,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const seenIds = new Set(entryIdsRef.current);
       let found = false;
 
+      // 逐页请求同样带期限：任一页不返回时，顶部和大纲跳转按钮都不能一直转圈。
+      const fetchJumpPage = async (cursor: string) => {
+        const deadline = withPageDeadline(controller.signal, EARLIER_PAGE_TIMEOUT_MS, () => { failedWhileJumping = true; });
+        try {
+          return await fetchSessionContext(sid, deadline.signal, { before: cursor, tail: JUMP_PAGE_SIZE, skipCache: true });
+        } catch (error) {
+          if (!failedWhileJumping && !(error instanceof DOMException && error.name === "AbortError")) failedWhileJumping = true;
+          throw error;
+        } finally {
+          deadline.release();
+        }
+      };
+
       for (let step = 0; step < MAX_JUMP_PAGES && hasMore && before; step += 1) {
-        const result = await fetchSessionContext(sid, controller.signal, {
-          before,
-          tail: JUMP_PAGE_SIZE,
-          skipCache: true,
-        });
+        const result = await fetchJumpPage(before);
         const currentRequest = backfillRequestRef.current;
         if (
           result.kind !== "loaded"
@@ -1236,11 +1287,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           hasMore,
           turnsBefore,
           loading: false,
+          failed: failedWhileJumping,
         });
       }
       return found || entryIdsRef.current.includes(targetEntryId);
     } catch (error) {
-      if (!(error instanceof DOMException && error.name === "AbortError")) {
+      if (!failedWhileJumping && !(error instanceof DOMException && error.name === "AbortError")) {
         console.error("Failed to load session messages until target entry:", error);
       }
       return false;
@@ -1248,7 +1300,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (backfillRequestRef.current.generation === generation) {
         backfillRequestRef.current.controller = null;
         setHistoryPage((current) => current.sid === sid && current.loading
-          ? { ...current, loading: false }
+          ? { ...current, loading: false, failed: failedWhileJumping }
           : current);
       }
     }
@@ -1332,7 +1384,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               setEntryIds([]);
               messagesRef.current = [];
               entryIdsRef.current = [];
-              setHistoryPage({ sid, oldestEntryId: null, hasMore: false, turnsBefore: 0, loading: false });
+              setHistoryPage({ sid, oldestEntryId: null, hasMore: false, turnsBefore: 0, loading: false, failed: false });
               setError(null);
             }
             setLoading(false);
@@ -4001,6 +4053,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     historyCursor: historyPage.sid === sessionIdRef.current ? historyPage.oldestEntryId : null,
     hasEarlierMessages: historyPage.sid === sessionIdRef.current && historyPage.hasMore,
     loadingEarlierMessages: historyPage.sid === sessionIdRef.current && historyPage.loading,
+    earlierPageFailed: historyPage.sid === sessionIdRef.current && historyPage.failed,
     earlierTurnCount: historyPage.sid === sessionIdRef.current ? historyPage.turnsBefore : 0,
     missingCwd, isModelScopeActive: modelSelectionState.isScoped, allModelList, loadAllModels, agentRunning, modelState: modelViewState, modelActions: modelViewActions, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames, toolSelectionKnown,
     retryInfo, contextUsage, systemPrompt, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
@@ -4013,7 +4066,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // Refs
     sessionIdRef, eventSourceRef,
     // Actions
-    handleSend, handleAbort, startSideChat, handleFork, handleNavigate, loadEarlierMessages, loadUntilEntryId,
+    handleSend, handleAbort, startSideChat, handleFork, handleNavigate, loadEarlierMessages, retryEarlierMessages, loadUntilEntryId,
     handleCompact, handleQueuedSubmit, handleAbortCompaction, dismissCompactError,
     handleRecallQueue,
     handleBuiltinSlashCommand,
@@ -4038,7 +4091,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     agentPhase, completion, runningCommands,
     activeToolResults, toolClocks, editEntryId, handleEditContent, cancelEdit, addNotice, shadowReportStatuses,
     sessionIdRef, eventSourceRef,
-    handleSend, handleAbort, handleFork, handleNavigate, loadEarlierMessages, loadUntilEntryId,
+    handleSend, handleAbort, handleFork, handleNavigate, loadEarlierMessages, retryEarlierMessages, loadUntilEntryId,
     handleCompact, handleQueuedSubmit, handleAbortCompaction, dismissCompactError,
     handleRecallQueue,
     handleBuiltinSlashCommand,

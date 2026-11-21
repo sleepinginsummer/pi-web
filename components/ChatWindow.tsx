@@ -275,7 +275,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
 
 
   const {
-    loading, error, sendError, activeLeafId, messages, entryIds, messageKeys, historyCursor, streamingStore, hasEarlierMessages, loadingEarlierMessages, earlierTurnCount,
+    loading, error, sendError, activeLeafId, messages, entryIds, messageKeys, historyCursor, streamingStore, hasEarlierMessages, loadingEarlierMessages, earlierPageFailed, earlierTurnCount,
     agentRunning, bashRunning, pendingBash, modelState, modelActions, missingCwd, isModelScopeActive, allModelList, loadAllModels, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames, toolSelectionKnown,
     retryInfo, contextUsage, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,
@@ -285,7 +285,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
     isNew, creationSettingsLocked, scrollPositionRequest,
     activeToolResults, toolClocks, editEntryId, handleEditContent, cancelEdit, addNotice,
     sessionIdRef,
-    handleSend, handleAbort, startSideChat, handleFork, handleNavigate, loadEarlierMessages, loadUntilEntryId,
+    handleSend, handleAbort, startSideChat, handleFork, handleNavigate, loadEarlierMessages, retryEarlierMessages, loadUntilEntryId,
     handleCompact, handleQueuedSubmit, handleAbortCompaction, dismissCompactError,
     handleRecallQueue,
     handleBuiltinSlashCommand,
@@ -773,7 +773,8 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
               count: Math.min(MAX_MOUNTED_HISTORY_GROUPS, Math.max(current.count, VISIBLE_PAGE_SIZE)),
               offset: Math.min(groupWindow.total, (current.key === renderWindowKey ? current.offset : 0) + VISIBLE_PAGE_SIZE),
             }));
-          } else if (hasEarlierMessages && !loadingEarlierMessages) {
+          } else if (hasEarlierMessages && !loadingEarlierMessages && !earlierPageFailed) {
+            // 上一页超时/失败后不再自动重发同一个游标：哨兵还在视口里的话会变成一个死循环。
             void loadEarlierMessages();
           }
         }
@@ -782,7 +783,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [hasEarlierMessages, initialScrollSettled, loadEarlierMessages, loadingEarlierMessages, messages.length, pendingScrollRestore, renderWindow.offset, renderWindowKey, scrollContainerRef, sentinel, visibleCount]);
+  }, [earlierPageFailed, hasEarlierMessages, initialScrollSettled, loadEarlierMessages, loadingEarlierMessages, messages.length, pendingScrollRestore, renderWindow.offset, renderWindowKey, scrollContainerRef, sentinel, visibleCount]);
 
   useEffect(() => {
     const sentinel = endSentinelRef.current;
@@ -1628,7 +1629,11 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                 <>
                   {hasMore && (
                      <div ref={setSentinel} className="py-3 text-center text-xs text-text-muted">
-                       {loadingEarlierMessages ? t("i18n.loading") : t("chat.loadEarlier", { count: boundedStartIndex })}
+                       {loadingEarlierMessages
+                         ? t("i18n.loading")
+                         : earlierPageFailed
+                           ? <button type="button" onClick={retryEarlierMessages} style={{ cursor: "pointer", textDecoration: "underline", color: "inherit" }}>{t("chat.loadEarlierFailed")}</button>
+                           : t("chat.loadEarlier", { count: boundedStartIndex })}
                     </div>
                   )}
                   {groups.slice(boundedStartIndex, endIndex).map(renderGroup)}

@@ -565,3 +565,25 @@ hooks/useAgentSession.ts:3462   missing: handleCompact, opts.chatInputRef, sessi
 6. **「更多」排成两行**（确认，用户要求一行）。`width: auto` 在 60px 宽的定位父级里每行只排一个按钮；
    改 `width: max-content` + `max-width: min(100vw - 16px, 420px)`，两组容器改 `display: contents`。
    实测 400px 视口：332×58，一行 6 个按钮，不溢出；运行中也只有一个「停止」。
+
+## 27. 分页三处复查（merge.36）
+
+外部审查针对 merge.35 的历史分页提三条，逐条核对后都成立：
+
+1. **Safari 16.2 翻不出更早消息**（确认）。`AbortSignal.any()` 是 Safari 17.4 才有的，
+   `AbortSignal.timeout()` 要 16.4；`AbortSignal.any()` 在老 Safari 上会**在发请求前**抛 TypeError，
+   连本来能翻的历史也一起废掉。改成 `withPageDeadline()`：`AbortController` + `setTimeout`（与
+   `lib/session-load-client.ts` 既有写法一致），`finally` 里 `release()` 清计时器并摘掉监听，切会话
+   时的取消照旧由外层 `controller` 传播。
+2. **超时后自动重发同一页**（确认）。顶部哨兵还在视口里，`loading` 一清就重建
+   `IntersectionObserver` 再请求同一个游标 —— 顶部会无限闪「加载中」。现在超时/出错把该游标标成
+   `failed`：哨兵不再自动发，顶部变成「加载失败，点击重试」（`retryEarlierMessages`）。成功一页、
+   新上下文快照、会话加载都会把标记清零。
+3. **大纲跳转的逐页请求没有期限**（确认）。`loadUntilEntryId` 循环里的每页现在都走
+   `fetchJumpPage()`（同样的 `withPageDeadline`），失败也把 `loading` 清掉并标 `failed`，
+   顶部与跳转按钮都不会一直转圈。
+
+**顺带发现（本次未改，范围外）**：`lib/session-load-client.ts:288` 的 `/state` 请求也在用
+`AbortSignal.any()`，`lib/agent-client.ts`、`lib/provider-usage.ts`、`components/MessageStash.tsx`
+在用 `AbortSignal.timeout()`。按本项目的 Safari 16.2 基线它们同样会在老 Safari 上抛错，
+要不要统一换掉需要单独拍板（改的是会话加载与聊天发送的关键路径）。

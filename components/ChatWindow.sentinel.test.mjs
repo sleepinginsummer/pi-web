@@ -19,3 +19,10 @@ test("文件标签按项目暂存，卸载中的查看器按渲染代数回写�
   assert.match(panelSource, /workspaceGenerationRef\.current \+= 1;/);
   assert.match(panelSource, /if \(generation !== workspaceGenerationRef\.current\) \{\s*saveParkedFileViewerState\(parkedWorkspacesRef\.current, generation, tabId, viewerRevision, viewerState\);\s*return;/);
 });
+
+test("上一页失败后不自动重发同一游标，顶部给点击重试", () => {
+  assert.match(source, /hasEarlierMessages && !loadingEarlierMessages && !earlierPageFailed/);
+  assert.match(source, /earlierPageFailed, hasEarlierMessages, initialScrollSettled, loadEarlierMessages, loadingEarlierMessages/);
+  assert.match(source, /onClick=\{retryEarlierMessages\}/);
+  assert.match(source, /chat\.loadEarlierFailed/);
+});
