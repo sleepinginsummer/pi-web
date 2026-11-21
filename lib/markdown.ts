@@ -240,8 +240,26 @@ function remarkWindowsFileLinks() {
  * （文件查看器的打开回调只挂在链接上）。这里在**渲染时**把绝对路径的 @ 引用包成链接：
  * 文字不变、模型看到的仍是一段纯文本，点到却能打开文件查看器。
  */
-const FILE_MENTION_TOKEN = /(^|[\s(（])@("([^"]+)"|(\/[^\s]+))/g;
+const FILE_MENTION_TOKEN = /(^|[\s(（])@("([^"]+)"|((?:\/|[A-Za-z]:[\\/])[^\s]+))/g;
 const FILE_MENTION_TRAILING_PUNCTUATION = /[.,;:!?。，、；：！？）)]+$/;
+
+/** 只有这些字符需要在链接地址里转义，让 `?`、`#` 不被当成查询串和片段。 */
+const FILE_MENTION_URL_ESCAPE = /[%?#\s]/g;
+
+/**
+ * 附件引用变链接时用的地址：逐字符转义 `%`、`?`、`#` 和空白，其余保持原样。
+ * 文件名里带 `#`、`?` 时不能直接塞进 href —— `resolveLocalFileHref()` 会把它当片段/查询截掉。
+ */
+function fileMentionHref(filePath: string): string {
+  const escaped = filePath.replace(FILE_MENTION_URL_ESCAPE, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`);
+  // 盘符会被清洗器当成未知协议的 scheme（`remarkWindowsFileLinks` 里同一个理由），换成 file: 地址。
+  return /^[A-Za-z]:[\\/]/.test(escaped) ? `file:///${escaped.replace(/\\/g, "/")}` : escaped;
+}
+
+/** Windows 的 `D:\…` 也认：服务端返回的是本机原生路径。 */
+function isAbsoluteFileMention(filePath: string): boolean {
+  return filePath.startsWith("/") || /^[A-Za-z]:[\\/]/.test(filePath);
+}
 
 type FileMentionPart =
   | { type: "text"; value: string }
@@ -260,11 +278,11 @@ function splitFileMentions(value: string): FileMentionPart[] {
     // 句末的标点不属于路径：`@/a/b.pdf。` 里链接只到 `.pdf`。
     const trailing = isQuoted ? "" : rawPath.match(FILE_MENTION_TRAILING_PUNCTUATION)?.[0] ?? "";
     const path = trailing ? rawPath.slice(0, -trailing.length) : rawPath;
-    if (!path.startsWith("/")) continue;
+    if (!isAbsoluteFileMention(path)) continue;
 
     const start = match.index + prefix.length;
     if (start > lastIndex) parts.push({ type: "text", value: value.slice(lastIndex, start) });
-    parts.push({ type: "link", value: `@${isQuoted ? `"${path}"` : path}`, path });
+    parts.push({ type: "link", value: `@${isQuoted ? `"${path}"` : path}`, path: fileMentionHref(path) });
     if (trailing) parts.push({ type: "text", value: trailing });
     lastIndex = match.index + match[0].length;
   }

@@ -106,7 +106,8 @@ async function getUploadDirectory(
   // 聊天附件落在系统下载目录。它不是任何会话的 cwd，因此不在允许根里；只有 `rename`
   // 上传（聊天那条路径）能写它，而且这里不授予读取权限 —— 真写下文件之后才给（见上传分支）。
   const downloadsDirectory = path.join(homedir(), "Downloads");
-  const writesDownloads = options.allowDownloadsWrite === true && samePath(directory, downloadsDirectory);
+  const isDownloadsTarget = samePath(directory, downloadsDirectory);
+  const writesDownloads = options.allowDownloadsWrite === true && isDownloadsTarget;
   if (writesDownloads) {
     // 精简镜像里可能没有下载目录（Dockerfile 的 /home/node 就只有 agent 目录）：
     // 第一次真正上传时由服务端建出来，而不是让用户去建。
@@ -121,6 +122,11 @@ async function getUploadDirectory(
     }
   }
   const allowedRoots = await getAllowedFileRoots();
+  if (isDownloadsTarget && !writesDownloads) {
+    // 下载目录只接受聊天那条 `rename` 上传。读权限在第一次写成功后授予，但那是为了预览；
+    // 不能让 `overwrite` 之类的策略借这份授权替换目录里原有的文件。
+    return { response: NextResponse.json({ error: "Access denied" }, { status: 403 }) };
+  }
   if (!writesDownloads && !isFilePathAllowed(directory, allowedRoots)) {
     return { response: NextResponse.json({ error: "Access denied" }, { status: 403 }) };
   }
@@ -248,7 +254,10 @@ export async function POST(
       return NextResponse.json({ error: validationError }, { status: 400 });
     }
 
-    const inspection = inspectUploadTargets(directory, fileNames);
+    // `rename` 自己挑空闲名字、写入用 `wx` 独占，冲突预检对它没有用处（每次 lstat 都是同步 IO）。
+    const inspection = strategy === "rename"
+      ? { conflicts: [] as string[], nonReplaceable: [] as string[] }
+      : inspectUploadTargets(directory, fileNames);
     if (strategy === "error" && inspection.conflicts.length > 0) {
       return NextResponse.json({
         error: "One or more files already exist",

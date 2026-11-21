@@ -520,3 +520,31 @@ hooks/useAgentSession.ts:3462   missing: handleCompact, opts.chatInputRef, sessi
 `/tmp/mobile-model-full2.png`（模型名）、`/tmp/mobile-menu-with-stash.png`（菜单）、
 `/tmp/mobile-stash-in-menu.png`（抽屉）。用例：`components/InputControls.test.mjs` 新增「暂存库
 不在输入行 + 由 PreferenceToggles 渲染 + 菜单透传 endAction」。
+
+## 25. /review 复查 merge.29–merge.33（0.17.0-merge.34）
+
+独立审查提了 5 条 + 1 条可选优化，逐条核对：
+
+1. **下载目录的写权限被读授权带出来了**（确认）。写成功后 `allowFileRoot()` 让这个目录成为普通允许根，
+   之后 `overwrite` 就能替换其中原有文件。修：`getUploadDirectory()` 对该目录**只认 `rename`**，
+   其它策略即便读权限已授予也 403；用例覆盖 overwrite/skip/error 三种策略都拒绝且原文件不变。
+   审查建议的「授权持久化 / 限定到具体文件」没做：预览依赖进程内允许根，而按会话引用的授权需要
+   客户端带 `sessionId`（文件查看器打开聊天附件时不带），改动面更大；现在的边界是「只读可预览、
+   写只认 rename」。
+2. **下载目录是符号链接时校验无效**（部分确认）。审查说得对：两侧都是同一个 realpath，比较恒成立。
+   但请求目标必须正好是 `<home>/Downloads`，写入落到用户自己的软链目标并不越界；返回的 `paths`
+   和授权用的都是解析后的真实目录，预览照常。没改，补了说明。
+3. **文件名带 `#`/`?`、Windows 盘符路径生成坏链接**（确认）。修：`fileMentionHref()` 转义 `%?#` 与
+   空白（`resolveLocalFileHref()` 先按 `#`/`?` 切分再解码，不转义就会截断），盘符转成
+   `file:///D:/…`（否则清洗器当未知协议丢掉），`remarkFileMentions` 也接受 `D:\…` 形状。用例补
+   「文件名里的 # ?」「Windows 盘符」两条。
+4. **抽屉仍会停在较早轮次**（确认：用户要的就是「最后」，我先前做成了活动轮优先）。修：抽屉固定落到
+   列表末尾，活动轮只保留高亮；行是异步来的，靠 `MutationObserver` 在第一次可滚时落位，只做一次。
+   实测：对话在 35% 处打开抽屉，`scrollTop == max`、末轮完整可见。
+5. **暂存库里的 Esc 会把菜单一起收掉**（确认）。修：`InputControlsMenu` 的 Esc 处理跳过来自
+   `<dialog>` 的事件，交给暂存库自己的 `onCancel`。浏览器里没法可靠复验（CDP 的合成 Esc 不触发
+   原生 dialog 的 cancel），只做了代码层与合成事件检查。
+
+**可选优化**（采纳）：`rename` 跳过 `inspectUploadTargets()`，每份附件少一次同步 `lstat`。
+
+验证：全量见提交信息；`lib/markdown.test.mjs` 47 条、`app/api/files/upload-route.test.mjs` 7 条。

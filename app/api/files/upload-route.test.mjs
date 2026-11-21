@@ -185,3 +185,23 @@ test("rename writes beside a same-named directory instead of failing", async (t)
   assert.equal(refused.status, 207);
   assert.match((await refused.json()).errors[0].error, /directory or symbolic link/);
 });
+
+test("a granted downloads root still refuses every strategy but rename", async (t) => {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(base, "home-overwrite-")));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  process.env.HOME = home;
+  const downloads = path.join(home, "Downloads");
+  fs.mkdirSync(downloads);
+  fs.writeFileSync(path.join(downloads, "original.txt"), "keep me");
+
+  // 先正常传一个文件，读权限随之授予。
+  assert.equal((await upload(downloads, { "chat.txt": "hello" }, "rename")).status, 200);
+  assert.equal((await listDirectory(downloads)).status, 200);
+
+  // 授权是为了预览，不是让人用别的策略替换目录里原有的文件。
+  for (const strategy of ["overwrite", "skip", "error"]) {
+    const response = await upload(downloads, { "original.txt": "replaced" }, strategy);
+    assert.equal(response.status, 403, `${strategy} should stay refused`);
+  }
+  assert.equal(fs.readFileSync(path.join(downloads, "original.txt"), "utf8"), "keep me");
+});

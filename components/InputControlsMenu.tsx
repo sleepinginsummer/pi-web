@@ -30,6 +30,9 @@ export function InputControlsMenu({
   return (
     <div className="mobile-controls-menu" role="group" aria-label={t("chat.moreControls")} onKeyDown={(event) => {
       if (event.key !== "Escape") return;
+      // 暂存库是弹在菜单里的原生 <dialog>：Esc 归它自己的 onCancel 处理，
+      // 这里再收一次会把它连菜单一起卸载掉。
+      if ((event.target as Element | null)?.closest?.("dialog")) return;
       event.stopPropagation();
       onClose();
     }}>

@@ -940,36 +940,33 @@ export const ChatMinimap = memo(function ChatMinimap({
   /** 抽屉是否已经落位：只在打开时定位一次，之后用户自己滚动不再被拉回去。 */
   const sheetSettledRef = useRef(false);
 
-  /** 把列表滚到「让这一行居中」，只动列表自己的 scrollTop（不惊动背后的对话）。 */
-  const centerPreviewItem = useCallback((list: HTMLDivElement, item: HTMLElement) => {
-    const listRect = list.getBoundingClientRect();
-    const itemRect = item.getBoundingClientRect();
-    list.scrollTop += itemRect.top - listRect.top - (listRect.height - itemRect.height) / 2;
-  }, []);
-
-  // 刚打开大纲时把当前所在轮滚进可视区，方便直接看到上下文位置。
+  // 桌面浮层：打开时把当前所在轮滚进可视区，方便直接看到上下文位置。
+  // 抽屉不这么做——它按用户的要求固定落在最后一轮。
   useEffect(() => {
-    if (!previewOpen || activeIndex === null || searchQuery.trim()) return;
+    if (variant === "sheet" || !previewOpen || activeIndex === null || searchQuery.trim()) return;
     const targetItem = previewItemRefs.current.get(activeIndex);
     if (!targetItem) return;
-    const list = previewListRef.current;
-    if (variant === "sheet" && list) {
-      centerPreviewItem(list, targetItem);
-      sheetSettledRef.current = true;
-      return;
-    }
     targetItem.scrollIntoView({ block: "nearest" });
-  }, [activeIndex, previewOpen, searchQuery, variant, centerPreviewItem]);
+  }, [activeIndex, previewOpen, searchQuery, variant]);
 
-  // 抽屉打开时先落到最后：手机上一屏只放得下几轮，停在第一轮等于什么都没看到。
-  // 活动轮还没测出来（或它在未加载区、没有对应行）时才用末尾兜底。
+  // 手机抽屉打开时落到**最后**：一屏只放得下几轮，停在第一轮等于什么都没看到。
+  // 只在打开那一刻做一次，之后用户自己滚动不会被拉回；活动轮仍然高亮，只是不再决定落点。
+  // 行是异步来的（未加载轮的目录要走一次接口），所以盯着列表的子节点：第一次能滚就落位。
   useEffect(() => {
-    if (variant !== "sheet" || !previewOpen || searchQuery.trim() || sheetSettledRef.current) return;
+    if (variant !== "sheet" || !previewOpen || searchQuery.trim()) return;
     const list = previewListRef.current;
-    if (!list || list.scrollHeight <= list.clientHeight) return;
-    list.scrollTop = list.scrollHeight;
-    sheetSettledRef.current = true;
-  }, [variant, previewOpen, searchQuery, allNodes.length, turnsBefore]);
+    if (!list) return;
+    const settle = () => {
+      if (sheetSettledRef.current || list.scrollHeight <= list.clientHeight) return;
+      list.scrollTop = list.scrollHeight;
+      sheetSettledRef.current = true;
+    };
+    settle();
+    if (sheetSettledRef.current) return;
+    const observer = new MutationObserver(settle);
+    observer.observe(list, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, [variant, previewOpen, searchQuery]);
 
   const toggleTurnExpanded = useCallback((turnNumber: number, isActiveLoaded: boolean) => {
     setToggledTurns((prev) => {
