@@ -108,3 +108,20 @@ test("划着滚动不会把动作栏闪出来", async () => {
     await unmount();
   }
 });
+
+test("别的手指抬起不会作废这根手指的点按", async () => {
+  const { dom, state, unmount } = await mountHarness();
+  try {
+    const text = dom.window.document.getElementById("text");
+    // 第一根手指按下；第二根手指抬起（pointerId 不同）不该把这次按下清掉。
+    await act(async () => {
+      pointer(text, "pointerdown", { pointerId: 1 });
+      pointer(dom.window.document, "pointerup", { pointerId: 2 });
+    });
+    assert.equal(state(), "hidden");
+    await act(async () => { pointer(dom.window.document, "pointerup", { pointerId: 1 }); });
+    assert.equal(state(), "shown");
+  } finally {
+    await unmount();
+  }
+});

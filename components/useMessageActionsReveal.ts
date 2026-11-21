@@ -5,10 +5,10 @@ import { useEffect, useRef, type PointerEvent as ReactPointerEvent, type RefObje
 /**
  * 触屏上「按一下这条消息」就显示动作栏（复制 / 新会话）。
  *
- * 动作栏原先只跟 hover 走（`onMouseEnter`）。触屏没有真正的 hover：iOS Safari 只对浏览器
- * 认为「可点」的元素合成 mouseenter，按在回复正文这类纯文本上根本不发，于是复制按钮怎么点
- * 都不出现；换个可点的地方按一下之后，合成事件才「打开」，再点正文又能出来——这正是用户
- * 看到的现象。
+ * 动作栏原先只跟 hover 走（`onMouseEnter`）。触屏没有真正的 hover，浏览器只在它认为合适的
+ * 时机补发合成鼠标事件：iOS Safari 只对「可点」的元素合成 mouseenter，按在回复正文这类纯文本
+ * 上根本不发；安卓 Chrome 则常常要滚动一下才补发 mousemove/mouseover（用户实测「滚一下按钮就
+ * 出来了」正是这个原因）。于是复制按钮怎么点都不出现，换个地方按一下之后又能出来。
  *
  * 所以给触屏补一个显式入口：在这一条上**点一下**（按下与抬起位置基本不动）就显示，
  * 按到别处收起。滚动时手指划过的消息不会闪出动作栏，鼠标指针仍交给 hover。
@@ -50,8 +50,9 @@ export function useMessageActionsReveal(
     const finishPress = (event: PointerEvent) => {
       const press = pressRef.current;
       if (!press) return;
-      pressRef.current = null;
+      // 别的手指抬起时不能把这次按下作废，只有同一根手指才算数。
       if (event.pointerId !== press.pointerId) return;
+      pressRef.current = null;
       // 划着滚动时手指也在这条消息上抬起过：位移太大就不算「点一下」。
       if (Math.hypot(event.clientX - press.x, event.clientY - press.y) > TAP_SLOP_PX) return;
       setVisible(true);

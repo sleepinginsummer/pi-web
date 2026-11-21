@@ -426,3 +426,18 @@ hooks/useAgentSession.ts:3462   missing: handleCompact, opts.chatInputRef, sessi
 **第二版（更贴合安卓）**：改成「点一下」判定 —— `pointerdown` 记下位置，抬起在 **document** 上读（手指滑出元素也不丢），位移超过 `TAP_SLOP_PX`（16px）就不算点按。这样滚动划过消息不会闪出动作栏；把「只有滚动才灵」的依赖彻底去掉。
 
 **验证**：jsdom + React 用例（点一下显示、点按钮不收、点外面收起、滚动/拖动不显示、鼠标不参与）；真浏览器 400px + 触摸模拟，并**拦掉所有合成 mouseover/mouseenter/mousemove**：点一下 opacity 0 → 1；按住上下拖动 95px 后抬起仍为 0。
+
+## 19. merge.25/26 的自查修正（0.17.0-merge.27）
+
+复查这两批改动后改掉两处：
+
+1. **注释把平台写窄了**：原注释只说 iOS Safari 不合成 mouseenter，会误导后来人。实际触屏浏览器都按自己的时机补发兼容鼠标事件：iOS 只对「可点」元素合成，安卓 Chrome 常常要滚动一下才补发 `mousemove`/`mouseover`（用户实测「滚一下按钮就出来了」）。注释与 `docs/agents/sessions.md` 都已改写。
+2. **多指抬起顺序**：`finishPress` 先清 `pressRef` 再比对 `pointerId`，第二根手指抬起会把第一根手指的点按作废。改成先比对再清，并补用例（恢复旧顺序该用例变红，已实测）。
+
+复查后保留不动的意见（都记在这里，不擅自扩大改动）：
+
+- 每条挂载的消息常驻 2 个 document 监听（`pointerup`/`pointercancel`）。当前渲染窗口只有几条到几十条，成本可忽略；若将来窗口显著变大，可在按下时才挂、抬起即摘。
+- 混合设备（触屏 + 鼠标）上，鼠标点空白不会收起点按唤出的动作栏，要等下一次 hover 或点按；hover 的 `onMouseLeave` 会兜住常见路径。
+- 键盘/读屏本来就没有唤出动作栏的路径，这次没有回归，也没有新增。
+- 用例是 hook 级替身，没有覆盖 `MessageView` 的真实接线（`ref` / `onPointerDown` 挂在哪一层、hook 是否在提前 return 之前调用）。这类接线错误由浏览器实测兜住。
+- `hovered` 这个名字现在既表示 hover、也表示点按唤出，可读性一般；改名要动两处状态与方法入参，收益不大，暂不改。
