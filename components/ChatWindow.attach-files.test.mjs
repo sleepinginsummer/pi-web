@@ -6,7 +6,8 @@ import { createJiti } from "jiti";
 import ts from "typescript";
 
 const jiti = createJiti(import.meta.url);
-const { dropMentionText, splitDroppedItems } = await jiti.import("../lib/file-upload-client.ts");
+const { splitDroppedItems } = await jiti.import("../lib/file-upload-client.ts");
+const { buildAtMentionText: buildMention } = await jiti.import("../lib/file-fuzzy.ts");
 
 const sourceText = readFileSync(new URL("./ChatWindow.tsx", import.meta.url), "utf8");
 const source = ts.createSourceFile("ChatWindow.tsx", sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
@@ -29,10 +30,10 @@ const report = new File(["x"], "report.pdf", { type: "application/pdf" });
 const log = new File(["x"], "server.log", { type: "" });
 
 /** Picks files with the composer's attach button, through ChatWindow's real drop path. */
-async function attach(files, { cwd = "/project", response } = {}) {
+async function attach(files, { cwd = "/project", response, target = "/Users/them/Downloads", targetError } = {}) {
   const calls = { images: [], uploads: [], mentions: [], notices: [], refreshed: 0 };
   const scope = {
-    session: null,
+    session: cwd === null ? null : { cwd },
     newSessionCwd: cwd,
     chatInputRef: {
       current: {
@@ -44,9 +45,13 @@ async function attach(files, { cwd = "/project", response } = {}) {
     t: (key, vars) => (vars ? `${key} ${JSON.stringify(vars)}` : key),
     onFilesUploaded: () => { calls.refreshed += 1; },
     splitDroppedItems,
-    dropMentionText,
-    uploadFiles: async (target, uploads, strategy) => {
-      calls.uploads.push([target, uploads.map((file) => file.name), strategy]);
+    buildAtMentionText: buildMention,
+    resolveUploadTarget: async () => {
+      if (targetError) throw targetError;
+      return target;
+    },
+    uploadFiles: async (directory, uploads, strategy) => {
+      calls.uploads.push([directory, uploads.map((file) => file.name), strategy]);
       return response;
     },
   };
@@ -54,22 +59,37 @@ async function attach(files, { cwd = "/project", response } = {}) {
   scope.onDrop = chatWindowCallback("onDrop", scope);
   chatWindowCallback("onAttachFiles", scope)(files);
   await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
   return calls;
 }
 
-test("the attach button sends picked files down the chat drop path (#1101)", async () => {
+test("the attach button sends picked files to the downloads folder, never replacing one (#1101)", async () => {
+  const downloadedAt = "/Users/them/Downloads";
   const mixed = await attach([photo, report, log], {
-    response: { status: 207, data: { uploaded: ["report.pdf"], skipped: ["server.log"] } },
+    response: {
+      status: 200,
+      data: {
+        uploaded: ["report (1).pdf", "server.log"],
+        paths: [`${downloadedAt}/report (1).pdf`, `${downloadedAt}/server.log`],
+      },
+    },
   });
-  // Images attach to the prompt; the rest are uploaded like a drop: never replacing a file, then mentioned.
+  // 图片仍附到消息；其余进下载目录，重名不覆盖（rename），按服务端给的绝对路径 @ 引用。
   assert.deepEqual(mixed.images, [photo]);
-  assert.deepEqual(mixed.uploads, [["/project", ["report.pdf", "server.log"], "skip"]]);
-  assert.deepEqual(mixed.mentions, ["@report.pdf @server.log "]);
+  assert.deepEqual(mixed.uploads, [[downloadedAt, ["report.pdf", "server.log"], "rename"]]);
+  // 改名后的 "report (1).pdf" 带空格，所以加引号；server.log 不用。
+  assert.deepEqual(mixed.mentions, [`@"${downloadedAt}/report (1).pdf" @${downloadedAt}/server.log `]);
   assert.deepEqual(mixed.notices, [
-    ["success", 'chat.dropUploaded {"count":1}'],
-    ["warning", 'chat.dropAlreadyExists {"names":"server.log"}'],
+    ["info", 'chat.dropUploading {"count":2}'],
+    ["success", 'chat.dropUploaded {"count":2}'],
   ]);
   assert.equal(mixed.refreshed, 1);
+
+  // 带空格的名字要加引号，否则模型看到的路径会被拆成两个词。
+  const spaced = await attach([report], {
+    response: { status: 200, data: { uploaded: ["my report.pdf"], paths: [`${downloadedAt}/my report.pdf`] } },
+  });
+  assert.deepEqual(spaced.mentions, [`@"${downloadedAt}/my report.pdf" `]);
 
   const imagesOnly = await attach([photo]);
   assert.deepEqual(imagesOnly.images, [photo]);
@@ -77,9 +97,24 @@ test("the attach button sends picked files down the chat drop path (#1101)", asy
   assert.deepEqual(imagesOnly.notices, []);
 });
 
-test("without a working directory, picked files behave like a drop there (#1101)", async () => {
-  const calls = await attach([photo, report], { cwd: null });
-  assert.deepEqual(calls.images, [photo]);
-  assert.deepEqual(calls.uploads, []);
-  assert.deepEqual(calls.notices, [["warning", "chat.dropNeedsCwd"]]);
+test("picked files no longer need a session working directory (#1101)", async () => {
+  const calls = await attach([photo, report], {
+    cwd: null,
+    response: { status: 200, data: { uploaded: ["report.pdf"], paths: ["/Users/them/Downloads/report.pdf"] } },
+  });
+  assert.deepEqual(calls.uploads, [["/Users/them/Downloads", ["report.pdf"], "rename"]]);
+  assert.deepEqual(calls.notices.map(([type]) => type), ["info", "success"]);
 });
+
+test("a failed upload reports one error and still keeps the picked images", async () => {
+  const failed = await attach([photo, report], { response: { status: 413, data: { error: "too big" } } });
+  assert.deepEqual(failed.images, [photo]);
+  assert.deepEqual(failed.mentions, []);
+  assert.deepEqual(failed.notices.at(-1), ["error", 'chat.dropFailed {"message":"too big"}']);
+
+  // 跨 realm 的 Error 不满足 instanceof，按字符串落进提示（真实浏览器里是同一个 realm）。
+  const noTarget = await attach([report], { targetError: new Error("offline") });
+  assert.deepEqual(noTarget.notices.at(-1), ["error", 'chat.dropFailed {"message":"Error: offline"}']);
+  assert.deepEqual(noTarget.uploads, []);
+});
+

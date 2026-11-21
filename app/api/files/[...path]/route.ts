@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
+import { homedir } from "os";
 import {
   allowFileRoot,
   getAllowedFileRoots,
@@ -27,6 +28,7 @@ import {
   inspectUploadTargets,
   parseUploadConflictStrategy,
   replaceUploadFile,
+  uniqueUploadName,
   validateUploadFileNames,
 } from "@/lib/file-upload";
 import { parseFormDataWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
@@ -98,6 +100,10 @@ async function getUploadDirectory(segments: string[]): Promise<
   { directory: string } | { response: NextResponse }
 > {
   const directory = filePathFromApiSegments(segments);
+  // 聊天里的「选择文件」把附件放进下载目录。这个目录不是任何一个会话的 cwd，
+  // 所以不在允许根里；只在上传目标正好是 ~/Downloads 时补一次（读目录也随之可浏览）。
+  const downloadsDirectory = path.join(homedir(), "Downloads");
+  if (samePath(directory, downloadsDirectory)) allowFileRoot(downloadsDirectory);
   const allowedRoots = await getAllowedFileRoots();
   if (!isFilePathAllowed(directory, allowedRoots)) {
     return { response: NextResponse.json({ error: "Access denied" }, { status: 403 }) };
@@ -232,11 +238,22 @@ export async function POST(
     const conflictSet = new Set(inspection.conflicts);
     const nonReplaceableSet = new Set(inspection.nonReplaceable);
     const uploaded: string[] = [];
+    const paths: string[] = [];
     const skipped: string[] = [];
     const errors: Array<{ name: string; error: string }> = [];
 
     for (const file of files) {
-      const destination = path.join(directory, file.name);
+      // rename：绝不覆盖，重名就按浏览器习惯换成 "名字 (1).ext"。
+      let finalName = file.name;
+      if (strategy === "rename") {
+        try {
+          finalName = uniqueUploadName(directory, file.name);
+        } catch (error) {
+          errors.push({ name: file.name, error: error instanceof Error ? error.message : String(error) });
+          continue;
+        }
+      }
+      const destination = path.join(directory, finalName);
       if (conflictSet.has(file.name) && strategy === "skip") {
         skipped.push(file.name);
         continue;
@@ -257,19 +274,20 @@ export async function POST(
       try {
         // Async writes: a 100MB file written synchronously would stall every
         // stream and request this process serves until the disk catches up.
-        if (conflictSet.has(file.name)) {
+        if (strategy === "overwrite" && conflictSet.has(file.name)) {
           await replaceUploadFile(destination, bytes);
         } else {
           await fs.promises.writeFile(destination, bytes, { flag: "wx" });
         }
-        uploaded.push(file.name);
+        uploaded.push(finalName);
+        paths.push(destination);
       } catch (error) {
         errors.push({ name: file.name, error: error instanceof Error ? error.message : String(error) });
       }
     }
 
     return NextResponse.json(
-      { uploaded, skipped, errors },
+      { uploaded, paths, skipped, errors },
       { status: errors.length > 0 ? 207 : 200 },
     );
   } catch (error) {

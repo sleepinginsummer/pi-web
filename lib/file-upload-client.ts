@@ -2,7 +2,7 @@ import { buildAtMentionText } from "./file-fuzzy";
 import { encodeFilePathForApi } from "./file-paths";
 
 /** Browser side of `POST /api/files/[...path]?type=upload`; mirrors `lib/file-upload.ts`. */
-export type UploadConflictStrategy = "error" | "overwrite" | "skip";
+export type UploadConflictStrategy = "error" | "overwrite" | "skip" | "rename";
 
 export interface UploadError {
   name: string;
@@ -11,6 +11,8 @@ export interface UploadError {
 
 export interface UploadResponse {
   uploaded?: string[];
+  /** 落盘的绝对路径，和 `uploaded` 一一对应；`rename` 策略下名字可能已经改过。 */
+  paths?: string[];
   skipped?: string[];
   errors?: UploadError[];
   conflicts?: string[];

@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 
-export const UPLOAD_CONFLICT_STRATEGIES = ["error", "overwrite", "skip"] as const;
+export const UPLOAD_CONFLICT_STRATEGIES = ["error", "overwrite", "skip", "rename"] as const;
 export type UploadConflictStrategy = typeof UPLOAD_CONFLICT_STRATEGIES[number];
 
 const UPLOAD_CONFLICT_STRATEGY_SET = new Set<string>(UPLOAD_CONFLICT_STRATEGIES);
@@ -56,6 +56,34 @@ export function inspectUploadTargets(directory: string, fileNames: string[]): Up
   }
 
   return { conflicts, nonReplaceable };
+}
+
+function pathExists(target: string): boolean {
+  try {
+    fs.lstatSync(target);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+/**
+ * 浏览器式的重名处理：`report.pdf` 已存在就依次尝试 `report (1).pdf`、`report (2).pdf`。
+ * 扩展名跟着保留；`.` 开头（`.gitignore`）或没有扩展名的名字整串当基名。
+ * 下载目录里要保留用户原来的文件名，所以用后缀而不是时间戳前缀。
+ */
+export function uniqueUploadName(directory: string, fileName: string): string {
+  if (!pathExists(path.join(directory, fileName))) return fileName;
+
+  const dot = fileName.lastIndexOf(".");
+  const base = dot > 0 ? fileName.slice(0, dot) : fileName;
+  const extension = dot > 0 ? fileName.slice(dot) : "";
+  for (let index = 1; index <= 1000; index += 1) {
+    const candidate = `${base} (${index})${extension}`;
+    if (!pathExists(path.join(directory, candidate))) return candidate;
+  }
+  throw new Error(`No free file name left for ${fileName}`);
 }
 
 /** Keep the old entry intact until its complete replacement can be renamed over it. */

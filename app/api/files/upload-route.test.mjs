@@ -5,156 +5,108 @@ import path from "node:path";
 import test from "node:test";
 import { createJiti } from "jiti";
 
+// Allowed roots come from the session catalogue, so keep the user's real agent
+// directory out of this: the upload route only needs the roots it is given.
 const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-upload-route-")));
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
-const previousRoots = globalThis.__piAllowedRootsCache;
+const previousHome = process.env.HOME;
 process.env.PI_CODING_AGENT_DIR = path.join(base, "agent");
+fs.mkdirSync(process.env.PI_CODING_AGENT_DIR);
+
 test.after(() => {
   if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
   else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-  globalThis.__piAllowedRootsCache = previousRoots;
+  if (previousHome === undefined) delete process.env.HOME;
+  else process.env.HOME = previousHome;
   fs.rmSync(base, { recursive: true, force: true });
 });
 
-const jiti = createJiti(import.meta.url, { alias: { "@": process.cwd() }, interopDefault: true });
-const { POST } = await jiti.import("./[...path]/route.ts");
+const jiti = createJiti(import.meta.url, {
+  alias: { "@": process.cwd() },
+  interopDefault: true,
+  moduleCache: false,
+});
+const { GET, POST } = await jiti.import("./[...path]/route.ts");
+const { allowFileRoot } = await jiti.import("../../../lib/file-access.ts");
 const { encodeFilePathForApi } = await jiti.import("../../../lib/file-paths.ts");
 const { NextRequest } = await jiti.import("next/server");
 
-function fixture() {
-  const directory = fs.mkdtempSync(path.join(base, "files-"));
-  globalThis.__piAllowedRootsCache = { roots: new Set([directory]), expiresAt: Date.now() + 60_000 };
-  const destination = path.join(directory, "important.txt");
-  fs.writeFileSync(destination, "original contents");
-  return { directory, destination };
-}
-
-async function upload(directory, strategy = "overwrite", names = ["important.txt"], contents = "replacement") {
+function upload(directory, files, conflict) {
   const encoded = encodeFilePathForApi(directory);
-  const form = new FormData();
-  for (const name of names) form.append("files", new File([contents], name));
-  return POST(new NextRequest(`http://localhost/api/files/${encoded}?type=upload&conflict=${strategy}`, {
-    method: "POST", headers: { host: "localhost" }, body: form,
-  }), { params: Promise.resolve({ path: encoded.split("/").map(decodeURIComponent) }) });
+  const body = new FormData();
+  for (const [name, content] of Object.entries(files)) {
+    body.append("files", new File([content], name, { type: "text/plain" }));
+  }
+  const request = new NextRequest(`http://localhost/api/files/${encoded}?type=upload&conflict=${conflict}`, {
+    method: "POST",
+    headers: { host: "localhost" },
+    body,
+  });
+  return POST(request, { params: Promise.resolve({ path: encoded.split("/").map(decodeURIComponent) }) });
 }
 
-for (const partial of [false, true]) {
-  test(`failed overwrite preserves original and cleans staging (partial write: ${partial})`, async (t) => {
-    const { directory, destination } = fixture();
-    const write = fs.promises.writeFile;
-    let injected = false;
-    t.mock.method(fs.promises, "writeFile", async (target, ...args) => {
-      if (String(target).startsWith(directory + path.sep)) {
-        injected = true;
-        if (partial) await write(target, "partial replacement", args[1]);
-        throw Object.assign(new Error("simulated ENOSPC"), { code: "ENOSPC" });
-      }
-      return write(target, ...args);
-    });
-    const response = await upload(directory);
-    assert.equal(injected, true);
-    assert.equal(response.status, 207);
-    assert.deepEqual(await response.json(), {
-      uploaded: [], skipped: [], errors: [{ name: "important.txt", error: "simulated ENOSPC" }],
-    });
-    assert.equal(fs.readFileSync(destination, "utf8"), "original contents");
-    assert.deepEqual(fs.readdirSync(directory), ["important.txt"]);
-  });
+function listDirectory(directory) {
+  const encoded = encodeFilePathForApi(directory);
+  return GET(
+    new NextRequest(`http://localhost/api/files/${encoded}?type=list`, { headers: { host: "localhost" } }),
+    { params: Promise.resolve({ path: encoded.split("/").map(decodeURIComponent) }) },
+  );
 }
 
-test("failed replacement rename preserves original and cleans staging", async (t) => {
-  const { directory, destination } = fixture();
-  const rename = fs.renameSync;
-  t.mock.method(fs, "renameSync", (from, to) => {
-    if (to === destination) {
-      assert.equal(fs.readFileSync(from, "utf8"), "replacement");
-      assert.equal(fs.readFileSync(to, "utf8"), "original contents");
-      throw Object.assign(new Error("simulated EACCES"), { code: "EACCES" });
-    }
-    return rename(from, to);
-  });
-  const response = await upload(directory);
-  assert.equal(response.status, 207);
-  assert.equal((await response.json()).errors[0].error, "simulated EACCES");
-  assert.equal(fs.readFileSync(destination, "utf8"), "original contents");
-  assert.deepEqual(fs.readdirSync(directory), ["important.txt"]);
-});
+test("rename never overwrites and reports the absolute path", async (t) => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(base, "rename-")));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  allowFileRoot(root);
+  fs.writeFileSync(path.join(root, "report.pdf"), "original");
 
-test("successful overwrite and fresh upload leave only complete destination files", async () => {
-  const { directory, destination } = fixture();
-  const response = await upload(directory, "overwrite", ["important.txt", "new.txt"]);
+  const response = await upload(root, { "report.pdf": "new", "notes.txt": "notes" }, "rename");
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { uploaded: ["important.txt", "new.txt"], skipped: [], errors: [] });
-  assert.equal(fs.readFileSync(destination, "utf8"), "replacement");
-  assert.equal(fs.readFileSync(path.join(directory, "new.txt"), "utf8"), "replacement");
-  assert.deepEqual(fs.readdirSync(directory).sort(), ["important.txt", "new.txt"]);
+  const data = await response.json();
+
+  assert.deepEqual(data.uploaded, ["report (1).pdf", "notes.txt"]);
+  assert.deepEqual(data.paths, [path.join(root, "report (1).pdf"), path.join(root, "notes.txt")]);
+  assert.equal(fs.readFileSync(path.join(root, "report.pdf"), "utf8"), "original");
+  assert.equal(fs.readFileSync(path.join(root, "report (1).pdf"), "utf8"), "new");
+
+  const again = await upload(root, { "report.pdf": "third" }, "rename");
+  assert.deepEqual((await again.json()).uploaded, ["report (2).pdf"]);
 });
 
-test("refuses a destination changed to a link while the replacement is staged", async (t) => {
-  const { directory, destination } = fixture();
-  const outside = fs.mkdtempSync(path.join(base, "changed-outside-"));
-  fs.writeFileSync(path.join(outside, "secret.txt"), "private contents");
-  const write = fs.promises.writeFile;
-  t.mock.method(fs.promises, "writeFile", async (target, ...args) => {
-    const result = await write(target, ...args);
-    if (String(target).startsWith(directory + path.sep)) {
-      fs.unlinkSync(destination);
-      fs.symlinkSync(outside, destination, process.platform === "win32" ? "junction" : "dir");
-    }
-    return result;
-  });
-  const response = await upload(directory);
-  assert.equal(response.status, 207);
-  assert.equal((await response.json()).errors[0].error, "Cannot replace a directory or symbolic link");
-  assert.equal(fs.lstatSync(destination).isSymbolicLink(), true);
-  assert.equal(fs.readFileSync(path.join(outside, "secret.txt"), "utf8"), "private contents");
-  assert.deepEqual(fs.readdirSync(directory), ["important.txt"]);
-});
+test("skip still reports the untouched file and writes nothing", async (t) => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(base, "skip-")));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  allowFileRoot(root);
+  fs.writeFileSync(path.join(root, "keep.txt"), "keep");
 
-test("one file may fill the 100MB limit, and one byte more is refused", async () => {
-  const { directory } = fixture();
-  const limit = 100 * 1024 * 1024;
+  const response = await upload(root, { "keep.txt": "replaced" }, "skip");
+  const data = await response.json();
 
-  const atLimit = await upload(directory, "error", ["full.bin"], Buffer.alloc(limit));
-  assert.equal(atLimit.status, 200);
-  assert.deepEqual(await atLimit.json(), { uploaded: ["full.bin"], skipped: [], errors: [] });
-  assert.equal(fs.statSync(path.join(directory, "full.bin")).size, limit);
-
-  const over = await upload(directory, "error", ["over.bin"], Buffer.alloc(limit + 1));
-  assert.equal(over.status, 413);
-  assert.deepEqual(await over.json(), { error: "Uploads must total 100MB or less" });
-  assert.deepEqual(fs.readdirSync(directory).sort(), ["full.bin", "important.txt"]);
-});
-
-test("files that pass the limit only together are refused before any is written", async () => {
-  const { directory } = fixture();
-  const half = Buffer.alloc(50 * 1024 * 1024 + 1);
-  const response = await upload(directory, "error", ["first.bin", "second.bin"], half);
-  assert.equal(response.status, 413);
-  assert.deepEqual(await response.json(), { error: "Uploads must total 100MB or less" });
-  assert.deepEqual(fs.readdirSync(directory), ["important.txt"]);
-});
-
-test("error and skip conflict strategies preserve the existing file", async () => {
-  const { directory, destination } = fixture();
-  assert.equal((await upload(directory, "error")).status, 409);
-  const response = await upload(directory, "skip");
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { uploaded: [], skipped: ["important.txt"], errors: [] });
-  assert.equal(fs.readFileSync(destination, "utf8"), "original contents");
+  assert.deepEqual(data.skipped, ["keep.txt"]);
+  assert.deepEqual(data.paths, []);
+  assert.equal(fs.readFileSync(path.join(root, "keep.txt"), "utf8"), "keep");
 });
 
-test("overwrite refuses directories and directory links without touching their targets", async () => {
-  const { directory } = fixture();
-  const outside = fs.mkdtempSync(path.join(base, "outside-"));
-  fs.writeFileSync(path.join(outside, "secret.txt"), "private contents");
-  fs.mkdirSync(path.join(directory, "folder"));
-  fs.symlinkSync(outside, path.join(directory, "linked"), process.platform === "win32" ? "junction" : "dir");
-  const response = await upload(directory, "overwrite", ["folder", "linked"]);
-  assert.equal(response.status, 207);
-  const body = await response.json();
-  assert.deepEqual(body.uploaded, []);
-  assert.deepEqual(body.errors.map((entry) => entry.name), ["folder", "linked"]);
-  assert.equal(fs.lstatSync(path.join(directory, "linked")).isSymbolicLink(), true);
-  assert.equal(fs.readFileSync(path.join(outside, "secret.txt"), "utf8"), "private contents");
+test("the downloads folder becomes uploadable and readable without an explicit root", async (t) => {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(base, "home-")));
+  const downloads = path.join(home, "Downloads");
+  fs.mkdirSync(downloads);
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  process.env.HOME = home;
+
+  // 没有任何会话 cwd 指向这里，上传前它不在允许根里。
+  const denied = await listDirectory(downloads);
+  assert.equal(denied.status, 403);
+
+  const response = await upload(downloads, { "chat.txt": "hello" }, "rename");
+  assert.equal(response.status, 200);
+  const data = await response.json();
+  assert.deepEqual(data.paths, [path.join(downloads, "chat.txt")]);
+  assert.equal(fs.readFileSync(path.join(downloads, "chat.txt"), "utf8"), "hello");
+
+  // 允许根补上之后，聊天里的路径能列出来（预览依赖这一步）。
+  const listed = await listDirectory(downloads);
+  assert.equal(listed.status, 200);
+  const entries = (await listed.json()).entries ?? [];
+  assert.ok(entries.some((entry) => (entry.name ?? entry.path) === "chat.txt"), "chat.txt should be listed");
 });

@@ -13,7 +13,9 @@ import { EXTENSION_DIALOG_BASE_WIDTH, fitExtensionDialogWidth } from "@/lib/exte
 import { windowOffsetForGroup } from "@/lib/render-window-offset";
 import { getTurnDurationMs } from "@/lib/turn-duration";
 import { compactNotificationText, getAssistantNotificationPreview, NOTIFICATION_TITLE_CHARS } from "@/lib/notification-text";
-import { dropMentionText, splitDroppedItems, uploadFiles, type DroppedItem } from "@/lib/file-upload-client";
+import { splitDroppedItems, uploadFiles, type DroppedItem } from "@/lib/file-upload-client";
+import { buildAtMentionText } from "@/lib/file-fuzzy";
+import { resolveUploadTarget } from "@/lib/upload-target-client";
 import { MessageView } from "./MessageView";
 import { StreamingReply } from "./StreamingReply";
 import { selectHasStreamingContent, selectIsStreaming, selectStreamingBlockCount, useStreamingSelector } from "@/hooks/useStreamingSelector";
@@ -845,29 +847,24 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
   }, [ctxKey, onContextUsageChange]);
   useEffect(() => () => { onContextUsageChange?.(null); }, [onContextUsageChange]);
 
-  // Images attach to the prompt. Other files go through the file explorer's
-  // upload into the working directory, never replacing a file already there,
-  // and come back as @mentions. The composer's attach button takes the same
-  // path, for phones that cannot drop files.
+  // Images attach to the prompt. Every other file is copied into the system
+  // Downloads folder (rename, never overwrite) and comes back as an absolute
+  // @mention the agent can read from disk. The composer's attach button takes
+  // the same path, and it no longer needs a session cwd, so it works on phones
+  // and before the first project is chosen.
   const uploadDroppedFiles = useCallback(async (files: File[]) => {
-    const cwd = session?.cwd ?? newSessionCwd;
-    if (!cwd) {
-      addNotice({ type: "warning", message: t("chat.dropNeedsCwd") });
-      return;
-    }
+    addNotice({ type: "info", message: t("chat.dropUploading", { count: files.length }) });
     try {
-      const { status, data } = await uploadFiles(cwd, files, "skip");
+      const directory = await resolveUploadTarget();
+      const { status, data } = await uploadFiles(directory, files, "rename");
       if (status !== 200 && status !== 207) throw new Error(data.error ?? `HTTP ${status}`);
-      const uploaded = data.uploaded ?? [];
-      const skipped = data.skipped ?? [];
-      const mentions = dropMentionText(files, [...uploaded, ...skipped]);
+      const paths = data.paths ?? [];
+      // 服务端给了绝对路径（重名时名字可能已经变成 "x (1).pdf"），带空格的加引号。
+      const mentions = paths.map((filePath) => buildAtMentionText(filePath, false)).join("");
       if (mentions) chatInputRef?.current?.insertText(mentions);
-      if (uploaded.length > 0) {
-        addNotice({ type: "success", message: t("chat.dropUploaded", { count: uploaded.length }) });
+      if (paths.length > 0) {
+        addNotice({ type: "success", message: t("chat.dropUploaded", { count: paths.length }) });
         onFilesUploaded?.();
-      }
-      if (skipped.length > 0) {
-        addNotice({ type: "warning", message: t("chat.dropAlreadyExists", { names: skipped.join(", ") }) });
       }
       for (const failure of data.errors ?? []) {
         addNotice({ type: "error", message: t("chat.dropFailed", { message: `${failure.name}: ${failure.error}` }) });
@@ -875,7 +872,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
     } catch (uploadError) {
       addNotice({ type: "error", message: t("chat.dropFailed", { message: uploadError instanceof Error ? uploadError.message : String(uploadError) }) });
     }
-  }, [addNotice, chatInputRef, newSessionCwd, onFilesUploaded, session?.cwd, t]);
+  }, [addNotice, chatInputRef, onFilesUploaded, t]);
 
   const onDrop = useCallback((items: DroppedItem[]) => {
     const { images, files, folders } = splitDroppedItems(items);

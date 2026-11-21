@@ -456,3 +456,20 @@ hooks/useAgentSession.ts:3462   missing: handleCompact, opts.chatInputRef, sessi
 **验证**（400px + 触摸模拟）：左滑文件行 → 操作条滑入，三个按钮 `将路径插入聊天 | 下载文件 | 在访达中打开`；内容 75px / 条宽 84px 不溢出；点这一行收起且不导航；竖向拖拽列表照常滚动（348 → 473）；1200px 桌面上鼠标悬浮仍是原来那组带文字按钮、没有滑出块。
 
 **调整（merge.29）**：按用户要求，移动端操作条只留 `@`（把路径插入聊天）。宽度从 84 降到 40，按钮 30px 高 24；`compact` 时下载与「在访达中打开」不再渲染，没有 `onAtMention` 的场合连手势都不接，避免滑出一块空白。桌面不受影响。截图 `/tmp/mobile-at-only.png`。
+
+## 21. 聊天文件改用「选择文件」入口并落到下载目录（0.17.0-merge.30）
+
+**背景**：聊天原本只把图片当附件（base64 内容块，不落盘），其他文件走「拖进聊天 / 回形针」→ 上传到会话工作目录根 + 插入 `@文件名`。用户要求：文件也走同一个入口，落点改到下载目录，粘贴逻辑不动。
+
+**改动**：
+- `lib/file-upload.ts` 新增 `rename` 冲突策略与 `uniqueUploadName()`：重名按浏览器习惯变成 `report (1).pdf`，扩展名保留，`.` 开头或无扩展名整串当基名，绝不覆盖。
+- 上传响应新增 `paths`（绝对路径，与 `uploaded` 一一对应），`uploaded` 在 `rename` 下是改名后的名字。
+- `app/api/upload-target/route.ts` + `lib/upload-target-client.ts`：落点由服务端给出（`<home>/Downloads`），客户端不拼路径，Windows 分隔符不会出错；客户端只取一次并缓存，失败不缓存。
+- `getUploadDirectory()` 发现上传目标正是 `~/Downloads` 时补一次 `allowFileRoot()`：不补则 403。代价是该目录此后可被 `/api/files` 列出读取（聊天里的路径要能点开预览）。
+- `ChatWindow.uploadDroppedFiles` 改落点、改策略、按 `paths` 插 `@绝对路径`（含空格自动加引号），并在上传前发一条「正在把 N 个文件存到下载目录…」提示；不再要求会话有 cwd，所以手机上没选项目也能传。
+- 图片与粘贴路径一行未动：图片仍是内容块（模型直接看图，落盘反而要退化成路径引用）。
+
+**验证**：
+- 单测：`lib/file-upload.test.mjs`（重名规则、`.` 开头、目录也算占用、`rename` 解析）、`app/api/files/upload-route.test.mjs`（不覆盖原文件、`paths` 正确、`skip` 仍跳过、下载目录上传后从 403 变可列）、`app/api/upload-target/route.test.mjs`。
+- 浏览器（1200px 桌面 / 400px 移动端）：点回形针选两个文件 → 落到 `~/Downloads`，输入框得到 `@/Users/syy/Downloads/pi-web-upload-check.txt @"…/my report.txt"`（空格加引号）；同名再传得到 `pi-web-upload-check (1).txt` 且 mention 指向新名字；提示文案出现两次「下载目录」。移动端 `label[for=chat-attach-input]` 可见、title 为「附加文件」，同样上传成功。
+- 实测后已删除 `~/Downloads` 与项目目录里的测试文件。
