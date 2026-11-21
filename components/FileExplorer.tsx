@@ -20,6 +20,8 @@ import type { FileTreeHiddenReason } from "@/lib/file-tree-visibility";
 import { createExpandedPathsMemory } from "@/lib/file-tree-expansion";
 import { loadChangesViewMode, saveChangesViewMode, type ChangesViewMode } from "@/lib/changes-view-preference";
 import { droppedItems } from "@/hooks/useDragDrop";
+import { useSwipeActions } from "@/hooks/useSwipeActions";
+import { useIsMobile } from "@/hooks/useIsMobile";
 import { useI18n } from "@/hooks/useI18n";
 type Translate = ReturnType<typeof useI18n>["t"];
 
@@ -204,6 +206,12 @@ const HIDDEN_REASON_KEYS = {
   excluded: "files.hiddenExcluded",
 } as const satisfies Record<HiddenReason, string>;
 
+/**
+ * 移动端左滑从右侧滑出的操作条宽度（@ + 下载 + 定位 三个图标按钮）。
+ * 它同时是手势终点：改这段布局时这个值要跟着改。
+ */
+const FILE_ROW_SWIPE_WIDTH = 84;
+
 export function TreeNode({
   node,
   depth,
@@ -221,6 +229,8 @@ export function TreeNode({
   dropTargetPath,
   onDropFiles,
   onDropTargetChange,
+  swipeOpenPath,
+  onSwipeOpenPathChange,
   t,
 }: {
   node: FileNode;
@@ -240,6 +250,9 @@ export function TreeNode({
   dropTargetPath?: string | null;
   onDropFiles?: (directory: string, items: DroppedItem[]) => void;
   onDropTargetChange?: (path: string | null) => void;
+  /** 移动端当前左滑展开的那一行（同一时间只开一行）。 */
+  swipeOpenPath?: string | null;
+  onSwipeOpenPathChange?: (path: string | null) => void;
   t: Translate;
 }) {
   const open = expandedPaths.has(node.fullPath);
@@ -264,6 +277,16 @@ export function TreeNode({
   const pendingLinkTarget = node.outsideLinkTarget && node.outsideLinkTarget !== allowedLinkTarget
     ? node.outsideLinkTarget
     : null;
+
+  // 触屏没有 hover：移动端把操作条做成左滑滑出，桌面端仍按悬浮显示。
+  const isMobile = useIsMobile();
+  const swipeOpen = swipeOpenPath === node.fullPath;
+  const swipe = useSwipeActions({
+    enabled: isMobile && !pendingLinkTarget,
+    open: swipeOpen,
+    actionWidth: FILE_ROW_SWIPE_WIDTH,
+    onOpenChange: (open) => onSwipeOpenPathChange?.(open ? node.fullPath : null),
+  });
 
   // A listing that reports the link again (a server restart forgets allowed
   // targets, or the link was pointed elsewhere) needs a new decision.
@@ -316,6 +339,10 @@ export function TreeNode({
   }, [refreshToken]);
 
   const handleClick = useCallback(() => {
+    // 左滑刚结束时浏览器还会补一次 click；动作条开着时点这一行只当作收起。
+    if (swipe.consumeClick()) return;
+    // 点别的行时把还开着的那一条收起来。
+    if (swipeOpenPath && swipeOpenPath !== node.fullPath) onSwipeOpenPathChange?.(null);
     if (node.isDir) {
       const next = !open;
       onToggleExpanded(node.fullPath, next);
@@ -323,7 +350,7 @@ export function TreeNode({
     } else {
       onOpenFile(node.fullPath, node.name);
     }
-  }, [node.isDir, node.fullPath, node.name, loaded, open, pendingLinkTarget, loadChildren, onOpenFile, onToggleExpanded]);
+  }, [node.isDir, node.fullPath, node.name, loaded, open, pendingLinkTarget, loadChildren, onOpenFile, onToggleExpanded, onSwipeOpenPathChange, swipe, swipeOpenPath]);
 
   const handleAllowLink = useCallback(async (event: React.MouseEvent) => {
     event.stopPropagation();
@@ -346,12 +373,33 @@ export function TreeNode({
     }
   }, [node.fullPath, node.outsideLinkEncloses, pendingLinkTarget, loadChildren, t]);
 
+  // 桌面悬浮与移动端左滑共用同一组操作按钮；移动端位置紧，只留图标。
+  const renderTreeNodeActions = (compact?: boolean) => (
+    <FileTreeNodeActions
+      fullPath={node.fullPath}
+      isDirectory={node.isDir}
+      cwd={cwd}
+      onAtMention={onAtMention}
+      compact={compact}
+      labels={{
+        download: t("files.download"),
+        insertPath: t("files.insertPath"),
+        mention: t("files.mention"),
+        reveal: t("files.reveal"),
+        revealWindows: t("files.revealWindows"),
+        revealLinux: t("files.revealLinux"),
+        revealError: t("files.revealError"),
+      }}
+    />
+  );
+
   return (
     <div>
       <div
         onClick={handleClick}
-        onMouseEnter={() => setHovered(true)}
-        onMouseLeave={() => setHovered(false)}
+        {...swipe.pointerHandlers}
+        onMouseEnter={() => { if (!isMobile) setHovered(true); }}
+        onMouseLeave={() => { if (!isMobile) setHovered(false); }}
         onDragOver={node.isDir ? (event) => {
           if (!event.dataTransfer.types.includes("Files")) return;
           event.preventDefault();
@@ -383,6 +431,9 @@ export function TreeNode({
           outline: isDropTarget ? "1px dashed var(--accent)" : "none",
           outlineOffset: -1,
           borderRadius: 4,
+          overflow: isMobile ? "hidden" : undefined,
+          // 横滑留给左滑手势，竖滑仍交给列表滚动。
+          touchAction: isMobile ? "pan-y" : undefined,
           userSelect: "none",
         }}
       >
@@ -456,22 +507,29 @@ export function TreeNode({
             <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4" />
           </svg>
         )}
-        {hovered && (
-          <FileTreeNodeActions
-            fullPath={node.fullPath}
-            isDirectory={node.isDir}
-            cwd={cwd}
-            onAtMention={onAtMention}
-            labels={{
-              download: t("files.download"),
-              insertPath: t("files.insertPath"),
-              mention: t("files.mention"),
-              reveal: t("files.reveal"),
-              revealWindows: t("files.revealWindows"),
-              revealLinux: t("files.revealLinux"),
-              revealError: t("files.revealError"),
+        {!isMobile && hovered && renderTreeNodeActions()}
+        {isMobile && (swipeOpen || swipe.offset !== 0) && (
+          <div
+            // 左滑时从右侧滑入；关着且没在拖动时整块不渲染，免得每行都多挂一串按钮。
+            style={{
+              position: "absolute",
+              top: 0,
+              right: 0,
+              bottom: 0,
+              width: FILE_ROW_SWIPE_WIDTH,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "flex-end",
+              paddingRight: 2,
+              background: "var(--bg-panel)",
+              boxShadow: "-1px 0 0 var(--border)",
+              transform: `translateX(${FILE_ROW_SWIPE_WIDTH + swipe.offset}px)`,
+              transition: swipe.dragging ? "none" : "transform 0.18s ease-out",
+              zIndex: 2,
             }}
-          />
+          >
+            {renderTreeNodeActions(true)}
+          </div>
         )}
       </div>
       {node.isDir && open && pendingLinkTarget && (
@@ -540,6 +598,8 @@ export function TreeNode({
               dropTargetPath={dropTargetPath}
               onDropFiles={onDropFiles}
               onDropTargetChange={onDropTargetChange}
+              swipeOpenPath={swipeOpenPath}
+              onSwipeOpenPathChange={onSwipeOpenPathChange}
               t={t}
             />
           ))}
@@ -851,6 +911,8 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
+  /** 移动端左滑展开的那一行；同一时间只允许一行。 */
+  const [swipeOpenPath, setSwipeOpenPath] = useState<string | null>(null);
   const [treeRefreshKey, setTreeRefreshKey] = useState(0);
   const [highlightedPaths, setHighlightedPaths] = useState<Set<string>>(new Set());
   const [gitFiles, setGitFiles] = useState<GitFileStatus[]>([]);
@@ -1438,6 +1500,8 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
                     dropTargetPath={dropTargetPath}
                     onDropFiles={handleDropFiles}
                     onDropTargetChange={handleDropTargetChange}
+                    swipeOpenPath={swipeOpenPath}
+                    onSwipeOpenPathChange={setSwipeOpenPath}
                     t={t}
                   />
                 ))}
@@ -1542,6 +1606,8 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
                 dropTargetPath={dropTargetPath}
                 onDropFiles={handleDropFiles}
                 onDropTargetChange={handleDropTargetChange}
+                swipeOpenPath={swipeOpenPath}
+                onSwipeOpenPathChange={setSwipeOpenPath}
                 t={t}
               />
             ))

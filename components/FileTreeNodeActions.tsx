@@ -8,6 +8,8 @@ interface Props {
   isDirectory: boolean;
   cwd: string;
   onAtMention?: (relativePath: string, isDir: boolean) => void;
+  /** 移动端左滑操作条里只放图标：位置紧，放不下文字标签。 */
+  compact?: boolean;
   labels: {
     insertPath: string;
     download: string;
@@ -35,7 +37,7 @@ const actionStyle = {
 
 
 /** 文件树条目的悬浮操作区，避免 TreeNode 继续承载具体操作状态和请求。 */
-export function FileTreeNodeActions({ fullPath, isDirectory, cwd, onAtMention, labels }: Props) {
+export function FileTreeNodeActions({ fullPath, isDirectory, cwd, onAtMention, compact = false, labels }: Props) {
   return (
     <span onClick={(event) => event.stopPropagation()} style={{ display: "flex", alignItems: "center", gap: 3, flexShrink: 0 }}>
       {onAtMention && (
@@ -44,9 +46,9 @@ export function FileTreeNodeActions({ fullPath, isDirectory, cwd, onAtMention, l
           onClick={() => onAtMention(getRelativeFilePath(fullPath, cwd), isDirectory)}
           title={labels.insertPath}
           aria-label={labels.insertPath}
-          style={{ ...actionStyle, color: "var(--accent)", fontSize: 11, fontWeight: 600 }}
+          style={{ ...actionStyle, color: "var(--accent)", fontSize: 11, fontWeight: 600, ...(compact ? { padding: "0 4px" } : null) }}
         >
-          @{labels.mention}
+          {compact ? "@" : `@${labels.mention}`}
         </button>
       )}
       {!isDirectory && (
@@ -72,7 +74,7 @@ export function FileTreeNodeActions({ fullPath, isDirectory, cwd, onAtMention, l
           linux: labels.revealLinux,
         }}
         errorLabel={labels.revealError}
-        showLabel
+        showLabel={!compact}
         style={actionStyle}
       />
     </span>

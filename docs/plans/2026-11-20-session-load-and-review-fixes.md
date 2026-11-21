@@ -441,3 +441,16 @@ hooks/useAgentSession.ts:3462   missing: handleCompact, opts.chatInputRef, sessi
 - 键盘/读屏本来就没有唤出动作栏的路径，这次没有回归，也没有新增。
 - 用例是 hook 级替身，没有覆盖 `MessageView` 的真实接线（`ref` / `onPointerDown` 挂在哪一层、hook 是否在提前 return 之前调用）。这类接线错误由浏览器实测兜住。
 - `hovered` 这个名字现在既表示 hover、也表示点按唤出，可读性一般；改名要动两处状态与方法入参，收益不大，暂不改。
+
+## 20. 移动端文件行改成左滑出操作条（0.17.0-merge.28）
+
+**问题**：`components/FileExplorer.tsx` 的 `FileTreeNodeActions` 只在 `hovered` 时渲染，手机上没有 hover，侧栏抽屉里的「下载 / 插入路径 / 提及 / 定位」根本点不出来。和消息动作栏同一个毛病，项目里已有既定做法：`SessionItem` 用 `if (!isMobile) setHovered(true)` 加一套移动端入口。
+
+**修法**（用户选定「移动端改成左滑出现」）：
+- 复用 `hooks/useSwipeActions.ts`（会话行已经在用），`TreeNode` 每行接一份手势；`FileExplorer` 用 `swipeOpenPath` 保证同一时间只开一行。
+- 操作条是行内的绝对定位块，`translateX(FILE_ROW_SWIPE_WIDTH + offset)`：关着时整块不渲染，左滑时从右侧滑入盖住行尾。`overflow: hidden` 只加在移动端，`touch-action: pan-y` 保住竖向滚动。
+- 移动端只放图标（`compact`）：`@` + 下载 + 定位 实测 75px，手势终点取 84px。桌面保持原样（带文字的 `@提及`、`在访达中打开`），悬浮行为不变。
+- 移动端忽略 hover（`if (!isMobile) setHovered(true)`），Git 状态点不会被伪悬停顶掉。
+- 点这一行只当作收起（`consumeClick()`），不会顺带打开文件/展开目录；点别的行会把开着的那条收起来。
+
+**验证**（400px + 触摸模拟）：左滑文件行 → 操作条滑入，三个按钮 `将路径插入聊天 | 下载文件 | 在访达中打开`；内容 75px / 条宽 84px 不溢出；点这一行收起且不导航；竖向拖拽列表照常滚动（348 → 473）；1200px 桌面上鼠标悬浮仍是原来那组带文字按钮、没有滑出块。
