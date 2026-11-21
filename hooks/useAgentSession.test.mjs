@@ -274,6 +274,14 @@ test("历史分页按游标串行前插并拒绝重复 entryId", () => {
   // 超时/出错后标记失败，顶部哨兵不再自动重发同一个游标。
   assert.match(paginationSource, /loading: false, failed: pageFailed/);
   assert.match(paginationSource, /const retryEarlierMessages = useCallback/);
+  // 404（会话文件已被删除）先校验归属，再关掉分页并说清楚，不留重试入口。
+  assert.match(paginationSource, /if \(result\.kind === "missing"\) \{/);
+  assert.match(paginationSource, /hasMore: false \}/);
+  assert.match(paginationSource, /translateRef\.current\("chat\.sessionFileMissing"\)/);
+  assert.ok(
+    paginationSource.indexOf('result.kind === "missing"') < paginationSource.indexOf('result.kind !== "loaded"'),
+    "missing 要在通用失败分支之前处理",
+  );
   assert.match(paginationSource, /page\.loading/);
   assert.match(paginationSource, /result\.snapshot\.entryIds\.some\(\(id\) => existingIds\.has\(id\)\)/);
   assert.match(paginationSource, /setMessages\(\(current\) => \{[\s\S]*?\.\.\.result\.snapshot\.messages, \.\.\.current/);
@@ -573,10 +581,14 @@ test("大纲跳转逐页请求同样带期限，失败走同一套清理", () =>
     source.indexOf("const loadSessionDetails = useCallback"),
   );
 
-  assert.match(jumpSource, /const fetchJumpPage = async \(cursor: string\) => \{/);
+  assert.match(jumpSource, /const fetchJumpPage = async \(cursor: string, isFirstPage: boolean\) => \{/);
   assert.match(jumpSource, /withPageDeadline\(controller\.signal, EARLIER_PAGE_TIMEOUT_MS/);
   assert.doesNotMatch(jumpSource, /AbortSignal\.(any|timeout)/);
   // 一页不返回时，顶部和跳转按钮都要能退出加载状态。
-  assert.match(jumpSource, /loading: false, failed: failedWhileJumping/);
+  assert.match(jumpSource, /loading: false, failed: firstPageFailed/);
+  // 只有顶部游标那一页失败才给顶部挂重试：后续页失败时顶部游标没变，重试那页回不到这次跳转。
+  assert.match(jumpSource, /const markJumpFailure = \(isFirstPage: boolean\) => \{/);
+  assert.match(jumpSource, /if \(isFirstPage\) firstPageFailed = true;/);
+  assert.match(jumpSource, /fetchJumpPage\(before, step === 0\)/);
   assert.equal((jumpSource.match(/fetchSessionContext\(/g) ?? []).length, 1);
 });

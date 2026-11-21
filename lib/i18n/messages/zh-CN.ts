@@ -920,6 +920,7 @@ export const zhCNLocale: LocalePlugin = {
     "chat.earlierProcessItems": "较早的 {count} 条处理记录",
     "chat.loadEarlier": "向上滚动以加载更早的消息（隐藏 {count} 条）",
     "chat.loadEarlierFailed": "加载失败，点击重试",
+    "chat.sessionFileMissing": "会话文件已不存在，无法加载更早的消息",
     "chat.jumpToLatest": "跳转到最新消息并继续跟随",
     "transcriptNotice.costSuffix": "（约 {cost}）",
     "transcriptNotice.cacheMiss": "缓存未命中：{tokens} Token 重新计费{cost}",

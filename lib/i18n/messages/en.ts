@@ -917,6 +917,7 @@ export const enLocale: LocalePlugin = {
     "chat.earlierProcessItems": "{count} earlier process items",
     "chat.loadEarlier": "Scroll up to load earlier messages ({count} hidden)",
     "chat.loadEarlierFailed": "Loading failed — tap to retry",
+    "chat.sessionFileMissing": "This session file no longer exists — earlier messages cannot be loaded.",
     "chat.jumpToLatest": "Jump to the latest message and keep following",
     "transcriptNotice.costSuffix": " (~{cost})",
     "transcriptNotice.cacheMiss": "Cache miss: {tokens} tokens re-billed{cost}",

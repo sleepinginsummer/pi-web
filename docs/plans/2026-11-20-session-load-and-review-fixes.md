@@ -587,3 +587,18 @@ hooks/useAgentSession.ts:3462   missing: handleCompact, opts.chatInputRef, sessi
 `AbortSignal.any()`，`lib/agent-client.ts`、`lib/provider-usage.ts`、`components/MessageStash.tsx`
 在用 `AbortSignal.timeout()`。按本项目的 Safari 16.2 基线它们同样会在老 Safari 上抛错，
 要不要统一换掉需要单独拍板（改的是会话加载与聊天发送的关键路径）。
+
+## 28. 分页失败的两处复查（merge.37）
+
+1. **404 之后仍会自动重发**（确认）。会话文件在页面打开期间被删/归档时，分页接口回 404 →
+   `kind: "missing"`，原来落进通用的「不是 loaded 就退出」分支，`failed` 仍是 false，顶部哨兵
+   还会重发同一游标，用户也看不到任何重试或说明。修：先校验请求仍属于当前会话，再单独处理
+   `missing` —— `hasMore: false` 关掉分页、不挂重试（重试一个删掉的文件没意义），并提示
+   「会话文件已不存在，无法加载更早的消息」。其余非 `loaded` 一律按失败处理（挂重试）。
+2. **大纲跳转后续页失败会污染顶部重试**（确认）。`loadUntilEntryId` 的各页只存在局部数组里，
+   第二页超时时一页都没提交，顶部游标还停在第一页之前，`finally` 却把它标成失败；顶部「点击重试」
+   于是从第一页又跑一遍普通分页，回不到原跳转。修：只有 `step === 0`（顶部游标那一页）失败才设
+   顶部失败标记（`firstPageFailed`），后续页失败留给大纲入口（`revealFailed`，再点那一轮）。
+
+验证：全量 572 文件 / 4149 通过 / 0 失败；tsc、eslint 通过；新增「missing 先于通用失败分支、
+关闭分页并提示」「只有首页失败才设顶部标记、fetchJumpPage(before, step === 0)」的用例。

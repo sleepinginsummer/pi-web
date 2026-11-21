@@ -1146,11 +1146,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       );
       const currentRequest = backfillRequestRef.current;
       if (
-        result.kind !== "loaded"
-        || currentRequest.sid !== sid
+        currentRequest.sid !== sid
         || currentRequest.generation !== generation
         || sessionIdRef.current !== sid
       ) return false;
+      // 会话文件在页面打开期间被删掉/归档：再自动重发只会一直 404，也翻不出任何东西。
+      // 把分页关掉并说清楚，比在顶部显示一个永远重试失败的按钮好。
+      if (result.kind === "missing") {
+        setHistoryPage((current) => (current.sid === sid
+          ? { ...current, loading: false, failed: false, hasMore: false }
+          : current));
+        addNotice({ type: "error", message: translateRef.current("chat.sessionFileMissing") });
+        return false;
+      }
+      if (result.kind !== "loaded") {
+        pageFailed = true;
+        return false;
+      }
 
       const existingIds = new Set(entryIdsRef.current);
       if (result.snapshot.entryIds.some((id) => existingIds.has(id))) {
@@ -1192,7 +1204,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           : current);
       }
     }
-  }, [historyPage]);
+  }, [addNotice, historyPage]);
 
   /** 顶部「重试」：清掉失败标记后重发同一个游标（自动翻页此时是停着的）。 */
   const retryEarlierMessages = useCallback((): void => {
@@ -1223,6 +1235,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setHistoryPage((current) => current.sid === sid ? { ...current, loading: true } : current);
 
     let failedWhileJumping = false;
+    // 只有「顶部游标那一页」失败才给顶部挂重试：后续页失败时顶部游标没变，
+    // 从那里重试回不到这次跳转，重试入口留在大纲（再点一次那一轮）。
+    let firstPageFailed = false;
     try {
       let before: string | null = initialPage.oldestEntryId;
       let hasMore: boolean = initialPage.hasMore;
@@ -1233,12 +1248,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       let found = false;
 
       // 逐页请求同样带期限：任一页不返回时，顶部和大纲跳转按钮都不能一直转圈。
-      const fetchJumpPage = async (cursor: string) => {
-        const deadline = withPageDeadline(controller.signal, EARLIER_PAGE_TIMEOUT_MS, () => { failedWhileJumping = true; });
+      const markJumpFailure = (isFirstPage: boolean) => {
+        failedWhileJumping = true;
+        if (isFirstPage) firstPageFailed = true;
+      };
+      const fetchJumpPage = async (cursor: string, isFirstPage: boolean) => {
+        const deadline = withPageDeadline(controller.signal, EARLIER_PAGE_TIMEOUT_MS, () => markJumpFailure(isFirstPage));
         try {
           return await fetchSessionContext(sid, deadline.signal, { before: cursor, tail: JUMP_PAGE_SIZE, skipCache: true });
         } catch (error) {
-          if (!failedWhileJumping && !(error instanceof DOMException && error.name === "AbortError")) failedWhileJumping = true;
+          if (!failedWhileJumping && !(error instanceof DOMException && error.name === "AbortError")) markJumpFailure(isFirstPage);
           throw error;
         } finally {
           deadline.release();
@@ -1246,7 +1265,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       };
 
       for (let step = 0; step < MAX_JUMP_PAGES && hasMore && before; step += 1) {
-        const result = await fetchJumpPage(before);
+        const result = await fetchJumpPage(before, step === 0);
         const currentRequest = backfillRequestRef.current;
         if (
           result.kind !== "loaded"
@@ -1300,7 +1319,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (backfillRequestRef.current.generation === generation) {
         backfillRequestRef.current.controller = null;
         setHistoryPage((current) => current.sid === sid && current.loading
-          ? { ...current, loading: false, failed: failedWhileJumping }
+          ? { ...current, loading: false, failed: firstPageFailed }
           : current);
       }
     }
