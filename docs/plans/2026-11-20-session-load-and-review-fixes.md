@@ -421,4 +421,8 @@ hooks/useAgentSession.ts:3462   missing: handleCompact, opts.chatInputRef, sessi
 
 **修法**：`components/useMessageActionsReveal.ts`，触屏（`pointerType !== "mouse"`）按在这条消息上就显示动作栏，按到别处收起（document 捕获阶段；`[data-message-actions]` 上的按下不算「别处」，否则点复制按钮会把栏收掉）。鼠标仍走 hover。用户消息与助手消息共用这一个 hook。
 
-**验证**：jsdom + React 用例（触屏按下显示、点按钮不收、点外面收起、鼠标不参与）；真浏览器 400px + 触摸模拟，并**拦掉所有合成 mouseover/mouseenter/mousemove** 模拟 iOS 行为——只靠 pointerdown 仍能把动作栏叫出来（opacity 0 → 1），点外面回到 0。
+**用户补充的两个关键事实**：① 设备是安卓 Chrome；② 「触发一次滚动就能触发按钮显示」。第②点正好印证了根因：滚动时 Chrome 会合成一次 `mousemove`/`mouseover`，hover 这才建立，按钮随之出现。
+
+**第二版（更贴合安卓）**：改成「点一下」判定 —— `pointerdown` 记下位置，抬起在 **document** 上读（手指滑出元素也不丢），位移超过 `TAP_SLOP_PX`（16px）就不算点按。这样滚动划过消息不会闪出动作栏；把「只有滚动才灵」的依赖彻底去掉。
+
+**验证**：jsdom + React 用例（点一下显示、点按钮不收、点外面收起、滚动/拖动不显示、鼠标不参与）；真浏览器 400px + 触摸模拟，并**拦掉所有合成 mouseover/mouseenter/mousemove**：点一下 opacity 0 → 1；按住上下拖动 95px 后抬起仍为 0。
