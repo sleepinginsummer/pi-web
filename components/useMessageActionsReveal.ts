@@ -44,10 +44,6 @@ export function useMessageActionsReveal(
     pressRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
   };
 
-  const onPointerCancel = () => {
-    pressRef.current = null;
-  };
-
   // 抬起挂在 document 上：手指最后落点未必还在这一条里（滑了一点、子元素换过），
   // 挂在自己身上就会丢掉这次点击。
   useEffect(() => {
