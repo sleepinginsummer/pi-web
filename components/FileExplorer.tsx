@@ -207,10 +207,10 @@ const HIDDEN_REASON_KEYS = {
 } as const satisfies Record<HiddenReason, string>;
 
 /**
- * 移动端左滑从右侧滑出的操作条宽度（@ + 下载 + 定位 三个图标按钮）。
+ * 移动端左滑从右侧滑出的操作条宽度（只有一个 @ 按钮）。
  * 它同时是手势终点：改这段布局时这个值要跟着改。
  */
-const FILE_ROW_SWIPE_WIDTH = 84;
+const FILE_ROW_SWIPE_WIDTH = 40;
 
 export function TreeNode({
   node,
@@ -282,7 +282,8 @@ export function TreeNode({
   const isMobile = useIsMobile();
   const swipeOpen = swipeOpenPath === node.fullPath;
   const swipe = useSwipeActions({
-    enabled: isMobile && !pendingLinkTarget,
+    // 没有「插入路径」这条动作时，滑出来也是空的，干脆不接手势。
+    enabled: isMobile && !pendingLinkTarget && Boolean(onAtMention),
     open: swipeOpen,
     actionWidth: FILE_ROW_SWIPE_WIDTH,
     onOpenChange: (open) => onSwipeOpenPathChange?.(open ? node.fullPath : null),

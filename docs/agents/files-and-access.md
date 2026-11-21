@@ -35,7 +35,7 @@
 ## 文件行的操作按钮（桌面悬浮 / 移动端左滑）
 - 桌面：鼠标悬浮这一行时右侧显示 `@提及 / 下载 / 定位`，移开就收起（`components/FileTreeNodeActions.tsx`）。
 - 移动端没有 hover（见 `docs/agents/sessions.md` 的「Message actions on a touch screen」），改成左滑：`TreeNode` 用共用的 `hooks/useSwipeActions.ts`，手势终点是 `FILE_ROW_SWIPE_WIDTH`；操作条是行内绝对定位的一块，跟着 `offset` 从右侧滑入，盖住行尾。悬停状态在移动端直接忽略（`if (!isMobile) setHovered(true)`），所以 Git 标记不会被「一直悬停」吃掉。
-- 操作条在移动端只放图标（`compact`）：`@` + 下载 + 定位，宽度 75px，塞进 84px 的手势终点；桌面仍是带文字的 `@提及`、`在访达中打开`。
+- 操作条在移动端只放一个 `@`（把路径插入聊天，`compact`）：宽 30px，手势终点 40px；没有 `onAtMention` 的场合不接手势，免得滑出一块空白。桌面仍是带文字的 `@提及`、`下载`、`在访达中打开`。
 - 一行同一时间只展开一条（`FileExplorer` 的 `swipeOpenPath`）；点这一行只当作收起（`consumeClick()`），点别的行会顺带收起它。`touch-action: pan-y` 保留竖向滚动。
 
 ## File viewer watches (`components/FileViewer.tsx`)

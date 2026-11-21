@@ -38,6 +38,9 @@ const actionStyle = {
 
 /** 文件树条目的悬浮操作区，避免 TreeNode 继续承载具体操作状态和请求。 */
 export function FileTreeNodeActions({ fullPath, isDirectory, cwd, onAtMention, compact = false, labels }: Props) {
+  // 移动端左滑只留 @（把路径插入聊天）；没有这个动作时整条不显示，别滑出一块空白。
+  if (compact && !onAtMention) return null;
+
   return (
     <span onClick={(event) => event.stopPropagation()} style={{ display: "flex", alignItems: "center", gap: 3, flexShrink: 0 }}>
       {onAtMention && (
@@ -46,12 +49,12 @@ export function FileTreeNodeActions({ fullPath, isDirectory, cwd, onAtMention, c
           onClick={() => onAtMention(getRelativeFilePath(fullPath, cwd), isDirectory)}
           title={labels.insertPath}
           aria-label={labels.insertPath}
-          style={{ ...actionStyle, color: "var(--accent)", fontSize: 11, fontWeight: 600, ...(compact ? { padding: "0 4px" } : null) }}
+          style={{ ...actionStyle, color: "var(--accent)", fontSize: 11, fontWeight: 600, ...(compact ? { padding: "0 8px", height: 24, minWidth: 30, fontSize: 13 } : null) }}
         >
           {compact ? "@" : `@${labels.mention}`}
         </button>
       )}
-      {!isDirectory && (
+      {!compact && !isDirectory && (
         <a
           href={`/api/files/${encodeFilePathForApi(fullPath)}?type=download`}
           download
@@ -66,17 +69,19 @@ export function FileTreeNodeActions({ fullPath, isDirectory, cwd, onAtMention, c
           </svg>
         </a>
       )}
-      <RevealFileButton
-        fullPath={fullPath}
-        labels={{
-          macos: labels.reveal,
-          windows: labels.revealWindows,
-          linux: labels.revealLinux,
-        }}
-        errorLabel={labels.revealError}
-        showLabel={!compact}
-        style={actionStyle}
-      />
+      {!compact && (
+        <RevealFileButton
+          fullPath={fullPath}
+          labels={{
+            macos: labels.reveal,
+            windows: labels.revealWindows,
+            linux: labels.revealLinux,
+          }}
+          errorLabel={labels.revealError}
+          showLabel
+          style={actionStyle}
+        />
+      )}
     </span>
   );
 }
