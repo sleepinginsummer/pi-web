@@ -7,6 +7,7 @@ import {
   markdownPreviewRemarkPlugins,
   normalizeDisplayMath,
 } from "@/lib/markdown";
+import { wakeMessageTitle } from "@/lib/wake-message-title";
 import { hasTurnRef, isHiddenCustomMessage, splitFinalAssistantBlocks } from "@/lib/message-display";
 import { cachedHasOutlineHeadings, hasOutlineHeadings, joinAnswerBlocks } from "@/lib/outline-headings";
 import { loadMinimapPreviewLocked, saveMinimapPreviewLocked } from "@/lib/minimap-preview-lock";
@@ -79,12 +80,16 @@ interface NodeInfo {
 }
 
 function getUserPreview(message: UserMessage | CustomMessage): string {
-  if (typeof message.content === "string") return message.content.trim();
-  return message.content
-    .filter((block): block is TextContent => block.type === "text")
-    .map((block) => block.text)
-    .join("\n")
-    .trim();
+  const text = typeof message.content === "string"
+    ? message.content.trim()
+    : message.content
+      .filter((block): block is TextContent => block.type === "text")
+      .map((block) => block.text)
+      .join("\n")
+      .trim();
+  // 后台命令 / 定时任务的唤醒正文是给模型看的，大纲只显示列表里那个标题。
+  const title = message.role === "custom" ? wakeMessageTitle(message.customType, text) : null;
+  return title ?? text;
 }
 
 /** Tool calls in one assistant message. A reply can both answer and call

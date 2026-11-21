@@ -352,7 +352,7 @@ test("renders the compact composer with the standard Send button and no session 
   assert.doesNotMatch(html, /type="file"|Attach files|Change tool preset/);
 });
 
-test("the attach button takes any file when the chat handles them, and images only otherwise (#1101)", () => {
+test("the attach button always takes any file (#1101)", () => {
   const render = (props) => renderToStaticMarkup(
     React.createElement(I18nProvider, null, React.createElement(ChatInput, {
       onSend() {}, onAbort() {}, isStreaming: false, modelState: emptyModelState, modelActions: emptyModelActions, ...props,
@@ -366,7 +366,8 @@ test("the attach button takes any file when the chat handles them, and images on
   // No accept list and no capture: phones offer files, the photo library and the camera.
   assert.doesNotMatch(fileInput(html), /accept=|capture=/);
 
-  assert.match(fileInput(render({})), /accept="image\/\*"/);
+  // 没有上传回调时也照样能选文件：`accept="image/*"` 会让安卓只给出相机/相册。
+  assert.doesNotMatch(fileInput(render({})), /accept=|capture=/);
 });
 
 test("filters model options by name and id", () => {
@@ -733,7 +734,9 @@ test("a compact error can be dismissed when the composer is given a handler", ()
 
 test("the attach button hands every picked file to the chat, or only images without a handler", () => {
   const source = readFileSync(new URL("./ChatInput.tsx", import.meta.url), "utf8");
-  assert.match(source, /accept=\{onAttachFiles \? undefined : "image\/\*"\}/);
+  // 隐藏的 file input 不设 accept：只要设成 image/*，安卓选择器里就只有相机与相册。
+  const input = source.slice(source.indexOf('id="chat-attach-input"'), source.indexOf("onChange={handleFilePick}"));
+  assert.doesNotMatch(input, /accept=/);
   assert.match(source, /onChange=\{handleFilePick\}/);
   assert.match(source, /if \(onAttachFiles\) onAttachFiles\(files\);\s*else void processImageFiles\(files\);/);
 });

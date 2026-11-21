@@ -4,6 +4,7 @@ import { hasOutlineFinalAnswer, pickOutlineFinalAssistant } from "./outline-fina
 import { extractOutlineHeadings, joinAnswerBlocks, outlineHeadingsFromBlocks, scanOutlineLines, stripInlineMarkdown } from "./outline-headings";
 import { readIndexedBranchOutlineRecords, readIndexedOutlineIdentity } from "./session-content-index";
 import { turnAnchorShape } from "./session-turns";
+import { wakeMessageTitle } from "./wake-message-title";
 import type { AssistantMessage, SessionEntry, TextContent } from "./types";
 
 import type { OutlineHeading, SessionOutlineTurn } from "./session-outline-types";
@@ -90,11 +91,14 @@ function extractEntryAnchorText(entry: SessionEntry): {
         .join("\n");
     }
     const hiddenAnchor = entry.display !== true;
+    const customType = typeof entry.customType === "string" ? entry.customType : undefined;
+    // 唤醒消息的正文是给模型看的（标题 + 命令行 + 输出尾巴）：大纲改用列表里那个标题。
+    const wakeTitle = wakeMessageTitle(customType, text);
     return {
       kind: "custom",
-      customType: typeof entry.customType === "string" ? entry.customType : undefined,
+      customType,
       ...(hiddenAnchor ? { hiddenAnchor: true } : {}),
-      text: truncateText(text, MAX_USER_TEXT_CHARS),
+      text: truncateText(wakeTitle ?? text, MAX_USER_TEXT_CHARS),
     };
   }
   if (entry.type === "message" && entry.message && "content" in entry.message) {

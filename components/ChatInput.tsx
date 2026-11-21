@@ -1792,12 +1792,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         paddingRight: compact ? 0 : isMobile ? 16 : 52, // desktop: 16px base + 36px for ChatMinimap alignment
       }}
     >
-      {/* Hidden file input — 视觉隐藏而非 display:none：安卓 WebView/部分浏览器对 display:none 的 file input 用 JS click() 不会弹出选择器。不设 capture，手机仍可选相册和相机。 */}
+      {/* Hidden file input — 视觉隐藏而非 display:none：安卓 WebView/部分浏览器对 display:none 的 file input 用 JS click() 不会弹出选择器。
+          不设 capture，也不设 accept：手机要能选到任意文件（图片按图片附加，其余上传到下载目录）。
+          只有「accept=image/*」时安卓只会给出相机/摄像机/相册，没有「文件」这一项。 */}
       {!compact && <input
         id="chat-attach-input"
         ref={fileInputRef}
         type="file"
-        accept={onAttachFiles ? undefined : "image/*"}
         multiple
         style={{
           position: "absolute",

@@ -616,3 +616,15 @@ hasMore:false`，且只作用于同一会话）。普通翻页和大纲跳转都
 
 验证：全量 572 文件 / 4149 通过 / 0 失败；tsc、eslint 40 条既存 warning；用例覆盖
 「missing 在会话/代次校验之后」「两个入口共用 terminatePagination」。
+
+## 30. 真机两条（merge.39）
+
+1. **移动端点附件只给出相机/相册，选不到文件**。合成器的隐藏 input 之前写成
+   `accept={onAttachFiles ? undefined : "image/*"}`——只要在某个渲染里 `onAttachFiles` 取到空值，
+   安卓就只给相机/摄像机/相册（截图即此）。现在直接去掉 `accept`：图片按图片附加，其余上传到
+   下载目录，手机永远能选到文件。
+2. **大纲里后台命令不可读**。唤醒消息的正文是给模型看的（`Background command [id] "label" exited
+   with code 0 after 3s` + `$ 命令` + 输出尾巴），大纲原来整段铺出来。新增
+   `lib/wake-message-title.ts`：后台命令取 `label`（没有就用命令行首行），定时任务取任务名；
+   服务端大纲（`extractEntryAnchorText`）与前端已加载轮次/搜索（`getUserPreview`）共用这一份，
+   两处口径一致。
