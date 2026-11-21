@@ -8,7 +8,6 @@ import {
   normalizeDisplayMath,
 } from "@/lib/markdown";
 import { hasTurnRef, isHiddenCustomMessage, splitFinalAssistantBlocks } from "@/lib/message-display";
-import { isWakeMessageType } from "@/lib/wake-message-types";
 import { cachedHasOutlineHeadings, hasOutlineHeadings, joinAnswerBlocks } from "@/lib/outline-headings";
 import { loadMinimapPreviewLocked, saveMinimapPreviewLocked } from "@/lib/minimap-preview-lock";
 import type { SessionOutlineResponse, SessionOutlineTurn } from "@/lib/session-outline-types";
@@ -80,13 +79,14 @@ interface NodeInfo {
 }
 
 /**
- * 这一轮是不是后台命令 / 定时任务的唤醒轮次。
+ * 这一轮是不是用户亲手开的提问。
  *
- * 它们会开新的一轮（`display: true` + 轮次锚点），但不是用户提问；大纲只列用户提问，
- * 判定来自 `lib/wake-message-types.ts`，和 `lib/session-outline.ts` 共用同一份。
+ * 大纲只列提问：压缩卡片、后台命令/定时任务的唤醒、子代理回报、扩展消息都是
+ * `role: "custom"`；分支摘要渲染成用户消息，由 `synthetic` 标记认出来。
+ * 与 `lib/session-outline.ts` 的 `byUser` 同一口径。
  */
-export function isWakeTurnAnchor(message: UserMessage | CustomMessage): boolean {
-  return message.role === "custom" && isWakeMessageType(message.customType);
+export function isOutlineAnchorMessage(message: UserMessage | CustomMessage): boolean {
+  return message.role === "user" && message.synthetic === undefined;
 }
 
 function getUserPreview(message: UserMessage | CustomMessage): string {
@@ -410,10 +410,11 @@ function sampleRailTicks(
     return ticks;
   }
 
+  // `activeIndex` 是节点在会话里的位置（`node.index`），这里要的是它在数组里的下标 ——
+  // 筛选后的数组和会话位置不再一一对应。
+  const activePosition = activeIndex === null ? -1 : loadedNodes.findIndex((node) => node.index === activeIndex);
   const picked = new Set<number>([0, loadedNodes.length - 1]);
-  if (activeIndex !== null && activeIndex >= 0 && activeIndex < loadedNodes.length) {
-    picked.add(activeIndex);
-  }
+  if (activePosition >= 0) picked.add(activePosition);
   const step = (loadedNodes.length - 1) / (loadedBudget - 1);
   for (let slot = 0; slot < loadedBudget && picked.size < loadedBudget; slot += 1) {
     picked.add(Math.round(slot * step));
@@ -562,6 +563,9 @@ export const ChatMinimap = memo(function ChatMinimap({
     const loadedIdSet = new Set(entryIds);
     return remoteOutline.turns.filter((turn) => turn.turnNumber <= turnsBefore && !loadedIdSet.has(turn.entryId));
   }, [entryIds, outlineRequestKey, remoteOutline, turnsBefore]);
+
+  /** 历史大纲是否已经拿到（拿到后才知道哪些历史轮次是提问）。 */
+  const outlineResolved = Boolean(remoteOutline && remoteOutline.key === outlineRequestKey);
 
   const lockActiveNode = useCallback((index: number) => {
     activeNodeLockRef.current = {
@@ -1000,10 +1004,14 @@ export const ChatMinimap = memo(function ChatMinimap({
     ));
   }, [normalizedQuery, unloadedOutlineTurns]);
 
+  // 大纲只列用户提问：自定义消息（压缩卡片、唤醒、子代理回报）和合成的分支摘要都不算。
+  const loadedUserNodes = useMemo(
+    () => allNodes.filter((node) => isOutlineAnchorMessage(node.targetTurn.userMessage)),
+    [allNodes],
+  );
   const filteredLoadedNodes = useMemo(() => {
-    const userNodes = allNodes.filter((node) => !isWakeTurnAnchor(node.targetTurn.userMessage));
-    if (!normalizedQuery) return userNodes;
-    return userNodes.filter((node) => {
+    if (!normalizedQuery) return loadedUserNodes;
+    return loadedUserNodes.filter((node) => {
       const userText = isHiddenCustomMessage(node.targetTurn.userMessage)
         ? t("chatMinimap.extensionTurn", { type: (node.targetTurn.userMessage as CustomMessage).customType })
         : getUserPreview(node.targetTurn.userMessage);
@@ -1012,7 +1020,7 @@ export const ChatMinimap = memo(function ChatMinimap({
         || answerText.toLowerCase().includes(normalizedQuery)
         || String(node.turnNumber).includes(normalizedQuery);
     });
-  }, [allNodes, normalizedQuery, t]);
+  }, [loadedUserNodes, normalizedQuery, t]);
 
   // 判断“这一轮有没有标题”要扫描整段最终回答。预览会在滚动切换当前轮时重渲染，
   // 所以按 allNodes 一次算好，别在渲染循环里对每一轮重扫 Markdown；正文没变的
@@ -1036,11 +1044,13 @@ export const ChatMinimap = memo(function ChatMinimap({
   }, [allNodes, headingScanCache]);
 
   const railTicks = useMemo(
-    () => sampleRailTicks(turnsBefore, allNodes, activeIndex),
-    [turnsBefore, allNodes, activeIndex],
+    () => sampleRailTicks(outlineResolved ? unloadedOutlineTurns.length : turnsBefore, loadedUserNodes, activeIndex),
+    [activeIndex, loadedUserNodes, outlineResolved, turnsBefore, unloadedOutlineTurns.length],
   );
 
-  const totalTurnCount = turnsBefore + allNodes.length;
+  // 总数只算会显示的轮次：历史大纲拿到后按它自己的条目数算（已剔除隐藏轮次），
+  // 还没拿到时只能按分页游标估算（含隐藏轮次，属于未知信息）。
+  const totalTurnCount = (outlineResolved ? unloadedOutlineTurns.length : turnsBefore) + loadedUserNodes.length;
   const matchedTurnCount = filteredUnloadedTurns.length + filteredLoadedNodes.length;
 
   if (totalTurnCount === 0) {
@@ -1161,7 +1171,8 @@ export const ChatMinimap = memo(function ChatMinimap({
 
           <div ref={previewListRef} className={styles.list}>
             {/* 全量目录未就绪或无 sessionId 时回退到早先分页提示 */}
-            {turnsBefore > 0 && unloadedOutlineTurns.length === 0 && !normalizedQuery && (
+            {/* 只有历史大纲还没拿到时才退到分页提示：拿到后为空，说明剩下的轮次不是提问。 */}
+            {turnsBefore > 0 && !outlineResolved && !normalizedQuery && (
               <button
                 type="button"
                 className={styles.earlier}

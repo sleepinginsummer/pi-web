@@ -646,3 +646,22 @@ hasMore:false`，且只作用于同一会话）。普通翻页和大纲跳转都
 验证：`lib/session-outline.test.mjs` 覆盖「用户轮 + 后台命令 + 定时任务 + 用户轮 → 大纲只剩 1 和 4，
 且第一轮的最终回答仍是它自己的」；`components/ChatMinimap.test.mjs` 覆盖 `isWakeTurnAnchor`；
 dev 400px 实测某会话（5 条用户消息 + 1 条后台命令）：大纲 5 行、`Background command` 0 行。
+
+## 32. 大纲只列用户提问（补齐，merge.41）
+
+复查指出 merge.40 只排除了两种唤醒消息，压缩摘要/分支摘要/子代理回报仍会进大纲，计数也仍按
+未筛选的条目算。核对成立，按「只列用户亲手开的轮次」补齐：
+
+- 服务端 `extractEntryAnchorText()` 增加 `byUser`：只有 `type: "message"` + `role: "user"` 为真；
+  分支摘要虽然也写成用户消息，但 `entry.type === "branch_summary"`，为假。
+- 过滤前移到摘要/标题扫描**之前**（采纳审查的可选优化）：被隐藏那一轮的回答不再做 Markdown 扫描。
+- 客户端 `isWakeTurnAnchor()` 换成 `isOutlineAnchorMessage()`（`role: "user"` 且无 `synthetic` 标记），
+  服务端要能区分合成分支摘要 —— `lib/session-reader.ts` 转换分支摘要时打上
+  `synthetic: "branch_summary"`（`lib/types.ts` 的 `UserMessage` 增加该可选字段）。
+- 计数与回退入口：`totalTurnCount` 在大纲已取得时按筛选后的条目算；「更早的 N 轮还没加载」只在
+  历史大纲**还没取得**时显示——取得后为空，说明剩下的轮次不是提问。
+- 轨道刻度按筛选后的节点取样，`activeIndex`（会话位置）换成它在数组里的下标再参与取样。
+- 同时删掉已无人使用的 `isWakeMessageType()`。
+
+验证：全量 572 文件 / 4152 通过 / 0 失败；tsc、eslint 40 条既存 warning；dev 400px 实测同一会话
+（5 条用户消息 + 1 条自定义消息）：标题计数从 6 变成 **5**，行数 5。

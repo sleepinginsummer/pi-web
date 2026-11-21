@@ -1130,6 +1130,8 @@ function entryToUiMessage(
       if (!entry.summary) return null;
       return {
         role: "user",
+        // 分支摘要渲染成用户消息，但不是用户提问：大纲按这个标记把它排除。
+        synthetic: "branch_summary",
         content: `*The conversation briefly explored another branch and returned with this summary:*\n\n${entry.summary}`,
         timestamp: parseEntryTimestamp(entry.timestamp),
       };

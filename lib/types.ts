@@ -59,6 +59,11 @@ export interface UserMessage {
   role: "user";
   content: string | (TextContent | ImageContent)[];
   timestamp?: number;
+  /**
+   * 不是用户亲手打的字，而是 pi-web 从会话文件合成出来的展示消息。
+   * 目前只有分支摘要（`branch_summary`）：它渲染成一条用户消息，但大纲只列真正的提问。
+   */
+  synthetic?: "branch_summary";
 }
 
 export interface AgentUsage {

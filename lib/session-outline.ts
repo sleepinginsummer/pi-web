@@ -4,7 +4,6 @@ import { hasOutlineFinalAnswer, pickOutlineFinalAssistant } from "./outline-fina
 import { extractOutlineHeadings, joinAnswerBlocks, outlineHeadingsFromBlocks, scanOutlineLines, stripInlineMarkdown } from "./outline-headings";
 import { readIndexedBranchOutlineRecords, readIndexedOutlineIdentity } from "./session-content-index";
 import { turnAnchorShape } from "./session-turns";
-import { isWakeMessageType } from "./wake-message-types";
 import type { AssistantMessage, SessionEntry, TextContent } from "./types";
 
 import type { OutlineHeading, SessionOutlineTurn } from "./session-outline-types";
@@ -63,6 +62,8 @@ function extractEntryAnchorText(entry: SessionEntry): {
   kind: "user" | "custom" | "compaction";
   customType?: string;
   hiddenAnchor?: boolean;
+  /** 这一轮是用户亲手打字开的（`message` + `role: "user"`）。分支摘要虽然也渲染成用户消息，但不是。 */
+  byUser: boolean;
   text: string;
 } {
   if (entry.type === "compaction") {
@@ -70,6 +71,7 @@ function extractEntryAnchorText(entry: SessionEntry): {
     return {
       kind: "compaction",
       customType: "compaction",
+      byUser: false,
       text: truncateText(stripInlineMarkdown(summary.split("\n")[0] ?? ""), MAX_USER_TEXT_CHARS),
     };
   }
@@ -77,6 +79,7 @@ function extractEntryAnchorText(entry: SessionEntry): {
     const summary = typeof entry.summary === "string" ? entry.summary : "";
     return {
       kind: "user",
+      byUser: false,
       text: truncateText(summary, MAX_USER_TEXT_CHARS),
     };
   }
@@ -96,6 +99,7 @@ function extractEntryAnchorText(entry: SessionEntry): {
       kind: "custom",
       customType,
       ...(hiddenAnchor ? { hiddenAnchor: true } : {}),
+      byUser: false,
       text: truncateText(text, MAX_USER_TEXT_CHARS),
     };
   }
@@ -103,17 +107,17 @@ function extractEntryAnchorText(entry: SessionEntry): {
     const message = entry.message;
     const content = message.content;
     if (typeof content === "string") {
-      return { kind: "user", text: truncateText(content, MAX_USER_TEXT_CHARS) };
+      return { kind: "user", byUser: true, text: truncateText(content, MAX_USER_TEXT_CHARS) };
     }
     if (Array.isArray(content)) {
       const text = (content as readonly { type?: unknown; text?: unknown }[])
         .filter((block): block is TextContent => block.type === "text" && typeof block.text === "string")
         .map((block) => block.text)
         .join("\n");
-      return { kind: "user", text: truncateText(text, MAX_USER_TEXT_CHARS) };
+      return { kind: "user", byUser: true, text: truncateText(text, MAX_USER_TEXT_CHARS) };
     }
   }
-  return { kind: "user", text: "" };
+  return { kind: "user", byUser: true, text: "" };
 }
 
 /** 最终回答的文本块（按正文渲染顺序）。保留原始缩进：四空格缩进的围栏是缩进代码。 */
@@ -143,24 +147,24 @@ function extractFinalAssistantHeadings(entry: SessionEntry | null): OutlineHeadi
 }
 
 /**
- * 这一轮该不该出现在大纲里。
+ * 大纲只列**用户亲手开的**轮次。
  *
- * 后台命令、定时任务的唤醒消息也会开一轮（它们带 `display: true` 并锚定新轮次），但那不是
- * 用户提问：把这些行铺进大纲只会把真正的问题挤下去。过滤放在配对**之后**——配对仍然按
- * 原始锚点逐轮算 `finalAssistant`，否则被跳过那一轮的回答会算到上一个用户提问头上。
- * 轮次编号保留原值（会有空号），和正文里的轮次分组对得上。
+ * 压缩摘要、分支摘要、后台命令/定时任务的唤醒消息、子代理回报都会开一轮（带 `display: true`
+ * 并锚定新轮次），但它们不是提问：铺进大纲只会把真正的问题挤下去。
+ *
+ * 过滤放在配对**之后**：配对仍然按原始锚点逐轮算 `finalAssistant`，否则被跳过那一轮的回答会
+ * 算到上一个用户提问头上。轮次编号保留原值（会有空号），和正文里的轮次分组对得上。
+ * 判定放在扫描摘要之前——被隐藏那一轮的回答可能很长，整段 Markdown 扫了也没人要。
  */
-export function isOutlineUserTurn(customType: string | undefined): boolean {
-  return !isWakeMessageType(customType);
-}
-
 export function buildOutlineTurnsFromPairs(
   pairs: ReadonlyArray<{ turnNumber: number; anchor: SessionEntry; finalAssistant: SessionEntry | null }>,
 ): SessionOutlineTurn[] {
-  return pairs.map(({ turnNumber, anchor, finalAssistant }) => {
+  const turns: SessionOutlineTurn[] = [];
+  for (const { turnNumber, anchor, finalAssistant } of pairs) {
     const anchorInfo = extractEntryAnchorText(anchor);
+    if (!anchorInfo.byUser) continue;
     const answerMarkdown = extractFinalAssistantMarkdown(finalAssistant);
-    return {
+    turns.push({
       turnNumber,
       entryId: anchor.id,
       kind: anchorInfo.kind,
@@ -170,8 +174,9 @@ export function buildOutlineTurnsFromPairs(
       ...(finalAssistant ? { finalAssistantEntryId: finalAssistant.id } : {}),
       answerSummary: extractOutlineSummary(answerMarkdown),
       headings: extractFinalAssistantHeadings(finalAssistant),
-    };
-  }).filter((turn) => isOutlineUserTurn(turn.customType));
+    });
+  }
+  return turns;
 }
 
 /** 从内存中的完整 SessionEntry 列表（运行中 live 会话）构建活动分支全量大纲。 */
