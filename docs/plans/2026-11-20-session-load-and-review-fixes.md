@@ -473,3 +473,15 @@ hooks/useAgentSession.ts:3462   missing: handleCompact, opts.chatInputRef, sessi
 - 单测：`lib/file-upload.test.mjs`（重名规则、`.` 开头、目录也算占用、`rename` 解析）、`app/api/files/upload-route.test.mjs`（不覆盖原文件、`paths` 正确、`skip` 仍跳过、下载目录上传后从 403 变可列）、`app/api/upload-target/route.test.mjs`。
 - 浏览器（1200px 桌面 / 400px 移动端）：点回形针选两个文件 → 落到 `~/Downloads`，输入框得到 `@/Users/syy/Downloads/pi-web-upload-check.txt @"…/my report.txt"`（空格加引号）；同名再传得到 `pi-web-upload-check (1).txt` 且 mention 指向新名字；提示文案出现两次「下载目录」。移动端 `label[for=chat-attach-input]` 可见、title 为「附加文件」，同样上传成功。
 - 实测后已删除 `~/Downloads` 与项目目录里的测试文件。
+
+## 22. 复查 merge.30 的五处问题（0.17.0-merge.31）
+
+外部审查提了 5 条，逐条核对后四条是缺陷、一条是既有行为：
+
+1. **下载目录不存在时首次上传 404**（确认）。`getUploadDirectory()` 只做 `stat`。现在 `rename` 上传到下载目录时会先 `mkdir -p`（精简镜像里 `/home/node` 没有 Downloads），失败才报 500。新增用例：HOME 下没有 Downloads 时首次上传成功。
+2. **校验前就放开整个目录**（确认，安全回归）。原来一进 `getUploadDirectory()` 就 `allowFileRoot()`，于是 `upload-check`、`skip`、甚至失败的上传都能把下载目录变成可浏览/可覆盖的允许根。现在：写例外只在「`type=upload` 且 `strategy=rename`」时给（`allowDownloadsWrite`），且不授予读取；读取权限改为**真的写出文件之后**才 `allowFileRoot()`。用例覆盖 skip/overwrite/error/upload-check/非法文件名五种情况都保持 403，成功后才 200。
+3. **同名目录/符号链接时改名后仍被拒**（确认）。`nonReplaceableSet` 检查原先不看策略，`rename` 选好的 `notes (1)` 也被挡住。改成只对 `overwrite` 生效。用例：同名目录与符号链接都能写成 `notes (1)` / `link (1)`，`overwrite` 仍拒绝。
+4. **并发同名可能失败**（确认，P3）。`wx` 撞 `EEXIST` 时现在重新选名重试（`MAX_RENAME_ATTEMPTS = 5`），写入仍独占。没做并发的确定性用例，靠代码路径与顺序用例覆盖。
+5. **附件引用点不开**（确认，但不是这次引入的：以前 `@文件名` 同样不可点）。新增 `remarkFileMentions`：渲染时把 `@/绝对路径` / `@"/带 空格"` 包成链接，文字原样、模型仍只看到纯文本；只认绝对路径，`@某人`、行内代码、相对路径都不动。用例覆盖四种形状。点击落到文件查看器的本地链接分支（既有能力，指向绝对路径；上传成功后下载目录已在允许根里）。
+
+验证：`app/api/files/upload-route.test.mjs` 6 条、`lib/markdown.test.mjs` 45 条、`lib/file-upload.test.mjs` 5 条全过；全量见提交信息。

@@ -233,6 +233,72 @@ function remarkWindowsFileLinks() {
   };
 }
 
+/**
+ * `@/绝对路径` / `@"/带 空格的绝对路径"`：聊天里上传附件后插入的就是这个形状。
+ *
+ * 模型按它去读文件，所以正文必须原样保留这段文字；但原样渲染时用户想点开预览没有入口
+ * （文件查看器的打开回调只挂在链接上）。这里在**渲染时**把绝对路径的 @ 引用包成链接：
+ * 文字不变、模型看到的仍是一段纯文本，点到却能打开文件查看器。
+ */
+const FILE_MENTION_TOKEN = /(^|[\s(（])@("([^"]+)"|(\/[^\s]+))/g;
+const FILE_MENTION_TRAILING_PUNCTUATION = /[.,;:!?。，、；：！？）)]+$/;
+
+type FileMentionPart =
+  | { type: "text"; value: string }
+  | { type: "link"; value: string; path: string };
+
+/** 把一段文本切成「普通文本 / 附件引用」；只认绝对路径，避免把正文里的 @某人 变成链接。 */
+function splitFileMentions(value: string): FileMentionPart[] {
+  const parts: FileMentionPart[] = [];
+  let lastIndex = 0;
+
+  for (const match of value.matchAll(FILE_MENTION_TOKEN)) {
+    const prefix = match[1];
+    const quoted = match[3];
+    const isQuoted = quoted !== undefined;
+    const rawPath = isQuoted ? quoted : match[2];
+    // 句末的标点不属于路径：`@/a/b.pdf。` 里链接只到 `.pdf`。
+    const trailing = isQuoted ? "" : rawPath.match(FILE_MENTION_TRAILING_PUNCTUATION)?.[0] ?? "";
+    const path = trailing ? rawPath.slice(0, -trailing.length) : rawPath;
+    if (!path.startsWith("/")) continue;
+
+    const start = match.index + prefix.length;
+    if (start > lastIndex) parts.push({ type: "text", value: value.slice(lastIndex, start) });
+    parts.push({ type: "link", value: `@${isQuoted ? `"${path}"` : path}`, path });
+    if (trailing) parts.push({ type: "text", value: trailing });
+    lastIndex = match.index + match[0].length;
+  }
+
+  if (lastIndex < value.length) parts.push({ type: "text", value: value.slice(lastIndex) });
+  return parts;
+}
+
+function remarkFileMentions() {
+  return (tree: Root): void => {
+    const walk = (node: Root | Content): void => {
+      if (!("children" in node) || !node.children) return;
+      // 链接里不再套链接；代码块的内容在 value 上，本来就没有 children。
+      if (node.type === "link" || node.type === "linkReference") return;
+
+      const next: Content[] = [];
+      for (const child of node.children) {
+        if (child.type !== "text") {
+          walk(child);
+          next.push(child);
+          continue;
+        }
+        for (const part of splitFileMentions(child.value)) {
+          next.push(part.type === "text"
+            ? ({ type: "text", value: part.value } as Content)
+            : ({ type: "link", url: part.path, title: null, children: [{ type: "text", value: part.value }] } as Content));
+        }
+      }
+      node.children = next;
+    };
+    walk(tree);
+  };
+}
+
 interface OutlineMarkdownNode {
   type?: string;
   depth?: number;
@@ -378,6 +444,7 @@ export const markdownRemarkPlugins: ReactMarkdownOptions["remarkPlugins"] = [
   remarkSplitAutolinkLiterals,
   remarkCurrencySafeMath,
   remarkWindowsFileLinks,
+  remarkFileMentions,
 ];
 
 // User messages keep every typed line break, as the TUI shows them (#680). The

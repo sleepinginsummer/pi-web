@@ -53,6 +53,8 @@ const FILE_REQUEST_TYPE_SET = new Set<string>(FILE_REQUEST_TYPES);
 // origin guard in lib/request-security.ts admits those subresource loads and
 // shares the segment constant.
 const MAX_UPLOAD_TOTAL_BYTES = 100 * 1024 * 1024;
+/** 并发上传同名文件时，`wx` 撞上 EEXIST 就换个空闲名字重试的次数上限。 */
+const MAX_RENAME_ATTEMPTS = 5;
 // Multipart boundaries and headers are not file bytes, but must be bounded too.
 const MAX_UPLOAD_REQUEST_BYTES = MAX_UPLOAD_TOTAL_BYTES + 1024 * 1024;
 
@@ -96,16 +98,30 @@ function parseFileRequestType(value: string): FileRequestType | null {
   return FILE_REQUEST_TYPE_SET.has(value) ? (value as FileRequestType) : null;
 }
 
-async function getUploadDirectory(segments: string[]): Promise<
-  { directory: string } | { response: NextResponse }
-> {
+async function getUploadDirectory(
+  segments: string[],
+  options: { allowDownloadsWrite?: boolean } = {},
+): Promise<{ directory: string } | { response: NextResponse }> {
   const directory = filePathFromApiSegments(segments);
-  // 聊天里的「选择文件」把附件放进下载目录。这个目录不是任何一个会话的 cwd，
-  // 所以不在允许根里；只在上传目标正好是 ~/Downloads 时补一次（读目录也随之可浏览）。
+  // 聊天附件落在系统下载目录。它不是任何会话的 cwd，因此不在允许根里；只有 `rename`
+  // 上传（聊天那条路径）能写它，而且这里不授予读取权限 —— 真写下文件之后才给（见上传分支）。
   const downloadsDirectory = path.join(homedir(), "Downloads");
-  if (samePath(directory, downloadsDirectory)) allowFileRoot(downloadsDirectory);
+  const writesDownloads = options.allowDownloadsWrite === true && samePath(directory, downloadsDirectory);
+  if (writesDownloads) {
+    // 精简镜像里可能没有下载目录（Dockerfile 的 /home/node 就只有 agent 目录）：
+    // 第一次真正上传时由服务端建出来，而不是让用户去建。
+    try {
+      fs.mkdirSync(downloadsDirectory, { recursive: true });
+    } catch (error) {
+      return {
+        response: NextResponse.json({
+          error: `Upload directory could not be created: ${error instanceof Error ? error.message : String(error)}`,
+        }, { status: 500 }),
+      };
+    }
+  }
   const allowedRoots = await getAllowedFileRoots();
-  if (!isFilePathAllowed(directory, allowedRoots)) {
+  if (!writesDownloads && !isFilePathAllowed(directory, allowedRoots)) {
     return { response: NextResponse.json({ error: "Access denied" }, { status: 403 }) };
   }
 
@@ -130,7 +146,11 @@ async function getUploadDirectory(segments: string[]): Promise<
       // Ignore stale session roots that no longer exist.
     }
   }
-  if (!isFilePathAllowed(realDirectory, realRoots)) {
+  // 下载目录没有根可对照：它的 realpath 必须就是 ~/Downloads 本身，符号链接不算。
+  const allowedRealDirectory = writesDownloads
+    ? samePath(realDirectory, fs.realpathSync(downloadsDirectory))
+    : isFilePathAllowed(realDirectory, realRoots);
+  if (!allowedRealDirectory) {
     return { response: NextResponse.json({ error: "Access denied" }, { status: 403 }) };
   }
 
@@ -180,8 +200,19 @@ export async function POST(
     const { path: segments } = await params;
     const type = request.nextUrl.searchParams.get("type") ?? "upload";
     if (type === "allow-link") return allowLinkedDirectory(request, segments);
+    if (type !== "upload" && type !== "upload-check") {
+      return NextResponse.json({ error: "Invalid upload request type" }, { status: 400 });
+    }
 
-    const uploadDirectory = await getUploadDirectory(segments);
+    // 策略先定：只有聊天的 `rename` 上传可以写下载目录，其它类型/策略照常走允许根。
+    const strategy = parseUploadConflictStrategy(request.nextUrl.searchParams.get("conflict"));
+    if (!strategy) {
+      return NextResponse.json({ error: "Invalid conflict strategy" }, { status: 400 });
+    }
+
+    const uploadDirectory = await getUploadDirectory(segments, {
+      allowDownloadsWrite: type === "upload" && strategy === "rename",
+    });
     if ("response" in uploadDirectory) return uploadDirectory.response;
     const { directory } = uploadDirectory;
 
@@ -196,15 +227,6 @@ export async function POST(
         return NextResponse.json({ error: validationError }, { status: 400 });
       }
       return NextResponse.json(inspectUploadTargets(directory, fileNames));
-    }
-
-    if (type !== "upload") {
-      return NextResponse.json({ error: "Invalid upload request type" }, { status: 400 });
-    }
-
-    const strategy = parseUploadConflictStrategy(request.nextUrl.searchParams.get("conflict"));
-    if (!strategy) {
-      return NextResponse.json({ error: "Invalid conflict strategy" }, { status: 400 });
     }
 
     let formData: FormData;
@@ -243,22 +265,12 @@ export async function POST(
     const errors: Array<{ name: string; error: string }> = [];
 
     for (const file of files) {
-      // rename：绝不覆盖，重名就按浏览器习惯换成 "名字 (1).ext"。
-      let finalName = file.name;
-      if (strategy === "rename") {
-        try {
-          finalName = uniqueUploadName(directory, file.name);
-        } catch (error) {
-          errors.push({ name: file.name, error: error instanceof Error ? error.message : String(error) });
-          continue;
-        }
-      }
-      const destination = path.join(directory, finalName);
       if (conflictSet.has(file.name) && strategy === "skip") {
         skipped.push(file.name);
         continue;
       }
-      if (conflictSet.has(file.name) && nonReplaceableSet.has(file.name)) {
+      // 只有「覆盖」策略才会动到已存在的目标；改名选的是空闲名字，跳过的不写，报错的提前返回。
+      if (strategy === "overwrite" && conflictSet.has(file.name) && nonReplaceableSet.has(file.name)) {
         errors.push({ name: file.name, error: "Cannot replace a directory or symbolic link" });
         continue;
       }
@@ -274,16 +286,42 @@ export async function POST(
       try {
         // Async writes: a 100MB file written synchronously would stall every
         // stream and request this process serves until the disk catches up.
+        if (strategy === "rename") {
+          // 并发上传同名文件会同时选到同一个空闲名字。写入仍是独占的（wx），
+          // 撞上 EEXIST 就重新选一个名字再试，绝不覆盖。
+          let written: string | null = null;
+          for (let attempt = 0; attempt < MAX_RENAME_ATTEMPTS && written === null; attempt += 1) {
+            const candidate = uniqueUploadName(directory, file.name);
+            try {
+              await fs.promises.writeFile(path.join(directory, candidate), bytes, { flag: "wx" });
+              written = candidate;
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+            }
+          }
+          if (written === null) throw new Error("Could not find a free file name");
+          uploaded.push(written);
+          paths.push(path.join(directory, written));
+          continue;
+        }
+
+        const destination = path.join(directory, file.name);
         if (strategy === "overwrite" && conflictSet.has(file.name)) {
           await replaceUploadFile(destination, bytes);
         } else {
           await fs.promises.writeFile(destination, bytes, { flag: "wx" });
         }
-        uploaded.push(finalName);
+        uploaded.push(file.name);
         paths.push(destination);
       } catch (error) {
         errors.push({ name: file.name, error: error instanceof Error ? error.message : String(error) });
       }
+    }
+
+    // 真的写进下载目录之后才授予读取权限：聊天里的路径要能点开预览。
+    // 请求失败、只做 upload-check、或用别的策略时都不会走到这里。
+    if (paths.length > 0 && samePath(directory, path.join(homedir(), "Downloads"))) {
+      allowFileRoot(directory);
     }
 
     return NextResponse.json(

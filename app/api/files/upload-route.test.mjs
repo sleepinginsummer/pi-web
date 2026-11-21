@@ -110,3 +110,78 @@ test("the downloads folder becomes uploadable and readable without an explicit r
   const entries = (await listed.json()).entries ?? [];
   assert.ok(entries.some((entry) => (entry.name ?? entry.path) === "chat.txt"), "chat.txt should be listed");
 });
+
+test("a missing downloads folder is created by the first upload", async (t) => {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(base, "home-missing-")));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  process.env.HOME = home;
+  const downloads = path.join(home, "Downloads");
+  assert.equal(fs.existsSync(downloads), false, "the fixture must start without Downloads");
+
+  const response = await upload(downloads, { "first.txt": "hello" }, "rename");
+  assert.equal(response.status, 200);
+  const data = await response.json();
+  assert.deepEqual(data.paths, [path.join(downloads, "first.txt")]);
+  assert.equal(fs.readFileSync(path.join(downloads, "first.txt"), "utf8"), "hello");
+});
+
+test("only a successful rename upload opens the downloads folder", async (t) => {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(base, "home-gate-")));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  process.env.HOME = home;
+  const downloads = path.join(home, "Downloads");
+  fs.mkdirSync(downloads);
+  fs.writeFileSync(path.join(downloads, "keep.txt"), "keep");
+
+  // 方向一：别的策略不给写，也不放开读取。
+  assert.equal((await upload(downloads, { "keep.txt": "x" }, "skip")).status, 403);
+  assert.equal((await upload(downloads, { "keep.txt": "x" }, "overwrite")).status, 403);
+  assert.equal((await upload(downloads, { "keep.txt": "x" }, "error")).status, 403);
+  assert.equal((await listDirectory(downloads)).status, 403);
+
+  // 方向二：upload-check 也不能先把目录放开。
+  const checked = await POST(
+    new NextRequest(`http://localhost/api/files/${encodeFilePathForApi(downloads)}?type=upload-check`, {
+      method: "POST",
+      headers: { host: "localhost", "content-type": "application/json" },
+      body: JSON.stringify({ fileNames: ["keep.txt"] }),
+    }),
+    { params: Promise.resolve({ path: encodeFilePathForApi(downloads).split("/").map(decodeURIComponent) }) },
+  );
+  assert.equal(checked.status, 403);
+  assert.equal((await listDirectory(downloads)).status, 403);
+
+  // 方向三：rename 上传本身失败（文件名非法）也不算写成功。
+  const rejected = await upload(downloads, { "../escape.txt": "x" }, "rename");
+  assert.equal(rejected.status, 400);
+  assert.equal((await listDirectory(downloads)).status, 403);
+
+  // 真的写进去之后才放开读取。
+  const written = await upload(downloads, { "chat.txt": "hello" }, "rename");
+  assert.equal(written.status, 200);
+  assert.equal((await listDirectory(downloads)).status, 200);
+});
+
+test("rename writes beside a same-named directory instead of failing", async (t) => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(base, "dir-conflict-")));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  allowFileRoot(root);
+  fs.mkdirSync(path.join(root, "notes"));
+  fs.symlinkSync(path.join(root, "notes"), path.join(root, "link"));
+
+  const response = await upload(root, { notes: "dir name" }, "rename");
+  assert.equal(response.status, 200);
+  const data = await response.json();
+  assert.deepEqual(data.errors, []);
+  assert.deepEqual(data.uploaded, ["notes (1)"]);
+  assert.equal(fs.readFileSync(path.join(root, "notes (1)"), "utf8"), "dir name");
+  assert.equal(fs.statSync(path.join(root, "notes")).isDirectory(), true);
+
+  const link = await upload(root, { link: "symlink name" }, "rename");
+  assert.deepEqual((await link.json()).uploaded, ["link (1)"]);
+
+  // 覆盖策略仍然拒绝替换目录与符号链接。
+  const refused = await upload(root, { notes: "nope" }, "overwrite");
+  assert.equal(refused.status, 207);
+  assert.match((await refused.json()).errors[0].error, /directory or symbolic link/);
+});
