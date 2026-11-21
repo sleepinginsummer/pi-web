@@ -84,6 +84,8 @@ import {
 import { getToolExecutionProgress } from "@/lib/tool-execution-progress";
 import type { SessionListRefreshRequest } from "@/lib/session-list-refresh-coordinator";
 const SESSION_CONTEXT_PAGE_SIZE = 50;
+/** 单页历史的期限：服务端卡住时不能让顶部一直停在「加载中」，超时按失败处理，按钮可重试。 */
+const EARLIER_PAGE_TIMEOUT_MS = 30_000;
 /** 大纲跳转的按需翻页：页更大、页数更宽，才能从当前页一路走到会话第一轮。 */
 const JUMP_PAGE_SIZE = 200;
 const MAX_JUMP_PAGES = 200;
@@ -1107,11 +1109,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       : current);
 
     try {
-      const result = await fetchSessionContext(sid, controller.signal, {
-        before,
-        tail: SESSION_CONTEXT_PAGE_SIZE,
-        skipCache: true,
-      });
+      const result = await fetchSessionContext(
+        sid,
+        AbortSignal.any([controller.signal, AbortSignal.timeout(EARLIER_PAGE_TIMEOUT_MS)]),
+        { before, tail: SESSION_CONTEXT_PAGE_SIZE, skipCache: true },
+      );
       const currentRequest = backfillRequestRef.current;
       if (
         result.kind !== "loaded"

@@ -266,7 +266,9 @@ test("历史分页按游标串行前插并拒绝重复 entryId", () => {
   );
 
   assert.match(paginationSource, /const before = page\.oldestEntryId/);
-  assert.match(paginationSource, /fetchSessionContext\(sid, controller\.signal, \{[\s\S]*?before,/);
+  // 单页请求带期限：服务端卡住时顶部不能一直停在「加载中」。
+  assert.match(paginationSource, /AbortSignal\.any\(\[controller\.signal, AbortSignal\.timeout\(EARLIER_PAGE_TIMEOUT_MS\)\]\)/);
+  assert.match(paginationSource, /\{ before, tail: SESSION_CONTEXT_PAGE_SIZE, skipCache: true \}/);
   assert.match(paginationSource, /page\.loading/);
   assert.match(paginationSource, /result\.snapshot\.entryIds\.some\(\(id\) => existingIds\.has\(id\)\)/);
   assert.match(paginationSource, /setMessages\(\(current\) => \{[\s\S]*?\.\.\.result\.snapshot\.messages, \.\.\.current/);

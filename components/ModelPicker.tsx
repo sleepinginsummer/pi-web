@@ -314,16 +314,13 @@ export const ModelPicker = memo(function ModelPicker({
           <line x1="1" y1="9" x2="4" y2="9" /><line x1="1" y1="14" x2="4" y2="14" />
         </svg>}
         <span style={{ flex: 1, overflow: "hidden", minWidth: 0, lineHeight: isMobile ? "14px" : undefined }}>
-          {variant === "toolbar" && isMobile && value && currentModelName ? (
-            <>
-              <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{value.provider}/</span>
-              <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{currentModelName}</span>
-            </>
-          ) : (
-            <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {currentName}
-            </span>
-          )}
+          {/* 移动端整段两行：`provider/model · provider` 当作一句话换行，
+              不要把 provider 单独占一行（第一行只装得下 "magpie/" 就浪费了）。 */}
+          <span style={variant === "toolbar" && isMobile
+            ? { display: "-webkit-box", WebkitBoxOrient: "vertical", WebkitLineClamp: 2, overflow: "hidden", overflowWrap: "anywhere" }
+            : { display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {currentName}
+          </span>
         </span>
         {variant === "field" && <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0, color: "var(--text-dim)" }}><polyline points="6 9 12 15 18 9" /></svg>}
       </button>

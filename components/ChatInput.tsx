@@ -2273,9 +2273,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           }}>
             {/* 工具组：窄屏键盘打开时会被收起，主操作不在这一组里。 */}
             <div className="chat-input-controls-tools" style={{ flex: isMobile ? "1 1 auto" : "1 1 auto", minWidth: 0, display: "flex", alignItems: "center", gap: 2 }}>
-              {/* 图片附件按钮：用 <label htmlFor> 原生触发，避免 JS click() 在移动端被浏览器拦截 */}
-              <label
-                htmlFor="chat-attach-input"
+              {/* 图片附件按钮：点击时在同一次用户手势里直接 input.click()。
+                  不用 <label htmlFor>：原生标签激活会先挪焦点，手机上等于收/开一次键盘，
+                  视口一变整棵聊天重排，选择框要等主线程空下来才弹（长会话里就是几秒、甚至弹不出）。
+                  pointerdown 上 preventDefault 让焦点留在原处，手势直接交给文件选择。 */}
+              <button
+                type="button"
+                aria-label={t(onAttachFiles ? "chat.attachFiles" : "chat.attachImage")}
+                onClick={() => fileInputRef.current?.click()}
+                onPointerDown={(event) => event.preventDefault()}
                 title={t(onAttachFiles ? "chat.attachFiles" : "chat.attachImage")}
                 style={{
                   flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
@@ -2300,7 +2306,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   <circle cx="8.5" cy="8.5" r="1.5" />
                   <polyline points="21 15 16 10 5 21" />
                 </svg>
-              </label>
+              </button>
               <ModelPicker
                 isMobile={isMobile}
                 options={modelPickerOptions}

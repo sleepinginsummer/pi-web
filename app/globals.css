@@ -3613,20 +3613,24 @@ span.token.table {
   bottom: calc(100% + 6px);
   right: 0;
   z-index: 60;
-  width: min(300px, calc(100vw - 32px));
+  /* 一排就够：按钮直接排进菜单这一行，只有窄屏放不下时才折行。
+     width 用 max-content —— auto 会按「更多」按钮那 60px 的定位父级算可用宽度，每行只排一个。 */
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  width: max-content;
+  max-width: min(calc(100vw - 16px), 420px);
   padding: 6px;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--bg-panel);
   box-shadow: 0 8px 24px #0003;
 }
+/* 两组只是语义分组，布局上并入菜单那一行。 */
 .mobile-controls-actions, .mobile-controls-preferences {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px;
+  display: contents;
 }
-.mobile-controls-actions:not(:empty) + .mobile-controls-preferences { border-top: 1px solid var(--border); }
 .mobile-controls-actions > button,
 .mobile-controls-actions > div > button,
 .mobile-controls-preferences > button { min-height: 44px; min-width: 44px; }

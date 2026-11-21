@@ -416,7 +416,9 @@ export const RunControls = memo(function RunControls({ isMobile, isStreaming, sh
               </div>
             )}
 
-            {isStreaming && (
+            {/* 压缩期间只有「停止压缩」那一个红方块：压缩本身已经把运行卡住，
+                再摆一个一模一样的 Stop 只会让人点错。 */}
+            {isStreaming && !isCompacting && (
               <>
                 <button
                 onClick={onAbort}

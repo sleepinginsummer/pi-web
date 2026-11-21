@@ -204,3 +204,14 @@ test("names every preset from one i18n source in the chip and the menu", async (
   // 说明和名字重复（例如"不使用工具"）时不再重复一行。
   assert.match(source, /desc !== name &&/);
 });
+
+test("compacting shows one stop control, not two", () => {
+  // 压缩期间只留「停止压缩」：原来压缩 + 运行中会同时画出两个一模一样的红方块。
+  const compacting = renderControls(false, { isStreaming: true, isCompacting: true });
+  assert.match(compacting, /aria-label="Stop compaction"/);
+  assert.doesNotMatch(compacting, /aria-label="Stop agent"/);
+
+  const running = renderControls(false, { isStreaming: true, isCompacting: false });
+  assert.match(running, /aria-label="Stop agent"/);
+  assert.doesNotMatch(running, /aria-label="Stop compaction"/);
+});

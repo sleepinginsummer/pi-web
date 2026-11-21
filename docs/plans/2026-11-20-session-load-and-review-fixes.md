@@ -548,3 +548,20 @@ hooks/useAgentSession.ts:3462   missing: handleCompact, opts.chatInputRef, sessi
 **可选优化**（采纳）：`rename` 跳过 `inspectUploadTargets()`，每份附件少一次同步 `lstat`。
 
 验证：全量见提交信息；`lib/markdown.test.mjs` 47 条、`app/api/files/upload-route.test.mjs` 7 条。
+
+## 26. 真机反馈（merge.31 上）——5 个问题
+
+1. **点附件按钮要等很久才弹选择框、有时弹不出**（确认）。附件按钮是 `<label htmlFor>`：原生标签激活先挪焦点，
+   手机上等于收/开一次键盘，`useViewportHeight` 一变整棵聊天重排，选择框要等主线程空下来。
+   改成 `<button>` + `input.click()`，`onPointerDown` 里 `preventDefault()` 保住焦点。
+2. **移动端上传不了**：与 1 同源（选择框都没弹出来），不是上传接口的问题。
+3. **压缩期间两个 Stop**（确认）。`RunControls` 里「停止压缩」和「Stop」同时命中，两个都是一模一样的红方块。
+   压缩时只留「停止压缩」。
+4. **顶部一直「加载中」**（确认可能）。历史分页请求没有期限，服务端一卡就永久停在加载中
+   （开发服这次也真的卡死过一次）。加 30 秒期限，超时走既有 `finally` 清 loading，按钮可重试。
+5. **模型名第一行浪费、名字被截断**（确认）。移动端把 `provider/` 单独渲染成第一行，第二行再放模型名，
+   结果第一行只有 "magpie/"。改成一整段两行（`-webkit-line-clamp: 2`）：实测
+   `magpie/DeepSeek-V4.1-Flash · deepseek365` 排成「magpie/DeepSeek-V4.1-Flash ·」/「deepseek365」，不省略。
+6. **「更多」排成两行**（确认，用户要求一行）。`width: auto` 在 60px 宽的定位父级里每行只排一个按钮；
+   改 `width: max-content` + `max-width: min(100vw - 16px, 420px)`，两组容器改 `display: contents`。
+   实测 400px 视口：332×58，一行 6 个按钮，不溢出；运行中也只有一个「停止」。
