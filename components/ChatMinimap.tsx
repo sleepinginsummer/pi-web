@@ -937,13 +937,39 @@ export const ChatMinimap = memo(function ChatMinimap({
 
   useEffect(() => () => cancelPreviewHide(), [cancelPreviewHide]);
 
+  /** 抽屉是否已经落位：只在打开时定位一次，之后用户自己滚动不再被拉回去。 */
+  const sheetSettledRef = useRef(false);
+
+  /** 把列表滚到「让这一行居中」，只动列表自己的 scrollTop（不惊动背后的对话）。 */
+  const centerPreviewItem = useCallback((list: HTMLDivElement, item: HTMLElement) => {
+    const listRect = list.getBoundingClientRect();
+    const itemRect = item.getBoundingClientRect();
+    list.scrollTop += itemRect.top - listRect.top - (listRect.height - itemRect.height) / 2;
+  }, []);
+
   // 刚打开大纲时把当前所在轮滚进可视区，方便直接看到上下文位置。
   useEffect(() => {
     if (!previewOpen || activeIndex === null || searchQuery.trim()) return;
     const targetItem = previewItemRefs.current.get(activeIndex);
     if (!targetItem) return;
+    const list = previewListRef.current;
+    if (variant === "sheet" && list) {
+      centerPreviewItem(list, targetItem);
+      sheetSettledRef.current = true;
+      return;
+    }
     targetItem.scrollIntoView({ block: "nearest" });
-  }, [activeIndex, previewOpen, searchQuery]);
+  }, [activeIndex, previewOpen, searchQuery, variant, centerPreviewItem]);
+
+  // 抽屉打开时先落到最后：手机上一屏只放得下几轮，停在第一轮等于什么都没看到。
+  // 活动轮还没测出来（或它在未加载区、没有对应行）时才用末尾兜底。
+  useEffect(() => {
+    if (variant !== "sheet" || !previewOpen || searchQuery.trim() || sheetSettledRef.current) return;
+    const list = previewListRef.current;
+    if (!list || list.scrollHeight <= list.clientHeight) return;
+    list.scrollTop = list.scrollHeight;
+    sheetSettledRef.current = true;
+  }, [variant, previewOpen, searchQuery, allNodes.length, turnsBefore]);
 
   const toggleTurnExpanded = useCallback((turnNumber: number, isActiveLoaded: boolean) => {
     setToggledTurns((prev) => {

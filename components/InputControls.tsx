@@ -590,14 +590,11 @@ export const InputControls = memo(function InputControls({
   // Stop 在运行结束时被 Compact/工具按钮替换，结束后的短时间内的点击视为误触。
   const isStrayClick = useRunEndStrayClick(isStreaming);
 
-  // 移动端：输入框下方只留运行控制与暂存库；「更多」在输入框右上方（见 MobileComposerMenu）。
+  // 移动端：输入行只留暂存库。Stop / 压缩都在「更多」里——它们贴着手边，暴露在外
+  // 一路滑动就容易误触，停掉一次运行或触发一次压缩。
   if (isMobile) {
     return (
       <div style={{ flex: "0 0 auto", display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 2 }}>
-        {(isStreaming || isCompacting) && (
-          <RunControls isMobile isStreaming={isStreaming} showLabel={false} onCompact={onCompact}
-            onAbortCompaction={onAbortCompaction} isCompacting={isCompacting} onAbort={onAbort} isStrayClick={isStrayClick} />
-        )}
         {endAction}
       </div>
     );
@@ -683,6 +680,9 @@ export const MobileComposerMenu = memo(function MobileComposerMenu({
       <button type="button" className="mobile-composer-more is-compact" aria-label={t("chat.moreControls")}
         aria-expanded={open} onClick={() => setOpen((current) => !current)}>
         <Ellipsis size={17} aria-hidden="true" />{t("chat.mobileMore")}
+        {(isStreaming || isCompacting) && (
+          <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: "50%", background: isCompacting ? "#ef4444" : "var(--accent)" }} />
+        )}
       </button>
       <InputControlsMenu
         isMobile
@@ -697,18 +697,18 @@ export const MobileComposerMenu = memo(function MobileComposerMenu({
             <ToolPresetControl isMobile toolPreset={toolPreset} customToolNames={customToolNames} activeBuiltinTools={activeBuiltinTools} pinnedToolNames={pinnedToolNames} toolSelectionKnown={toolSelectionKnown} onChange={onToolPresetChange} isStrayClick={isStrayClick} disabled={isStreaming} />
           </>
         )}
-        runControls={(!isStreaming && !isCompacting) ? (
+        runControls={(
           <RunControls
             isMobile
             isStreaming={isStreaming}
             showLabel
-            onCompact={onCompact}
-            onAbortCompaction={onAbortCompaction}
+            onCompact={onCompact && (() => { setOpen(false); onCompact(); })}
+            onAbortCompaction={onAbortCompaction && (() => { setOpen(false); onAbortCompaction(); })}
             isCompacting={isCompacting}
-            onAbort={onAbort}
+            onAbort={() => { setOpen(false); onAbort(); }}
             isStrayClick={isStrayClick}
           />
-        ) : null}
+        )}
         preferenceControls={(
           <PreferenceToggles
             isMobile

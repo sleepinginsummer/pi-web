@@ -71,7 +71,7 @@ function renderOpenMobileMenu() {
 }
 
 test("the phone's More trigger lives above the input, not in the bottom row", () => {
-  // 输入框下方那一行只留运行控制与暂存库：模型名称、思考强度、Stop 才排得开。
+  // 输入框下方那一行只留暂存库：模型名称、思考强度、Stop 都在别的行或「更多」里。
   const row = renderControls(true);
   assert.doesNotMatch(row, /aria-label="More controls"/);
 
@@ -103,10 +103,30 @@ test("Fast switch renders for an available desktop model", () => {
 });
 
 
-test("stop remains directly available during a mobile run", () => {
-  const html = renderControls(true, { isStreaming: true });
-  assert.match(html, /class="mobile-composer-stop"/);
-  assert.doesNotMatch(html, /class="mobile-controls-menu"/);
+test("Stop is out of the phone's input row and behind the More trigger", async () => {
+  // 贴着手边的 Stop 一路滑动就会误触（停掉一次运行），所以它只在「更多」里。
+  const row = renderControls(true, { isStreaming: true });
+  assert.doesNotMatch(row, /mobile-composer-stop/);
+  assert.doesNotMatch(row, /aria-label="Stop Agent"/);
+  assert.doesNotMatch(row, /class="mobile-controls-menu"/);
+
+  // 运行中「更多」亮一个点，否则 Stop 藏进去后看不出还在跑。
+  const trigger = renderToStaticMarkup(
+    React.createElement(I18nProvider, null,
+      React.createElement(MobileComposerMenu, { ...sharedProps, isStreaming: true })),
+  );
+  assert.match(trigger, /border-radius:50%/);
+  const idleTrigger = renderToStaticMarkup(
+    React.createElement(I18nProvider, null,
+      React.createElement(MobileComposerMenu, { ...sharedProps })),
+  );
+  assert.doesNotMatch(idleTrigger, /border-radius:50%/);
+
+  // 菜单里的运行控制不再按运行状态隐藏：空闲给压缩，运行中给停止。
+  const source = await readFile(new URL("./InputControls.tsx", import.meta.url), "utf8");
+  const menu = source.slice(source.indexOf("export const MobileComposerMenu"), source.indexOf("interface ComposerTopUtilitiesProps"));
+  assert.match(menu, /runControls=\{\(\s*<RunControls/);
+  assert.ok(!menu.includes("(!isStreaming && !isCompacting) ? ("), "运行控制不该被运行状态藏起来");
 });
 
 test("keeps the tool preset visible but locked during a run", () => {
