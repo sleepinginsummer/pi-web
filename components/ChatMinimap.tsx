@@ -7,8 +7,8 @@ import {
   markdownPreviewRemarkPlugins,
   normalizeDisplayMath,
 } from "@/lib/markdown";
-import { wakeMessageTitle } from "@/lib/wake-message-title";
 import { hasTurnRef, isHiddenCustomMessage, splitFinalAssistantBlocks } from "@/lib/message-display";
+import { isWakeMessageType } from "@/lib/wake-message-types";
 import { cachedHasOutlineHeadings, hasOutlineHeadings, joinAnswerBlocks } from "@/lib/outline-headings";
 import { loadMinimapPreviewLocked, saveMinimapPreviewLocked } from "@/lib/minimap-preview-lock";
 import type { SessionOutlineResponse, SessionOutlineTurn } from "@/lib/session-outline-types";
@@ -79,17 +79,23 @@ interface NodeInfo {
   turnNumber: number;
 }
 
+/**
+ * 这一轮是不是后台命令 / 定时任务的唤醒轮次。
+ *
+ * 它们会开新的一轮（`display: true` + 轮次锚点），但不是用户提问；大纲只列用户提问，
+ * 判定来自 `lib/wake-message-types.ts`，和 `lib/session-outline.ts` 共用同一份。
+ */
+export function isWakeTurnAnchor(message: UserMessage | CustomMessage): boolean {
+  return message.role === "custom" && isWakeMessageType(message.customType);
+}
+
 function getUserPreview(message: UserMessage | CustomMessage): string {
-  const text = typeof message.content === "string"
-    ? message.content.trim()
-    : message.content
-      .filter((block): block is TextContent => block.type === "text")
-      .map((block) => block.text)
-      .join("\n")
-      .trim();
-  // 后台命令 / 定时任务的唤醒正文是给模型看的，大纲只显示列表里那个标题。
-  const title = message.role === "custom" ? wakeMessageTitle(message.customType, text) : null;
-  return title ?? text;
+  if (typeof message.content === "string") return message.content.trim();
+  return message.content
+    .filter((block): block is TextContent => block.type === "text")
+    .map((block) => block.text)
+    .join("\n")
+    .trim();
 }
 
 /** Tool calls in one assistant message. A reply can both answer and call
@@ -995,8 +1001,9 @@ export const ChatMinimap = memo(function ChatMinimap({
   }, [normalizedQuery, unloadedOutlineTurns]);
 
   const filteredLoadedNodes = useMemo(() => {
-    if (!normalizedQuery) return allNodes;
-    return allNodes.filter((node) => {
+    const userNodes = allNodes.filter((node) => !isWakeTurnAnchor(node.targetTurn.userMessage));
+    if (!normalizedQuery) return userNodes;
+    return userNodes.filter((node) => {
       const userText = isHiddenCustomMessage(node.targetTurn.userMessage)
         ? t("chatMinimap.extensionTurn", { type: (node.targetTurn.userMessage as CustomMessage).customType })
         : getUserPreview(node.targetTurn.userMessage);

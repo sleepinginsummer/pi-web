@@ -21,7 +21,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { AssistantOutline, ChatMinimap, cachedAssistantAnswer, canLocateAnswerHeadings, getAssistantAnswer, getAssistantAnswerMarkdown } = await jiti.import("./ChatMinimap.tsx");
+const { isWakeTurnAnchor, AssistantOutline, ChatMinimap, cachedAssistantAnswer, canLocateAnswerHeadings, getAssistantAnswer, getAssistantAnswerMarkdown } = await jiti.import("./ChatMinimap.tsx");
 const { I18nProvider } = await jiti.import("@/hooks/useI18n");
 const source = await readFile(new URL("./ChatMinimap.tsx", import.meta.url), "utf8");
 const bodySource = await readFile(new URL("./MarkdownBody.tsx", import.meta.url), "utf8");
@@ -339,4 +339,14 @@ test("待定位目标按当前 DOM 量，不用缓存偏移", async () => {
   const scrollToNode = source.slice(source.indexOf("const scrollToNode = useCallback"), source.indexOf("const scrollToHeading = useCallback"));
   assert.match(scrollToNode, /elementScrollTop\(scrollEl, findTurnElement\(scrollEl, node\.targetTurn\.entryId\)\)/);
   assert.ok(scrollToNode.indexOf("elementScrollTop") < scrollToNode.indexOf("?? node.targetTurn.scrollTop"), "DOM 在前，缓存偏移在后");
+});
+
+test("后台命令与定时任务的唤醒轮次不进大纲", () => {
+  const wake = (customType) => ({ role: "custom", customType, content: "x" });
+  assert.equal(isWakeTurnAnchor(wake("pi-web:background-command")), true);
+  assert.equal(isWakeTurnAnchor(wake("pi-web:scheduled-task")), true);
+  // 用户提问、子代理回报、隐藏的自定义消息照旧进大纲。
+  assert.equal(isWakeTurnAnchor({ role: "user", content: "问题" }), false);
+  assert.equal(isWakeTurnAnchor(wake("pi-web:subagent-report")), false);
+  assert.equal(isWakeTurnAnchor(wake(undefined)), false);
 });

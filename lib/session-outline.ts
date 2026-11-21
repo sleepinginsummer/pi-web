@@ -4,7 +4,7 @@ import { hasOutlineFinalAnswer, pickOutlineFinalAssistant } from "./outline-fina
 import { extractOutlineHeadings, joinAnswerBlocks, outlineHeadingsFromBlocks, scanOutlineLines, stripInlineMarkdown } from "./outline-headings";
 import { readIndexedBranchOutlineRecords, readIndexedOutlineIdentity } from "./session-content-index";
 import { turnAnchorShape } from "./session-turns";
-import { wakeMessageTitle } from "./wake-message-title";
+import { isWakeMessageType } from "./wake-message-types";
 import type { AssistantMessage, SessionEntry, TextContent } from "./types";
 
 import type { OutlineHeading, SessionOutlineTurn } from "./session-outline-types";
@@ -92,13 +92,11 @@ function extractEntryAnchorText(entry: SessionEntry): {
     }
     const hiddenAnchor = entry.display !== true;
     const customType = typeof entry.customType === "string" ? entry.customType : undefined;
-    // 唤醒消息的正文是给模型看的（标题 + 命令行 + 输出尾巴）：大纲改用列表里那个标题。
-    const wakeTitle = wakeMessageTitle(customType, text);
     return {
       kind: "custom",
       customType,
       ...(hiddenAnchor ? { hiddenAnchor: true } : {}),
-      text: truncateText(wakeTitle ?? text, MAX_USER_TEXT_CHARS),
+      text: truncateText(text, MAX_USER_TEXT_CHARS),
     };
   }
   if (entry.type === "message" && entry.message && "content" in entry.message) {
@@ -144,6 +142,18 @@ function extractFinalAssistantHeadings(entry: SessionEntry | null): OutlineHeadi
   return outlineHeadingsFromBlocks(extractFinalAssistantBlocks(entry), MAX_HEADINGS_PER_TURN);
 }
 
+/**
+ * 这一轮该不该出现在大纲里。
+ *
+ * 后台命令、定时任务的唤醒消息也会开一轮（它们带 `display: true` 并锚定新轮次），但那不是
+ * 用户提问：把这些行铺进大纲只会把真正的问题挤下去。过滤放在配对**之后**——配对仍然按
+ * 原始锚点逐轮算 `finalAssistant`，否则被跳过那一轮的回答会算到上一个用户提问头上。
+ * 轮次编号保留原值（会有空号），和正文里的轮次分组对得上。
+ */
+export function isOutlineUserTurn(customType: string | undefined): boolean {
+  return !isWakeMessageType(customType);
+}
+
 export function buildOutlineTurnsFromPairs(
   pairs: ReadonlyArray<{ turnNumber: number; anchor: SessionEntry; finalAssistant: SessionEntry | null }>,
 ): SessionOutlineTurn[] {
@@ -161,7 +171,7 @@ export function buildOutlineTurnsFromPairs(
       answerSummary: extractOutlineSummary(answerMarkdown),
       headings: extractFinalAssistantHeadings(finalAssistant),
     };
-  });
+  }).filter((turn) => isOutlineUserTurn(turn.customType));
 }
 
 /** 从内存中的完整 SessionEntry 列表（运行中 live 会话）构建活动分支全量大纲。 */

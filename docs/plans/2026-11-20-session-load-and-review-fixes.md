@@ -628,3 +628,21 @@ hasMore:false`，且只作用于同一会话）。普通翻页和大纲跳转都
    `lib/wake-message-title.ts`：后台命令取 `label`（没有就用命令行首行），定时任务取任务名；
    服务端大纲（`extractEntryAnchorText`）与前端已加载轮次/搜索（`getUserPreview`）共用这一份，
    两处口径一致。
+
+## 31. 大纲只列用户提问（merge.40）
+
+用户要求：大纲里不要出现后台命令和定时任务的轮次。
+
+- 过滤放在**配对之后**（`buildOutlineTurnsFromPairs` 的末尾）。唤醒消息也会开一轮，如果先把它
+  从锚点里剔掉，它之后那段回答会被算进上一个用户提问的 `finalAssistant`，摘要和标题就串了。
+- 轮次编号保留原值，所以会出现空号（如 1、4）；这样和正文里的轮次分组对得上。
+- 客户端侧（已加载轮次 + 搜索）用同一个判定 `isWakeTurnAnchor()`；服务端大纲与客户端共用
+  `lib/wake-message-types.ts` 的 `isWakeMessageType()`。
+- merge.39 加的 `lib/wake-message-title.ts`（把唤醒正文换成标题）随之删除：行都不显示，
+  标题不再有意义。删除时发现一个真 bug——把判定从 `lib/session-outline.ts` 导入客户端组件，
+  会把服务端会话索引（连带 pi SDK 的 jiti、`v8`）拖进浏览器包，dev 直接 500。
+  `npm test` 抓不到这类问题（不打客户端包），是 dev 页面报错才暴露的。
+
+验证：`lib/session-outline.test.mjs` 覆盖「用户轮 + 后台命令 + 定时任务 + 用户轮 → 大纲只剩 1 和 4，
+且第一轮的最终回答仍是它自己的」；`components/ChatMinimap.test.mjs` 覆盖 `isWakeTurnAnchor`；
+dev 400px 实测某会话（5 条用户消息 + 1 条后台命令）：大纲 5 行、`Background command` 0 行。
