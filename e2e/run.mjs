@@ -462,7 +462,9 @@ try {
     await page.getByText("E2E final answer", { exact: true }).waitFor();
     const processDetails = page.getByRole("button", { name: /^Process details/ });
     const thinking = page.getByRole("button", { name: /^Thinking/ });
-    assert.equal(await processDetails.count(), 1);
+    // 正文段落把这一轮的过程详情切成三组：工具调用前、工具输出与「过程说明」之间、答复前的最后一段思考。
+    const processGroupCount = await processDetails.count();
+    assert.equal(processGroupCount, 3);
     assert.equal(await thinking.count(), 0, "All thinking stays inside process details");
     const finalMessage = page.locator("[data-entry-id='answer']");
     const tables = finalMessage.last().locator(".markdown-table-wrap");
@@ -491,7 +493,7 @@ try {
     assert.equal(await finalMessage.getByRole("button", { name: /^Thinking/ }).count(), 0);
     assert.equal(await finalMessage.getByText("test/E2E Model", { exact: true }).count(), 1);
     assert.equal(thinkingRequests.length, 0);
-    await processDetails.click();
+    for (let index = 0; index < processGroupCount; index++) await processDetails.nth(index).click();
     assert.equal(await thinking.count(), 3);
     assert.equal(await thinking.last().innerText(), "E2E final reasoning");
     assert.equal(thinkingRequests.length, 0);
@@ -500,7 +502,8 @@ try {
       await page.getByText(text, { exact: false }).waitFor();
     }
     assert.equal(thinkingRequests.length, 3);
-    const processText = await processDetails.locator("..").innerText();
+    // 过程详情分成多组后不再共用一个容器：按整段对话的顺序核对时间线。
+    const processText = await page.locator("[data-chat-scroll-container]").innerText();
     assert.ok(processText.indexOf("E2E intermediate reasoning") < processText.indexOf("echo E2E tool output"));
     assert.ok(processText.indexOf("echo E2E tool output") < processText.indexOf("E2E follow-up reasoning"));
     assert.ok(processText.indexOf("E2E follow-up reasoning") < processText.indexOf("E2E process note"));
