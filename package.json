@@ -30,6 +30,8 @@
     "!.next/cache",
     "!.next/dev",
     "!.next/**/*.js.map",
+    "!.next/trace",
+    "!.next/types",
     "public",
     "scripts",
     "lib/pi-sdk-extension-cache-patch.mjs",
