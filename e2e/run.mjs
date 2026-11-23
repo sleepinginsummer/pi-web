@@ -531,7 +531,10 @@ try {
       const earlierTurn = preview.getByRole("button", { name: "E2E prompt outside the compacted page", exact: true });
       await earlierTurn.waitFor();
       await earlierTurn.click();
-      await preview.getByText("E2E compacted heading", { exact: true }).first().waitFor();
+      // 这一轮在压缩卡片处结束（压缩本身是一个未列的合成轮次），所以大纲里只有提问、没有答复摘要；
+      // 「跳到对话」仍在，能把这一轮带进正文。
+      assert.equal(await preview.locator("[data-minimap-outline-entry]").count(), 1);
+      await preview.getByRole("button", { name: "Jump to chat", exact: true }).waitFor();
       await page.screenshot({ path: join(artifacts, "compaction-minimap.png") });
 
       const selectSession = async (title, entryId) => {
@@ -579,7 +582,8 @@ try {
       await olderMessage.waitFor({ state: "visible" });
       await positionForReading(olderMessage);
       await selectSession("Render **E2E markdown**", "user");
-      const process = page.getByRole("button", { name: /process details/i });
+      // 一轮的过程详情按正文段落分成多组，这里只关心「折叠状态在重新挂载后回到默认」。
+      const process = page.getByRole("button", { name: /process details/i }).first();
       await process.click();
       const answerHeading = page.getByRole("heading", { name: "E2E reading position", exact: true });
       await positionForReading(answerHeading);
