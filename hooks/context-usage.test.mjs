@@ -28,6 +28,8 @@ function setup() {
     fetch: (url) => { const request = Promise.withResolvers(); requests.push({ ...request, url }); return request.promise; },
     agentStatusUrl: (sid) => `/api/agent/${sid}?systemPrompt=0`, setLiveTotalActiveMs() {},
     syncLiveModel() {}, setIsCompacting() {}, setAutoCompactionEnabled() {}, setQueuedMessages() {},
+    // 队列显示走唯一写入口（界面状态 + 错误页读的镜像）。
+    updateQueuedMessages() {},
     // applyRuntimeState 也把正在跑的扩展命令写回顶栏提示。
     setRunningCommands() {},
     // applyRuntimeState 也会把扩展绑定状态交给唯一状态机（新会话等待态）。
@@ -37,6 +39,7 @@ function setup() {
     // 运行态快照按读取坐标投影：迟到的不覆盖实时队列、压缩与思考强度。
     runtimeReadSeqRef: { current: 0 }, queueStateGenerationRef: { current: 0 },
     compactionEpochRef: { current: 0 }, lastAppliedRuntimeSeqRef: { current: 0 },
+    lastAppliedQueueSeqRef: { current: 0 }, lastAppliedThinkingSeqRef: { current: 0 },
     runtimeThinkingLevelSessionRef: { current: null }, thinkingChoiceRevisionRef: { current: 0 },
     runtimeBusySnapshotRef: { current: null },
   });

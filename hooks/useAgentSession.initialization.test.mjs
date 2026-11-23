@@ -33,7 +33,7 @@ test("并发初始化复用 SSE，断线和显式关闭后重新建立连接", a
   const connect = new Function(
     "useCallback", "EventSource", "createStreamSource", "STREAM_OPEN", "STREAM_CLOSED",
     "eventStreamConnectionRef", "eventSourceRef", "closeEvents",
-    "EVENT_STREAM_CONNECT_TIMEOUT_MS", "fetchRuntimeState", "applyRuntimeState",
+    "EVENT_STREAM_CONNECT_TIMEOUT_MS", "fetchRuntimeState", "applyRuntimeState", "beginRuntimeRead", "applyRuntimeSnapshot",
     "sessionIdRef", "handleAgentEventRef", "agentRunningRef",
     `${compiled}\nreturn connectEvents;`,
   )(
@@ -41,6 +41,9 @@ test("并发初始化复用 SSE，断线和显式关闭后重新建立连接", a
     FakeEventSource.OPEN, FakeEventSource.CLOSED,
     connectionRef, eventSourceRef, closeEvents,
     1000, async () => ({ state: undefined }), () => {},
+    // 建连补读走统一坐标：这里只需要它被调用，投影本身由 applyRuntimeSnapshot 覆盖。
+    () => ({ seq: 1, queueGeneration: 0, compactionEpoch: 0, thinkingRevision: 0 }),
+    () => {},
     { current: "session-1" }, { current: null }, { current: false },
   );
   try {

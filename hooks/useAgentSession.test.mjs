@@ -505,7 +505,7 @@ test("refreshes Shadow runtime state after a cold SSE connection becomes ready",
 
   assert.match(
     connector,
-    /event\.type === "connected"[\s\S]*?fetchRuntimeState\(sid, controller\.signal\)[\s\S]*?applyRuntimeState\(snapshot\.state, undefined, \{\s*queue: queueStateGenerationRef\.current === queueGeneration && isNewest,\s*compaction: compactionEpochRef\.current === compactionEpoch && isNewest,[\s\S]*?thinking: isNewest && thinkingChoiceRevisionRef\.current === thinkingRevision,?\s*\}\)/,
+    /event\.type === "connected"[\s\S]*?const connectRead = beginRuntimeRead\(\);[\s\S]*?fetchRuntimeState\(sid, controller\.signal\)[\s\S]*?applyRuntimeSnapshot\(connectRead, snapshot\.state\)/,
   );
   assert.match(connector, /eventSourceRef\.current === es && sessionIdRef\.current === sid/);
 });
@@ -532,14 +532,22 @@ test("历史页缓存仅在会话版本和 leaf 均与 context 响应一致时�
 test("每一次运行态快照都按读取坐标投影，迟到的快照不覆盖实时队列", () => {
   // 统一的边界：坐标在发请求之前取，回来时用它判断哪些字段已被更新的实时事件取代。
   assert.match(source, /const beginRuntimeRead = useCallback\(\(\): RuntimeRead => \(\{/);
-  assert.match(source, /queue: queueStateGenerationRef\.current === read\.queueGeneration && newest,/);
+  // 每个字段各记一份已采纳序号：只更新档位的补读不能把队列/压缩也判成过期。
+  assert.match(source, /const lastAppliedQueueSeqRef = useRef\(0\);/);
+  assert.match(source, /const lastAppliedThinkingSeqRef = useRef\(0\);/);
+  assert.match(source, /const queueAdopted = read\.seq > lastAppliedQueueSeqRef\.current\s*&& queueStateGenerationRef\.current === read\.queueGeneration;/);
+  assert.match(source, /const thinkingAdopted = read\.seq > lastAppliedThinkingSeqRef\.current\s*&& read\.thinkingRevision === thinkingChoiceRevisionRef\.current;/);
+  assert.match(source, /queue: queueAdopted,/);
+  assert.match(source, /if \(queueAdopted\) lastAppliedQueueSeqRef\.current = read\.seq;/);
   assert.match(source, /compaction: compactionEpochRef\.current === read\.compactionEpoch && newest,/);
-  assert.match(source, /thinking: newest && read\.thinkingRevision === thinkingChoiceRevisionRef\.current,/);
+  assert.match(source, /thinking: thinkingAdopted,/);
   // 预读改用统一坐标（不再就地算判据），建连补读就地判据也要带上档位版本。
   assert.match(source, /applyRuntimeSnapshot\(runtimeRead, snapshot\.state\)/);
   assert.match(source, /const runtimeRead = beginRuntimeRead\(\);/);
-  assert.match(source, /thinking: isNewest && thinkingChoiceRevisionRef\.current === thinkingRevision,/);
-  assert.match(source, /const thinkingRevision = thinkingChoiceRevisionRef\.current;\s*void fetchRuntimeState\(sid, controller\.signal\)/);
+  // 建连补读也走同一个入口：它说空闲同样算「最新结论」，加载结束时不会按旧预读再开回合。
+  assert.match(source, /const connectRead = beginRuntimeRead\(\);/);
+  assert.match(source, /applyRuntimeSnapshot\(connectRead, snapshot\.state\)/);
+  assert.match(source, /const connectRead = beginRuntimeRead\(\);\s*void fetchRuntimeState\(sid, controller\.signal\)/);
   // 轮询对账（运行中每几秒一次）此前无条件写队列：一次取样于入队之前的 /state 回来就会把
   // 刚显示的队列行清掉，而服务端还留着它——用户看到的就是「消息没了」。
   assert.match(source, /const read = beginRuntimeRead\(\);\s*const snapshot = await readAgentSnapshot\(sid\);/);
@@ -556,7 +564,7 @@ test("每一次运行态快照都按读取坐标投影，迟到的快照不覆�
   assert.match(source, /beforeRead: \(\) => \{ bindingPollReadRef\.current = beginRuntimeRead\(\); \}/);
   // 只有「建连补读」就地算判据：它没有加载自己的队列表，但要带加载期间的队列代次。
   const raw = [...source.matchAll(/applyRuntimeState\(snapshot\.state, undefined, \{/g)];
-  assert.equal(raw.length, 1, "建连补读之外，运行态快照都必须走 applyRuntimeSnapshot");
+  assert.equal(raw.length, 0, "运行态快照都必须走 applyRuntimeSnapshot");
 });
 
 test("迟到的 /state 不覆盖后来入队的队列行", async () => {
@@ -579,6 +587,7 @@ test("迟到的 /state 不覆盖后来入队的队列行", async () => {
     sessionIdRef: { current: "s1" },
     setIsCompacting() {},
     setQueuedMessages: (value) => queueWrites.push(value),
+    updateQueuedMessages: (value) => queueWrites.push(value),
     normalizeQueuedMessages: (value) => value ?? { steering: [], followUp: [] },
     setRunningCommands() {}, setFastEnabled() {}, setRuntimeFastAvailable() {}, applyShadowRuntimeState() {},
     setContextUsage() {}, applyContextUsage() {}, setSystemPrompt() {}, setLiveTotalActiveMs() {},
@@ -591,6 +600,8 @@ test("迟到的 /state 不覆盖后来入队的队列行", async () => {
     queueStateGenerationRef: { current: 0 },
     compactionEpochRef: { current: 0 },
     lastAppliedRuntimeSeqRef: { current: 0 },
+    lastAppliedQueueSeqRef: { current: 0 },
+    lastAppliedThinkingSeqRef: { current: 0 },
     thinkingChoiceRevisionRef: { current: 0 },
   };
   const { createContext } = await import("node:vm");
@@ -603,7 +614,7 @@ test("迟到的 /state 不覆盖后来入队的队列行", async () => {
   const read = context.beginRuntimeRead();
   sandbox.queueStateGenerationRef.current += 1;
   const parked = { steering: [], followUp: [{ text: "后续消息", images: [] }] };
-  context.setQueuedMessages(parked);
+  context.updateQueuedMessages(parked);
   // 那份旧的 /state 现在才回来：它看到的队列是空的，但不能把刚显示的队列行清掉。
   context.applyRuntimeSnapshot(read, { queuedMessages: { steering: [], followUp: [] }, thinkingLevel: "high" });
   assert.deepEqual(queueWrites, [parked], "迟到的快照不写队列");
@@ -625,6 +636,248 @@ test("迟到的 /state 不覆盖后来入队的队列行", async () => {
   assert.equal(queueWrites.at(-1), afterReconnect, "旧的对账响应不能清掉重连补读显示的队列");
 });
 
+test("队列写入同时刷新错误页的「移回」入口", async () => {
+  const ts = (await import("typescript")).default;
+  const { Script, createContext } = await import("node:vm");
+  const ast = ts.createSourceFile("useAgentSession.ts", source, ts.ScriptTarget.Latest, true);
+  function findCallback(name) {
+    function visit(node) {
+      if (ts.isVariableDeclaration(node) && node.name.getText(ast) === name) return node.initializer.arguments[0];
+      return ts.forEachChild(node, visit);
+    }
+    return visit(ast);
+  }
+  const compiled = new Script(ts.transpileModule(`(${findCallback("updateQueuedMessages").getText(ast)})`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2020 },
+  }).outputText);
+  const shown = [];
+  const blocked = [];
+  const sandbox = {
+    queuedMessagesRef: { current: { steering: [], followUp: [] } },
+    setQueuedMessages: (value) => shown.push(value),
+    setBlockedRecall: (value) => blocked.push(value),
+  };
+  const context = createContext(sandbox);
+  const update = compiled.runInContext(context);
+
+  // 普通写入（成功加载、实时 queue_update、被采纳的迟到快照都走这里）。
+  const rows = { steering: [], followUp: [{ text: "待取回", images: [] }] };
+  update(rows);
+  assert.deepEqual(shown, [rows]);
+  assert.deepEqual(sandbox.queuedMessagesRef.current, rows);
+  assert.deepEqual(blocked, [rows], "错误页入口同步拿到这批消息");
+
+  // 空队列清掉入口：另一个标签页已经取回了。
+  update({ steering: [], followUp: [] });
+  assert.deepEqual(blocked, [rows, null]);
+});
+
+test("最新一次改档失败时，按服务端实际档位回填（并受版本保护）", async () => {
+  const ts = (await import("typescript")).default;
+  const { Script, createContext } = await import("node:vm");
+  const ast = ts.createSourceFile("useAgentSession.ts", source, ts.ScriptTarget.Latest, true);
+  function findCallback(name) {
+    function visit(node) {
+      if (ts.isVariableDeclaration(node) && node.name.getText(ast) === name) return node.initializer.arguments[0];
+      return ts.forEachChild(node, visit);
+    }
+    return visit(ast);
+  }
+  const compile = (name) => new Script(ts.transpileModule(`(${findCallback(name).getText(ast)})`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2020 },
+  }).outputText);
+
+  const levels = [];
+  const changes = [];
+  const states = [];
+  const queueWrites = [];
+  const compactingWrites = [];
+  const sandbox = {
+    sessionIdRef: { current: "s1" },
+    creationSettingsLocked: false,
+    isNew: false,
+    newSessionCwd: null,
+    recommendedThinkingLevelRef: { current: null },
+    thinkingLevelOverrideRef: { current: null },
+    thinkingChoiceRevisionRef: { current: 0 },
+    thinkingChangeRequestsRef: { current: new Set() },
+    modelSelectionActions: { setThinkingLevel: (value) => levels.push(value) },
+    onPendingNewSessionEvent() {},
+    sendAgentCommand: (sid, command) => {
+      const change = Promise.withResolvers();
+      changes.push({ level: command.level, resolve: change.resolve, reject: change.reject });
+      return change.promise;
+    },
+    // 补读走只读的 /state（不会把已关闭的会话从磁盘重新拉起），并且只在页面仍挂载时发。
+    mountedRef: { current: true },
+    AbortController,
+    isThinkingLevel: (value) => typeof value === "string",
+    fetchRuntimeState: (sid) => {
+      const read = Promise.withResolvers();
+      states.push({ resolve: read.resolve, reject: read.reject });
+      return read.promise;
+    },
+    // applyRuntimeState 的依赖（真快照投影，版本校验就在里面）。
+    setIsCompacting: (value) => compactingWrites.push(value), setQueuedMessages() {},
+    updateQueuedMessages: (value) => queueWrites.push(value),
+    normalizeQueuedMessages: (value) => value ?? { steering: [], followUp: [] },
+    setRunningCommands() {}, setFastEnabled() {}, setRuntimeFastAvailable() {}, applyShadowRuntimeState() {},
+    setContextUsage() {}, applyContextUsage() {}, setSystemPrompt() {}, setLiveTotalActiveMs() {},
+    setExtensionStatuses() {}, setExtensionWidgets() {}, filterVisibleExtensionWidgets: (value) => value ?? [],
+    projectExtensionBinding: () => "bound",
+    runtimeThinkingLevelSessionRef: { current: null },
+    runtimeBusySnapshotRef: { current: null },
+    runtimeReadSeqRef: { current: 0 },
+    queueStateGenerationRef: { current: 0 },
+    compactionEpochRef: { current: 0 },
+    lastAppliedRuntimeSeqRef: { current: 0 },
+    lastAppliedQueueSeqRef: { current: 0 },
+    lastAppliedThinkingSeqRef: { current: 0 },
+  };
+  const context = createContext(sandbox);
+  context.applyRuntimeState = compile("applyRuntimeState").runInContext(context);
+  context.applyRuntimeSnapshot = compile("applyRuntimeSnapshot").runInContext(context);
+  context.beginRuntimeRead = compile("beginRuntimeRead").runInContext(context);
+  const change = compile("handleThinkingLevelChange").runInContext(context);
+
+  // 选 A=high，再选 B=low；B 写入失败，A 的确认在这之后才到（它其实已经写进服务端）。
+  const first = change("high");
+  const second = change("low");
+  changes[1].reject(new Error("写入失败"));
+  await second;
+  changes[0].resolve(null);
+  await first;
+  assert.deepEqual(levels, ["high", "low"], "失败时界面还停在一个没生效的档位");
+
+  // 在途请求结算后补读服务端档位：它读到 high，选择器回到服务端实际用的那一档。
+  for (let i = 0; i < 100 && states.length === 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(states.length, 1, "最新一次失败后补读服务端档位");
+  states[0].resolve({ state: { thinkingLevel: "high" } });
+  for (let i = 0; i < 100 && levels.at(-1) !== "high"; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(levels, ["high", "low", "high"], "选择器回到服务端实际档位");
+
+  // 补读在途时用户又改档：这次补读不能覆盖新的选择。
+  const third = change("medium");
+  changes[2].reject(new Error("写入失败"));
+  await third;
+  for (let i = 0; i < 100 && states.length < 2; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(states.length, 2, "第二次失败同样补读服务端档位");
+  const fourth = change("low");
+  changes[3].resolve(null);
+  await fourth;
+  const afterFourth = [...levels];
+  // 那次补读的响应现在才回来：版本已经被第四次选择推进，不能覆盖它。
+  states[1].resolve({ state: { thinkingLevel: "high" } });
+  for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(levels, afterFourth, "补读在版本变化后不再写入");
+
+  // 乱序：失败补读先发出、采到 high；另一标签页随后把档位改成 low，本页的重连补读先回来显示了
+  // low。失败补读最后返回时不能把它写回 high——所以补读也要和常规快照共用读取序号。
+  const fifth = change("medium");
+  changes[changes.length - 1].reject(new Error("写入失败"));
+  await fifth;
+  for (let i = 0; i < 100 && states.length < 3; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(states.length, 3, "第三次失败同样补读服务端档位");
+  assert.match(source, /if \(read\.seq <= lastAppliedThinkingSeqRef\.current\) return;/);
+  // 重连补读（后发出、先回来）显示 low。
+  context.applyRuntimeSnapshot(context.beginRuntimeRead(), { thinkingLevel: "low" });
+  const beforeStale = [...levels];
+  assert.equal(levels.at(-1), "low");
+  // 旧补读现在才回来：它采到的是 high，但不能覆盖已经显示的 low。
+  states[2].resolve({ state: { thinkingLevel: "high" } });
+  for (let i = 0; i < 30; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(levels, beforeStale, "迟到的失败补读不覆盖更新的档位");
+
+  // 反向的乱序：重连先发起读取，随后改档失败、补读先返回。补读只更新档位，就不能把整份
+  // 快照的序号也推进——否则重连快照回来时，队列与压缩状态会被误判成过期。
+  const connectRead = context.beginRuntimeRead();
+  const sixth = change("high");
+  changes[changes.length - 1].reject(new Error("写入失败"));
+  await sixth;
+  for (let i = 0; i < 100 && states.length < 4; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(states.length, 4, "第四次失败同样补读");
+  states[3].resolve({ state: { thinkingLevel: "medium" } });
+  for (let i = 0; i < 100 && levels.at(-1) !== "medium"; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(levels.at(-1), "medium", "补读先返回并回填档位");
+
+  const queuedRows = { steering: [], followUp: [{ text: "断线期间入队的消息", images: [] }] };
+  context.applyRuntimeSnapshot(connectRead, { queuedMessages: queuedRows, isCompacting: true, thinkingLevel: "high" });
+  assert.deepEqual(queueWrites.at(-1), queuedRows, "重连快照仍能更新队列");
+  assert.equal(compactingWrites.at(-1), true, "重连快照仍能更新压缩状态");
+  assert.equal(levels.at(-1), "medium", "重连快照里更早的取样不覆盖档位");
+
+  // 补读先发先回、重连后发后回：另一标签页把档位改成 low，本页的重连读到了它。补读回读的
+  // 是旧值，但它只是服务端值的回读，不该推进用户选择的版本——否则这份更新的重连快照会被拒。
+  const seventh = change("high");
+  changes[changes.length - 1].reject(new Error("写入失败"));
+  await seventh;
+  for (let i = 0; i < 100 && states.length < 5; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(states.length, 5, "第五次失败同样补读");
+  // 重连在补读发出之后、返回之前取坐标：它的读取序号更大，档位版本是那一刻的值。
+  const reconnectRead = context.beginRuntimeRead();
+  states[4].resolve({ state: { thinkingLevel: "medium" } });
+  for (let i = 0; i < 100 && levels.at(-1) !== "medium"; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(levels.at(-1), "medium", "补读先回来并回填");
+  // 重连快照后返回，读到别的标签页改成的新档位 low：它必须能更新选择器。
+  context.applyRuntimeSnapshot(reconnectRead, { thinkingLevel: "low" });
+  assert.equal(levels.at(-1), "low", "补读不挡住更新的重连快照");
+});
+
+test("连续改档时，迟到的确认不会把选择器退回旧档", async () => {
+  const ts = (await import("typescript")).default;
+  const { Script, createContext } = await import("node:vm");
+  const ast = ts.createSourceFile("useAgentSession.ts", source, ts.ScriptTarget.Latest, true);
+  function findCallback(name) {
+    function visit(node) {
+      if (ts.isVariableDeclaration(node) && node.name.getText(ast) === name) return node.initializer.arguments[0];
+      return ts.forEachChild(node, visit);
+    }
+    return visit(ast);
+  }
+  const compile = (name) => new Script(ts.transpileModule(`(${findCallback(name).getText(ast)})`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2020 },
+  }).outputText);
+  const levels = [];
+  const requests = [];
+  const sandbox = {
+    sessionIdRef: { current: "s1" },
+    creationSettingsLocked: false,
+    isNew: false,
+    newSessionCwd: null,
+    recommendedThinkingLevelRef: { current: null },
+    thinkingLevelOverrideRef: { current: null },
+    thinkingChoiceRevisionRef: { current: 0 },
+    thinkingChangeRequestsRef: { current: new Set() },
+    modelSelectionActions: { setThinkingLevel: (value) => levels.push(value) },
+    onPendingNewSessionEvent() {},
+    sendAgentCommand: (sid, command) => {
+      if (command.type === "get_state") return Promise.resolve({ thinkingLevel: "high" });
+      return new Promise((resolve, reject) => requests.push({ level: command.level, resolve, reject }));
+    },
+    // 失败后按服务端实际档位回填走的是统一的运行态快照入口。
+    beginRuntimeRead: () => ({ seq: 1, queueGeneration: 0, compactionEpoch: 0, thinkingRevision: 999 }),
+    applyRuntimeSnapshot: (read, state) => {
+      if (state?.thinkingLevel) levels.push(state.thinkingLevel);
+    },
+  };
+  const context = createContext(sandbox);
+  const change = compile("handleThinkingLevelChange").runInContext(context);
+
+  const first = change("high");
+  const second = change("low");
+  assert.deepEqual(levels, ["high", "low"], "两次选择都先乐观显示");
+  // B 先确认：它仍是最新的一次选择，落地并推进版本。
+  requests[1].resolve(null);
+  await second;
+  const revisionAfterB = sandbox.thinkingChoiceRevisionRef.current;
+  assert.deepEqual(levels, ["high", "low", "low"]);
+  // A 迟到：既不改界面，也不推进版本（否则 B 之后发出的读取会全部失效）。
+  requests[0].resolve(null);
+  await first;
+  assert.deepEqual(levels, ["high", "low", "low"], "迟到的确认不改界面");
+  assert.equal(sandbox.thinkingChoiceRevisionRef.current, revisionAfterB, "迟到的确认不推进版本");
+});
+
 test("用户改档之后，切换之前取的那份快照不再写回旧档位", async () => {
   const ts = (await import("typescript")).default;
   const { Script, createContext } = await import("node:vm");
@@ -642,9 +895,10 @@ test("用户改档之后，切换之前取的那份快照不再写回旧档位",
   const levels = [];
   const sandbox = {
     sessionIdRef: { current: "s1" },
-    setIsCompacting() {}, setQueuedMessages() {},
+    setIsCompacting() {}, setQueuedMessages() {}, updateQueuedMessages() {},
     normalizeQueuedMessages: (value) => value ?? { steering: [], followUp: [] },
     setRunningCommands() {}, setFastEnabled() {}, setRuntimeFastAvailable() {}, applyShadowRuntimeState() {},
+    updateQueuedMessages() {},
     setContextUsage() {}, applyContextUsage() {}, setSystemPrompt() {}, setLiveTotalActiveMs() {},
     modelSelectionActions: { setThinkingLevel: (value) => levels.push(value) },
     setExtensionStatuses() {}, setExtensionWidgets() {}, filterVisibleExtensionWidgets: (value) => value ?? [],
@@ -655,6 +909,8 @@ test("用户改档之后，切换之前取的那份快照不再写回旧档位",
     queueStateGenerationRef: { current: 0 },
     compactionEpochRef: { current: 0 },
     lastAppliedRuntimeSeqRef: { current: 0 },
+    lastAppliedQueueSeqRef: { current: 0 },
+    lastAppliedThinkingSeqRef: { current: 0 },
     thinkingChoiceRevisionRef: { current: 0 },
   };
   const context = createContext(sandbox);
@@ -682,12 +938,74 @@ test("用户改档之后，切换之前取的那份快照不再写回旧档位",
     source.indexOf("const handleThinkingLevelChange = useCallback"),
     source.indexOf("const handleFastEnabledChange = useCallback"),
   );
+  // 只推进两次：用户发起改档、服务端确认。失败后的回填是服务端值的回读，不推进版本——
+  // 推进的话，之后发出的读取（例如别的标签页改档后的重连补读）会被一并作废。
   assert.equal((thinkingHandler.match(/thinkingChoiceRevisionRef\.current \+= 1;/g) ?? []).length, 2);
 
   // 之后发的读取带着新版本，仍然可以纠正（例如别的标签页又改过档）。
   const later = context.beginRuntimeRead();
   context.applyRuntimeSnapshot(later, { thinkingLevel: "medium" });
   assert.deepEqual(levels, ["low", "low", "medium"]);
+});
+
+test("建连补读说空闲后，加载完成时不会按旧预读恢复已结束的命令", async () => {
+  const ts = (await import("typescript")).default;
+  const { Script, createContext } = await import("node:vm");
+  const ast = ts.createSourceFile("useAgentSession.ts", source, ts.ScriptTarget.Latest, true);
+  function findCallback(name) {
+    function visit(node) {
+      if (ts.isVariableDeclaration(node) && node.name.getText(ast) === name) return node.initializer.arguments[0];
+      return ts.forEachChild(node, visit);
+    }
+    return visit(ast);
+  }
+  const compile = (name) => new Script(ts.transpileModule(`(${findCallback(name).getText(ast)})`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2020 },
+  }).outputText);
+  const sandbox = {
+    sessionIdRef: { current: "s1" },
+    agentRunningRef: { current: false },
+    lastAppliedRuntimeSeqRef: { current: 0 },
+    lastAppliedQueueSeqRef: { current: 0 },
+    lastAppliedThinkingSeqRef: { current: 0 },
+    runtimeReadSeqRef: { current: 0 },
+    queueStateGenerationRef: { current: 0 },
+    compactionEpochRef: { current: 0 },
+    thinkingChoiceRevisionRef: { current: 0 },
+    runtimeThinkingLevelSessionRef: { current: null },
+    runtimeBusySnapshotRef: { current: null },
+    pendingDetachedSubagentIdsRef: { current: new Set() },
+    bashRunningRef: { current: false },
+    setIsCompacting() {}, setQueuedMessages() {}, updateQueuedMessages() {},
+    normalizeQueuedMessages: (value) => value ?? { steering: [], followUp: [] },
+    setRunningCommands() {}, setFastEnabled() {}, setRuntimeFastAvailable() {}, applyShadowRuntimeState() {},
+    setContextUsage() {}, applyContextUsage() {}, setSystemPrompt() {}, setLiveTotalActiveMs() {},
+    modelSelectionActions: { setThinkingLevel() {} },
+    setExtensionStatuses() {}, setExtensionWidgets() {}, filterVisibleExtensionWidgets: (value) => value ?? [],
+    newSessionCwd: null, projectExtensionBinding: () => "bound", onPendingNewSessionEvent() {},
+    loadTools() {}, setBashRunning() {}, waitForBashSettlement() {}, connectEvents() {}, requestScrollPosition() {},
+    entered: [],
+    enterMainRun: (phase) => sandbox.entered.push(phase),
+  };
+  const context = createContext(sandbox);
+  context.applyRuntimeState = compile("applyRuntimeState").runInContext(context);
+  context.applyRuntimeSnapshot = compile("applyRuntimeSnapshot").runInContext(context);
+  context.beginRuntimeRead = compile("beginRuntimeRead").runInContext(context);
+  const restore = compile("restoreRuntimeFromLoad").runInContext(context);
+
+  // 预读采到命令在跑；命令随后结束，SSE 建连补读采到空闲并先返回。
+  const preRead = context.beginRuntimeRead();
+  context.applyRuntimeSnapshot(preRead, { runningCommands: ["/review"], isStreaming: false });
+  assert.equal(sandbox.runtimeBusySnapshotRef.current, true);
+  const connectRead = context.beginRuntimeRead();
+  context.applyRuntimeSnapshot(connectRead, { runningCommands: [], isStreaming: false });
+  assert.equal(sandbox.runtimeBusySnapshotRef.current, false, "补读也要记下「空闲」这个最新结论");
+
+  // 连线本身也要断言：补读必须走同一个入口，否则它只推进序号、不记「空闲」结论。
+  assert.match(source, /const connectRead = beginRuntimeRead\(\);\s*void fetchRuntimeState\(sid, controller\.signal\)[\s\S]*?applyRuntimeSnapshot\(connectRead, snapshot\.state\)/);
+  // 上下文加载完成：旧预读说 busy，但最新的结论是空闲，不能再开一个回合。
+  restore("s1", { alive: true, busy: true, state: { runningCommands: ["/review"] } }, preRead);
+  assert.equal(sandbox.entered.length, 0, "命令已经结束，不该恢复成运行中");
 });
 
 test("重试完成时不会用旧快照清掉已经开始流式输出的回复", async () => {
@@ -708,6 +1026,8 @@ test("重试完成时不会用旧快照清掉已经开始流式输出的回复",
     sessionIdRef: { current: "s1" },
     agentRunningRef: { current: false },
     lastAppliedRuntimeSeqRef: { current: 0 },
+    lastAppliedQueueSeqRef: { current: 0 },
+    lastAppliedThinkingSeqRef: { current: 0 },
     runtimeBusySnapshotRef: { current: null },
     pendingDetachedSubagentIdsRef: { current: new Set() },
     bashRunningRef: { current: false },
@@ -761,8 +1081,10 @@ test("普通加载失败也按本次有效的运行态快照给出「移回」�
     source.indexOf("const loadContext = useCallback"),
   );
   // 只有外部写入才重新查询队列；普通 500 用这次加载的预读结果，仍然按队列代次校验。
-  assert.match(catchSource, /if \(!isSessionExternalWriteError\(error\) && earlyRuntimePromise\) \{/);
-  assert.match(catchSource, /if \(!snapshot \|\| queueStateGenerationRef\.current !== runtimeRead\.queueGeneration\) return;/);
+  assert.match(catchSource, /if \(!isSessionExternalWriteError\(error\) && sessionIdRef\.current === sid\) \{/);
+  assert.match(catchSource, /const queued = queuedMessagesRef\.current;/);
+  // 队列显示只有一个写入口：界面状态和错误页读的镜像一起更新，漏一处错误页就会拿旧队列判断。
+  assert.equal((source.match(/(?<!\.)\bsetQueuedMessages\(/g) ?? []).length, 1);
   assert.match(catchSource, /setBlockedRecall\(queued\.steering\.length > 0 \|\| queued\.followUp\.length > 0 \? queued : null\);/);
 });
 
@@ -788,7 +1110,7 @@ test("乱序的运行态响应：迟到的预读不会把思考强度写回旧�
     sessionIdRef: { current: "s1" },
     options_placeholder: undefined,
     setIsCompacting: (value) => compacting.push(value),
-    setQueuedMessages() {},
+    setQueuedMessages() {}, updateQueuedMessages() {},
     normalizeQueuedMessages: (value) => value ?? { steering: [], followUp: [] },
     setRunningCommands() {},
     setFastEnabled() {}, setRuntimeFastAvailable() {}, applyShadowRuntimeState() {},
@@ -1007,7 +1329,7 @@ test("the external-write error path keeps the queued messages reachable", () => 
   // 旧实例的取回通知也要让新实例的队列代次失效、并清空输入框里的队列。
   assert.match(
     source,
-    /blockedRecallRequestRef\.current \+= 1;\s*setQueuedMessages\(\{ steering: \[\], followUp: \[\] \}\);/,
+    /blockedRecallRequestRef\.current \+= 1;\s*updateQueuedMessages\(\{ steering: \[\], followUp: \[\] \}\)/,
   );
   // 预读失败同样按代次校验队列：否则超时的旧请求会把后来出现的排队消息清空。
   // 状态请求失败不重置运行状态：否则旧预读超时会清掉建连补读或 compaction_start 刚设好的压缩状态。
@@ -1017,29 +1339,33 @@ test("the external-write error path keeps the queued messages reachable", () => 
   );
   assert.doesNotMatch(earlyFailure, /applyRuntimeState\(undefined\)/);
   // 错误的队列更新与取回后的补查都要写进错误页读的那一份。
-  assert.match(source, /case "queue_update": \{[\s\S]{0,600}?setBlockedRecall\(queued\.steering\.length > 0 \|\| queued\.followUp\.length > 0 \? queued : null\)/);
-  assert.match(source, /const queued = normalizeQueuedMessages\(snapshot\?\.state\?\.queuedMessages\);\s*setQueuedMessages\(queued\);\s*\/\/[^\n]*\n\s*setBlockedRecall\(/);
+  // 实时队列更新也走唯一入口，错误页入口由那一处同步（不再各自写一份）。
+  assert.match(source, /case \"queue_update\": \{[\s\S]{0,600}?updateQueuedMessages\(queued\);/);
+  assert.match(source, /const queued = normalizeQueuedMessages\(snapshot\?\.state\?\.queuedMessages\);\s*updateQueuedMessages\(queued\);\s*\/\/[^\n]*\n\s*setBlockedRecall\(/);
   // 建连后的补读同样按代次校验队列。
   assert.match(
     source,
-    /const queueGeneration = queueStateGenerationRef\.current;\s*const compactionEpoch = compactionEpochRef\.current;\s*const runtimeReadSeq = \+\+runtimeReadSeqRef\.current;\s*const thinkingRevision = thinkingChoiceRevisionRef\.current;\s*void fetchRuntimeState\(sid, controller\.signal\)/,
+    /const connectRead = beginRuntimeRead\(\);\s*void fetchRuntimeState\(sid, controller\.signal\)/,
   );
   // 读取序号：较新的快照提交后，更早的响应不许再覆盖压缩状态（压缩可能发生在取样之后、监听之前）。
-  assert.match(source, /compaction: compactionEpochRef\.current === compactionEpoch && isNewest,/);
-  assert.match(source, /lastAppliedRuntimeSeqRef\.current = Math\.max\(lastAppliedRuntimeSeqRef\.current, runtimeReadSeq\);/);
+  assert.match(source, /lastAppliedRuntimeSeqRef\.current = read\.seq;/);
   // 上下文的思考档位只作回退：运行态已经给过这个会话档位时不再覆盖。
   assert.match(source, /runtimeThinkingLevelSessionRef\.current !== sid/);
   // 迟到的预读同样不许写回旧档位：思考强度与压缩状态共用读取序号。
   assert.match(source, /applyRuntimeSnapshot\(runtimeRead, snapshot\.state\);/);
-  assert.match(source, /compaction: compactionEpochRef\.current === compactionEpoch && isNewest,[\s\S]*?thinking: isNewest && thinkingChoiceRevisionRef\.current === thinkingRevision,/);
+
   // 每次加载错误都按本次结果更新外部写入标记，重试成普通 500 时不会继续误报。
   assert.match(source, /setExternalWriteBlocked\(isSessionExternalWriteError\(error\)\);/);
   // 实时队列更新让在途补读/重查作废；取回通知清空后按最新状态补一次查询。
   assert.match(source, /case "queue_update":[\s\S]{0,200}?queueStateGenerationRef\.current \+= 1;/);
   assert.match(source, /const generation = queueStateGenerationRef\.current \+ 1;\s*queueStateGenerationRef\.current = generation;\s*void fetchRuntimeState\(sid/);
   // 错误页的探查也要按队列代次校验：实时 queue_update 之后回来的旧空队列不能清掉入口。
-  assert.match(source, /const queueGeneration = queueStateGenerationRef\.current;\s*void fetchRuntimeState\(sid, new AbortController\(\)\.signal\)/);
-  assert.match(source, /if \(queueStateGenerationRef\.current !== queueGeneration\) return;/);
+  assert.match(loader, /const probeRead = beginRuntimeRead\(\);\s*void fetchRuntimeState\(sid, new AbortController\(\)\.signal\)/);
+  // 探查也取读取坐标：它拿到的新队列如果只写 blockedRecall，之后返回的旧预读仍会清掉入口。
+  assert.match(loader, /const probeRead = beginRuntimeRead\(\);/);
+  assert.match(loader, /if \(queueStateGenerationRef\.current !== probeRead\.queueGeneration\) return;/);
+  assert.match(loader, /if \(probeRead\.seq <= lastAppliedQueueSeqRef\.current\) return;/);
+  assert.match(loader, /lastAppliedQueueSeqRef\.current = probeRead\.seq;\s*updateQueuedMessages\(/);
   // 压缩状态另有代次：预读只应用一次，迟到快照不许把 compaction_start 盖回去。
   assert.match(source, /compactionEpochRef\.current \+= 1;/);
   assert.doesNotMatch(
