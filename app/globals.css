@@ -4685,3 +4685,96 @@ span.token.table {
 }
 
 .mobile-top-bar-outline[aria-pressed="true"] { background: var(--bg-selected); }
+
+
+/* 展开的过程详情与工具调用卡片左侧可点击折叠竖条：内容很长时无需滚回顶部即可收起。 */
+.collapse-rail-layout {
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+}
+
+.collapse-rail-btn {
+  position: relative;
+  flex-shrink: 0;
+  width: 18px;
+  padding: 0;
+  margin-right: 4px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  display: flex;
+  justify-content: center;
+  touch-action: manipulation;
+}
+
+.collapse-rail-btn::before {
+  content: "";
+  width: 2px;
+  height: 100%;
+  border-radius: 1px;
+  background: var(--border);
+  transition: background-color 0.15s ease, width 0.15s ease;
+}
+
+.collapse-rail-btn:hover::before,
+.collapse-rail-btn:focus-visible::before {
+  width: 3px;
+  background: var(--accent);
+}
+
+.collapse-rail-btn:focus-visible {
+  outline: none;
+}
+
+.collapse-rail-btn--card {
+  width: 14px;
+  margin-right: 0;
+  border-top: 1px solid rgba(34, 197, 94, 0.2);
+  background: var(--bg-subtle);
+  transition: background-color 0.15s ease;
+}
+
+.collapse-rail-btn--card-error {
+  border-top-color: rgba(248, 113, 113, 0.25);
+}
+
+.collapse-rail-btn--card::before {
+  margin: 6px 0;
+  height: auto;
+}
+
+.collapse-rail-btn--card:hover,
+.collapse-rail-btn--card:focus-visible {
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-subtle));
+}
+
+.collapse-rail-content {
+  flex: 1;
+  min-width: 0;
+}
+
+
+/* 输入框右上角工具条：上方无附件/提示时浮在消息区右下角，左侧完全通透不占整行白底。 */
+.composer-top-row--floating {
+  position: relative;
+  height: 0;
+  margin-bottom: 0 !important;
+  padding: 0 !important;
+  overflow: visible;
+  z-index: 12;
+  pointer-events: none;
+}
+
+.composer-top-row--floating > .composer-top-utils,
+.composer-top-row--floating > .composer-top-mobile-meta {
+  position: absolute;
+  right: 2px;
+  bottom: 5px;
+  pointer-events: auto;
+  padding: 1px 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg) 76%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}

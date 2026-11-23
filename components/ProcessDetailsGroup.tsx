@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { formatTurnDuration } from "@/lib/turn-duration";
 import type { CacheMissSummary } from "@/lib/transcript-notices";
 import { cacheMissSummaryText, TRANSCRIPT_NOTICE_WARNING_COLOR } from "./TranscriptNotices";
@@ -8,7 +8,15 @@ import { cacheMissSummaryText, TRANSCRIPT_NOTICE_WARNING_COLOR } from "./Transcr
 // 主会话与回收站共用过程折叠样式和交互。
 export function ProcessDetailsGroup({ messageCount, toolCallCount, durationMs, cacheMisses, defaultExpanded = false, reveal = false, renderRecent, renderChildren, t }: { messageCount: number; toolCallCount: number; durationMs?: number; cacheMisses?: CacheMissSummary; defaultExpanded?: boolean; reveal?: boolean; renderRecent?: () => ReactNode; renderChildren: () => ReactNode; t: (key: string, params?: Record<string, string | number>) => string }) {
   const [expanded, setExpanded] = useState(defaultExpanded);
+  const containerRef = useRef<HTMLDivElement>(null);
   const contentVisible = expanded || reveal;
+  const collapseFromRail = () => {
+    const top = containerRef.current?.getBoundingClientRect().top;
+    setExpanded(false);
+    if (top !== undefined && top < 64) {
+      requestAnimationFrame(() => containerRef.current?.scrollIntoView({ block: "nearest" }));
+    }
+  };
   // 折叠箭头已表达可展开，「过程详情」文字只保留在无障碍名称中。
   const parts = [`${messageCount} ${t(messageCount === 1 ? "chat.message" : "chat.messages")}`];
   if (toolCallCount > 0) parts.push(`${toolCallCount} ${t(toolCallCount === 1 ? "chat.toolCall" : "chat.toolCalls")}`);
@@ -17,7 +25,7 @@ export function ProcessDetailsGroup({ messageCount, toolCallCount, durationMs, c
   const cacheMissText = cacheMisses && !(expanded || reveal) ? cacheMissSummaryText(t, cacheMisses) : undefined;
 
   return (
-    <div style={{ marginBottom: 14 }}>
+    <div ref={containerRef} style={{ marginBottom: 14 }}>
       <button
         type="button"
         aria-expanded={contentVisible}
@@ -50,8 +58,19 @@ export function ProcessDetailsGroup({ messageCount, toolCallCount, durationMs, c
       </button>
       {/* 折叠时也可以先亮出最新几条（当前轮用），点开才是全部。 */}
       {contentVisible ? (
-        <div style={{ marginTop: 8 }}>
-          {renderChildren()}
+        <div className={expanded ? "collapse-rail-layout" : undefined} style={{ marginTop: 8 }}>
+          {expanded && (
+            <button
+              type="button"
+              className="collapse-rail-btn"
+              onClick={collapseFromRail}
+              title={t("chat.collapseProcess")}
+              aria-label={t("chat.collapseProcess")}
+            />
+          )}
+          <div className={expanded ? "collapse-rail-content" : undefined}>
+            {renderChildren()}
+          </div>
         </div>
       ) : renderRecent ? (
         <div style={{ marginTop: 8 }}>

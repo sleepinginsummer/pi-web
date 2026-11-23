@@ -227,6 +227,7 @@ interface Props {
   sessionId?: string;
   writtenFiles?: WrittenFile[];
   visibleBlockOffset?: number;
+  visibleBlockLimit?: number;
   /** 本轮总耗时；没有过程详情的最终答复在用量行显示。 */
   turnDurationMs?: number;
   /** Running tool calls' clocks, for the cards still waiting for their result message. */
@@ -251,14 +252,14 @@ function haveSameRelevantToolEntries<T>(
   return true;
 }
 
-export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, toolClocks, modelNames, cwd, onOpenFile, onOpenSubagent, entryId, searchBlockIndex, onFork, forking, onEditContent, onCancelEdit, isEditing, showTimestamp, prevTimestamp, sessionId, writtenFiles, visibleBlockOffset, turnDurationMs, onCompact, isCompacting, compactError, markAnswerHeadings }: Props) {
+export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, toolClocks, modelNames, cwd, onOpenFile, onOpenSubagent, entryId, searchBlockIndex, onFork, forking, onEditContent, onCancelEdit, isEditing, showTimestamp, prevTimestamp, sessionId, writtenFiles, visibleBlockOffset, visibleBlockLimit, turnDurationMs, onCompact, isCompacting, compactError, markAnswerHeadings }: Props) {
   // display:false 的自定义消息只给模型看，pi TUI 不渲染（#1043）。
   if (isHiddenCustomMessage(message)) return null;
   if (message.role === "user") {
     return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} onEditContent={onEditContent} onCancelEdit={onCancelEdit} isEditing={isEditing} />;
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} toolClocks={toolClocks} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} onOpenSubagent={onOpenSubagent} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} searchBlockIndex={searchBlockIndex} onFork={onFork} forking={forking} writtenFiles={writtenFiles} visibleBlockOffset={visibleBlockOffset} turnDurationMs={turnDurationMs} onCompact={onCompact} isCompacting={isCompacting} compactError={compactError} markAnswerHeadings={markAnswerHeadings} />;
+    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} toolClocks={toolClocks} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} onOpenSubagent={onOpenSubagent} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} searchBlockIndex={searchBlockIndex} onFork={onFork} forking={forking} writtenFiles={writtenFiles} visibleBlockOffset={visibleBlockOffset} visibleBlockLimit={visibleBlockLimit} turnDurationMs={turnDurationMs} onCompact={onCompact} isCompacting={isCompacting} compactError={compactError} markAnswerHeadings={markAnswerHeadings} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
@@ -296,6 +297,7 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     && prev.sessionId === next.sessionId
     && prev.writtenFiles === next.writtenFiles
     && prev.visibleBlockOffset === next.visibleBlockOffset
+    && prev.visibleBlockLimit === next.visibleBlockLimit
     && prev.onCompact === next.onCompact
     && prev.isCompacting === next.isCompacting
     && prev.compactError === next.compactError
@@ -533,6 +535,7 @@ function AssistantMessageView({
   forking,
   writtenFiles,
   visibleBlockOffset = 0,
+  visibleBlockLimit,
   turnDurationMs,
   onCompact,
   isCompacting,
@@ -556,6 +559,7 @@ function AssistantMessageView({
   forking?: boolean;
   writtenFiles?: WrittenFile[];
   visibleBlockOffset?: number;
+  visibleBlockLimit?: number;
   turnDurationMs?: number;
   onCompact?: () => void;
   isCompacting?: boolean;
@@ -567,7 +571,9 @@ function AssistantMessageView({
   const allBlockItems = (message.content ?? [])
     .map((block, originalIndex) => ({ block, originalIndex }))
     .filter(({ block }) => isDisplayableAssistantBlock(block, { isStreaming }));
-  const blockItems = allBlockItems.slice(Math.max(0, visibleBlockOffset));
+  const sliceStart = Math.max(0, visibleBlockOffset);
+  const sliceEnd = visibleBlockLimit !== undefined ? sliceStart + Math.max(0, visibleBlockLimit) : undefined;
+  const blockItems = allBlockItems.slice(sliceStart, sliceEnd);
   const allBlocks = allBlockItems.map(({ block }) => block);
   const blocks = blockItems.map(({ block }) => block);
   const providerError = getAssistantErrorMessage(message, { isStreaming });
@@ -1085,12 +1091,21 @@ function ToolClockTime({ clock }: { clock: ToolClock }) {
 function ToolCallBlock({ block, result, notRun, duration, clock, onOpenSubagent, resultFooter }: { block: ToolCallContent; result?: ToolResultMessage; notRun?: boolean; duration?: number; clock?: ToolClock; onOpenSubagent?: (sessionId: string, label: string) => void; resultFooter?: ReactNode }) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(() => isToolCallExpanded(block.toolCallId));
+  const cardRef = useRef<HTMLDivElement>(null);
   const [deferredInput, setDeferredInput] = useState<unknown>(null);
   const [deferredError, setDeferredError] = useState<string | null>(null);
   const toggleExpanded = () => {
     const next = !expanded;
     setToolCallExpanded(block.toolCallId, next);
     setExpanded(next);
+  };
+  const collapseFromRail = () => {
+    const top = cardRef.current?.getBoundingClientRect().top;
+    setToolCallExpanded(block.toolCallId, false);
+    setExpanded(false);
+    if (top !== undefined && top < 64) {
+      requestAnimationFrame(() => cardRef.current?.scrollIntoView({ block: "nearest" }));
+    }
   };
   const writtenFileText = getWrittenFileText(block);
   const inputStr = writtenFileText ?? (deferredInput === null
@@ -1158,7 +1173,7 @@ function ToolCallBlock({ block, result, notRun, duration, clock, onOpenSubagent,
   const codemodeCallCount = codemode ? codemode.calls.length + codemode.omitted : 0;
 
   return (
-    <div
+    <div ref={cardRef}
       style={{
         borderRadius: 7,
         overflow: "hidden",
@@ -1230,87 +1245,101 @@ function ToolCallBlock({ block, result, notRun, duration, clock, onOpenSubagent,
         )}
       </div>
 
-      {/* ── Expanded: input args (only when no richer view exists); a codemode script in place of its JSON ── */}
-      {expanded && (isStreamingInput || !isEditTool || (!result && !notRun && !editPreview)) && !patchFiles && (
-        toolFields ? (
-          <div
-            style={{
-              padding: "6px 10px 8px",
-              background: "var(--bg-subtle)",
-              borderTop: isError ? "1px solid rgba(248,113,113,0.25)" : "1px solid rgba(34,197,94,0.2)",
-            }}
-          >
-            <ToolFieldRows fields={toolFields} />
-          </div>
-        ) : (
-          <pre
-            style={{
-              margin: 0,
-              padding: "8px 10px",
-              color: "var(--text-muted)",
-              fontSize: "calc(12px + var(--chat-font-size-offset, 0px))",
-              lineHeight: 1.5,
-              overflow: "auto",
-              background: "var(--bg-subtle)",
-              borderTop: isError ? "1px solid rgba(248,113,113,0.25)" : "1px solid rgba(34,197,94,0.2)",
-              whiteSpace: "pre-wrap",
-              wordBreak: "break-all",
-            }}
-          >
-            {codemode ? codemode.code.replace(/\r/g, "").trimEnd() : inputStr}
-            {deferredError ? `\n${deferredError}` : ""}
-          </pre>
-        )
-      )}
-
-      {/* ── Expanded: the calls a codemode script made ── */}
-      {expanded && codemode && (
-        <CodemodeCallList calls={codemode.calls} omitted={codemode.omitted} isError={isError} />
-      )}
-
       {/* ── Result images — always visible, independent of the collapsed details ── */}
       {resultImages.length > 0 && <div style={{ display: "flex", gap: 8, flexWrap: "wrap", padding: 10 }}>{resultImages.map((image, index) => <MessageImage key={index} image={image} variant="assistant" />)}</div>}
 
-      {/* ── Expanded: a pending edit's diff, from its arguments ── */}
-      {editPreview && (
-        <div style={{ borderTop: "1px solid rgba(34,197,94,0.15)", background: "var(--bg)" }}>
-          <SplitFilesView files={editPreview} />
+      {/* ── Expanded body with clickable left collapse rail ── */}
+      {expanded && (
+        <div className="collapse-rail-layout">
+          <button
+            type="button"
+            className={`collapse-rail-btn collapse-rail-btn--card${isError ? " collapse-rail-btn--card-error" : ""}`}
+            onClick={collapseFromRail}
+            title={t("i18n.collapse")}
+            aria-label={t("i18n.collapse")}
+          />
+          <div className="collapse-rail-content">
+            {/* ── Expanded: input args (only when no richer view exists); a codemode script in place of its JSON ── */}
+            {(isStreamingInput || !isEditTool || (!result && !notRun && !editPreview)) && !patchFiles && (
+              toolFields ? (
+                <div
+                  style={{
+                    padding: "6px 10px 8px",
+                    background: "var(--bg-subtle)",
+                    borderTop: isError ? "1px solid rgba(248,113,113,0.25)" : "1px solid rgba(34,197,94,0.2)",
+                  }}
+                >
+                  <ToolFieldRows fields={toolFields} />
+                </div>
+              ) : (
+                <pre
+                  style={{
+                    margin: 0,
+                    padding: "8px 10px",
+                    color: "var(--text-muted)",
+                    fontSize: "calc(12px + var(--chat-font-size-offset, 0px))",
+                    lineHeight: 1.5,
+                    overflow: "auto",
+                    background: "var(--bg-subtle)",
+                    borderTop: isError ? "1px solid rgba(248,113,113,0.25)" : "1px solid rgba(34,197,94,0.2)",
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-all",
+                  }}
+                >
+                  {codemode ? codemode.code.replace(/\r/g, "").trimEnd() : inputStr}
+                  {deferredError ? `\n${deferredError}` : ""}
+                </pre>
+              )
+            )}
+
+            {/* ── Expanded: the calls a codemode script made ── */}
+            {codemode && (
+              <CodemodeCallList calls={codemode.calls} omitted={codemode.omitted} isError={isError} />
+            )}
+
+            {/* ── Expanded: a pending edit's diff, from its arguments ── */}
+            {editPreview && (
+              <div style={{ borderTop: "1px solid rgba(34,197,94,0.15)", background: "var(--bg)" }}>
+                <SplitFilesView files={editPreview} />
+              </div>
+            )}
+
+            {/* ── Expanded: applied-patch split diff ── */}
+            {patchFiles && (
+              <div style={{ borderTop: "1px solid rgba(34,197,94,0.15)", background: "var(--bg)" }}>
+                <SplitFilesView files={patchFiles} />
+              </div>
+            )}
+
+            {/* ── Paired result — only shown when expanded ── */}
+            {result && patchFiles && isError && (
+              <PairedResult
+                text={resultText ?? ""}
+                textBlocks={result.content.filter((item): item is TextContent => item.type === "text")}
+                images={[]}
+                isEmpty={resultIsEmpty}
+                isError={isError}
+              />
+            )}
+            {result && !patchFiles && !codemodeRunning && (
+              resultDiff ? (
+                <PairedDiffResult
+                  diff={resultDiff}
+                />
+              ) : (!resultIsEmpty || resultImages.length === 0) && (
+                <PairedResult
+                  text={resultText ?? ""}
+                  textBlocks={result.content.filter((item): item is TextContent => item.type === "text")}
+                  images={[]}
+                  isEmpty={resultIsEmpty}
+                  isError={isError}
+                />
+              )
+            )}
+            {result && resultFooter}
+          </div>
         </div>
       )}
-
-      {/* ── Expanded: applied-patch split diff ── */}
-      {expanded && patchFiles && (
-        <div style={{ borderTop: "1px solid rgba(34,197,94,0.15)", background: "var(--bg)" }}>
-          <SplitFilesView files={patchFiles} />
-        </div>
-      )}
-
-      {/* ── Paired result — only shown when expanded ── */}
-      {expanded && result && patchFiles && isError && (
-        <PairedResult
-          text={resultText ?? ""}
-          textBlocks={result.content.filter((item): item is TextContent => item.type === "text")}
-          images={[]}
-          isEmpty={resultIsEmpty}
-          isError={isError}
-        />
-      )}
-      {expanded && result && !patchFiles && !codemodeRunning && (
-        resultDiff ? (
-          <PairedDiffResult
-            diff={resultDiff}
-          />
-        ) : (!resultIsEmpty || resultImages.length === 0) && (
-          <PairedResult
-            text={resultText ?? ""}
-            textBlocks={result.content.filter((item): item is TextContent => item.type === "text")}
-            images={[]}
-            isEmpty={resultIsEmpty}
-            isError={isError}
-          />
-        )
-      )}
-      {expanded && result && resultFooter}
     </div>
   );
 }

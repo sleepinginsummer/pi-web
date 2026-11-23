@@ -27,7 +27,7 @@ import { ChatScrollFollowButton } from "./ChatScrollFollowButton";
 import { ExtensionStatusBar } from "./ExtensionStatusBar";
 import { DevServersShelf } from "./DevServersShelf";
 import { useI18n } from "@/hooks/useI18n";
-import { useAgentSession, type AgentPhase } from "@/hooks/useAgentSession";
+import { useAgentSession } from "@/hooks/useAgentSession";
 import { useChatScrollFollow } from "@/hooks/useChatScrollFollow";
 import { DetachedSubagentStatusPanel } from "./DetachedSubagentStatusPanel";
 import { useAudio } from "@/hooks/useAudio";
@@ -65,8 +65,9 @@ import { getFinalAnswerViews, keepWrittenFiles, type FinalAnswerViews } from "@/
 import { getFileName } from "@/lib/file-paths";
 import { NoticeShelf } from "./NoticeShelf";
 import { SessionObserverPanel } from "./SessionObserverPanel";
+import { SESSION_OBSERVER_FEATURE_ENABLED } from "@/lib/session-observer-protocol";
 import { buildQuotedSelection } from "@/lib/quoted-selection";
-import { extensionPhaseLabel, phaseHint } from "@/lib/chat-phase-label";
+import { phaseHint, phaseLabel } from "@/lib/chat-phase-label";
 
 const MAX_MOUNTED_HISTORY_GROUPS = 160;
 
@@ -121,29 +122,6 @@ interface Props {
   quoteSelectionEnabled?: boolean;
   initialPrompt?: string;
   onInitialPromptConsumed?: (sessionId: string, prompt: string) => void;
-}
-
-function phaseLabel(
-  phase: AgentPhase,
-  t: (key: string, params?: Record<string, string | number>) => string,
-  isCompacting = false,
-  queuedCount = 0,
-  runningCommand?: string | null,
-): string {
-  if (isCompacting) return queuedCount > 0 ? t("chat.compactingQueued", { count: queuedCount }) : t("chat.compacting");
-  if (phase?.kind === "running_tools") {
-    const progress = phase.tools.find((tool) => tool.progress)?.progress;
-    if (progress) return progress;
-    const names = phase.tools.map((t) => t.name);
-    if (names.length === 0) return t("chat.runningTool");
-    if (names.length === 1) return t("chat.runningNamedTool", { name: names[0] });
-    if (names.length <= 3) return t("chat.runningTools", { names: names.join(", ") });
-    return t("chat.runningToolsMore", { names: names.slice(0, 2).join(", "), count: names.length - 2 });
-  }
-  if (phase?.kind === "waiting_model") return t("chat.waitingModel");
-  // 扩展命令不启动模型回合：只有这里能说明是哪条命令还在跑（过长的截断显示）。
-  if (phase?.kind === "running_command") return extensionPhaseLabel(t, runningCommand);
-  return t("chat.thinking");
 }
 
 const CHAT_MINIMAP_WIDTH = 36;
@@ -217,9 +195,17 @@ const LIVE_PROCESS_ITEM_LIMIT = 3;
 
 function LiveProcessDetailsGroup({ hiddenCount, renderAll, renderRecent, t }: { hiddenCount: number; renderAll: () => ReactNode; renderRecent: () => ReactNode; t: (key: string, params?: Record<string, string | number>) => string }) {
   const [expanded, setExpanded] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const collapseFromRail = () => {
+    const top = containerRef.current?.getBoundingClientRect().top;
+    setExpanded(false);
+    if (top !== undefined && top < 64) {
+      requestAnimationFrame(() => containerRef.current?.scrollIntoView({ block: "nearest" }));
+    }
+  };
 
   return (
-    <div>
+    <div ref={containerRef}>
       {hiddenCount > 0 && (
         <button
           type="button"
@@ -248,7 +234,20 @@ function LiveProcessDetailsGroup({ hiddenCount, renderAll, renderRecent, t }: { 
           <span>{t("chat.earlierProcessItems", { count: hiddenCount })}</span>
         </button>
       )}
-      {expanded ? renderAll() : renderRecent()}
+      {expanded && hiddenCount > 0 ? (
+        <div className="collapse-rail-layout">
+          <button
+            type="button"
+            className="collapse-rail-btn"
+            onClick={collapseFromRail}
+            title={t("chat.collapseProcess")}
+            aria-label={t("chat.collapseProcess")}
+          />
+          <div className="collapse-rail-content">
+            {renderAll()}
+          </div>
+        </div>
+      ) : expanded ? renderAll() : renderRecent()}
     </div>
   );
 }
@@ -382,16 +381,27 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
     const selection = window.getSelection();
     const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
     const root = messageContentRef.current;
-    if (!selection || selection.isCollapsed || !range || !root || !root.contains(range.commonAncestorContainer)) {
+    if (!selection || selection.isCollapsed || !range || !root || !range.intersectsNode(root)) {
       setQuotedSelection(null);
       return;
     }
-    const text = selection.toString().trim();
+    // 将跨出消息列边界的选区裁剪到消息列内部，避免拖到输入框或空白处时整次选区作废或带入外部文本。
+    const clipped = range.cloneRange();
+    if (!root.contains(clipped.startContainer)) {
+      clipped.setStart(root, 0);
+    }
+    if (!root.contains(clipped.endContainer)) {
+      clipped.setEnd(root, root.childNodes.length);
+    }
+    const text = clipped.toString().trim();
     if (!text) {
       setQuotedSelection(null);
       return;
     }
-    const rect = range.getBoundingClientRect();
+    const rawRect = clipped.getBoundingClientRect();
+    const rect = rawRect.width === 0 && rawRect.height === 0
+      ? (clipped.getClientRects()[0] ?? rawRect)
+      : rawRect;
     setQuotedSelection({
       text,
       top: Math.min(window.innerHeight - 44, rect.bottom + 8),
@@ -399,31 +409,29 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
     });
   }, [quoteInputOpen, quoteSelectionEnabled]);
 
-  // 拖选常在内容列之外松手（行尾空白、滚动条、输入框），pointerup 不会落到内容列上，
-  // 所以在 document 上监听松手，只用起点判断这次选择是否属于消息区。
+  // 拖选常在内容列之外起手或松手（行尾空白、滚动条、输入框），移动端长按还会触发 pointercancel；
+  // 去掉起点守卫，统一在抬手时按选区与消息列的交集判定，并在选区清空时收起浮层。
   useEffect(() => {
     if (!quoteSelectionEnabled) return;
-    let startedInMessages = false;
-    const onPointerDown = (event: PointerEvent) => {
-      startedInMessages = !!messageContentRef.current?.contains(event.target as Node);
-    };
-    const onPointerUp = () => {
-      if (!startedInMessages) return;
-      startedInMessages = false;
+    const onPointerUp = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (target && quotePopoverRef.current?.contains(target)) return;
       captureQuotedSelection();
     };
-    const onPointerCancel = () => {
-      startedInMessages = false;
+    const onSelectionChange = () => {
+      if (quoteInputOpen) return;
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed) {
+        setQuotedSelection(null);
+      }
     };
-    document.addEventListener("pointerdown", onPointerDown, true);
     document.addEventListener("pointerup", onPointerUp, true);
-    document.addEventListener("pointercancel", onPointerCancel, true);
+    document.addEventListener("selectionchange", onSelectionChange);
     return () => {
-      document.removeEventListener("pointerdown", onPointerDown, true);
       document.removeEventListener("pointerup", onPointerUp, true);
-      document.removeEventListener("pointercancel", onPointerCancel, true);
+      document.removeEventListener("selectionchange", onSelectionChange);
     };
-  }, [captureQuotedSelection, quoteSelectionEnabled]);
+  }, [captureQuotedSelection, quoteInputOpen, quoteSelectionEnabled]);
 
   useEffect(() => {
     if (!quoteInputOpen || !quotedSelection) return;
@@ -1266,7 +1274,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
             onToggleExpanded={setNoticeExpanded}
             floating
           />
-          {observerPanel && session && (
+          {SESSION_OBSERVER_FEATURE_ENABLED && observerPanel && session && (
             <div className="session-observer-overlay">
               <SessionObserverPanel key={session.id} sessionId={session.id} cwd={session.cwd} {...observerPanel} />
             </div>
@@ -1278,7 +1286,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
           className={`scrollbar-subtle min-w-0 flex-1 overflow-x-hidden overflow-y-auto pt-4 [scrollbar-gutter:stable]${askDialogElement ? " chat-scroll-ask-reserve" : ""}`}
           style={{ visibility: pendingScrollRestore ? "hidden" : undefined }}
         >
-          <div style={{ padding: `0 ${isMobile ? CHAT_COLUMN_PADDING : CHAT_INPUT_RIGHT_PADDING}px 0 ${CHAT_COLUMN_PADDING}px` }}>
+          <div style={{ padding: `0 ${isMobile ? CHAT_COLUMN_PADDING : CHAT_INPUT_RIGHT_PADDING}px 38px ${CHAT_COLUMN_PADDING}px` }}>
             <div ref={messageContentRef} style={{ maxWidth: "var(--chat-content-max-width, 820px)", margin: "0 auto" }}>
             {(() => {
               const { toolResults, visibleRefIndexByMessage, writtenFilesByFinalAssistant } = messageRenderIndex;
@@ -1298,7 +1306,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                 if (idx === lastAnchorIdx) { (lastUserMsgRef as { current: HTMLDivElement | null }).current = el; }
               };
 
-              const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; writtenFiles?: WrittenFile[]; visibleBlockOffset?: number; recoverTruncation?: boolean; turnDurationMs?: number; withNotices?: boolean; finalAnswer?: boolean } = {}): ReactNode => {
+              const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; writtenFiles?: WrittenFile[]; visibleBlockOffset?: number; visibleBlockLimit?: number; recoverTruncation?: boolean; turnDurationMs?: number; withNotices?: boolean; finalAnswer?: boolean } = {}): ReactNode => {
                 const msg = options.messageOverride ?? messages[idx];
                 if (msg.role === "custom" && msg.customType === SIDE_BOUNDARY_MESSAGE_TYPE) return <SideChatDivider key="side-chat-divider" />;
                 if (isHiddenCustomMessage(msg)) return null;
@@ -1339,6 +1347,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                     sessionId={session?.id ?? sessionIdRef.current ?? undefined}
                     writtenFiles={options.writtenFiles}
                     visibleBlockOffset={options.visibleBlockOffset}
+                    visibleBlockLimit={options.visibleBlockLimit}
                     turnDurationMs={options.turnDurationMs}
                     onCompact={options.recoverTruncation ? handleCompact : undefined}
                     isCompacting={options.recoverTruncation ? isCompacting : undefined}
@@ -1469,82 +1478,201 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                 type ProcessDescriptor =
                   | { kind: "plain"; index: number }
                   | { kind: "notices"; index: number; notices: TranscriptNotice[] }
-                  | { kind: "message"; index: number; message: AssistantMessage; showTimestamp: boolean; withNotices: boolean };
-                const processDescriptors: ProcessDescriptor[] = [];
-                // 也收「只有提示行、没有内容」的步骤。
-                let processMessageCount = 0;
-                let processToolCount = 0;
-                let processRefIdx: number | undefined;
-                let revealProcess = false;
+                  | { kind: "message"; index: number; message: AssistantMessage; visibleBlockOffset?: number; visibleBlockLimit?: number; showTimestamp: boolean; withNotices: boolean };
+                type TurnSegment =
+                  | {
+                      kind: "process";
+                      keySuffix: string;
+                      descriptors: ProcessDescriptor[];
+                      messageCount: number;
+                      toolCallCount: number;
+                      refIdx: number | undefined;
+                      reveal: boolean;
+                      rangeStart: number;
+                      rangeEnd: number;
+                    }
+                  | {
+                      kind: "body";
+                      keySuffix: string;
+                      index: number;
+                      message: AssistantMessage;
+                      visibleBlockOffset: number;
+                      visibleBlockLimit: number;
+                      showTimestamp: boolean;
+                      withNotices: boolean;
+                    };
+
+                const isExposedBodyBlock = (block: { type: string; text?: string }) => (
+                  block.type === "image" || (block.type === "text" && (block.text ?? "").trim().length > 0)
+                );
+
+                const segments: TurnSegment[] = [];
+                let bucketDescriptors: ProcessDescriptor[] = [];
+                let bucketMessageCount = 0;
+                let bucketToolCount = 0;
+                let bucketRefIdx: number | undefined;
+                let bucketReveal = false;
+                let bucketRangeStart = processStart;
+                let bucketRangeEnd = processStart;
+                let segmentSeq = 0;
+
+                const flushBucket = () => {
+                  if (bucketDescriptors.length === 0) return;
+                  segments.push({
+                    kind: "process",
+                    keySuffix: `p${segmentSeq++}`,
+                    descriptors: bucketDescriptors,
+                    messageCount: bucketMessageCount,
+                    toolCallCount: bucketToolCount,
+                    refIdx: bucketRefIdx,
+                    reveal: bucketReveal,
+                    rangeStart: bucketRangeStart,
+                    rangeEnd: bucketRangeEnd,
+                  });
+                  bucketDescriptors = [];
+                  bucketMessageCount = 0;
+                  bucketToolCount = 0;
+                  bucketRefIdx = undefined;
+                  bucketReveal = false;
+                };
+
                 for (let processIdx = processStart; processIdx <= finalAssistantIdx; processIdx++) {
                   const processMessage = messages[processIdx];
                   if (processMessage.role === "custom") {
-                    // Not counted either: a turn whose only extra is a hidden message has no process details.
                     if (isHiddenCustomMessage(processMessage)) continue;
-                    revealProcess ||= Boolean(pendingSearchScroll && pendingSearchScroll.entryId === entryIds[processIdx]);
-                    processMessageCount += 1;
-                    processDescriptors.push({ kind: "plain", index: processIdx });
+                    if (bucketDescriptors.length === 0) bucketRangeStart = processIdx;
+                    bucketRangeEnd = processIdx;
+                    bucketReveal ||= Boolean(pendingSearchScroll && pendingSearchScroll.entryId === entryIds[processIdx]);
+                    bucketMessageCount += 1;
+                    bucketDescriptors.push({ kind: "plain", index: processIdx });
                     continue;
                   }
                   if (processMessage.role !== "assistant") continue;
                   const message = processIdx === finalAssistantIdx ? finalViews.process : processMessage;
-                  // The final message's notices go under its answer when it has one.
                   const withNotices = processIdx !== finalAssistantIdx || !finalAnswerMessage;
                   const blocks = getDisplayableAssistantBlocks(message);
                   if (blocks.length === 0) {
                     const notices = withNotices ? getTranscriptNotices(processMessage) : [];
-                    if (notices.length > 0) processDescriptors.push({ kind: "notices", index: processIdx, notices });
+                    if (notices.length > 0) {
+                      if (bucketDescriptors.length === 0) bucketRangeStart = processIdx;
+                      bucketRangeEnd = processIdx;
+                      bucketDescriptors.push({ kind: "notices", index: processIdx, notices });
+                    }
                     continue;
                   }
-                  processRefIdx ??= visibleRefIndexByMessage.get(processIdx);
-                  processToolCount += countToolCallBlocks(blocks);
-                  processMessageCount += 1;
-                  revealProcess ||= Boolean(
-                    pendingSearchScroll
-                    && entryIds[processIdx] === pendingSearchScroll.entryId
-                    && (
-                      pendingSearchScroll.blockIndex === undefined
-                      || blocks.some((block) => processMessage.content.indexOf(block) === pendingSearchScroll.blockIndex)
-                    )
-                  );
-                  processDescriptors.push({
-                    kind: "message",
-                    index: processIdx,
-                    message,
-                    // 同一条消息拆成过程和答复时，只在答复处显示时间。
-                    showTimestamp: processIdx !== finalAssistantIdx || !finalAnswerMessage,
-                    withNotices,
-                  });
-                }
-                const renderProcessViews = (): ReactNode => processDescriptors.map((entry) => {
-                  if (entry.kind === "notices") {
-                    return <TranscriptNoticeLines key={`process-notices-${messageKeys[entry.index]}`} notices={entry.notices} />;
-                  }
-                  if (entry.kind === "plain") {
-                    return renderMessage(entry.index, { attachRef: false, keyPrefix: "process" });
-                  }
-                  return renderMessage(entry.index, {
-                    attachRef: false,
-                    keyPrefix: "process",
-                    messageOverride: entry.message,
-                    showTimestamp: entry.showTimestamp,
-                    withNotices: entry.withNotices,
-                  });
-                });
 
-                // 只有提示行（其余步骤不显示内容）时不折叠。
-                if (processMessageCount === 0) nodes.push(
-                  <Fragment key={`process-only-${messageKeys[start] ?? start}`}>{renderProcessViews()}</Fragment>,
-                );
-                else if (processDescriptors.length > 0) {
-                  // 过程详情一律默认折叠，历史轮次折起来只留摘要行。列表末尾这一轮若看不到答复
-                  // （跑完或中断却没有答复，或被压缩卡片、唤醒消息切开的前一段），折叠时先亮出最新几条：
-                  // 既不会一次摊开几十张工具卡，也不会连它刚做了什么都看不到（#906）。
-                  const showsRecentWhenFolded = end === messages.length && !collapsesProcessDetails(finalAnswerMessage);
-                  // 预览与运行中的处理组共用同一套「最新几条」窗口规则。
+                  // 只折思考与工具调用，非空正文与图片永远按原时间顺序直接露出。
+                  let cursor = 0;
+                  while (cursor < blocks.length) {
+                    const isBody = isExposedBodyBlock(blocks[cursor]);
+                    let nextCursor = cursor + 1;
+                    while (nextCursor < blocks.length && isExposedBodyBlock(blocks[nextCursor]) === isBody) {
+                      nextCursor += 1;
+                    }
+                    const isFullMessageSlice = cursor === 0 && nextCursor === blocks.length;
+                    const isLastSlice = nextCursor === blocks.length;
+                    const sliceBlocks = blocks.slice(cursor, nextCursor);
+                    const sliceShowTimestamp = isLastSlice && (processIdx !== finalAssistantIdx || !finalAnswerMessage);
+                    const sliceWithNotices = isLastSlice && withNotices;
+
+                    if (isBody) {
+                      flushBucket();
+                      segments.push({
+                        kind: "body",
+                        keySuffix: `b${segmentSeq++}`,
+                        index: processIdx,
+                        message,
+                        visibleBlockOffset: cursor,
+                        visibleBlockLimit: nextCursor - cursor,
+                        showTimestamp: sliceShowTimestamp,
+                        withNotices: sliceWithNotices,
+                      });
+                    } else {
+                      if (bucketDescriptors.length === 0) bucketRangeStart = processIdx;
+                      bucketRangeEnd = processIdx;
+                      bucketRefIdx ??= visibleRefIndexByMessage.get(processIdx);
+                      bucketToolCount += countToolCallBlocks(sliceBlocks);
+                      bucketMessageCount += 1;
+                      bucketReveal ||= Boolean(
+                        pendingSearchScroll
+                        && entryIds[processIdx] === pendingSearchScroll.entryId
+                        && (
+                          pendingSearchScroll.blockIndex === undefined
+                          || sliceBlocks.some((block) => processMessage.content.indexOf(block) === pendingSearchScroll.blockIndex)
+                        )
+                      );
+                      bucketDescriptors.push({
+                        kind: "message",
+                        index: processIdx,
+                        message,
+                        ...(isFullMessageSlice ? {} : { visibleBlockOffset: cursor, visibleBlockLimit: nextCursor - cursor }),
+                        showTimestamp: sliceShowTimestamp,
+                        withNotices: sliceWithNotices,
+                      });
+                    }
+                    cursor = nextCursor;
+                  }
+                }
+                flushBucket();
+
+                let lastProcessSegmentIdx = -1;
+                for (let s = segments.length - 1; s >= 0; s--) {
+                  const seg = segments[s];
+                  if (seg.kind === "process" && seg.messageCount > 0) {
+                    lastProcessSegmentIdx = s;
+                    break;
+                  }
+                }
+                const hasExposedBodySegment = segments.some((seg) => seg.kind === "body");
+
+                for (let segIdx = 0; segIdx < segments.length; segIdx++) {
+                  const seg = segments[segIdx];
+                  if (seg.kind === "body") {
+                    nodes.push(renderMessage(seg.index, {
+                      attachRef: false,
+                      keyPrefix: `body-${seg.keySuffix}`,
+                      messageOverride: seg.message,
+                      visibleBlockOffset: seg.visibleBlockOffset,
+                      visibleBlockLimit: seg.visibleBlockLimit,
+                      showTimestamp: seg.showTimestamp,
+                      withNotices: seg.withNotices,
+                    }));
+                    continue;
+                  }
+
+                  const renderProcessViews = (): ReactNode => seg.descriptors.map((entry) => {
+                    if (entry.kind === "notices") {
+                      return <TranscriptNoticeLines key={`process-notices-${seg.keySuffix}-${messageKeys[entry.index]}`} notices={entry.notices} />;
+                    }
+                    if (entry.kind === "plain") {
+                      return renderMessage(entry.index, { attachRef: false, keyPrefix: `process-${seg.keySuffix}` });
+                    }
+                    return renderMessage(entry.index, {
+                      attachRef: false,
+                      keyPrefix: `process-${seg.keySuffix}-${entry.visibleBlockOffset ?? 0}`,
+                      messageOverride: entry.message,
+                      visibleBlockOffset: entry.visibleBlockOffset,
+                      visibleBlockLimit: entry.visibleBlockLimit,
+                      showTimestamp: entry.showTimestamp,
+                      withNotices: entry.withNotices,
+                    });
+                  });
+
+                  if (seg.messageCount === 0) {
+                    nodes.push(
+                      <Fragment key={`process-only-${messageKeys[start] ?? start}-${seg.keySuffix}`}>{renderProcessViews()}</Fragment>,
+                    );
+                    continue;
+                  }
+
+                  const isLastProcessGroup = segIdx === lastProcessSegmentIdx;
+                  const showsRecentWhenFolded = isLastProcessGroup
+                    && end === messages.length
+                    && !hasExposedBodySegment
+                    && !collapsesProcessDetails(finalAnswerMessage);
                   const renderFoldPreview = (): ReactNode => {
                     const sources: Array<{ index: number; itemCount: number; message: AgentMessage }> = [];
-                    for (let index = processStart; index <= finalAssistantIdx; index++) {
+                    for (let index = seg.rangeStart; index <= seg.rangeEnd; index++) {
                       const message = messages[index];
                       if (message.role === "custom") {
                         if (isHiddenCustomMessage(message)) continue;
@@ -1566,25 +1694,25 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                       if (visibleBlockOffset >= source.itemCount) return null;
                       return renderMessage(source.index, {
                         attachRef: false,
-                        keyPrefix: "process-recent",
+                        keyPrefix: `process-recent-${seg.keySuffix}`,
                         messageOverride: source.message,
                         visibleBlockOffset: source.message.role === "assistant" ? visibleBlockOffset : undefined,
                         showTimestamp: source.index !== finalAssistantIdx || !finalAnswerMessage,
                       });
                     });
                   };
-                  const processCacheMisses = summarizeCacheMisses(messages.slice(processStart, finalAnswerMessage ? finalAssistantIdx : finalAssistantIdx + 1));
+                  const processCacheMisses = summarizeCacheMisses(messages.slice(seg.rangeStart, finalAnswerMessage && seg.rangeEnd === finalAssistantIdx ? finalAssistantIdx : seg.rangeEnd + 1));
                   nodes.push(
                     <div
-                      key={`process-group-${messageKeys[start] ?? start}`}
-                      ref={processRefIdx === undefined ? undefined : (el) => { messageRefs.current[processRefIdx] = el; }}
+                      key={`process-group-${messageKeys[start] ?? start}-${seg.keySuffix}`}
+                      ref={seg.refIdx === undefined ? undefined : (el) => { messageRefs.current[seg.refIdx!] = el; }}
                     >
                       <ProcessDetailsGroup
-                        messageCount={processMessageCount}
-                        toolCallCount={processToolCount}
-                        durationMs={turnDurationMs}
+                        messageCount={seg.messageCount}
+                        toolCallCount={seg.toolCallCount}
+                        durationMs={isLastProcessGroup ? turnDurationMs : undefined}
                         cacheMisses={processCacheMisses}
-                        reveal={revealProcess}
+                        reveal={seg.reveal}
                         renderRecent={showsRecentWhenFolded ? renderFoldPreview : undefined}
                         t={t}
                         renderChildren={() => <>{renderProcessViews()}</>}
@@ -1592,6 +1720,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                     </div>,
                   );
                 }
+
                 const turnWrittenFiles = writtenFilesByFinalAssistant.get(finalAssistantIdx);
                 const writtenFiles = turnWrittenFiles ? keepWrittenFiles(finalViews, turnWrittenFiles) : undefined;
                 if (finalAnswerMessage) nodes.push(renderMessage(finalAssistantIdx, {
@@ -1599,7 +1728,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                   // 最终回答的顶层标题带标记：右侧大纲跳转靠它和预览的编号逐个对上。
                   finalAnswer: true,
                   // 没有过程详情时，本轮耗时显示在答复下方。
-                  turnDurationMs: processDescriptors.length === 0 ? turnDurationMs : undefined,
+                  turnDurationMs: lastProcessSegmentIdx === -1 ? turnDurationMs : undefined,
                   recoverTruncation: end === messages.length && !isStreaming && !hasAssistantAnswer(finalAnswerMessage),
                 }));
                 for (let index = finalAssistantIdx + 1; index < end; index++) nodes.push(renderMessage(index));

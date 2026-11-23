@@ -1777,6 +1777,22 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   );
 
 
+  const hasTopStackContent = Boolean(
+    missingCwd
+    || modelError
+    || sendError
+    || (modelScopeWarnings && modelScopeWarnings.length > 0)
+    || (modelDataDiagnostics && modelDataDiagnostics.length > 0)
+    || showImageUnsupportedWarning
+    || extensionsInitializing
+    || imageAttachmentError
+    || (newSessionWorktrees && newSessionWorktrees.length > 0)
+    || ((queuedMessages?.steering.length ?? 0) + (queuedMessages?.followUp.length ?? 0)) > 0
+    || compactResultText
+    || compactError
+    || textAttachment
+  );
+  const floatTopToolbar = !compact && attachedImages.length === 0 && !hasTopStackContent;
   return (
     <fieldset
       disabled={builtinCommandPending}
@@ -2041,7 +2057,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         {/* 输入框上方同一排：左侧悬浮粘贴图片（多图自动向上换行），右侧固定工具条（贴着输入框右上角，互不冲突） */}
         {(!compact || attachedImages.length > 0) && (
           <div
-            className="composer-top-row"
+            className={floatTopToolbar ? "composer-top-row composer-top-row--floating" : "composer-top-row"}
             style={{
               display: "flex",
               alignItems: "flex-end",

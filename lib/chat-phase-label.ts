@@ -23,6 +23,13 @@ export type Translate = (key: string, params?: Record<string, string | number>) 
  * while before the next token arrives, and reporting the underlying "waiting for model"
  * phase in the meantime reads as a hang. Compaction is what the user needs to know.
  * While compacting, messages queued for after it count beside it (`chat.compactingQueued`).
+ *
+ * A running tool's newest live output line stands in for the tool names: the tool card
+ * above already names the tool and shows its output, so repeating both here only crowds
+ * the row.
+ *
+ * Returns null when there is nothing to report; callers decide whether the status row
+ * exists at all (ChatWindow renders it only while a run has no streaming content yet).
  */
 export function phaseLabel(
   phase: AgentPhase,
@@ -33,10 +40,11 @@ export function phaseLabel(
 ): string | null {
   if (isCompacting) return queuedCount > 0 ? t("chat.compactingQueued", { count: queuedCount }) : t("chat.compacting");
   if (phase?.kind === "running_tools") {
+    // Each update moves its tool to the end of the list (running_tools in
+    // useAgentSession), so the last entry is the tool that just reported: its live output
+    // line is what the user wants to watch, not an older tool's stale one.
     const latest = phase.tools[phase.tools.length - 1];
-    if (latest?.progress) {
-      return `${t("chat.runningNamedTool", { name: latest.name })} ${latest.progress}`;
-    }
+    if (latest?.progress) return latest.progress;
     const names = phase.tools.map((tool) => tool.name);
     if (names.length === 0) return t("chat.runningTool");
     if (names.length === 1) return t("chat.runningNamedTool", { name: names[0] });
