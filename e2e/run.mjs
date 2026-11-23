@@ -519,20 +519,19 @@ try {
     if (viewport.width > 600) {
       const chatScroll = page.locator("[data-chat-scroll-container]");
       assert.equal(await chatScroll.count(), 1, "Expected one stable chat scroll container");
-      const node = page.locator("[data-minimap-node-index='0']");
-      await node.waitFor();
-      const rect = await node.boundingBox();
+      // 压缩后的首屏一条提问都没加载（问句在压缩卡片上方）：导航条仍要在，只剩「更早的轮次」占位；
+      // 大纲只列用户提问，压缩卡片不再算一轮。
+      await page.locator("[data-minimap-earlier]").waitFor({ state: "attached" });
+      assert.equal(await page.locator("[data-minimap-node-index]").count(), 0);
+      const pill = page.locator("[data-minimap-pill]");
+      const rect = await pill.boundingBox();
       assert.ok(rect);
       await page.mouse.move(rect.x + rect.width / 2, rect.y + rect.height / 2);
       const preview = page.locator("[data-minimap-preview-box]");
-      await preview.getByRole("button", { name: "E2E compaction anchor", exact: true }).waitFor();
-      await preview.getByRole("button", { name: "E2E compacted heading", exact: true }).click();
-      await page.waitForFunction(() => {
-        const heading = document.querySelector("[data-entry-id='answer'] h2");
-        const scroll = document.querySelector("[data-chat-scroll-container]");
-        return heading && scroll && Math.abs(heading.getBoundingClientRect().top
-          - scroll.getBoundingClientRect().top - scroll.clientHeight * 0.3) < 5;
-      });
+      const earlierTurn = preview.getByRole("button", { name: "E2E prompt outside the compacted page", exact: true });
+      await earlierTurn.waitFor();
+      await earlierTurn.click();
+      await preview.getByText("E2E compacted heading", { exact: true }).first().waitFor();
       await page.screenshot({ path: join(artifacts, "compaction-minimap.png") });
 
       const selectSession = async (title, entryId) => {

@@ -390,7 +390,8 @@ function sampleRailTicks(
   activeIndex: number | null,
 ): Array<{ key: string; loaded: boolean; active: boolean; nodeIndex?: number }> {
   const ticks: Array<{ key: string; loaded: boolean; active: boolean; nodeIndex?: number }> = [];
-  if (loadedNodes.length === 0) return ticks;
+  // 页内可能一条提问都没有（压缩后的首屏、只剩工具步骤的窗口）：此时仍要画出
+  // 「更早的轮次」占位，否则导航条会整条消失，用户看不出还有没加载的历史。
 
   const unloadedSlotBudget = unloadedCount > 0 ? Math.min(8, unloadedCount, Math.floor(MAX_PILL_TICKS / 3)) : 0;
   for (let i = 0; i < unloadedSlotBudget; i += 1) {
@@ -1079,6 +1080,7 @@ export const ChatMinimap = memo(function ChatMinimap({
     >
       <div
         className={styles.pill}
+        data-minimap-pill=""
         title={locked ? t("chatMinimap.pinPreview") : undefined}
         onClick={togglePreviewPinned}
         onMouseEnter={enterPreview}

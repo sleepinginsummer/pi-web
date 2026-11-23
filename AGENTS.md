@@ -24,6 +24,7 @@ Lint: `npm run lint`
 - Restart only after the failure reproduces from a fresh page and the server-side checks also fail. Stop the exact dev process gracefully, move `.next` into a `mktemp -d` backup, and restart with the standard `npm run dev` command.
 - Do not use `next dev --webpack` as a fallback. This repository's development graph can fail on `undici` imports such as `node:console`; development is expected to use Turbopack.
 - Next.js may append a generated `BEGIN:nextjs-agent-rules` block to `AGENTS.md` when `next dev` starts. Treat that as generated tooling output, verify it with `git status`, and do not include it in an unrelated feature commit.
+- e2e 在本机跑：先停掉本检出的 dev 服务，或用一个独立 worktree（`git worktree add <另一目录> <commit>` 再 `ln -s` 共享 `node_modules`），因为 `e2e/run.mjs` 会为同一个构建目录起另一个 `next dev`，并拒绝在用着 `.next/dev/lock` 的检出里跑。`E2E_SERVER_MODE=start`（先 `npm run build`）与 CI 一致，最可信；dev 模式冷编译在外置盘上会超过 e2e 的接口期限，挂了直接重跑一遍（缓存已热）。
 
 ### Upgrading pi
 
