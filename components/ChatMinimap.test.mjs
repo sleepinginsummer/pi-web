@@ -341,6 +341,13 @@ test("待定位目标按当前 DOM 量，不用缓存偏移", async () => {
   assert.ok(scrollToNode.indexOf("elementScrollTop") < scrollToNode.indexOf("?? node.targetTurn.scrollTop"), "DOM 在前，缓存偏移在后");
 });
 
+test("未加载轮次按 entryId 判定，不再拿轮次号与轮次个数比", () => {
+  // 大纲只列用户提问后编号会跳号（1、2、5、9…），turnsBefore 是轮次个数：
+  // 用 `turnNumber <= turnsBefore` 会把后面的提问整段截掉（真机里 65 轮只剩约 40 行）。
+  assert.doesNotMatch(source, /turn\.turnNumber <= turnsBefore/);
+  assert.match(source, /remoteOutline\.turns\.filter\(\(turn\) => !loadedIdSet\.has\(turn\.entryId\)\)/);
+});
+
 test("大纲只列用户提问：自定义消息与合成的分支摘要都不算", () => {
   const custom = (customType) => ({ role: "custom", customType, content: "x", display: true });
   assert.equal(isOutlineAnchorMessage({ role: "user", content: "问题" }), true);

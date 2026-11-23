@@ -561,7 +561,10 @@ export const ChatMinimap = memo(function ChatMinimap({
   const unloadedOutlineTurns = useMemo(() => {
     if (turnsBefore <= 0 || !remoteOutline || remoteOutline.key !== outlineRequestKey) return [];
     const loadedIdSet = new Set(entryIds);
-    return remoteOutline.turns.filter((turn) => turn.turnNumber <= turnsBefore && !loadedIdSet.has(turn.entryId));
+    // 按 entryId 判断是否已加载，**不要**再拿 turnNumber 和 turnsBefore 比：
+    // 大纲只列用户提问后，编号会跳过被隐藏的轮次（1、2、5、9…），而 turnsBefore 是
+    // 轮次**个数**。两者口径不同，`turnNumber <= turnsBefore` 会把后面的提问整段丢掉。
+    return remoteOutline.turns.filter((turn) => !loadedIdSet.has(turn.entryId));
   }, [entryIds, outlineRequestKey, remoteOutline, turnsBefore]);
 
   /** 历史大纲是否已经拿到（拿到后才知道哪些历史轮次是提问）。 */
