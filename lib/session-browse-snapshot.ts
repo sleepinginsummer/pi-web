@@ -27,8 +27,8 @@ interface ParsedSnapshot extends CachedSnapshot {
   readMs: number;
 }
 
-const MAX_CACHED_SESSIONS = 8;
-const MAX_CACHED_BYTES = 256 * 1024 * 1024;
+const MAX_CACHED_SESSIONS = 4;
+const MAX_CACHED_BYTES = 32 * 1024 * 1024;
 
 declare global {
   var __piSessionBrowseCache: Map<string, CachedSnapshot> | undefined;

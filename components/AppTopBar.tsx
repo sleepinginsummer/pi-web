@@ -9,6 +9,7 @@ import type { ShadowSessionControl } from "@/lib/shadow-session-control";
 import { BranchNavigator, hasSessionBranches } from "./BranchNavigator";
 import { ShadowSessionToggle } from "./ShadowSessionToggle";
 import { DraftObserverSessionToggle, ObserverSessionToggle } from "./ObserverSessionToggle";
+import { SESSION_OBSERVER_FEATURE_ENABLED } from "@/lib/session-observer-protocol";
 import { SYSTEM_PROMPT_ADDON_EDITOR_ATTR, SystemPromptAddonToggle } from "./SystemPromptAddonToggle";
 import { SessionStatsButton } from "./SessionInfoControls";
 
@@ -189,7 +190,7 @@ function SessionTopBarControls({ activePanel, hideAgents = false, hideStats = fa
           onToggle={shadow?.onToggle ?? NOOP}
         />
         <SystemPromptAddonToggle scopeKey={shadow?.scopeKey ?? null} sessionId={shadow?.sessionId ?? null} onChange={session.onSystemPromptAddonChange} />
-        {(session.observerPanel || session.observerDraft) && (
+        {SESSION_OBSERVER_FEATURE_ENABLED && (session.observerPanel || session.observerDraft) && (
           <div className="top-bar-toggle-group">
             {session.observerPanel && (
               <button

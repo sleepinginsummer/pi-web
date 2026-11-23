@@ -3,7 +3,7 @@ import { clampThinkingLevel, getSupportedThinkingLevels, isContextOverflow } fro
 import { createAgentSessionFromServices, createAgentSessionServices, getAgentDir, initTheme, SessionManager, SettingsManager, Theme, type ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { randomUUID } from "crypto";
-import { existsSync, realpathSync, writeFileSync } from "fs";
+import { existsSync, realpathSync, statSync, writeFileSync } from "fs";
 import { resolve } from "path";
 import type { AgentRuntimeSnapshot, AgentRuntimeState } from "./agent-state";
 import { isDeepStrictEqual } from "util";
@@ -28,7 +28,7 @@ import { generateTitleForSessionFile } from "./session-file-title";
 import { findDeferredModel, findDeferredStartupModel, rememberProviderModels } from "./deferred-provider-models";
 import { ObserverContextOverflow, observerModelTools, SessionObserver } from "./session-observer";
 import { createObserverChecklistExtension } from "./observer-checklist-extension";
-import { isObserverFocusPreset, isObserverInterval, normalizeObserverFocusNote, SESSION_OBSERVER_ENTRY, type ObserverInteraction, type StoredObserverInteraction } from "./session-observer-protocol";
+import { isObserverFocusPreset, isObserverInterval, normalizeObserverFocusNote, SESSION_OBSERVER_ENTRY, SESSION_OBSERVER_FEATURE_ENABLED, type ObserverInteraction, type StoredObserverInteraction } from "./session-observer-protocol";
 import { isThinkingLevel } from "./thinking-levels";
 import { isBlockingExtensionUiRequest } from "./extension-ui-queue";
 import { createDevServerExtension } from "./dev-server-extension";
@@ -302,6 +302,25 @@ export function resolveSessionIdleTimeoutMs(
 /** Resolved once: the debug panel reads it rather than resolving the variable again, which warns. */
 export const SESSION_IDLE_TIMEOUT_MS = resolveSessionIdleTimeoutMs();
 
+const LARGE_SESSION_BYTES = 32 * 1024 * 1024;
+const LARGE_SESSION_IDLE_TIMEOUT_MS = 2 * 60 * 1000;
+const MEDIUM_SESSION_BYTES = 8 * 1024 * 1024;
+const MEDIUM_SESSION_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+
+/**
+ * 大会话的 SDK SessionManager 会在堆里驻留原文件 6~7 倍的对象内存；
+ * 按磁盘体积缩短空闲超时，避免几百 MB~1GB 内存白白占满 10 分钟。
+ */
+export function resolveEffectiveIdleTimeoutMs(baseTimeoutMs: number, sessionFileBytes: number): number {
+  if (baseTimeoutMs <= 0) return 0;
+  if (sessionFileBytes >= LARGE_SESSION_BYTES) return Math.min(baseTimeoutMs, LARGE_SESSION_IDLE_TIMEOUT_MS);
+  if (sessionFileBytes >= MEDIUM_SESSION_BYTES) return Math.min(baseTimeoutMs, MEDIUM_SESSION_IDLE_TIMEOUT_MS);
+  return baseTimeoutMs;
+}
+
+/** 同时保留在内存里的空闲 AgentSession 上限（运行中/有子代理/有活跃租约的会话不计入，也绝不回收）。 */
+export const MAX_IDLE_SESSIONS = 6;
+
 const DEFAULT_EXTENSION_BINDING_WAIT_TIMEOUT_MS = 20_000;
 
 /**
@@ -526,6 +545,7 @@ export class AgentSessionWrapper {
   private mcpPromptWait: { controller: AbortController; done: Promise<void> } | null = null;
   private unsubscribe: (() => void) | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private idleTimeoutMs: number = SESSION_IDLE_TIMEOUT_MS;
   private onDestroyCallback: (() => void) | null = null;
   private shutdownPromise: Promise<void> | null = null;
   private extensionUiAbortController = new AbortController();
@@ -848,6 +868,23 @@ export class AgentSessionWrapper {
     return false;
   }
 
+  /** 判断当前 wrapper 是否完全空闲且可安全按容量上限回收。 */
+  isIdleEvictable(): boolean {
+    if (!this._alive || this.forceShutdownOnIdle) return false;
+    if (this.isRunning() || this.isAwaitingInput() || this.hasBlockingUiRequest()) return false;
+    if (getLiveSubagentStatus(this.sessionId) !== undefined) return false;
+    if (hasActiveSessionLivenessProvider({
+      sessionId: this.sessionId,
+      sessionFile: this.sessionFile || undefined,
+    })) return false;
+    return true;
+  }
+
+  /** 最近一次活跃时间戳，用于空闲会话上限淘汰时按最久未用排序。 */
+  getIdleActivityAt(): number {
+    return this.idleLastResetAt ?? this.startedAt ?? 0;
+  }
+
   /**
    * A page that has this session selected renews it (POST /api/agent/[id]/lease): the idle
    * countdown starts over at the full timeout, so a closed tab's session is reaped one idle
@@ -956,7 +993,7 @@ export class AgentSessionWrapper {
         replacement: this.sessionReplacement,
       },
       idle: {
-        timeoutMs: SESSION_IDLE_TIMEOUT_MS,
+        timeoutMs: this.idleTimeoutMs,
         nextCheckAt: this.idleDeadlineAt,
         lastResetAt: this.idleLastResetAt,
         forcedByStop: this.forceShutdownOnIdle && this.idleDeadlineAt !== null,
@@ -981,7 +1018,7 @@ export class AgentSessionWrapper {
 
   start(): void {
     this.startedAt = Date.now();
-    if (typeof this.inner.sessionManager?.getEntries === "function") void this.sessionObserver;
+    if (SESSION_OBSERVER_FEATURE_ENABLED && typeof this.inner.sessionManager?.getEntries === "function") void this.sessionObserver;
     this.unsubscribe = this.inner.subscribe((event: AgentEvent) => {
       this.lastEventType = typeof event.type === "string" ? event.type : null;
       this.lastEventAt = Date.now();
@@ -1994,8 +2031,20 @@ export class AgentSessionWrapper {
     // A resolved timeout of 0 disables idle shutdown, but a run that Stop could
     // not unwind is still reaped after the default delay; otherwise it stays
     // running until the server restarts (#656).
-    const timeoutMs = SESSION_IDLE_TIMEOUT_MS
-      || (this.forceShutdownOnIdle ? DEFAULT_SESSION_IDLE_TIMEOUT_MS : 0);
+    let sessionFileBytes = 0;
+    if (SESSION_IDLE_TIMEOUT_MS > 0 && !this.forceShutdownOnIdle && this.sessionFile) {
+      try {
+        sessionFileBytes = statSync(this.sessionFile).size;
+      } catch {
+        sessionFileBytes = 0;
+      }
+    }
+    const timeoutMs = SESSION_IDLE_TIMEOUT_MS > 0
+      ? (this.forceShutdownOnIdle
+          ? SESSION_IDLE_TIMEOUT_MS
+          : resolveEffectiveIdleTimeoutMs(SESSION_IDLE_TIMEOUT_MS, sessionFileBytes))
+      : (this.forceShutdownOnIdle ? DEFAULT_SESSION_IDLE_TIMEOUT_MS : 0);
+    this.idleTimeoutMs = timeoutMs;
     this.forcedIdleTimerArmed = timeoutMs !== 0 && this.forceShutdownOnIdle;
     this.idleLastResetAt = Date.now();
     if (timeoutMs === 0) {
@@ -3835,6 +3884,36 @@ function registerRpcWrapper(wrapper: AgentSessionWrapper): void {
   registry.set(sessionId, wrapper);
   wrapper.start();
   if (!wrapper.isChatOnly()) wrapper.beginExtensionBinding();
+  evictExcessIdleSessions(sessionId);
+}
+
+/**
+ * 超过空闲上限时按最久未活动淘汰多余的空闲 wrapper；
+ * 当用户通过 PI_WEB_IDLE_TIMEOUT_MS=0 显式禁用空闲回收时跳过。
+ */
+export function evictExcessIdleSessions(
+  excludeSessionId?: string,
+  maxIdle = MAX_IDLE_SESSIONS,
+): string[] {
+  if (SESSION_IDLE_TIMEOUT_MS === 0 || maxIdle < 0) return [];
+  const candidates: AgentSessionWrapper[] = [];
+  for (const wrapper of getRegistry().values()) {
+    if (excludeSessionId && wrapper.sessionId === excludeSessionId) continue;
+    if (typeof wrapper.isIdleEvictable === "function" && wrapper.isIdleEvictable()) {
+      candidates.push(wrapper);
+    }
+  }
+  if (candidates.length <= maxIdle) return [];
+  candidates.sort((a, b) => a.getIdleActivityAt() - b.getIdleActivityAt());
+  const toEvict = candidates.slice(0, candidates.length - maxIdle);
+  const evictedIds: string[] = [];
+  for (const wrapper of toEvict) {
+    evictedIds.push(wrapper.sessionId);
+    void wrapper.shutdown().catch((error) => {
+      console.error("[pi-web] failed to evict excess idle session:", error instanceof Error ? error.message : error);
+    });
+  }
+  return evictedIds;
 }
 
 /**
@@ -4661,7 +4740,7 @@ export async function startRpcSession(
               llamaCppExtension,
               ...(builtins?.extensions ?? []),
               createReadOnlyMcpPolicyExtension(),
-              createObserverChecklistExtension(() => observerWrapperRef.current?.sessionObserver),
+              ...(SESSION_OBSERVER_FEATURE_ENABLED ? [createObserverChecklistExtension(() => observerWrapperRef.current?.sessionObserver)] : []),
               createProjectCommandBashExtension({
                 cwd: sessionCwd,
                 settings: settingsManager,
@@ -4868,7 +4947,7 @@ export async function startRpcSession(
         ...(chatOnlyExtensionModel ? { chatOnlyExtensionModel } : {}),
       },
     );
-    if (!sessionFile && options.observerEnabled) {
+    if (SESSION_OBSERVER_FEATURE_ENABLED && !sessionFile && options.observerEnabled) {
       wrapper.sessionObserver.saveSettings({ enabled: true, model: null, thinkingLevel: null });
     }
     observerWrapperRef.current = wrapper;

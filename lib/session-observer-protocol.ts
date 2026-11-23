@@ -2,6 +2,12 @@ import type { SelectedModel } from "./model-types";
 import { applyObserverEdit, type ObserverEdit, type ObserverItem } from "./observer-checklist";
 import type { ThinkingLevel } from "./thinking-levels";
 
+/**
+ * 会话观察员全局功能开关。
+ * 观察员交互记录在长会话中会膨胀到上百 MB，暂时全局关闭（前端隐藏入口、后端停跑并停注册扩展）；
+ * 保留协议与实现代码，改回 true 即可恢复。
+ */
+export const SESSION_OBSERVER_FEATURE_ENABLED = false;
 export const SESSION_OBSERVER_ENTRY = "pi-web:session-observer";
 export const DEFAULT_OBSERVER_INTERVAL = 10;
 export const OBSERVER_FOCUS_PRESETS = ["balanced", "risks", "requirements"] as const;

@@ -546,11 +546,11 @@ declare global {
  */
 export const SM_CACHE_LIMITS = {
   /** Most sessions held at once. */
-  maxEntries: 12,
-  /** Summed on-disk size of cached sessions. */
-  maxTotalBytes: 256 * 1024 * 1024,
+  maxEntries: 6,
+  /** Summed on-disk size of cached sessions (parsed JS objects expand ~6-7x in V8 heap). */
+  maxTotalBytes: 32 * 1024 * 1024,
   /** A session larger than this is never cached — it would evict everything else. */
-  maxFileBytes: 64 * 1024 * 1024,
+  maxFileBytes: 16 * 1024 * 1024,
 };
 
 function getSmCache(): Map<string, SmCacheEntry> {
