@@ -86,8 +86,8 @@ test("AppShell hosts subagent tabs in the right panel next to file and terminal 
   assert.match(appShell, /<SubagentViewer[\s\S]*?sessionId=\{activeOverlayTab\.sessionId\}[\s\S]*?running=\{runningSessionIds\.has\(activeOverlayTab\.sessionId\)\}/);
   // 关闭最后一个 overlay 标签时依次回退到终端、文件，全部关掉才收起面板。
   assert.match(appShell, /const nextOverlay = remainingOverlays\.at\(-1\);[\s\S]*?else if \(fileTabs\.length === 0\) \{\s*closeFilePanel\(\);/);
-  // 项目切换暂存文件标签并丢弃 overlay 标签。
-  assert.match(appShell, /switchFileWorkspaceTabs\(currentProject, newProject\);\s*setOverlayTabs\(\[\]\);\s*setActiveOverlayTabId\(null\);/);
+  // 项目切换暂存文件标签并丢弃非团队看板的 overlay 标签（保留团队看板便于跨项目切成员）。
+  assert.match(appShell, /switchFileWorkspaceTabs\(currentProject, newProject\);\s*setOverlayTabs\(\(prev\) => prev\.filter\(\(tab\) => tab\.kind === "board"\)\);\s*setActiveOverlayTabId\(\(current\) => \(current\?\.startsWith\("board:"\) \? current : null\)\);/);
   // overlay 标签激活时不显示文件查看器或“没有打开的文件”占位。
   assert.match(appShell, /!activeTerminalTabId && !activeOverlayTab && activeFileTab\?\.filePath \? \(/);
   assert.match(appShell, /\) : !activeTerminalTabId && !activeOverlayTab \? \(/);

@@ -34,9 +34,16 @@ function setup() {
     newSessionCwd: null, onPendingNewSessionEvent() {},
     projectExtensionBinding: () => "bound",
     normalizeQueuedMessages: (value) => value, finishPromptWithoutStream: () => { throw new Error("busy run settled"); },
+    // 运行态快照按读取坐标投影：迟到的不覆盖实时队列、压缩与思考强度。
+    runtimeReadSeqRef: { current: 0 }, queueStateGenerationRef: { current: 0 },
+    compactionEpochRef: { current: 0 }, lastAppliedRuntimeSeqRef: { current: 0 },
+    runtimeThinkingLevelSessionRef: { current: null }, thinkingChoiceRevisionRef: { current: 0 },
+    runtimeBusySnapshotRef: { current: null },
   });
   context.applyContextUsage = callback("applyContextUsage").runInContext(context);
   context.applyRuntimeState = callback("applyRuntimeState").runInContext(context);
+  context.beginRuntimeRead = callback("beginRuntimeRead").runInContext(context);
+  context.applyRuntimeSnapshot = callback("applyRuntimeSnapshot").runInContext(context);
   context.readAgentSnapshot = callback("readAgentSnapshot").runInContext(context);
   context.applyAgentSnapshot = callback("applyAgentSnapshot").runInContext(context);
   context.refreshContextUsage = callback("refreshContextUsage").runInContext(context);

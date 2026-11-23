@@ -682,18 +682,25 @@ test("多条队列移回的图片在草稿恢复时不被单次上传数量限�
 test("移回入口恢复完整图片预览并保留现有附件和草稿", async () => {
   const { prependChatDraft } = await jiti.import("../lib/queued-messages.ts");
   const inputSource = ts.createSourceFile("ChatInput.tsx", readFileSync(new URL("./ChatInput.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  function findImperativeHandle(node) {
-    if (ts.isCallExpression(node) && node.expression.getText(inputSource) === "useImperativeHandle") return node.arguments[1];
-    return ts.forEachChild(node, findImperativeHandle);
+  // 移回逻辑现在是一份 `useCallback`，句柄里的 prependDraft 和迟到的取回通知都用它。
+  function findPrependDraft(node) {
+    if (
+      ts.isVariableDeclaration(node)
+      && node.name.getText(inputSource) === "prependDraft"
+      && node.initializer
+      && ts.isCallExpression(node.initializer)
+      && node.initializer.expression.getText(inputSource) === "useCallback"
+    ) return node.initializer.arguments[0];
+    return ts.forEachChild(node, findPrependDraft);
   }
-  const callback = new Script(ts.transpileModule(`(${findImperativeHandle(inputSource).getText(inputSource)})`, {
+  const callback = new Script(ts.transpileModule(`(${findPrependDraft(inputSource).getText(inputSource)})`, {
     compilerOptions: { target: ts.ScriptTarget.ES2020 },
   }).outputText);
   const existing = { data: "b3RoZXI=", mimeType: "image/png", previewUrl: "blob:existing" };
   const valueRef = { current: "当前文字" };
   const attachedImagesRef = { current: [existing] };
   let persisted;
-  const handle = callback.runInNewContext({
+  const prepend = callback.runInNewContext({
     textareaRef: { current: null }, valueRef, attachedImagesRef,
     textAttachmentRef: { current: "TXT 附件" }, draftKeyRef: { current: "test-session" },
     prependChatDraft,
@@ -702,8 +709,10 @@ test("移回入口恢复完整图片预览并保留现有附件和草稿", async
     setValue() {}, setAttachedImages() {}, setAtQuery() {},
     setDraft: (key, draft) => { persisted = { key, draft }; },
     requestAnimationFrame: (callback) => callback(),
-  })();
-  handle.prependDraft({ value: "排队文字", images: [{ data: "dGVzdA==", mimeType: "image/png" }] });
+    autoGrowTextarea() {},
+    scrollTextareaCaretIntoView() {},
+  });
+  prepend({ value: "排队文字", images: [{ data: "dGVzdA==", mimeType: "image/png" }] });
   assert.equal(valueRef.current, "排队文字\n\n当前文字");
   assert.equal(attachedImagesRef.current.length, 2);
   assert.equal(attachedImagesRef.current[0].previewUrl, "data:image/png;base64,dGVzdA==");
@@ -781,4 +790,19 @@ test("a programmatic caret at the end scrolls an overflowing box to its bottom, 
   const mid = fake("many\nlines", 3, 320);
   scrollTextareaCaretIntoView(mid);
   assert.equal(mid.scrollTop, 0, "a mid-text caret leaves the scroll alone");
+});
+
+test("a recall delivered after the composer mounted lands in the input", async () => {
+  const source = await readFile(new URL("./ChatInput.tsx", import.meta.url), "utf8");
+
+  // 取回请求往返期间用户切走再切回：输入框已经挂载并读过草稿，迟到的结果只能靠订阅送进来，
+  // 否则下一次编辑会把本地内容写回同一个键，服务端已清除的消息就丢了。
+  assert.match(source, /subscribeRecalledDraft\(draftKey, \(draft\) => prependDraft\(draft\)\)/);
+  // 投递落在读完初始草稿之后、订阅生效之前时不会补发：订阅前先用恢复标记补收一次，
+  // 否则首次写回会覆盖刚取回的正文与附件。
+  assert.match(source, /if \(firstMount && recallRevision\(draftKey\) !== initialRecallRevisionRef\.current\) \{/);
+  // 补收之后这一帧的渲染值还是旧的：附件同样要按引用判一次，别拿旧值写回去。
+  assert.match(source, /\|\| attachedImagesRef\.current !== attachedImages\) return;/);
+  assert.match(source, /adoptStoredDraft\(draftKey\);/);
+  assert.match(source, /const prependDraft = useCallback\(\(draft: ChatDraft\) => \{/);
 });

@@ -234,6 +234,19 @@ test("POST refuses a foreign origin, a body that is not JSON, and a folder with 
   assert.equal(existsSync(trustPath), false, "nothing was trusted");
 });
 
+test("the trust route refuses while queued messages wait only for Recall", async () => {
+  const routeSource = await readFile(new URL("./route.ts", import.meta.url), "utf8");
+  const post = routeSource.slice(routeSource.indexOf("export async function POST"));
+  const guardIndex = post.indexOf("hasRecallOnlyRpcMessagesForCwd(result.cwd)");
+  // 写入点按真实调用定位：`trustProject(...)` 是同步的，写成 `await trustProject(` 会找不到。
+  const writeIndex = post.search(/\btrustProject\(result\.cwd,/);
+  assert.ok(guardIndex > 0, "the guard is there");
+  assert.ok(writeIndex > 0, "the write is there");
+  // 写入信任后这个目录下的会话会被关掉：内存里的消息也会一起消失，所以拦在写之前。
+  assert.ok(guardIndex < writeIndex, "the guard runs before the trust settings are written");
+  assert.match(post.slice(guardIndex, writeIndex), /Recall the waiting messages/);
+});
+
 test("POST trusts the folder, and GET then lists it as trusted", async (t) => {
   t.after(() => rm(trustPath, { force: true }));
   const response = await post({ cwd });

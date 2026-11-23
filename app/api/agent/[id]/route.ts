@@ -194,7 +194,8 @@ export async function POST(
       error: error instanceof Error ? error.message : String(error),
       ...(missingCwd ? cwdMissingBody(missingCwd) : {}),
       ...((error as { code?: unknown } | null)?.code === EXTENSION_REPORTED_CODE ? { code: EXTENSION_REPORTED_CODE } : {}),
-      ...(commandType === "prompt" && !promptAccepted
+      // 提示形态的提交（含 steer / follow_up）没被接收时都要明确「没有发出」，客户端据此保留草稿。
+      ...(commandType && getSubmitMode(commandType) && !promptAccepted
         ? { code: "prompt_rejected", accepted: false }
         : {}),
     }, { status: status === 404 ? status : 500 });

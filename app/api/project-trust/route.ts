@@ -12,7 +12,7 @@ import { isMcpEntryRefusal, validateMcpProject } from "@/lib/mcp-entry-request";
 import { invalidateModelsCache } from "@/lib/models-cache";
 import { getProjectTrustStatus, trustProject } from "@/lib/project-trust";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
-import { destroyRpcSessionsForCwd, hasBusyRpcSessionForCwd } from "@/lib/rpc-manager";
+import { destroyRpcSessionsForCwd, hasBusyRpcSessionForCwd, hasRecallOnlyRpcMessagesForCwd } from "@/lib/rpc-manager";
 
 export const dynamic = "force-dynamic";
 
@@ -88,6 +88,10 @@ export async function POST(req: Request) {
     }
     if (hasBusyRpcSessionForCwd(result.cwd)) {
       return refusal(409, "session-busy", "Wait for the active session to finish before trusting this project");
+    }
+    // 信任会关闭这个目录下的会话；只等「移回」的消息也只在内存里，先请用户取回。
+    if (hasRecallOnlyRpcMessagesForCwd(result.cwd)) {
+      return refusal(409, "session-busy", "Recall the waiting messages before trusting this project");
     }
 
     const status = trustProject(result.cwd, agentDir);

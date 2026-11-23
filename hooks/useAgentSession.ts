@@ -48,7 +48,17 @@ import type { TranslationParams } from "@/lib/i18n/types";
 import { isSessionExternalWriteError } from "@/lib/session-external-write";
 import { prependChatDraft, queuedMessagesToDraft, type QueuedMessages } from "@/lib/queued-messages";
 export type { QueuedMessages } from "@/lib/queued-messages";
-import { getDraft, parkedNewSessionDraftKey, setDraft, type ChatDraft } from "@/lib/draft-store";
+import {
+  clearDraftRestorePending,
+  getDraft,
+  hasPendingDraftRestore,
+  markDraftRestorePending,
+  notifyRecalledDraft,
+  parkedNewSessionDraftKey,
+  setDraft,
+  subscribeDraftRestore,
+  type ChatDraft,
+} from "@/lib/draft-store";
 import { CONFIGURED_TOOL_PRESET, getPresetFromToolNames, getToolNamesForPreset, SETTINGS_BUILTIN_TOOLS, type ToolEntry } from "@/lib/tool-presets";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import { createShownNotices, extensionErrorMessage } from "@/lib/startup-issues";
@@ -73,7 +83,7 @@ import {
 } from "@/lib/session-load-client";
 import { backfillFirstPage, mergeOlderPage, sameSessionView } from "@/lib/first-page-backfill";
 import { LatestContextLoader } from "@/lib/latest-context-loader";
-import { createIdleMessageReads, entriesAfter } from "@/lib/idle-message-read";
+import { createIdleMessageReads, entriesAfter, mergeBranchTailEntryIds } from "@/lib/idle-message-read";
 import { SessionContextRefreshScheduler } from "@/lib/session-context-refresh-scheduler";
 import { ShadowLifecycleCoordinator } from "@/lib/shadow-lifecycle";
 import { useShadowSessionSetting } from "@/hooks/useShadowSessionSetting";
@@ -141,6 +151,15 @@ interface PendingBash {
   result?: BashResultLike;
 }
 type DetachedSubagentMode = "auto-resume" | "next-turn";
+/** 一次运行态读取的坐标：发起时的读取序号、队列代次与压缩代次。 */
+interface RuntimeRead {
+  seq: number;
+  queueGeneration: number;
+  compactionEpoch: number;
+  /** 取这份快照时用户档位选择的版本：之后用户改过档，这份快照的档位就是旧的。 */
+  thinkingRevision: number;
+}
+
 export interface DetachedSubagentStatus {
   id: string;
   agent: string;
@@ -608,9 +627,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [detailsState, setDetailsState] = useState<{ sid: string; value: SessionDetails } | null>(null);
   const [loading, setLoading] = useState(!isNew);
   const [error, setError] = useState<string | null>(null);
+  // 外部写入把 /context 挡在外面时，队列里只存在服务器内存中的消息：错误页据此给出取回入口。
+  const [blockedRecall, setBlockedRecall] = useState<QueuedMessages | null>(null);
+  // 错误页属于外部写入：文件稳定后可以直接重试读取，不必刷新。
+  const [externalWriteBlocked, setExternalWriteBlocked] = useState(false);
+  // 已经取回、但上下文还没读成功：草稿只在页面内存里，这时刷新就真的丢了。
+  const [recalledPending, setRecalledPending] = useState(false);
+  const [recallError, setRecallError] = useState<string | null>(null);
   const [activeLeafId, setActiveLeafId] = useState<string | null>(null);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [entryIds, setEntryIds] = useState<string[]>([]);
+  const [branchTailEntryIds, setBranchTailEntryIds] = useState<string[]>();
+  const branchTailEntryIdsRef = useRef(branchTailEntryIds);
   const messagesRef = useRef(messages);
   const entryIdsRef = useRef(entryIds);
   // 运行中追加的消息没有 entry id；重读文件时把它们的 key 交给同位置的 entry（lib/message-keys.ts），避免整轮消息重挂载。
@@ -668,6 +696,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [fastPending, setFastPending] = useState(false);
   const [toolPreset, setToolPreset] = useState<ToolPreset>(CONFIGURED_TOOL_PRESET);
   const [customToolNames, setCustomToolNames] = useState<string[] | null>(null);
+  // 工具切换还没有落地：这段时间里候选名单还是旧的，再点一次会用它算出「只取消了一个工具」的请求。
+  const [toolSelectionPending, setToolSelectionPending] = useState(false);
   const [activeBuiltinTools, setActiveBuiltinTools] = useState<string[] | undefined>();
   // 会话文件里钉死的内置工具名单；null 表示跟随 settings.json（configured）。只用于解释
   // "设置里开着、本会话却没有"的工具（例如扩展把 edit 换掉了），不决定控件显示哪一档。
@@ -969,9 +999,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [applyContextUsage]);
 
   /** 所有服务端运行状态都通过这一入口投影，避免挂载、reload、reconcile 字段漂移。 */
-  const applyRuntimeState = useCallback((state: AgentRuntimeState | undefined, usageRead?: { sid: string; runId: number; requestId: number }) => {
-    setIsCompacting(state?.isCompacting ?? false);
-    setQueuedMessages(normalizeQueuedMessages(state?.queuedMessages));
+  const applyRuntimeState = useCallback((
+    state: AgentRuntimeState | undefined,
+    usageRead?: { sid: string; runId: number; requestId: number },
+    // 队列、压缩状态与思考强度按「谁最新」分别校验：一次预读可能在取回清空队列、
+    // 压缩开始或别的标签页调档之前采集、之后才回来。
+    options: { queue?: boolean; compaction?: boolean; thinking?: boolean } = {},
+  ) => {
+    if (options.compaction !== false) setIsCompacting(state?.isCompacting ?? false);
+    if (options.queue !== false) setQueuedMessages(normalizeQueuedMessages(state?.queuedMessages));
     setRunningCommands(state?.runningCommands ?? []);
     if (!state) {
       setFastEnabled(false);
@@ -987,7 +1023,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setLiveTotalActiveMs({ sessionId: sessionIdRef.current, value: state.totalActiveMs });
     }
     applyShadowRuntimeState(state);
-    modelSelectionActions.setThinkingLevel(state.thinkingLevel);
+    if (options.thinking !== false) {
+      // 运行态的档位是「服务端此刻真正在用的那一档」：记下这个会话已经拿到过它，
+      // 之后的上下文档位（可能取样更早、只是回来得更晚）就不再覆盖它。
+      if (typeof state.thinkingLevel === "string" && sessionIdRef.current) {
+        runtimeThinkingLevelSessionRef.current = sessionIdRef.current;
+      }
+      modelSelectionActions.setThinkingLevel(state.thinkingLevel);
+    }
     setFastEnabled(state.fastEnabled);
     setRuntimeFastAvailable(state.fastAvailable);
     setExtensionStatuses(state.extensionStatuses);
@@ -1007,6 +1050,35 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [applyContextUsage, applyShadowRuntimeState, modelSelectionActions, newSessionCwd, onPendingNewSessionEvent, setRunningCommands]);
 
+  /**
+   * 一次运行态读取的坐标：发起请求时的读取序号、队列代次与压缩代次。响应回来时用它判断哪些
+   * 字段已经被更新的实时事件取代——迟到的 `/state` 不许把刚入队的队列行、刚开始的压缩盖掉。
+   */
+  const beginRuntimeRead = useCallback((): RuntimeRead => ({
+    seq: ++runtimeReadSeqRef.current,
+    queueGeneration: queueStateGenerationRef.current,
+    compactionEpoch: compactionEpochRef.current,
+    thinkingRevision: thinkingChoiceRevisionRef.current,
+  }), []);
+
+  /** 按读取坐标投影一份运行态快照：凡是比它新的实时状态都不覆盖。 */
+  const applyRuntimeSnapshot = useCallback((read: RuntimeRead, state: AgentRuntimeState | undefined, usageRead?: { sid: string; runId: number; requestId: number }) => {
+    const newest = read.seq > lastAppliedRuntimeSeqRef.current;
+    applyRuntimeState(state, usageRead, {
+      // 队列也按读取序号校验：断线期间错过的 `queue_update` 不会推进代次，只比代次的话
+      // 「取到空队列、回来时另一份快照已经显示了新队列」的响应仍然会把队列行清掉。
+      queue: queueStateGenerationRef.current === read.queueGeneration && newest,
+      compaction: compactionEpochRef.current === read.compactionEpoch && newest,
+      thinking: newest && read.thinkingRevision === thinkingChoiceRevisionRef.current,
+    });
+    if (newest) {
+      // 这份快照说「有没有主回合在跑」：流式输出、等待模型，或者正在执行的扩展命令。
+      runtimeBusySnapshotRef.current = state !== undefined
+        && (state.isStreaming === true || state.isPromptRunning === true || (state.runningCommands?.length ?? 0) > 0);
+    }
+    lastAppliedRuntimeSeqRef.current = Math.max(lastAppliedRuntimeSeqRef.current, read.seq);
+  }, [applyRuntimeState]);
+
   // extensions-binding 是等待态：绑定完成事件可能错过（例如切走期间绑定已完成），
   // 因此在这个状态里兜底轮询运行时状态，由同一协议投影收敛到就绪或失败。
   const bindingPollSessionId = isNew && pendingSessionView.extensionsPending ? pendingSessionView.transportSessionId : null;
@@ -1023,8 +1095,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   useSessionBindingPoll({
     sessionId: bindingPollSessionId,
     enabled: bindingPollSessionId !== null,
+    beforeRead: () => { bindingPollReadRef.current = beginRuntimeRead(); },
     onSnapshot: (snapshot) => {
-      if (snapshot.state && sessionIdRef.current === bindingPollSessionId) applyRuntimeState(snapshot.state);
+      const read = bindingPollReadRef.current;
+      if (snapshot.state && read && sessionIdRef.current === bindingPollSessionId) {
+        applyRuntimeSnapshot(read, snapshot.state);
+      }
     },
     deadlineMs: SESSION_BINDING_DEADLINE_MS,
     onDeadline: bindingPollDeadline,
@@ -1064,6 +1140,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setMessageKeyAliases((aliases) => carryMessageKeys({ ...previousView, aliases }, nextView));
     setMessages(snapshot.messages);
     setEntryIds(snapshot.entryIds);
+    setBranchTailEntryIds(snapshot.branchTailEntryIds);
+    branchTailEntryIdsRef.current = snapshot.branchTailEntryIds;
     messagesRef.current = snapshot.messages;
     entryIdsRef.current = snapshot.entryIds;
     setHistoryPage({
@@ -1076,7 +1154,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     });
     setCurrentModelOverride((current) => modelSwitchPendingRef.current ? current : null);
     setError(null);
-    if (snapshot.thinkingLevel && snapshot.thinkingLevel !== "off") {
+    setBlockedRecall(null);
+    setExternalWriteBlocked(false);
+    setRecalledPending(false);
+    setRecallError(null);
+    clearDraftRestorePending(sid);
+    // 上下文的档位只作回退：会话已经读到运行态档位时，上下文这份可能更旧（取样更早却更晚返回）。
+    if (snapshot.thinkingLevel && snapshot.thinkingLevel !== "off"
+      && runtimeThinkingLevelSessionRef.current !== sid) {
       modelSelectionActions.setThinkingLevel(snapshot.thinkingLevel);
     }
     setLoading(false);
@@ -1334,14 +1419,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     backfillRequestRef.current.controller?.abort();
     backfillRequestRef.current = { sid, generation: backfillRequestRef.current.generation + 1, controller: null };
     const earlyRuntimeController = includeState ? new AbortController() : null;
+    // 队列代次：每次加载与每次取回都会推进它，旧的预读因此不会把已清空的队列写回来。
+    queueStateGenerationRef.current += 1;
+    // 预读也用统一读取坐标：加载自己推进了队列代次，坐标里记的就是这一代。
+    const runtimeRead = beginRuntimeRead();
     const earlyRuntimePromise = earlyRuntimeController
       ? fetchRuntimeState(sid, earlyRuntimeController.signal).then((snapshot) => {
-          if (sessionIdRef.current === sid) applyRuntimeState(snapshot.state);
+          if (sessionIdRef.current === sid) {
+            // 这一份只应用一次：加载结束时再应用一遍，会把期间到达的 compaction_start 盖回去。
+            applyRuntimeSnapshot(runtimeRead, snapshot.state);
+          }
           return snapshot;
         }).catch((error: unknown) => {
           if (!(error instanceof DOMException && error.name === "AbortError")) {
+            // 失败的请求给不出「现在」：成功快照与实时事件才是运行状态的来源，按「没有状态」
+            // 重置会清掉它们刚设置的压缩、命令状态（正在压缩时输入栏的「停止压缩」会消失）。
             console.error("Failed to load early session runtime state:", error);
-            if (sessionIdRef.current === sid) applyRuntimeState(undefined);
           }
           return null;
         })
@@ -1373,10 +1466,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               setActiveLeafId(null);
               setMessages([]);
               setEntryIds([]);
+              setBranchTailEntryIds(undefined);
+              branchTailEntryIdsRef.current = undefined;
               messagesRef.current = [];
               entryIdsRef.current = [];
               setHistoryPage({ sid, oldestEntryId: null, hasMore: false, turnsBefore: 0, loading: false, failed: false });
               setError(null);
+              setBlockedRecall(null);
+              setExternalWriteBlocked(false);
+              setRecalledPending(false);
+              setRecallError(null);
+              clearDraftRestorePending(sid);
             }
             setLoading(false);
             return false;
@@ -1396,7 +1496,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           committedSnapshot = loaded.snapshot;
           return loaded;
       });
-      if (!contextResult.committed || !contextResult.value) return { loaded: false, agentState: null };
+      if (!contextResult.committed || !contextResult.value) return { loaded: false, agentState: null, runtimeRead: null };
       // 首屏一页可能全是过程记录（见 lib/session-page-budget.ts）：补几页再交给界面，
       // 否则打开会话看到的是空白。翻页只看服务端响应：游标、有没有消息都来自刚拿到的页，
       // 不读 ref 或 state —— 它们在同一个异步续体里可能还是上一帧、甚至上一个会话的值。
@@ -1482,30 +1582,30 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
       }
 
-      if (!includeState) return { loaded: true, agentState: null };
+      if (!includeState) return { loaded: true, agentState: null, runtimeRead: null };
       runtimeStateRequestRef.current?.abort();
       const runtimeController = earlyRuntimeController ?? new AbortController();
       runtimeStateRequestRef.current = runtimeController;
       try {
         const agentState = earlyRuntimePromise ? await earlyRuntimePromise : await fetchRuntimeState(sid, runtimeController.signal);
-        if (!agentState) return { loaded: true, agentState: null };
+        if (!agentState) return { loaded: true, agentState: null, runtimeRead };
         if (sessionIdRef.current !== sid || runtimeStateRequestRef.current !== runtimeController) {
-          return { loaded: true, agentState: null };
+          return { loaded: true, agentState: null, runtimeRead: null };
         }
-        applyRuntimeState(agentState.state);
-        return { loaded: true, agentState };
+        // 不再投影一遍：预读解析时已经应用过，加载期间到达的实时事件为最新。
+        return { loaded: true, agentState, runtimeRead };
       } catch (error) {
         if (!(error instanceof DOMException && error.name === "AbortError")) {
+          // 同上：失败不重置运行状态。
           console.error("Failed to load session runtime state:", error);
-          if (sessionIdRef.current === sid) applyRuntimeState(undefined);
         }
-        return { loaded: true, agentState: null };
+        return { loaded: true, agentState: null, runtimeRead };
       } finally {
         if (runtimeStateRequestRef.current === runtimeController) runtimeStateRequestRef.current = null;
       }
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") {
-        return { loaded: false, agentState: null };
+        return { loaded: false, agentState: null, runtimeRead: null };
       }
       if (sessionIdRef.current === sid) {
         // 会话文件写入冲突已经重试过一次。屏幕上还有本会话内容时保留它并给提示，
@@ -1517,14 +1617,48 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         ) {
           addNotice({ type: "warning", message: "会话文件正在被写入，显示的是稍早的内容；写入结束后重新打开即可刷新" });
           setLoading(false);
-          return { loaded: false, agentState: null };
+          return { loaded: false, agentState: null, runtimeRead: null };
         }
         setError(String(error));
         setLoading(false);
+        // 每次错误都按本次结果更新：一次外部写入失败之后重试遇到普通 500 时，
+        // 旧的 true 会让错误页继续误报「另一个程序写入了这个会话文件」。
+        setExternalWriteBlocked(isSessionExternalWriteError(error));
+        // 普通错误（例如 500）也可能剩下只存在服务器内存里的消息：这次加载的预读已经取到队列，
+        // 就按它决定入口。只靠预读写 `queuedMessages` 不够——错误页没有输入框，读的是 `blockedRecall`。
+        // 上一次外部写入的探查可能已经被这次加载作废（代号与代次都推进了），不能指望它。
+        if (!isSessionExternalWriteError(error) && earlyRuntimePromise) {
+          void earlyRuntimePromise.then((snapshot) => {
+            if (!snapshot || queueStateGenerationRef.current !== runtimeRead.queueGeneration) return;
+            if (sessionIdRef.current !== sid) return;
+            const queued = normalizeQueuedMessages(snapshot.state?.queuedMessages);
+            setBlockedRecall(queued.steering.length > 0 || queued.followUp.length > 0 ? queued : null);
+          }).catch(() => undefined);
+        }
+        // 外部写入时 /context 一直 409，但 get_state / clear_queue 仍可用：队列里若还有只存在
+        // 服务器内存中的消息，就让错误页给出取回入口，否则刷新后它们就再也拿不回来了。
+        if (isSessionExternalWriteError(error)) {
+          const requestId = blockedRecallRequestRef.current + 1;
+          blockedRecallRequestRef.current = requestId;
+          // 实时 queue_update 也会推进队列代次：它在取样之后到达时，这次探查已经过期。
+          const queueGeneration = queueStateGenerationRef.current;
+          void fetchRuntimeState(sid, new AbortController().signal)
+            .then((snapshot) => {
+              // 这次查询期间队列可能已经被取回清空：它已经不是队列的真实状态了。
+              if (requestId !== blockedRecallRequestRef.current) return;
+              if (queueStateGenerationRef.current !== queueGeneration) return;
+              if (sessionIdRef.current !== sid) return;
+              const queued = normalizeQueuedMessages(snapshot?.state?.queuedMessages);
+              // 通过代号校验就是最新的队列状态：空了就清掉入口（另一个标签页可能已经取回了），
+              // 否则页面会继续显示旧数量和已经失效的「移回」。
+              setBlockedRecall(queued.steering.length > 0 || queued.followUp.length > 0 ? queued : null);
+            })
+            .catch(() => undefined);
+        }
       }
-      return { loaded: false, agentState: null };
+      return { loaded: false, agentState: null, runtimeRead: null };
     }
-  }, [addNotice, applyRuntimeState, commitContextSnapshot, loadSessionDetails]);
+  }, [addNotice, applyRuntimeSnapshot, beginRuntimeRead, commitContextSnapshot, loadSessionDetails]);
 
   /** Shadow lifecycle entry 使用单次 context-only 刷新，避免触发 details/backfill 或改变滚动位置。 */
   const scheduleContextRefresh = useCallback((sid: string) => {
@@ -1686,9 +1820,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (event.type === "connected") {
             settle("connected");
             // /state 可能早于冷启动完成返回；建连后重新读取扩展状态。
+            // 队列单独按代次校验：这次请求可能在取回清空队列之前取样、之后才回来。
             const controller = new AbortController();
+            const queueGeneration = queueStateGenerationRef.current;
+            const compactionEpoch = compactionEpochRef.current;
+            const runtimeReadSeq = ++runtimeReadSeqRef.current;
+            const thinkingRevision = thinkingChoiceRevisionRef.current;
             void fetchRuntimeState(sid, controller.signal).then((snapshot) => {
-              if (eventSourceRef.current === es && sessionIdRef.current === sid) applyRuntimeState(snapshot.state);
+              if (eventSourceRef.current === es && sessionIdRef.current === sid) {
+                const isNewest = runtimeReadSeq > lastAppliedRuntimeSeqRef.current;
+                applyRuntimeState(snapshot.state, undefined, {
+                  queue: queueStateGenerationRef.current === queueGeneration && isNewest,
+                  compaction: compactionEpochRef.current === compactionEpoch && isNewest,
+                  // 取这份快照之后用户改过档位：选择器以用户确认的值为准。
+                  thinking: isNewest && thinkingChoiceRevisionRef.current === thinkingRevision,
+                });
+                lastAppliedRuntimeSeqRef.current = Math.max(lastAppliedRuntimeSeqRef.current, runtimeReadSeq);
+              }
             }).catch((error: unknown) => {
               if (!(error instanceof DOMException && error.name === "AbortError")) {
                 console.error("Failed to refresh runtime state after event stream connected:", error);
@@ -2340,9 +2488,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     runId: number,
     snapshot: AgentRuntimeSnapshot,
     usageRequestId: number,
+    read: RuntimeRead,
   ) => {
     if (!sessionHookMountedRef.current || sessionIdRef.current !== sid || promptRunIdRef.current !== runId) return;
-    applyRuntimeState(snapshot.state, { sid, runId, requestId: usageRequestId });
+    applyRuntimeSnapshot(read, snapshot.state, { sid, runId, requestId: usageRequestId });
 
     if (snapshot.busy) {
       agentRunningRef.current = true;
@@ -2352,17 +2501,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // 扩展 UI 等待用户输入时 wrapper 可能暂时 idle，不能提前结束交互。
     if (extensionDialogRef.current || askQuestionnaireRef.current || !agentRunningRef.current) return;
     await finishPromptWithoutStream(sid, runId);
-  }, [applyRuntimeState, finishPromptWithoutStream]);
+  }, [applyRuntimeSnapshot, finishPromptWithoutStream]);
 
   const reconcileAgentState = useCallback(async (sid: string, runId = promptRunIdRef.current) => {
     const generation = reconcileRequestGenerationRef.current + 1;
     reconcileRequestGenerationRef.current = generation;
     const usageRequestId = ++contextUsageRequestIdRef.current;
+    // 坐标必须在发请求之前取：回来时若已有更新的队列或压缩事件，这份快照就不能覆盖它们。
+    const read = beginRuntimeRead();
     const snapshot = await readAgentSnapshot(sid);
     // 同一 run 的多个触发可能乱序返回，只允许最新请求提交状态。
     if (generation !== reconcileRequestGenerationRef.current || !snapshot) return;
-    await applyAgentSnapshot(sid, runId, snapshot, usageRequestId);
-  }, [applyAgentSnapshot, readAgentSnapshot]);
+    await applyAgentSnapshot(sid, runId, snapshot, usageRequestId, read);
+  }, [applyAgentSnapshot, beginRuntimeRead, readAgentSnapshot]);
   reconcileAgentStateRef.current = reconcileAgentState;
 
   const waitForBashSettlement = useCallback(async (sid: string) => {
@@ -2434,7 +2585,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const added = anchor && messagesRef.current.length === entryIdsRef.current.length
       ? entriesAfter(anchor, response.snapshot)
       : null;
-    if (!added || page.sid !== sid) {
+    if (!anchor || !added || page.sid !== sid) {
       await loadSession(sid, false, false, { preserveScroll: true });
       return;
     }
@@ -2447,6 +2598,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       ...response.snapshot,
       messages: [...messagesRef.current, ...added.messages],
       entryIds: [...entryIdsRef.current, ...added.entryIds],
+      branchTailEntryIds: mergeBranchTailEntryIds(anchor, branchTailEntryIdsRef.current, response.snapshot.branchTailEntryIds),
       oldestEntryId: page.oldestEntryId,
       hasMore: page.hasMore,
       turnsBefore: page.turnsBefore,
@@ -2754,9 +2906,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
         break;
       }
-      case "queue_update":
-        setQueuedMessages(normalizeQueuedMessages(event as Partial<QueuedMessages>));
+      case "queue_update": {
+        // 实时队列是最新的：在途的补读、重查结果一律作废，别把旧队列盖回来。
+        queueStateGenerationRef.current += 1;
+        const queued = normalizeQueuedMessages(event as Partial<QueuedMessages>);
+        setQueuedMessages(queued);
+        // 加载失败时输入框没有挂载，错误页的「移回」入口读的是这一个。
+        setBlockedRecall(queued.steering.length > 0 || queued.followUp.length > 0 ? queued : null);
         break;
+      }
       case "auto_retry_start":
         setRetryInfo({ attempt: event.attempt as number, maxAttempts: event.maxAttempts as number, errorMessage: event.errorMessage as string | undefined });
         break;
@@ -2803,12 +2961,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       case "auto_compaction_start":
       case "compaction_start":
+        // 实时事件是压缩状态的最新来源：之后才回来的快照不许把它盖掉。
+        compactionEpochRef.current += 1;
         setIsCompacting(true);
         setCompactError(null);
         setCompactResult(null);
         break;
       case "auto_compaction_end":
       case "compaction_end":
+        compactionEpochRef.current += 1;
         setIsCompacting(false);
         // pi sends summarization_retry_finished first; a stream down for that
         // retry missed it, and its banner would stay above an idle composer.
@@ -2977,8 +3138,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         dropOptimisticUserMessage();
         promoteNewSession(0, message, fromStash);
         void loadTools(sid);
+        const stagedRead = beginRuntimeRead();
         void fetchRuntimeState(sid, new AbortController().signal).then((snapshot) => {
-          if (sessionIdRef.current === sid) applyRuntimeState(snapshot.state);
+          if (sessionIdRef.current === sid) applyRuntimeSnapshot(stagedRead, snapshot.state);
         }).catch((error: unknown) => {
           console.error("读取新会话 runtime 状态失败:", error);
         });
@@ -3098,7 +3260,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (fromStash && firstPromptRequestStarted && (e as { accepted?: boolean } | null)?.accepted !== false) throw e;
       return false;
     }
-  }, [addNotice, applyRuntimeState, closeEvents, dispatch, displayModel, displayModelFastAvailable, editEntryId, ensureEventsConnected, ensureNewSession, enterMainRun, fastEnabled, loadTools, onPendingNewSessionEvent, onSessionCreatedInBackground, pendingSessionView, toolPreset, customToolNames, isNavigationActive, isNew, navigationKey, newSessionCwd, newSessionModel, pendingControlKind, promoteNewSession, reconcileAgentState, requestScrollPosition, resetStreamDeltas, session, setEdit, translate]);
+  }, [addNotice, applyRuntimeSnapshot, beginRuntimeRead, closeEvents, dispatch, displayModel, displayModelFastAvailable, editEntryId, ensureEventsConnected, ensureNewSession, enterMainRun, fastEnabled, loadTools, onPendingNewSessionEvent, onSessionCreatedInBackground, pendingSessionView, toolPreset, customToolNames, isNavigationActive, isNew, navigationKey, newSessionCwd, newSessionModel, pendingControlKind, promoteNewSession, reconcileAgentState, requestScrollPosition, resetStreamDeltas, session, setEdit, translate]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
     if (bashRunningRef.current) return false;
@@ -3185,6 +3347,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const blocked = recall?.blockedByCommands;
     if (blocked?.length) {
       addNotice({ type: "warning", message: translate("chat.stopBlockedByCommand", { command: commandNameOf(blocked[0]) ?? blocked[0] }) });
+      // 命令照旧跑，但服务端已把等它的排队消息撤回：它们必须回到输入框，否则 Stop 之后还会
+      // 在命令结束时发出去。队列显示清掉，草稿带附件一并恢复。
+      restoreRecalledPrompts(sid, recall as QueuedMessages | null);
       return;
     }
     // 中止会话后不再等待用户输入，关闭挂起的 dialog 弹窗
@@ -3305,8 +3470,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // run's end reads the file.
     const midRun = agentRunningRef.current || bashRunningRef.current;
     const syncLiveState = async () => {
+      const read = beginRuntimeRead();
       const snapshot = await readAgentSnapshot(sid);
-      if (snapshot?.state && sessionHookMountedRef.current && sessionIdRef.current === sid) applyRuntimeState(snapshot.state);
+      if (snapshot?.state && sessionHookMountedRef.current && sessionIdRef.current === sid) {
+        applyRuntimeSnapshot(read, snapshot.state);
+      }
     };
     try {
       await sendAgentCommand(sid, { type: "set_model", provider, modelId });
@@ -3336,7 +3504,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       modelSwitchPendingRef.current = false;
       setModelSwitching(false);
     }
-  }, [applyRuntimeState, readAgentSnapshot, addNotice, creationSettingsLocked, currentModelOverride, isNavigationActive, isNew, loadSession, modelSelectionActions, navigationKey, newSessionCwd, onPendingNewSessionEvent]);
+  }, [applyRuntimeSnapshot, beginRuntimeRead, readAgentSnapshot, addNotice, creationSettingsLocked, currentModelOverride, isNavigationActive, isNew, loadSession, modelSelectionActions, navigationKey, newSessionCwd, onPendingNewSessionEvent]);
 
   /**
    * Manual compaction (the Compact button and `/compact`). Never awaited by a
@@ -3663,6 +3831,92 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [opts.chatInputRef, addNotice, isNavigationActive, navigationKey]);
 
+  /**
+   * 首屏加载成功后按快照恢复运行态：运行中的回合或扩展命令、bash 结算、后台子代理监听。
+   * 首次加载与错误页重试共用这一份，否则重试成功后会话会一直显示空闲——命令在跑的时候
+   * SSE 建连本身并不会把界面标记为运行中。
+   */
+  const restoreRuntimeFromLoad = useCallback((
+    sid: string,
+    agentState: AgentRuntimeSnapshot | null | undefined,
+    read?: RuntimeRead | null,
+  ) => {
+    if (!agentState?.alive) return;
+    loadTools(sid);
+    const runtimeState = agentState.state;
+    // 界面已经接管主回合（后续消息开始流式输出）时不能再按旧快照重设阶段：`enterMainRun`
+    // 会把阶段改回「执行命令中」并清空正在渲染的流式回复。更新的快照说了空闲也一样。
+    const takenOver = agentRunningRef.current
+      || (read != null && lastAppliedRuntimeSeqRef.current > read.seq && runtimeBusySnapshotRef.current === false);
+    if (!takenOver && agentState.busy && runtimeState && !runtimeState.isBashRunning) {
+      requestScrollPosition("running-end");
+      enterMainRun(runtimeState.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
+      void connectEvents(sid);
+    }
+    if (runtimeState?.isBashRunning) {
+      bashRunningRef.current = true;
+      setBashRunning(true);
+      void waitForBashSettlement(sid);
+    }
+    if (!agentRunningRef.current && pendingDetachedSubagentIdsRef.current.size > 0) {
+      // 刷新后只恢复后台监听，不能把 detached 子代理显示成主代理思考。
+      void connectEvents(sid);
+    }
+  }, [connectEvents, enterMainRun, loadTools, requestScrollPosition, waitForBashSettlement]);
+
+  /**
+   * 外部写入把 /context 挡在外面时，队列里只存在服务器内存中的消息先取回来，再重新加载：
+   * 队列清空后 wrapper 才能被淘汰，/context 也才能重新读盘。取回的正文与附件进草稿，
+   * 所以刷新后输入框里仍有它们。
+   */
+  const handleRecallBlockedQueue = useCallback(async () => {
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    setRecallError(null);
+    try {
+      const result = await sendAgentCommand<QueuedMessages>(sid, { type: "clear_queue" });
+      const draft = queuedMessagesToDraft(result);
+      // 草稿是这份正文唯一的一份了（草稿存储只在内存里）：读盘再失败也不能把它清掉。
+      if (draft.value || draft.images.length > 0) {
+        setDraft(sid, prependChatDraft(draft, getDraft(sid) ?? { value: "", images: [] }));
+        markDraftRestorePending(sid);
+        // 请求往返期间用户可能已经切走再切回：正文由存储保管，正在挂载的输入框接到通知就把
+        // 它并进来，否则下一次编辑会拿本地内容把这个键覆盖掉。
+        notifyRecalledDraft(sid, draft);
+      }
+      // 这个实例已经卸载：界面交给新的那个实例，重读也由它来做。
+      if (!mountedRef.current) return;
+      // 队列已经在服务端清空：在途的预读／状态查询都不许把它写回来。
+      queueStateGenerationRef.current += 1;
+      setQueuedMessages({ steering: [], followUp: [] });
+      setBlockedRecall(null);
+      setRecalledPending(true);
+      setError(null);
+      // 必须让服务端复验：带缓存的首屏会直接提交旧内容并清掉恢复状态，之后的后台复验只记日志。
+      const reloaded = await loadSession(sid, true, true, { validateView: true });
+      // 移回之后同样要恢复运行态：命令还在跑时建连不会把界面标记成运行中，
+      // 丢掉这份快照就会让仍在执行的 `/review` 显示成空闲。
+      if (mountedRef.current && sessionIdRef.current === sid) {
+        restoreRuntimeFromLoad(sid, reloaded.agentState, reloaded.runtimeRead);
+      }
+    } catch (e) {
+      console.error("Failed to recall queued messages:", e);
+      // 错误页盖住了 NoticeShelf，原因要写在这里，否则用户只看到「取回没反应」。
+      if (mountedRef.current) setRecallError(e instanceof Error ? e.message : String(e));
+    }
+  }, [loadSession, restoreRuntimeFromLoad]);
+
+  /** 文件稳定后重新读一次：仍然保留取回后的草稿状态，不让用户为此刷新页面。 */
+  const handleRetryBlockedLoad = useCallback(() => {
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    setError(null);
+    void loadSession(sid, true, true, { validateView: true }).then(({ agentState, runtimeRead }) => {
+      if (!mountedRef.current || sessionIdRef.current !== sid) return;
+      restoreRuntimeFromLoad(sid, agentState, runtimeRead);
+    });
+  }, [loadSession, restoreRuntimeFromLoad]);
+
   const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption) => {
     if (creationSettingsLocked) return;
     if (isNew && !sessionIdRef.current) {
@@ -3675,12 +3929,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (isNew) modelSelectionActions.setThinkingLevel("auto");
       return;
     }
+    // 输入栏此刻已经可用：在建的快照可能取到切换之前的档位，先让它们的档位字段失效，
+    // 否则确认之后的响应回来会把选择器写回旧值。
+    thinkingChoiceRevisionRef.current += 1;
     modelSelectionActions.setThinkingLevel(level);
     const sid = sessionIdRef.current;
     if (!sid) return;
     try {
       await sendAgentCommand(sid, { type: "set_thinking_level", level });
-      if (sessionIdRef.current === sid) modelSelectionActions.setThinkingLevel(level);
+      if (sessionIdRef.current === sid) {
+        // 请求期间发出的读取可能采到改档之前的值：确认时再推进一次版本，让它们失效。
+        thinkingChoiceRevisionRef.current += 1;
+        modelSelectionActions.setThinkingLevel(level);
+      }
     } catch (e) {
       console.error("Failed to set thinking level:", e);
     }
@@ -3706,19 +3967,89 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setFastPending(false);
     }
   }, [addNotice, creationSettingsLocked, fastPending]);
+  // 卸载后迟到的取回结果只写存储、不再碰界面（那个实例已经不是当前会话了）。
+  // 队列查询的代号：取回通知到达时递增，让还没回来的那次查询结果作废。
+  const blockedRecallRequestRef = useRef(0);
+  // 队列状态的代次：取回清空队列或开始新一轮加载时推进，旧的状态快照据此失效。
+  const queueStateGenerationRef = useRef(0);
+  // 压缩状态的代次（compaction_start / compaction_end 推进）：旧快照不许覆盖实时压缩状态。
+  const compactionEpochRef = useRef(0);
+  // 运行态快照的读取序号：较新的快照提交后，更早的响应也不许再覆盖压缩状态
+  // （压缩可能发生在预读取样之后、SSE 开始监听之前，那时没有事件推进代次）。
+  const runtimeReadSeqRef = useRef(0);
+  const lastAppliedRuntimeSeqRef = useRef(0);
+  // 已经读到过运行态思考强度的会话：上下文的档位对它们只是回退值。
+  const runtimeThinkingLevelSessionRef = useRef<string | null>(null);
+  // 最近一次绑定轮询发起时的读取坐标（轮询是串行的，任何时刻最多一个在途请求）。
+  const bindingPollReadRef = useRef<RuntimeRead | null>(null);
+  // 用户档位选择的版本：确认之后，切换之前取的快照不许把选择器写回旧档位。
+  const thinkingChoiceRevisionRef = useRef(0);
+  // 最近一次被采纳的快照给出的「有没有主回合在跑」：比旧快照说了空闲时，不再按旧快照开回合。
+  const runtimeBusySnapshotRef = useRef<boolean | null>(null);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    // Strict Mode 会多跑一次 setup/cleanup：清理后必须在 setup 里恢复，否则这个仍然挂着的
+    // 实例会以为自己是旧的，取回成功后直接返回。
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
+  // 切走再切回来会重新挂载：恢复状态按会话 ID 存在草稿存储里，这里把它读回来，
+  // 否则错误页只剩服务端那句「刷新」，而刷新正好丢掉刚取回的消息。
+  useEffect(() => {
+    const sid = sessionIdRef.current ?? "";
+    setRecalledPending(hasPendingDraftRestore(sid));
+    if (!sid) return;
+    // 取回请求可能在新实例挂载之后才返回（发起它的是已经卸载的旧实例）：那时队列已经清空，
+    // 这里立刻转成「已取回」状态，否则错误页还叫着「请刷新」，而刷新会丢掉这份草稿。
+    return subscribeDraftRestore(sid, () => {
+      // 队列已经由取回请求清空了：迟到的状态查询与预读都不能把它写回来。
+      blockedRecallRequestRef.current += 1;
+      setQueuedMessages({ steering: [], followUp: [] });
+      setRecalledPending(true);
+      setBlockedRecall(null);
+      // 通知可能晚于取回之后新入队的消息：清空只针对已取回的那批，随后按最新状态补一次查询，
+      // 期间若又有实时更新到达，这次查询就作废（别把新队列盖掉）。
+      const generation = queueStateGenerationRef.current + 1;
+      queueStateGenerationRef.current = generation;
+      void fetchRuntimeState(sid, new AbortController().signal)
+        .then((snapshot) => {
+          if (sessionIdRef.current !== sid || queueStateGenerationRef.current !== generation) return;
+          const queued = normalizeQueuedMessages(snapshot?.state?.queuedMessages);
+          setQueuedMessages(queued);
+          // 取回之后又有新消息入队时，错误页要重新拿到「移回」入口。
+          setBlockedRecall(queued.steering.length > 0 || queued.followUp.length > 0 ? queued : null);
+        })
+        .catch(() => undefined);
+    });
+  }, [session?.id]);
+
+  const toolSelectionPendingRef = useRef(false);
   const handleToolPresetChange = useCallback(async (preset: ToolPreset, customNames: string[] | null = null) => {
+    // 上一次切换还没落地时连偏好都不能写：这份名单是旧的，写进去会让之后的新会话采用它。
+    if (toolSelectionPendingRef.current) return;
     setPreferredToolPreset(preset);
     if (creationSettingsLocked) return;
     setPreferredCustomTools(customNames);
-    setCustomToolNames(customNames);
-    setToolSelectionKnown(true);
     const toolNames = customNames ?? getToolNamesForPreset(preset);
-    setToolPresetState(preset);
     const sid = sessionIdRef.current;
-    if (!sid) return;
+    if (!sid) {
+      // 还没有会话：这就是待创建会话要用的那一档，直接显示。
+      setCustomToolNames(customNames);
+      setToolSelectionKnown(true);
+      setToolPresetState(preset);
+      return;
+    }
+    toolSelectionPendingRef.current = true;
+    setToolSelectionPending(true);
     try {
       const result = await sendAgentCommand<{ sessionId?: string; recreated?: boolean }>(sid, { type: "set_tools", toolNames });
       if (sessionIdRef.current !== sid) return;
+      // 服务端确认之后才改当前会话的档位与勾选：切换可能被拒绝（例如还有待移回的消息），
+      // 那时界面必须停在原来的选择上，否则用户以为换了档，模型其实还在用旧工具。
+      setCustomToolNames(customNames);
+      setToolSelectionKnown(true);
+      setToolPresetState(preset);
       const activeSessionId = result?.sessionId ?? sid;
       clearSlashCommands();
       if (result?.recreated || activeSessionId !== sid) {
@@ -3730,13 +4061,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         await ensureEventsConnected(activeSessionId);
       }
       await loadTools(activeSessionId);
+      const read = beginRuntimeRead();
       const snapshot = await fetchRuntimeState(activeSessionId, new AbortController().signal);
-      if (sessionIdRef.current === activeSessionId) applyRuntimeState(snapshot.state);
+      if (sessionIdRef.current === activeSessionId) applyRuntimeSnapshot(read, snapshot.state);
     } catch (e) {
       console.error("Failed to set tools:", e);
       addNotice({ type: "error", message: `切换工具失败：${e instanceof Error ? e.message : String(e)}` });
+    } finally {
+      toolSelectionPendingRef.current = false;
+      setToolSelectionPending(false);
     }
-  }, [creationSettingsLocked, setToolPresetState, clearSlashCommands, closeEvents, clearAskQuestionnaire, ensureEventsConnected, loadTools, applyRuntimeState, addNotice]);
+  }, [creationSettingsLocked, setToolPresetState, clearSlashCommands, closeEvents, clearAskQuestionnaire, ensureEventsConnected, loadTools, applyRuntimeSnapshot, beginRuntimeRead, addNotice]);
 
   // One lease request: it resets the session's idle countdown (renewIdleTimer()). A reply
   // that does not come within SESSION_LEASE_TIMEOUT_MS, or no network, counts as "unanswered".
@@ -3853,25 +4188,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       sessionIdRef.current = session.id;
       void connectEvents(session.id);
       // 先向服务端验证版本和活动 leaf，不能把旧窗口直接显示在另一个分支上。
-      loadSession(session.id, true, true, { validateView: true }).then(({ agentState }) => {
-        if (agentState?.alive) {
-          loadTools(session.id);
-          const runtimeState = agentState.state;
-          if (agentState.busy && runtimeState && !runtimeState.isBashRunning) {
-            requestScrollPosition("running-end");
-            enterMainRun(runtimeState.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
-            void connectEvents(session.id);
-          }
-          if (agentState.state?.isBashRunning) {
-            bashRunningRef.current = true;
-            setBashRunning(true);
-            void waitForBashSettlement(session.id);
-          }
-        }
-        if (!agentRunningRef.current && pendingDetachedSubagentIdsRef.current.size > 0) {
-          // 刷新后只恢复后台监听，不能把 detached 子代理显示成主代理思考。
-          void connectEvents(session.id);
-        }
+      loadSession(session.id, true, true, { validateView: true }).then(({ agentState, runtimeRead }) => {
+        restoreRuntimeFromLoad(session.id, agentState, runtimeRead);
       });
     } else if (pendingSessionView.resumingInitialization) {
       // 重新挂载后接管已有 runtime，先连接 SSE 再完成初始化，不创建第二个会话。
@@ -3884,9 +4202,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       void connectEvents(attachSessionId);
       const controller = new AbortController();
       runtimeStateRequestRef.current = controller;
+      const attachRead = beginRuntimeRead();
       void fetchRuntimeState(attachSessionId, controller.signal)
         .then((snapshot) => {
-          if (sessionIdRef.current === attachSessionId) applyRuntimeState(snapshot.state);
+          if (sessionIdRef.current === attachSessionId) applyRuntimeSnapshot(attachRead, snapshot.state);
         })
         .catch((error: unknown) => {
           if (!(error instanceof DOMException && error.name === "AbortError")) {
@@ -4040,13 +4359,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // 保持同一对象引用，下游 memo 组件（ChatInput/MessageView）才能跳过渲染。
   return useMemo(() => ({
     // State
-    data: details, loading, error, sendError, activeLeafId, messages, entryIds, messageKeys, streamingStore,
+    data: details, loading, error, sendError, activeLeafId, messages, entryIds, branchTailEntryIds, messageKeys, streamingStore,
     historyCursor: historyPage.sid === sessionIdRef.current ? historyPage.oldestEntryId : null,
     hasEarlierMessages: historyPage.sid === sessionIdRef.current && historyPage.hasMore,
     loadingEarlierMessages: historyPage.sid === sessionIdRef.current && historyPage.loading,
     earlierPageFailed: historyPage.sid === sessionIdRef.current && historyPage.failed,
     earlierTurnCount: historyPage.sid === sessionIdRef.current ? historyPage.turnsBefore : 0,
-    missingCwd, isModelScopeActive: modelSelectionState.isScoped, allModelList, loadAllModels, agentRunning, modelState: modelViewState, modelActions: modelViewActions, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames, toolSelectionKnown,
+    missingCwd, isModelScopeActive: modelSelectionState.isScoped, allModelList, loadAllModels, agentRunning, modelState: modelViewState, modelActions: modelViewActions, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames, toolSelectionKnown, toolSelectionPending,
+    externalWriteBlocked, recalledPending, recallError, handleRetryBlockedLoad,
     retryInfo, contextUsage, systemPrompt, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
@@ -4060,6 +4380,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleSend, handleAbort, startSideChat, handleFork, handleNavigate, loadEarlierMessages, retryEarlierMessages, loadUntilEntryId,
     handleCompact, handleQueuedSubmit, handleAbortCompaction, dismissCompactError,
     handleRecallQueue,
+    blockedRecall,
+    handleRecallBlockedQueue,
     handleBuiltinSlashCommand,
     handleShadowMindToggle, handleToolPresetChange, loadTools, loadSlashCommands, setActiveLeafId, setMessages,
     handleEditContent,
@@ -4071,9 +4393,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleAgentEventRef,
   }), [
     missingCwd,
-    details, loading, error, sendError, activeLeafId, messages, entryIds, messageKeys, streamingStore, historyPage,
+    details, loading, error, sendError, activeLeafId, messages, entryIds, branchTailEntryIds, messageKeys, streamingStore, historyPage,
     agentRunning, allModelList, loadAllModels, modelSelectionState.isScoped, startSideChat,
-    modelViewState, modelViewActions, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames, toolSelectionKnown,
+    modelViewState, modelViewActions, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames, toolSelectionKnown, toolSelectionPending,
+    externalWriteBlocked, recalledPending, recallError, handleRetryBlockedLoad,
     retryInfo, contextUsage, systemPrompt, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
@@ -4085,6 +4408,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleSend, handleAbort, handleFork, handleNavigate, loadEarlierMessages, retryEarlierMessages, loadUntilEntryId,
     handleCompact, handleQueuedSubmit, handleAbortCompaction, dismissCompactError,
     handleRecallQueue,
+    blockedRecall,
+    handleRecallBlockedQueue,
     handleBuiltinSlashCommand,
     handleShadowMindToggle, handleToolPresetChange, loadTools, loadSlashCommands, setActiveLeafId, setMessages,
     dispatch, setAgentRunning, setForkingEntryId,

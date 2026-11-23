@@ -37,6 +37,8 @@ import { createBackgroundCommandExtension } from "./background-command-extension
 import { isBackgroundCommandsEnabled } from "./background-command-settings";
 import { createScheduledTaskExtension } from "./scheduled-task-extension";
 import { isScheduledTasksEnabled } from "./scheduled-task-settings";
+import { createTeamExtension } from "./team-extension";
+import { TEAM_MEMBER_ENTRY_TYPE } from "./team-types";
 import {
   createProjectCommandBashExtension,
   createProjectCommandBashOperations,
@@ -94,7 +96,9 @@ import { isBuiltInSubagentsEnabled } from "./subagent-settings";
 import { resolveShellTools } from "./powershell-settings";
 import { CHAT_ONLY_RESOURCE_LOADER_OPTIONS, contextFilesSystemPrompt } from "./chat-only";
 import { createExactSystemPromptExtension } from "./exact-system-prompt";
-import { isSystemPromptAddonExtension, withSessionSystemPromptAddon } from "./system-prompt-addon";
+import { SubmitGuard, createSubmitGuardExtension } from "./submit-guard";
+import { isSystemPromptAddonExtension, projectEffectiveSystemPromptAddon } from "./system-prompt-addon";
+import { findMembershipBySession } from "./teams";
 import { createPiWebBuiltinExtensions, createSubagentCodemodeExtension, createSubagentMcpExtensions } from "./builtin-extensions";
 import type { McpHost } from "./mcp-host";
 import type { DebugMcpHost, DebugSessionLifecycle, DebugWrapperSnapshot } from "./debug-types";
@@ -164,6 +168,15 @@ type ParkedPrompt = {
   settle: () => void;
   /** A flush is waiting for its admission; it stays a queue row (Recall, Stop) until then. */
   delivering?: boolean;
+  /** 停放时判定的类型：扩展命令（true）还是普通消息。队列检查只读它，不再展开消息文本。 */
+  command?: boolean;
+  /** 这一行占用的 pendingPrompts 令牌；结算后置空，重新入队时不会再登记旧令牌。 */
+  token?: symbol;
+  /**
+   * Stop 在 pi 接收之前拦下的那一行：只等「移回」。自动派发（回合结束、压缩结束）不再替用户
+   * 发出去——用户按过 Stop，这一行回来是为了让他自己决定。
+   */
+  recallOnly?: boolean;
 };
 
 /** What Recall and Stop hand back to the composer: whole messages by queue, images included (lib/queued-messages.ts). */
@@ -246,6 +259,8 @@ type AgentSessionWrapperOptions = {
   /** Chat only: the extension-provided model the session wanted, named when a prompt finds no model. */
   chatOnlyExtensionModel?: { provider: string; id: string };
   sideChat?: boolean;
+  /** Stop 与「已派发、pi 还没接收」的提交之间的仲裁（lib/submit-guard.ts），随会话的内联扩展一起装上。 */
+  submitGuard?: SubmitGuard;
   /**
    * The notices of what went wrong as the session started (lib/startup-issues.ts), told to every
    * stream it opens. Left out (a subagent, a side chat), the wrapper keeps none: its parent's page said them.
@@ -485,6 +500,27 @@ function isCompactionInProgressError(error: unknown): boolean {
 // Wraps AgentSession with the same interface the rest of the app expects
 // ============================================================================
 
+/**
+ * Stop 落在一条提交「已到达、pi 还没接收」之间：这条消息没有发出。
+ *
+ * 路由据此回「未接收」（`prompt_rejected` + `accepted: false`），输入框保留草稿；wrapper 内部重新
+ * 入队时按 `recallOnly` 处理——它只等「移回」，不会再被自动派发出去。
+ */
+export class StoppedBeforeDispatchError extends Error {
+  readonly code = "stopped_before_dispatch";
+
+  constructor(message = "会话已停止，这条消息没有发出") {
+    super(message);
+    this.name = "StoppedBeforeDispatchError";
+  }
+}
+
+/** 跨 bundle 也能认：只按字段判断，不依赖 `instanceof`。 */
+function isStoppedBeforeDispatchError(error: unknown): boolean {
+  if (error instanceof StoppedBeforeDispatchError) return true;
+  return typeof error === "object" && error !== null && (error as { code?: unknown }).code === "stopped_before_dispatch";
+}
+
 export class SessionFileConflictError extends Error {
   constructor() {
     super("会话文件已被外部修改，请刷新后重试");
@@ -514,6 +550,10 @@ export class AgentSessionWrapper {
   // Prompts waiting for the running compaction to finish, and an extension command sent as a
   // follow-up while a run streams (ParkedPrompt above).
   private parkedDuringCompaction: ParkedPrompt[] = [];
+  // The pendingPrompts tokens those parked entries hold. A re-parked row whose delivery already
+  // settled holds none, and must not offset a submission that is genuinely still running
+  // (see releaseForcedShutdownOnceStopped).
+  private readonly parkedPromptTokens = new Set<symbol>();
   // The extension commands pi is running right now, by their submitted text: they start no run, so
   // nothing else tells the composer what occupies the session (see get_state / abort).
   private runningCommands: string[] = [];
@@ -551,6 +591,13 @@ export class AgentSessionWrapper {
   private extensionUiAbortController = new AbortController();
   // abort 期间扩展可能在取消当前问题后继续请求下一题，必须拒绝新 UI 才能真正收口。
   private aborting = false;
+  /**
+   * 每次真正停下一轮就加一。Stop 可能落在一条提交「已派发、pi 还没接收」之间（pi 的异步
+   * `input` 钩子期间），那条提交恢复时会话已空闲，pi 会为它另起一轮；派发前后对比这个值，
+   * 就能认出这种「被 Stop 复活」的提交并立刻停掉它。
+   */
+  private stopEpoch = 0;
+  private readonly submitGuard: SubmitGuard | undefined;
   private _alive = true;
   // 工具中断自动恢复状态：最近一次 agent_end 的消息（供 agent_settled 检测）、
   private lastAgentEndMessages: unknown[] | null = null;
@@ -613,6 +660,7 @@ export class AgentSessionWrapper {
       fastModels,
     };
     this.exactSystemPrompt = options.exactSystemPrompt;
+    this.submitGuard = options.submitGuard;
     this.chatOnly = options.chatOnly ?? false;
     this.onDirectTurnSettled = options.onDirectTurnSettled;
     this.suppressCompletionNotifications = options.suppressCompletionNotifications ?? false;
@@ -845,6 +893,14 @@ export class AgentSessionWrapper {
     return this._alive && (this.pendingPrompts.active || this.inner.isStreaming || this.inner.isCompacting || this.shellRunning);
   }
 
+  /**
+   * 只等「移回」的队列行。它们不会自己派发，所以不算「运行中」；但正文只存在内存里，空闲回收
+   * 或淘汰会把它连同行一起丢掉，因此它们各算一条继续留活着的理由。
+   */
+  hasRecallOnlyParkedPrompts(): boolean {
+    return this.parkedDuringCompaction.some((entry) => entry.recallOnly === true);
+  }
+
   /** 已知 entry id 仍可能被重写；以文件版本变化触发完整内容校验。 */
   diskFreshness(): SessionDiskFreshness {
     return this.isAlive() ? this.diskInspector.inspect(this.sessionFile) : "current";
@@ -872,6 +928,8 @@ export class AgentSessionWrapper {
   isIdleEvictable(): boolean {
     if (!this._alive || this.forceShutdownOnIdle) return false;
     if (this.isRunning() || this.isAwaitingInput() || this.hasBlockingUiRequest()) return false;
+    // 只等「移回」的行只在内存里，淘汰会话就等于把它丢掉。
+    if (this.hasRecallOnlyParkedPrompts()) return false;
     if (getLiveSubagentStatus(this.sessionId) !== undefined) return false;
     if (hasActiveSessionLivenessProvider({
       sessionId: this.sessionId,
@@ -905,6 +963,8 @@ export class AgentSessionWrapper {
   evictIfDiskAhead(): boolean {
     if (!this.isAlive() || this.isRunning() || this.diskFreshness() !== "changed") return false;
     if (this.isRunning()) return false;
+    // 只等「移回」的行只在内存里：销毁实例就等于把它丢掉，等用户取回后再淘汰。
+    if (this.hasRecallOnlyParkedPrompts()) return false;
     console.info("[pi-web] 检测到会话文件外部写入，淘汰空闲会话", { sessionId: this.sessionId });
     this.destroy();
     invalidateSessionListCache();
@@ -1361,6 +1421,10 @@ export class AgentSessionWrapper {
       images: input.images,
       // 已由 deliverFirstPrompt 负责投递，压缩结束的 flush 不能再发一次。
       delivering: true,
+      // 首条消息永远是普通消息，不是扩展命令。
+      command: false,
+      // 这条队列行占着一个提交名额，交给强制关闭判定按归属扣掉。
+      token,
       settle: () => {
         if (settled) return;
         settled = true;
@@ -1384,11 +1448,13 @@ export class AgentSessionWrapper {
 
   private async deliverFirstPrompt(entry: ParkedPrompt, prepare: () => Promise<void>): Promise<void> {
     const fail = (error: unknown) => {
-      // 没发出去就留作队列行，用户可以移回，绝不静默丢弃。
+      // 没发出去就留作队列行，用户可以移回，绝不静默丢弃。Stop 拒绝的那一条没有发出过：
+      // 标成只等「移回」，否则下一轮结束的 flush 会替用户把它发出去。
+      if (isStoppedBeforeDispatchError(error)) entry.recallOnly = true;
       entry.delivering = false;
       if (!this.parkedDuringCompaction.includes(entry)) this.parkedDuringCompaction.push(entry);
       this.emitQueueUpdate();
-      entry.settle();
+      this.settleParked(entry);
       this.emit({ type: "prompt_error", errorMessage: error instanceof Error ? error.message : String(error) });
       this.emit(this.promptDoneEvent());
     };
@@ -1405,9 +1471,11 @@ export class AgentSessionWrapper {
     if (index === -1 || !this._alive) return;
     this.parkedDuringCompaction.splice(index, 1);
     this.emitQueueUpdate();
+    // 与 deliverParkedPrompt 一致：出队之后它是一条真正在跑的提交，不再算「排队等待」。
+    this.releaseParkedToken(entry);
     try {
       await this.send({ type: "prompt", message: entry.message, ...(entry.images?.length ? { images: entry.images } : {}) });
-      entry.settle();
+      this.settleParked(entry);
     } catch (error) {
       fail(error);
     }
@@ -1419,9 +1487,29 @@ export class AgentSessionWrapper {
     if (this.shadowSessionSetting.available) await this.shadowSessionSetting.setEnabled(true);
   }
 
+  /**
+   * 暂存项占用的 pendingPrompts 令牌随它进出队列登记：入队时登记，出队派发时撤销（从那一刻
+   * 起它是一条真正在跑的提交），结算后不再恢复。`releaseForcedShutdownOnceStopped()` 只减
+   * 仍在队列里等着的令牌，才会把一条卡在预检的提交当成「被停掉的工作」，而失败后重新入队、
+   * 已经结算的旧行也不会抵消它。
+   */
   private parkDuringCompaction(entry: ParkedPrompt): void {
+    // 重新入队时恢复登记：只有仍占着令牌的项算队列行，已结算的项令牌已置空。
+    if (entry.token) this.parkedPromptTokens.add(entry.token);
     this.parkedDuringCompaction.push(entry);
     this.emitQueueUpdate();
+  }
+
+  /** 这一项离开队列去派发：它不再是等待中的队列行（失败重新入队时会再登记）。 */
+  private releaseParkedToken(entry: ParkedPrompt): void {
+    if (entry.token) this.parkedPromptTokens.delete(entry.token);
+  }
+
+  /** 结算一个暂存项：先撤登记再交还名额，之后重新入队也不会把旧令牌算成它的。 */
+  private settleParked(entry: ParkedPrompt): void {
+    this.releaseParkedToken(entry);
+    entry.token = undefined;
+    entry.settle();
   }
 
   /**
@@ -1433,7 +1521,7 @@ export class AgentSessionWrapper {
     const parked = this.parkedDuringCompaction;
     if (parked.length === 0) return { steering: [], followUp: [] };
     this.parkedDuringCompaction = [];
-    for (const entry of parked) entry.settle();
+    for (const entry of parked) this.settleParked(entry);
     this.emitQueueUpdate();
     // A plain prompt's client waits for prompt_done; nothing ran.
     if (parked.some((entry) => entry.streamingBehavior === undefined)) this.emit({ type: "prompt_done", aborted: true });
@@ -1451,16 +1539,19 @@ export class AgentSessionWrapper {
    */
   private flushParkedPrompts(): void {
     for (const entry of this.parkedDuringCompaction) {
-      if (entry.delivering) continue;
+      // 被 Stop 拦下的行只等「移回」：自动派发不该替用户把取消过的消息再发一次。
+      if (entry.delivering || entry.recallOnly) continue;
       entry.delivering = true;
       void this.deliverParkedPrompt(entry);
     }
   }
 
   /**
-   * Deliver the commands parked behind a finished turn. pi runs an extension command the moment it
-   * arrives, so a follow-up one waits in the parked list (see the prompt case); compaction's
-   * refusals share that list and `compaction_end` flushes them.
+   * Deliver what waited behind the finished turn. pi runs an extension command the moment it
+   * arrives, so a follow-up one waits in the parked list (see the prompt case); a message sent
+   * while an extension command runs waits there too. Compaction's refusals share that list and
+   * `compaction_end` flushes them. The wait is re-checked per entry in `deliverParkedPrompt()`,
+   * which compaction's own flush reaches too: a command still running must not be overtaken.
    */
   private flushParkedWhenIdle(): void {
     if (this.parkedDuringCompaction.length === 0) return;
@@ -1468,75 +1559,162 @@ export class AgentSessionWrapper {
     this.flushParkedPrompts();
   }
 
+  /**
+   * An extension command returned: it no longer occupies the session, so whatever a prompt was
+   * held behind (see the prompt case) goes now. Every completion path calls this, the sync
+   * dispatch failure included.
+   */
+  private forgetRunningCommand(commandText: string): void {
+    if (!commandText) return;
+    const index = this.runningCommands.indexOf(commandText);
+    if (index === -1) return;
+    this.runningCommands.splice(index, 1);
+    this.flushParkedWhenIdle();
+  }
+
+  /**
+   * Stop 落在「已派发、pi 还没接收」之间时，这条提交不该再有回合。
+   *
+   * 有守闸的会话（`lib/submit-guard.ts`）里，pi 的 `input` 钩子最后一道会把它拦下，pi 既不记录也
+   * 不开回合，按「没有发出」交还输入框；没有守闸的会话（Chat only、子代理）只能等 pi 开跑之后再
+   * 停掉——那一轮的用户消息已经写进记录了，所以不当作没发出去。
+   */
+  private handleStoppedSubmission(
+    result: "handled" | "queued" | "started" | undefined,
+    epochAtDispatch: number,
+    swallowed: boolean,
+  ): "swallowed" | "revived" | null {
+    if (swallowed) return "swallowed";
+    if (result !== "started" || this.stopEpoch === epochAtDispatch) return null;
+    void this.inner.abort().catch((error) => {
+      console.warn(
+        "[pi-web] stopping a prompt revived by Stop failed:",
+        error instanceof Error ? error.message : error,
+      );
+    });
+    return "revived";
+  }
+
   private async deliverParkedPrompt(entry: ParkedPrompt): Promise<void> {
+    // 与 flush 里的跳过一致：这类行只由用户「移回」取走，任何自动派发都不碰它。
+    if (entry.recallOnly) return;
     const releaseAdmission = await this.acquirePromptAdmission();
-    entry.delivering = false;
-    const index = this.parkedDuringCompaction.indexOf(entry);
-    if (index === -1) {
-      // Recalled (Recall, Stop) while it waited.
-      releaseAdmission();
-      return;
-    }
-    this.parkedDuringCompaction.splice(index, 1);
-    this.emitQueueUpdate();
+    // 提交锁无论如何都要还回去：这个函数由 flush 以 `void` 调用，异常逃出去就等于把
+    // promptAdmissionTail 永久挂住，之后所有提交都排在它后面。
     let released = false;
     const release = () => {
       if (released) return;
       released = true;
       releaseAdmission();
     };
-    let disposition: "handled" | "queued" | "started" | undefined;
-    let failure: unknown;
-    // A parked follow-up command starts no run; name it while pi runs it, as a directly submitted
-    // one is named (see the prompt case).
-    let deliveredCommand = "";
     try {
-      const multiSkill = expandMultiSkillCommand(entry.message, this.inner.resourceLoader?.getSkills().skills ?? []);
-      if (!multiSkill.expanded && this.isExtensionCommandPrompt(multiSkill.text)) {
-        deliveredCommand = multiSkill.text.trim();
-        this.runningCommands.push(deliveredCommand);
+      entry.delivering = false;
+      const index = this.parkedDuringCompaction.indexOf(entry);
+      if (index === -1) {
+        // Recalled (Recall, Stop) while it waited.
+        return;
       }
-      const promptPromise = this.inner.prompt(multiSkill.text, {
-        ...(multiSkill.expanded ? { expandPromptTemplates: false } : {}),
-        ...(entry.images?.length ? { images: entry.images } : {}),
-        source: "rpc",
-        streamingBehavior: entry.streamingBehavior ?? "steer",
-        preflightResult: (result) => {
-          disposition = result;
-          release();
-        },
-      });
-      // pi 对扩展命令要等 handler 返回才回调 preflightResult；等到那时才释放，整段命令
-      // 都会占着提交锁，后面的消息连命令自己的 `cancel` 都进不了 SDK。派发即视为接受，
-      // 与直接提交路径（见 prompt case 的 acceptPreflight）一致；命令结束再结算队列状态。
-      if (deliveredCommand) release();
-      await promptPromise;
-    } catch (error) {
-      failure = error;
-    }
-    if (deliveredCommand) {
-      const index = this.runningCommands.indexOf(deliveredCommand);
-      if (index !== -1) this.runningCommands.splice(index, 1);
-    }
-    release();
-    if (failure !== undefined && disposition === undefined && isCompactionInProgressError(failure)) {
-      // Another compaction started first: wait for that one's end.
-      this.parkDuringCompaction(entry);
-      return;
-    }
-    entry.settle();
-    if (failure !== undefined) {
-      // Refused unsent: keep it as a queue row for Recall or the next compaction end, as the TUI's restoreQueue().
-      if (disposition === undefined) this.parkDuringCompaction(entry);
-      this.emit({
-        type: "prompt_error",
-        errorMessage: failure instanceof Error ? failure.message : String(failure),
-      });
-    }
-    // The client of a plain prompt waits for prompt_done; the delivery that started
-    // the run sends it when that run ends, one that joined a run rides that run's.
-    if (disposition === "started" || (disposition !== "queued" && entry.streamingBehavior === undefined)) {
-      this.emit(this.promptDoneEvent());
+      let multiSkill: ReturnType<typeof expandMultiSkillCommand>;
+      let commandText: string;
+      try {
+        multiSkill = expandMultiSkillCommand(entry.message, this.inner.resourceLoader?.getSkills().skills ?? []);
+        commandText = !multiSkill.expanded && this.isExtensionCommandPrompt(multiSkill.text)
+          ? multiSkill.text.trim()
+          : "";
+        // 等待条件按这一项再判一次：压缩结束的 flush 不经过 flushParkedWhenIdle，普通消息不能借它
+        // 绕过还在跑的扩展命令；命令自己（`/review cancel`）反而必须放行——它在回合结束后就该进
+        // 处理器，不能被仍在跑的命令挡住。留在队列里，等下一次 flush（命令返回时就会来一次）。
+        if (!commandText && this.runningCommands.length > 0) return;
+        // 消息可能在命令后等了几分钟：别的进程此时若追加过记录，沿内存里的旧分支末端写会把这条
+        // 消息接到过期的会话上。派发前查一次文件版本，冲突就留在队列里交给用户（移回），不硬写。
+        if (this.diskFreshness() !== "current") {
+          this.emit({
+            type: "prompt_error",
+            errorMessage: "会话文件已被外部修改，排队的消息没有发出，可用「移回」取回",
+          });
+          return;
+        }
+      } catch (error) {
+        // 读不到会话文件（权限、I/O）时判断不了新旧，同样不能硬写：消息留在队列里，报给用户。
+        console.error("[pi-web] parked prompt delivery check failed:", error instanceof Error ? error.message : error);
+        this.emit({
+          type: "prompt_error",
+          errorMessage: "读取会话文件失败，排队的消息没有发出，可用「移回」取回",
+        });
+        return;
+      }
+      this.parkedDuringCompaction.splice(index, 1);
+      this.emitQueueUpdate();
+      // 从这一刻起它是一条真正在跑的提交：不再按「排队等待」扣减强制关闭的判定。
+      this.releaseParkedToken(entry);
+      let disposition: "handled" | "queued" | "started" | undefined;
+      let failure: unknown;
+      let stopped: "swallowed" | "revived" | null = null;
+      const stopEpochAtDispatch = this.stopEpoch;
+      const guardTicket = this.submitGuard?.begin(stopEpochAtDispatch);
+      // A parked follow-up command starts no run; name it while pi runs it, as a directly submitted
+      // one is named (see the prompt case).
+      const deliveredCommand = commandText;
+      try {
+        if (deliveredCommand) this.runningCommands.push(deliveredCommand);
+        const promptPromise = this.inner.prompt(multiSkill.text, {
+          ...(multiSkill.expanded ? { expandPromptTemplates: false } : {}),
+          ...(entry.images?.length ? { images: entry.images } : {}),
+          source: "rpc",
+          streamingBehavior: entry.streamingBehavior ?? "steer",
+          preflightResult: (result) => {
+            disposition = result;
+            if (guardTicket) this.submitGuard?.end(guardTicket);
+            stopped = this.handleStoppedSubmission(result, stopEpochAtDispatch, guardTicket?.swallowed === true);
+            release();
+          },
+        });
+        // pi 对扩展命令要等 handler 返回才回调 preflightResult；等到那时才释放，整段命令
+        // 都会占着提交锁，后面的消息连命令自己的 `cancel` 都进不了 SDK。派发即视为接受，
+        // 与直接提交路径（见 prompt case 的 acceptPreflight）一致；命令结束再结算队列状态。
+        if (deliveredCommand) release();
+        await promptPromise;
+      } catch (error) {
+        failure = error;
+      }
+      // pi 没走预检就拒绝（校验失败、压缩中）时这条提交已经不在它手里了。
+      if (guardTicket) this.submitGuard?.end(guardTicket);
+      this.forgetRunningCommand(deliveredCommand);
+      release();
+      if (failure !== undefined && disposition === undefined && isCompactionInProgressError(failure)) {
+        // Another compaction started first: wait for that one's end.
+        this.parkDuringCompaction(entry);
+        return;
+      }
+      if (stopped === "swallowed") {
+        // Stop 在 pi 接收之前落地，守闸把它拦在入队/开跑之外：没有回合，也没有记录。
+        // 留作队列行（只等「移回」）：先结算它的令牌——这种行不会自己派发，留着令牌会让会话
+        // 一直显示运行中，还会挡住 bash、克隆等操作。
+        entry.recallOnly = true;
+        this.settleParked(entry);
+        this.parkDuringCompaction(entry);
+        this.emit({
+          type: "prompt_error",
+          errorMessage: "会话已停止，这条消息没有发出，可用「移回」取回",
+        });
+        return;
+      }
+      this.settleParked(entry);
+      if (failure !== undefined) {
+        // Refused unsent: keep it as a queue row for Recall or the next compaction end, as the TUI's restoreQueue().
+        if (disposition === undefined) this.parkDuringCompaction(entry);
+        this.emit({
+          type: "prompt_error",
+          errorMessage: failure instanceof Error ? failure.message : String(failure),
+        });
+      }
+      // The client of a plain prompt waits for prompt_done; the delivery that started
+      // the run sends it when that run ends, one that joined a run rides that run's.
+      if (disposition === "started" || (disposition !== "queued" && entry.streamingBehavior === undefined)) {
+        this.emit(this.promptDoneEvent());
+      }
+    } finally {
+      release();
     }
   }
 
@@ -1849,6 +2027,20 @@ export class AgentSessionWrapper {
     return name !== null && this.extensionCommandCandidates().some((command) => command.name === name);
   }
 
+  /**
+   * Whether an earlier message still waits in the parked queue. A message submitted now would
+   * otherwise take pi's queue directly and be consumed by the running turn before the flush ever
+   * delivers those — B answered before A. It joins the queue instead, whose FIFO delivery keeps
+   * the submission order. A parked command does not count: pi runs commands the moment they
+   * arrive, and `/review cancel` must reach its handler at once.
+   * 判定只读停放时记录的 `command`：这里不能展开消息文本——`/skill:` 会同步读技能文件，文件在
+   * 等待期间被删掉时会抛错，一条无关的提交也会因此被拒绝（甚至留下未结算的令牌）。
+   */
+  private hasParkedUserMessage(): boolean {
+    // 只等「移回」的行不会自己派发，新提交不必排到它后面。
+    return this.parkedDuringCompaction.some((entry) => entry.command !== true && entry.recallOnly !== true);
+  }
+
   /** Defer out of the extension callback, including session_start, before awaiting binding. */
   private checkExtensionShutdown(): void {
     if (!this.extensionShutdownRequested) return;
@@ -1864,7 +2056,7 @@ export class AgentSessionWrapper {
    * extensionsInitializing/extensionsError 字段和 extensions_bound 事件表达。
    */
   private shouldWaitForExtensions(type: string): boolean {
-    return type === "prompt" || type === "steer" || type === "follow_up" || type === "get_commands" || type === "set_shadow_mind_enabled" || type === "bash";
+    return type === "prompt" || type === "get_commands" || type === "set_shadow_mind_enabled" || type === "bash";
   }
 
   private async withFinalRunningNotification<T>(operation: () => Promise<T>): Promise<T> {
@@ -1875,11 +2067,15 @@ export class AgentSessionWrapper {
       notifyRunningChange();
     }
   }
-
-  /** 面板要与实际请求一致：扩展没加载（未安装、Chat only、子代理）时不会有追加内容。 */
+  /** 面板要与实际请求一致（只读）：覆盖独立扩展注入与未装扩展时的团队角色兜底注入。 */
   private projectSystemPromptAddon(systemPrompt: string): string {
     const loaded = this.inner.resourceLoader?.getExtensions?.().extensions.some(isSystemPromptAddonExtension) ?? false;
-    return loaded ? withSessionSystemPromptAddon(systemPrompt, this.inner.sessionId) : systemPrompt;
+    const membership = findMembershipBySession(this.inner.sessionId);
+    return projectEffectiveSystemPromptAddon(systemPrompt, this.inner.sessionId, {
+      addonExtensionLoaded: loaded,
+      isTeamMember: Boolean(membership),
+      teamMemberPrompt: membership?.member.prompt,
+    });
   }
 
   private async restoreShadowSessionSetting(): Promise<void> {
@@ -2009,7 +2205,13 @@ export class AgentSessionWrapper {
    * beside it keeps the normal idle timer, which leases move.
    */
   private releaseForcedShutdownOnceStopped(): void {
-    const stoppedWorkRunning = this.pendingPrompts.active || this.inner.isStreaming || this.inner.isCompacting
+    // 只有 Stop 要停的工作扣着强制关闭。按令牌归属扣掉暂存项与正在跑的扩展命令：两者都不是
+    // 被停掉的工作，否则一条排在长命令后面的消息会一直扣着强制关闭，命令到期仍未返回时会话
+    // 被直接销毁，只存在内存里的消息和附件随之丢失。只减真正占着令牌的暂存项
+    // （`parkedPromptTokens`）：失败后重新入队的旧行已经结算，不能再抵消一条卡在预检的提交。
+    const waitingOnCommands = this.parkedPromptTokens.size + this.runningCommands.length;
+    const stoppedWorkRunning = this.pendingPrompts.size > waitingOnCommands
+      || this.inner.isStreaming || this.inner.isCompacting
       || (this.forceShutdownCoversShell && this.shellRunning);
     if (this._alive && stoppedWorkRunning) return;
     this.forceShutdownOnIdle = false;
@@ -2056,7 +2258,8 @@ export class AgentSessionWrapper {
       this.idleDeadlineAt = null;
       // A subagent run that waits for a slot (or its MCP servers) holds this SDK session and will
       // prompt it: disposing it now would leave that run on a dead session that records nothing (#1590).
-      if (!this.forceShutdownOnIdle && (this.isRunning() || getLiveSubagentStatus(this.sessionId) !== undefined || hasActiveSessionLivenessProvider({
+      if (!this.forceShutdownOnIdle && (this.isRunning() || this.hasRecallOnlyParkedPrompts()
+        || getLiveSubagentStatus(this.sessionId) !== undefined || hasActiveSessionLivenessProvider({
         sessionId: this.sessionId,
         sessionFile: this.sessionFile || undefined,
       }))) {
@@ -2176,7 +2379,20 @@ export class AgentSessionWrapper {
   }
 
   async send(command: Record<string, unknown>): Promise<unknown> {
+    // `steer` / `follow_up` 就是带 `streamingBehavior` 的提示，在入口一次归一：每条提交只做一次
+    // 启动等待、只经过一个提交锁入口。递归回 `send()` 会让它多等一次扩展绑定与模型初始化，
+    // 后到的普通提示反而先拿到锁（流式回合里 B 会插到先提交的 A 前面）。
+    if (command.type === "steer" || command.type === "follow_up") {
+      command = {
+        type: "prompt",
+        message: command.message,
+        ...(command.images ? { images: command.images } : {}),
+        streamingBehavior: command.type === "steer" ? "steer" : "followUp",
+      };
+    }
     const type = command.type as string;
+    // 这条提交到达时的停表值：启动等待、提交锁等待期间发生的 Stop 都发生在它之后，这条消息就不该再发。
+    const stopEpochAtArrival = this.stopEpoch;
     // A status read (the chat's reconciliation, every few seconds while it runs) would hide the
     // last command that did something; it never resets the idle timer either.
     if (type !== "get_state") {
@@ -2202,7 +2418,7 @@ export class AgentSessionWrapper {
       throw new SessionFileConflictError();
     }
 
-    if (type === "prompt" || type === "steer" || type === "follow_up") {
+    if (type === "prompt") {
       const imageError = validateAgentImages(command.images);
       if (imageError) throw new Error(imageError);
     }
@@ -2220,6 +2436,11 @@ export class AgentSessionWrapper {
         // this submission starts a run or joins its streaming queue.
         const releaseAdmission = await this.acquirePromptAdmission();
         try {
+          // Stop 落在等待期间（启动、提交锁）时，这条提交是 Stop 之前发的，不该再当作新提交开一轮：
+          // 否则它会在旧回合结束、锁释放后才读到新代次，被正常接收并发出去。
+          if (this.stopEpoch !== stopEpochAtArrival) {
+            throw new StoppedBeforeDispatchError();
+          }
           const shadowToggle = typeof command.message === "string" ? parseShadowMindToggleCommand(command.message) : null;
           if (shadowToggle !== null) {
             return { kind: "shadow-setting", enabled: await this.shadowSessionSetting.setEnabled(shadowToggle) };
@@ -2289,7 +2510,8 @@ export class AgentSessionWrapper {
               .then(() => {
                 if (!controller.signal.aborted) return;
                 finishPrompt();
-                throw new Error(MCP_WAIT_STOPPED_MESSAGE);
+                // 只有 Stop 会中止这个等待：按「没有发出」退回，首条消息因此也会被标成只等「移回」。
+                throw new StoppedBeforeDispatchError(MCP_WAIT_STOPPED_MESSAGE);
               });
             const wait = { controller, done: waited.then(() => undefined, () => undefined) };
             this.mcpPromptWait = wait;
@@ -2302,28 +2524,62 @@ export class AgentSessionWrapper {
           this.autoContinueCount = 0;
           this.lastAutoContinuedToolCallId = null;
           const loadedSkills = this.inner.resourceLoader?.getSkills().skills ?? [];
-          const multiSkill = expandMultiSkillCommand(command.message as string, loadedSkills);
-          // pi runs an extension command before anything else and starts no run, then calls back
-          // only once its handler returns. Waiting for that acknowledgement would hold the POST,
-          // and this admission, for the command's whole lifetime (`/review` runs for minutes), so
-          // every later submission — a message answered in its own run, another command — waited
-          // for it. A dispatch to a registered command is the acceptance itself.
-          const dispatchesCommand = !multiSkill.expanded && this.isExtensionCommandPrompt(multiSkill.text);
-          const commandText = dispatchesCommand ? multiSkill.text.trim() : "";
-          // pi never queues an extension command: it runs one the moment it arrives, mid-run too.
-          // The composer's follow-up button means "after this turn", so hold the command here — it
-          // becomes a queue row, the run's end delivers it (flushParkedPrompts), and Stop or Recall
-          // hands it back. The same parked list takes compaction's refusals. A command already
-          // running changes nothing: still wait for this turn, whose settle is what flushes the
-          // queue (delivery no longer holds prompt admission for the command's lifetime).
-          if (commandText && streamingBehavior === "followUp" && this.inner.isStreaming) {
-            this.parkDuringCompaction({
-              message: command.message as string,
-              images: promptImages,
-              streamingBehavior: "followUp",
-              settle: finishPrompt,
-            });
-            return { queued: true };
+          // 派发前的异常（例如 `/skill:` 引用的文件在等待期间被删掉）必须结算提交名额，
+          // 否则这条令牌会一直挂着：`pendingPrompts` 不清、会话永远算「运行中」。
+          let multiSkill: ReturnType<typeof expandMultiSkillCommand>;
+          let commandText: string;
+          let dispatchesCommand: boolean;
+          try {
+            multiSkill = expandMultiSkillCommand(command.message as string, loadedSkills);
+            // pi runs an extension command before anything else and starts no run, then calls back
+            // only once its handler returns. Waiting for that acknowledgement would hold the POST,
+            // and this admission, for the command's whole lifetime (`/review` runs for minutes), so
+            // every later submission — a message answered in its own run, another command — waited
+            // for it. A dispatch to a registered command is the acceptance itself.
+            dispatchesCommand = !multiSkill.expanded && this.isExtensionCommandPrompt(multiSkill.text);
+            commandText = dispatchesCommand ? multiSkill.text.trim() : "";
+            // pi never queues an extension command: it runs one the moment it arrives, mid-run too.
+            // The composer's follow-up button means "after this turn", so hold the command here — it
+            // becomes a queue row, the run's end delivers it (flushParkedPrompts), and Stop or Recall
+            // hands it back. The same parked list takes compaction's refusals. A command already
+            // running changes nothing: still wait for this turn, whose settle is what flushes the
+            // queue (delivery no longer holds prompt admission for the command's lifetime).
+            // Stop 也可能落在拿到提交锁之后、这条提交真正派发之前（例如它在等 MCP 连接）：
+            // 它同样是 Stop 之前发的，排队等于替用户把消息留到命令结束再发出去。
+            if (this.stopEpoch !== stopEpochAtArrival) throw new StoppedBeforeDispatchError();
+            if (commandText && streamingBehavior === "followUp" && this.inner.isStreaming) {
+              this.parkDuringCompaction({
+                message: command.message as string,
+                images: promptImages,
+                streamingBehavior: "followUp",
+                command: true,
+                token: promptToken,
+                settle: finishPrompt,
+              });
+              return { queued: true };
+            }
+            // 扩展命令没有回合（`/review` 能跑几分钟），这期间发来的消息哪里都不该去：没有回合可
+            // 插，pi 会另起一轮与命令并行；有回合在跑时它的下一批次同样会在命令结束前把消息消费掉。
+            // 两种情形都排进「等命令结束」的队列，命令返回时由 forgetRunningCommand 派发，
+            // Stop / 移回照常可用。命令本身从不排队——`/review cancel` 必须立刻到达处理器。
+            // 回合还在跑、队列里又有没派发的普通消息时，新提交也排到它们后面：直接进 pi 的队列
+            // 会被这一轮先消费，后发的 B 会先于仍在等待的 A（派发是 FIFO 的）。只在回合进行中
+            // 才这样排队：没有回合也没有命令时没有即将到来的派发点，排进去反而会一起卡住。
+            if (!commandText
+              && (this.runningCommands.length > 0 || (this.inner.isStreaming && this.hasParkedUserMessage()))) {
+              this.parkDuringCompaction({
+                message: command.message as string,
+                images: promptImages,
+                streamingBehavior,
+                command: false,
+                token: promptToken,
+                settle: finishPrompt,
+              });
+              return { queued: true };
+            }
+          } catch (error) {
+            finishPrompt();
+            throw error;
           }
           // A new prompt, not one queued into a run: what an earlier run's Stop said is over.
           // Not at acceptance: pi accepts a command that awaits a run of its own after that
@@ -2332,12 +2588,11 @@ export class AgentSessionWrapper {
           // Which extension command is running (for the composer's label and for Stop, which cannot
           // interrupt one): recorded around the dispatch and cleared when the handler returns.
           if (commandText) this.runningCommands.push(commandText);
-          const forgetCommand = () => {
-            if (!commandText) return;
-            const index = this.runningCommands.indexOf(commandText);
-            if (index !== -1) this.runningCommands.splice(index, 1);
-          };
+          const forgetCommand = () => this.forgetRunningCommand(commandText);
           let prompt: Promise<void>;
+          let stopSwallowed = false;
+          const stopEpochAtDispatch = this.stopEpoch;
+          const guardTicket = this.submitGuard?.begin(stopEpochAtDispatch);
           try {
             prompt = this.inner.prompt(multiSkill.text, {
               ...(multiSkill.expanded ? { expandPromptTemplates: false } : {}),
@@ -2347,10 +2602,30 @@ export class AgentSessionWrapper {
               // Match pi's RPC contract: acknowledge only after synchronous prompt
               // validation and extension preflight have accepted the submission.
               // Every disposition (handled, queued, started) is an acceptance; a
-              // rejected prompt never calls this and rejects `prompt` instead.
-              preflightResult: () => acceptPreflight(),
+              // rejected prompt never calls this and rejects `prompt` instead. The one
+              // exception is a submission Stop voided before pi took it: the guard
+              // swallows it (handled) and the POST is rejected as unsent.
+              preflightResult: (result) => {
+                if (guardTicket) this.submitGuard?.end(guardTicket);
+                // Stop 落在这条提交「已派发、pi 还没接收」之间：pi 的预检在回合停下后才继续，
+                // 它看到会话已空闲，会为这条消息另起一轮。守闸把它拦在入队/开跑之前，那它就
+                // 算没发出去（交还输入框）；拦不住时停掉已经开始的这一轮。
+                const stopped = this.handleStoppedSubmission(
+                  result,
+                  stopEpochAtDispatch,
+                  guardTicket?.swallowed === true,
+                );
+                if (stopped === "swallowed") {
+                  stopSwallowed = true;
+                  rejectPreflight(new StoppedBeforeDispatchError());
+                  finishPrompt();
+                  return;
+                }
+                acceptPreflight();
+              },
             });
           } catch (error) {
+            if (guardTicket) this.submitGuard?.end(guardTicket);
             forgetCommand();
             finishPrompt();
             throw error;
@@ -2363,9 +2638,10 @@ export class AgentSessionWrapper {
             acceptPreflight();
             forgetCommand();
             finishPrompt();
-            if (!streamingBehavior) this.emit(this.promptDoneEvent());
+            if (!streamingBehavior && !stopSwallowed) this.emit(this.promptDoneEvent());
             this.checkExtensionShutdown();
           }, (error) => {
+            if (guardTicket) this.submitGuard?.end(guardTicket);
             forgetCommand();
             // pi's SDK refuses prompts while a manual compaction runs. Park the
             // submission and flush it at compaction end (the TUI's
@@ -2378,6 +2654,8 @@ export class AgentSessionWrapper {
                 message: command.message as string,
                 images: promptImages,
                 streamingBehavior,
+                command: Boolean(commandText),
+                token: promptToken,
                 settle: finishPrompt,
               });
               parked = true;
@@ -2421,17 +2699,44 @@ export class AgentSessionWrapper {
         // own cancel entry (`/review cancel`). A run, a compaction or a shell command still stops.
         if (!this.inner.isStreaming && !this.inner.isCompacting && !this.shellRunning
           && this.runningCommands.length > 0 && !this.hasBlockingUiRequest()) {
-          return { blockedByCommands: [...this.runningCommands] };
+          // 命令停不了，但排队等它的消息可以交还输入框：说了「停」之后它们不该再发出去。
+          // 命令自己的执行不受影响，所以不设置 aborting、不关挂起的弹窗。内部中止
+          // （abortForUiFailure）拿不到返回值，不能替它清空，消息留在队列里。
+          // 还没入队的两条也一并作废：更新代次让等提交锁的提交被退回，放掉正等 MCP 连接的那条
+          // （它已经过了代次检查，只能中止等待），否则命令结束、连接就绪后它们会自己发出去。
+          if (command.keepQueue !== true) {
+            this.stopEpoch += 1;
+            this.submitGuard?.cancelInFlight();
+            if (this.mcpPromptWait) {
+              const wait = this.mcpPromptWait;
+              wait.controller.abort();
+              await wait.done;
+            }
+          }
+          const recalled: RecalledPrompts = command.keepQueue === true
+            ? { steering: [], followUp: [] }
+            : this.recallParkedPrompts();
+          return {
+            blockedByCommands: [...this.runningCommands],
+            steering: recalled.steering,
+            followUp: recalled.followUp,
+          };
         }
         this.observerInstance?.cancel();
+        this.stopEpoch += 1;
+        // 仍在 pi 手里的那条提交（卡在异步 input 钩子里）不在任何队列，只有守闸能拦住它。
+        this.submitGuard?.cancelInFlight();
         this.aborting = true;
         this.forceShutdownOnIdle = true;
         this.resetIdleTimer();
         clearAttentionSession(this.sessionId);
         // Stop ends the compaction, whose end would send the parked prompts:
         // they go back to the composer instead, as the TUI's abort restores
-        // queued messages to the editor.
-        const recalled = this.recallParkedPrompts();
+        // queued messages to the editor. An internal abort (`abortForUiFailure`)
+        // discards the return value, so it must leave them queued.
+        const recalled: RecalledPrompts = command.keepQueue === true
+          ? { steering: [], followUp: [] }
+          : this.recallParkedPrompts();
         const wakes = command.keepQueue === true ? [] : this.takeQueuedWakeMessages();
         // 先取走仍在 SDK 队列里的消息，避免 agent 在 abort 到达前取走下一批 steering。
         const beforeStop = command.keepQueue === true ? { steering: [], followUp: [] } : this.recallSdkQueueAfterStop(false);
@@ -2725,26 +3030,6 @@ export class AgentSessionWrapper {
           steering: [...cleared.steering, ...recalled.steering],
           followUp: [...cleared.followUp, ...recalled.followUp],
         };
-      }
-
-      case "steer":
-      case "follow_up": {
-        const queuedImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
-        const queuedImagesOrNone = queuedImages?.length ? queuedImages : undefined;
-        // pi 的这两个队列只由运行中的回合消费。扩展命令（/review 等）执行期间 isStreaming 仍是
-        // false：此时入队的消息没有消费者，会一直留在队列里直到下一次运行。命令没有回合可插入，
-        // 所以按 TUI 的做法把消息当成一轮提示交给 SDK —— 有回合就排队，没有回合就开跑。
-        if (!this.inner.isStreaming) {
-          return this.send({
-            type: "prompt",
-            message: command.message,
-            streamingBehavior: command.type === "steer" ? "steer" : "followUp",
-            ...(queuedImagesOrNone ? { images: queuedImagesOrNone } : {}),
-          });
-        }
-        if (command.type === "steer") await this.inner.steer(command.message as string, queuedImagesOrNone);
-        else await this.inner.followUp(command.message as string, queuedImagesOrNone);
-        return null;
       }
 
       case "get_tools": {
@@ -4173,6 +4458,11 @@ export async function setRpcSessionTools(
   const crossesChatOnlyBoundary = toolNames === undefined
     || !hasCurrentResourcePolicy
     || existing.isChatOnly() !== (toolNames.length === 0);
+  // 只有重建实例会丢掉只存在内存里的队列行（原地更新会保留它），而且要在写入工具选择之前拒绝：
+  // 先请用户移回，别静默吞掉正文和附件，也别留下一条应用不了的选择记录。
+  if (crossesChatOnlyBoundary && existing.hasRecallOnlyParkedPrompts()) {
+    throw new Error("Cannot change tools while messages wait for Recall");
+  }
   if (toolNames === undefined) appendClearedSessionToolSelection(existing.inner.sessionManager);
   else appendSessionToolSelection(existing.inner.sessionManager, toolNames);
   invalidateSessionListCache();
@@ -4330,6 +4620,19 @@ export function hasBusyRpcSessionForCwd(cwd: string): boolean {
   if (getStartingSessionCwds().has(targetCwd)) return true;
   return Array.from(getRegistry().values()).some(
     (session) => normalizeRpcCwd(session.cwd) === targetCwd && session.isRunning(),
+  );
+}
+
+/**
+ * 只等「移回」的消息只存在内存里：销毁这个目录下的会话就等于把它们丢掉，
+ * 所以信任项目这类会 `destroyRpcSessionsForCwd()` 的操作用它单独拦一次。
+ */
+export function hasRecallOnlyRpcMessagesForCwd(cwd: string): boolean {
+  const targetCwd = normalizeRpcCwd(cwd);
+  return Array.from(getRegistry().values()).some(
+    (session) => normalizeRpcCwd(session.cwd) === targetCwd
+      && typeof session.hasRecallOnlyParkedPrompts === "function"
+      && session.hasRecallOnlyParkedPrompts(),
   );
 }
 
@@ -4681,6 +4984,8 @@ export async function startRpcSession(
     // after the session is created, so the getter is filled in below.
     const exactSystemPromptRef: { current?: () => string } = {};
     const observerWrapperRef: { current?: AgentSessionWrapper } = {};
+    // Stop 与「已派发、pi 还没接收」提交之间的仲裁，和一个内联扩展一起装进会话。
+    const submitGuard = new SubmitGuard();
     const exactSystemPromptExtension = createExactSystemPromptExtension(() => exactSystemPromptRef.current?.());
     // codemode, tool-search, and mcp, as the pi CLI loads them, and the host that decides
     // which MCP servers the session connects (ADR 0006).
@@ -4716,6 +5021,7 @@ export async function startRpcSession(
         : []),
       ...(skillsBinding?.loaderOptions.extensionFactories ?? []),
     ];
+    let loadedServices: Awaited<ReturnType<typeof createAgentSessionServices>> | null = null;
     const services = await createAgentSessionServices({
       cwd: sessionCwd,
       agentDir,
@@ -4769,6 +5075,13 @@ export async function startRpcSession(
                 () => listSubagentProfiles(sessionCwd),
                 isBuiltInSubagentsEnabled,
               ),
+              createTeamExtension({
+                sessionId: sessionManager.getSessionId(),
+                hasSystemPromptAddonExtension: () =>
+                  loadedServices?.resourceLoader.getExtensions().extensions.some(isSystemPromptAddonExtension) ?? false,
+              }),
+              // 内联扩展排在发现的扩展之后，这道守闸于是是所有 `input` 钩子的最后一道。
+              createSubmitGuardExtension(() => submitGuard),
             ],
             extensionsOverride: (base) => preferUserPowerShellExtension(
               preferUserBashExtension(preferPiWebSubagentExtension(base)),
@@ -4776,6 +5089,7 @@ export async function startRpcSession(
           },
       ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),
     });
+    loadedServices = services;
     if (subagentResources?.codemode
       && !services.resourceLoader.getExtensions().extensions.some((extension) => extension.tools.has("codemode"))) {
       throw new Error("Code mode is unavailable: builtin:codemode was not registered");
@@ -4808,7 +5122,13 @@ export async function startRpcSession(
       : undefined;
     const branch = sessionManager.getBranch();
     const hasExistingMessages = branch.some((entry) => entry.type === "message" && entry.message.role !== "system");
-    const savedModel = hasExistingMessages ? getLatestModelChange(branch as unknown as SessionEntry[]) : null;
+    const isTeamMemberSession = branch.some((entry) => entry.type === "custom" && entry.customType === TEAM_MEMBER_ENTRY_TYPE);
+    const savedModel = (hasExistingMessages || isTeamMemberSession)
+      ? getLatestModelChange(branch as unknown as SessionEntry[])
+      : null;
+    const savedTeamThinking = isTeamMemberSession && !hasExistingMessages && !thinkingLevel
+      ? (branch.findLast((entry) => entry.type === "thinking_level_change")?.thinkingLevel as ThinkingLevel | undefined)
+      : undefined;
     const restoredModel = savedModel
       ? services.modelRuntime.getModel(savedModel.provider, savedModel.modelId)
       : undefined;
@@ -4842,7 +5162,7 @@ export async function startRpcSession(
         ? { requestedModel: { provider: deferredInitialModel.provider, modelId: deferredInitialModel.id } }
         : defaultModel ? { defaultModel } : {})
       : undefined;
-    const deferredModel = hasExistingMessages
+    const deferredModel = (hasExistingMessages || (isTeamMemberSession && savedModel))
       ? savedModel && !restoredModel
         ? findDeferredModel(services.modelRuntime, savedModel.provider, savedModel.modelId)
         : undefined
@@ -4852,6 +5172,14 @@ export async function startRpcSession(
     // createAgentSession gives this model at startup instead: a resumed session's last saved level,
     // else the default; a new one's requested level, else the model's enabledModels pin, its
     // modelThinkingLevels entry, else the default.
+    const deferredSavedStartup = !hasExistingMessages && !chatOnly && isTeamMemberSession && savedModel && !restoredModel
+      ? await findDeferredStartupModel(services.modelRuntime, enabledModels, { requestedModel: savedModel })
+      : undefined;
+    const deferredThinkingPin = deferredModel && deferredSavedStartup && deferredSavedStartup.model === deferredModel
+      ? deferredSavedStartup.thinkingLevelPin
+      : deferredModel && deferredStartup && deferredStartup.model === deferredModel
+        ? deferredStartup.thinkingLevelPin
+        : undefined;
     const deferredThinkingLevel = !deferredModel
       ? undefined
       : hasExistingMessages
@@ -4859,7 +5187,8 @@ export async function startRpcSession(
           ?? services.settingsManager.getDefaultThinkingLevel()
           ?? SDK_DEFAULT_THINKING_LEVEL
         : thinkingLevel
-          ?? deferredStartup?.thinkingLevelPin
+          ?? savedTeamThinking
+          ?? deferredThinkingPin
           ?? services.settingsManager.getModelThinkingLevel(deferredModel.provider, deferredModel.id)
           ?? services.settingsManager.getDefaultThinkingLevel()
           ?? SDK_DEFAULT_THINKING_LEVEL;
@@ -4872,11 +5201,25 @@ export async function startRpcSession(
       : undefined;
     startupStage = "sessionCreate";
     stageStartedAt = performance.now();
+    // 仅在首次启动（无历史消息）时计算显式思考强度；已有消息的会话交给 SDK 从历史记录恢复。
+    const restoredThinkingPin = restoredModel && services.modelRuntime.hasConfiguredAuth(restoredModel.provider)
+      ? scope.scopedModels.find(
+        (scoped) => scoped.model === restoredModel
+          || (scoped.model.provider === restoredModel.provider && scoped.model.id === restoredModel.id),
+      )?.thinkingLevel
+      : undefined;
+    const startupThinkingLevel = hasExistingMessages
+      ? undefined
+      : (thinkingLevel
+        ?? savedTeamThinking
+        ?? (restoredModel && services.modelRuntime.hasConfiguredAuth(restoredModel.provider)
+          ? (restoredThinkingPin ?? services.settingsManager.getModelThinkingLevel(restoredModel.provider, restoredModel.id))
+          : initial.thinkingLevel));
     const { session: inner, modelFallbackMessage } = await createAgentSessionFromServices({
       services,
       sessionManager,
       ...(startupModel ? { model: startupModel } : {}),
-      ...(initial?.thinkingLevel ? { thinkingLevel: initial.thinkingLevel } : {}),
+      ...(startupThinkingLevel ? { thinkingLevel: startupThinkingLevel } : {}),
       ...(scope.scopedModels.length > 0 ? { scopedModels: [...scope.scopedModels] } : {}),
       ...(subagentResources
         ? subagentToolOptions(subagentResources)
@@ -4936,6 +5279,7 @@ export async function startRpcSession(
       {
         exactSystemPrompt,
         chatOnly,
+        submitGuard,
         suppressCompletionNotifications: Boolean(subagentResources) || isSideChat,
         ...(subagentResources
           ? { onDirectTurnSettled: (aborted: boolean) => SUBAGENT_CONTROLLER.settleDirectTurn(inner.sessionId, aborted) }

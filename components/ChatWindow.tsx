@@ -274,8 +274,8 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
 
 
   const {
-    loading, error, sendError, activeLeafId, messages, entryIds, messageKeys, historyCursor, streamingStore, hasEarlierMessages, loadingEarlierMessages, earlierPageFailed, earlierTurnCount,
-    agentRunning, bashRunning, pendingBash, modelState, modelActions, missingCwd, isModelScopeActive, allModelList, loadAllModels, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames, toolSelectionKnown,
+    loading, error, sendError, activeLeafId, messages, entryIds, branchTailEntryIds, messageKeys, historyCursor, streamingStore, hasEarlierMessages, loadingEarlierMessages, earlierPageFailed, earlierTurnCount,
+    agentRunning, bashRunning, pendingBash, modelState, modelActions, missingCwd, isModelScopeActive, allModelList, loadAllModels, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames, toolSelectionKnown, toolSelectionPending,
     retryInfo, contextUsage, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
@@ -286,7 +286,8 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
     sessionIdRef,
     handleSend, handleAbort, startSideChat, handleFork, handleNavigate, loadEarlierMessages, retryEarlierMessages, loadUntilEntryId,
     handleCompact, handleQueuedSubmit, handleAbortCompaction, dismissCompactError,
-    handleRecallQueue,
+    handleRecallQueue, blockedRecall, handleRecallBlockedQueue,
+    externalWriteBlocked, recalledPending, recallError, handleRetryBlockedLoad,
     handleBuiltinSlashCommand,
     handleShadowMindToggle, handleToolPresetChange, loadSlashCommands,
   } = useAgentSession({
@@ -912,6 +913,8 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
       leafId={activeLeafId}
       messages={messages}
       entryIds={entryIds}
+      branchTailEntryIds={branchTailEntryIds}
+      messageKeys={messageKeys}
       getStreamingMessage={getStreamingMessage}
       isStreaming={isStreaming}
       scrollContainer={scrollContainerRef}
@@ -1065,6 +1068,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
       activeBuiltinTools={activeBuiltinTools}
       pinnedToolNames={pinnedToolNames}
       toolSelectionKnown={toolSelectionKnown}
+      toolSelectionPending={toolSelectionPending}
       onToolPresetChange={(session && !isHiddenRelation(session.relation)) || isNew ? handleToolPresetChange : undefined}
       retryInfo={retryInfo}
       queuedMessages={queuedMessages}
@@ -1130,9 +1134,47 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
   }
 
   if (error) {
+    // 外部写入把上下文挡在外面时，队列里只存在服务器内存中的消息还能取回：先取回再重新加载，
+    // 否则刷新后聊天区只剩这句话，输入框和「移回」一起消失。
+    const recallable = blockedRecall ? blockedRecall.steering.length + blockedRecall.followUp.length : 0;
     return (
-      <div className="flex h-full items-center justify-center text-red-400">
-        {error}
+      <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
+        {externalWriteBlocked && recalledPending ? (
+          // 服务端那句是「等写入完成后刷新」，可这时刷新正好丢掉刚取回的消息：换成应用内提示。
+          <div className="text-text-muted">{t("chat.externalWriteBlockedTitle")}</div>
+        ) : (
+          <div className="text-red-400">{error}</div>
+        )}
+        {recallError && <div className="text-red-400">{recallError}</div>}
+        {recallable > 0 ? (
+          <div className="flex flex-col items-center gap-2">
+            <p className="text-sm text-text-muted">
+              {/* 只有外部写入冲突才提「另一个程序写入了」：普通 500 也能让队列里剩下可取回的消息。 */}
+              {externalWriteBlocked
+                ? t("chat.externalWriteRecallHint", { count: recallable })
+                : t("chat.queuedRecallHint", { count: recallable })}
+            </p>
+            <button
+              type="button"
+              className="rounded-md border border-border bg-surface px-3 py-1.5 text-sm hover:bg-hover"
+              onClick={() => { void handleRecallBlockedQueue(); }}
+            >
+              {t("chat.externalWriteRecall")}
+            </button>
+          </div>
+        ) : recalledPending ? (
+          // 取回的消息现在只在页面内存的草稿里：刷新就真丢了，所以只让他在本页重试。
+          <p className="text-sm text-text-muted">{t("chat.externalWriteRecalled")}</p>
+        ) : null}
+        {/* 加载错误页始终给一个应用内重试：错误会变（外部写入 → 普通 500），而刷新会丢掉
+            内存里的草稿。文案仍按 externalWriteBlocked 区分是哪一种。 */}
+        <button
+          type="button"
+          className="rounded-md border border-border bg-surface px-3 py-1.5 text-sm hover:bg-hover"
+          onClick={handleRetryBlockedLoad}
+        >
+          {t("chat.externalWriteRetry")}
+        </button>
       </div>
     );
   }

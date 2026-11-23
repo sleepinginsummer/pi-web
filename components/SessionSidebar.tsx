@@ -25,6 +25,8 @@ import { PinnedSessionsSection, ProjectSection, type SessionTreeSharedProps } fr
 import { collectTopPinnedSessionIds } from "@/lib/session-tree";
 import { TrashPanel } from "./TrashPanel";
 import { SessionSearch } from "./SessionSearch";
+import { TeamSidebarSection } from "./TeamSidebarSection";
+import type { Team } from "@/lib/team-types";
 
 // Fixed row height for the session list. SessionItem renders at exactly this
 // height, so the list can be windowed (only the visible slice is mounted).
@@ -148,6 +150,7 @@ interface Props {
   worktreeState?: WorktreeState | null;
   onOpenFile?: (filePath: string, fileName: string, options?: { sourceSessionId?: string | null; modeHint?: "diff" }) => void;
   onOpenTerminal?: (cwd: string) => void;
+  onOpenTeamBoard?: (teamId: string, teamName: string) => void;
   explorerRefreshKey?: number;
   onExplorerRefresh?: () => void;
   onAtMention?: (relativePath: string, isDir: boolean) => void;
@@ -293,7 +296,7 @@ function PiWebTitle() {
 }
 const EMPTY_SESSION_ID_SET: ReadonlySet<string> = new Set();
 
-export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, selectedSession, onSelectSession, onSelectSideChat, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, runningSessionIds, awaitingInputSessionIds = EMPTY_SESSION_ID_SET, backgroundActivity, startingSessions, runningSessionTransitions, readAt, getUnreadMarkTime, locateSessionRequest, selectedCwd: selectedCwdProp, onCwdChange, worktreeState = null, onOpenFile, onOpenTerminal, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onSessionsChange }: Props) {
+export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, selectedSession, onSelectSession, onSelectSideChat, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, runningSessionIds, awaitingInputSessionIds = EMPTY_SESSION_ID_SET, backgroundActivity, startingSessions, runningSessionTransitions, readAt, getUnreadMarkTime, locateSessionRequest, selectedCwd: selectedCwdProp, onCwdChange, worktreeState = null, onOpenFile, onOpenTerminal, onOpenTeamBoard, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onSessionsChange }: Props) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
   const {
@@ -322,6 +325,34 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
     removeProject,
   } = useSidebarNavigation(allSessions, !loading && !error);
   const [selectedCwd, setSelectedCwd] = useState<string | null>(null);
+  const [teams, setTeams] = useState<Team[]>([]);
+  const loadTeams = useCallback(async () => {
+    try {
+      const response = await fetch("/api/teams", { cache: "no-store" });
+      if (!response.ok) return;
+      const data = await response.json() as { teams?: Team[] };
+      if (Array.isArray(data.teams)) setTeams(data.teams);
+    } catch {
+      // 下次轮询重试
+    }
+  }, []);
+  useEffect(() => {
+    void loadTeams();
+  }, [loadTeams, refreshKey]);
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      void loadTeams();
+    }, 5_000);
+    return () => clearInterval(timer);
+  }, [loadTeams]);
+  const teamMemberSessionIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const team of teams) {
+      for (const member of team.members) ids.add(member.sessionId);
+    }
+    return ids;
+  }, [teams]);
   const [validatedProject, setValidatedProject] = useState<{ cwd: string; projectRoot?: string; projectKey?: string } | null>(null);
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() => new Set());
   const [collapsedProjectsReady, setCollapsedProjectsReady] = useState(false);
@@ -969,6 +1000,44 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
           };
           return (
             <>
+              <TeamSidebarSection
+                teams={teams}
+                selectedSessionId={selectedSessionId}
+                runningSessionIds={runningSessionIds}
+                awaitingInputSessionIds={awaitingInputSessionIds}
+                unreadSessionIds={unreadSessionIds}
+                defaultCwd={selectedCwdProp ?? selectedCwd ?? visibleProjects[0] ?? null}
+                onSelectMemberSession={(sessionId, cwd) => {
+                  const found = visibleSessions.find((s) => s.id === sessionId);
+                  if (found) {
+                    handleSelectSessionFromList(found);
+                    return;
+                  }
+                  // 刚创建的成员会话可能尚未被列表扫描到，先查一次列表再打开。
+                  void fetch("/api/sessions", { cache: "no-store" })
+                    .then((res) => (res.ok ? res.json() : null))
+                    .then((data: { sessions?: SessionInfo[] } | null) => {
+                      const match = data?.sessions?.find((s) => s.id === sessionId);
+                      if (match) handleSelectSessionFromList(match);
+                      else if (cwd) setSelectedCwd(cwd);
+                    })
+                    .catch(() => undefined);
+                }}
+                onOpenBoard={(teamId, teamName) => onOpenTeamBoard?.(teamId, teamName)}
+                onTeamsChanged={(openSession) => {
+                  void loadTeams();
+                  void loadSessions(false);
+                  if (openSession) {
+                    void fetch("/api/sessions", { cache: "no-store" })
+                      .then((res) => (res.ok ? res.json() : null))
+                      .then((data: { sessions?: SessionInfo[] } | null) => {
+                        const match = data?.sessions?.find((s) => s.id === openSession.sessionId);
+                        if (match) handleSelectSessionFromList(match);
+                      })
+                      .catch(() => undefined);
+                  }
+                }}
+              />
               <PinnedSessionsSection
                 title={t("sidebar.pinned")}
                 sessions={topPinnedSessions}
@@ -987,9 +1056,9 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
               {visibleProjects.map((project) => {
                 const collapsed = collapsedProjects.has(project);
                 const projectSessions = sessionsForProject(visibleSessions, project);
-                const unpinnedProjectSessions = topPinnedSectionIds.size > 0
-                  ? projectSessions.filter((session) => !topPinnedSectionIds.has(session.id))
-                  : projectSessions;
+                const unpinnedProjectSessions = projectSessions.filter((session) => (
+                  !topPinnedSectionIds.has(session.id) && !teamMemberSessionIds.has(session.id)
+                ));
                 const active = project === selectedProject;
                 return (
                   <ProjectSection

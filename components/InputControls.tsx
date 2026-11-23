@@ -329,7 +329,7 @@ export const ToolPresetControl = memo(function ToolPresetControl({ isMobile, too
                         <label key={name} className={`flex items-center gap-2 py-1 text-xs text-text-muted ${followsSettings ? "cursor-default" : "cursor-pointer"}`}>
                           <input
                             type="checkbox"
-                            disabled={!selectedTools || followsSettings}
+                            disabled={!selectedTools || followsSettings || disabled}
                             checked={selectedTools?.includes(name) ?? false}
                             onChange={(event) => {
                               if (!selectedTools) return;
@@ -573,6 +573,8 @@ interface InputControlsProps {
   pinnedToolNames?: readonly string[] | null;
   toolSelectionKnown?: boolean;
   onToolPresetChange?: (preset: ToolPreset, customNames?: string[] | null) => void;
+  /** 上一次工具切换还没落地：候选名单仍是旧的，这时再点会用它算出一份过时的请求。 */
+  toolSelectionPending?: boolean;
   onCompact?: () => void;
   onAbortCompaction?: () => void;
   isCompacting?: boolean;
@@ -587,7 +589,7 @@ interface InputControlsProps {
 
 /** 输入控制栏自行管理下拉菜单，输入文字变化时无需重建控制栏。 */
 export const InputControls = memo(function InputControls({
-  isMobile, isStreaming, modelState, modelActions, onThinkingLevelChange, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames, toolSelectionKnown, onToolPresetChange,
+  isMobile, isStreaming, modelState, modelActions, onThinkingLevelChange, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames, toolSelectionKnown, toolSelectionPending, onToolPresetChange,
   onCompact, onAbortCompaction, isCompacting, onAbort, soundEnabled, onSoundToggle,
   notificationEnabled, notificationPermission, onNotificationToggle,
   endAction,
@@ -618,7 +620,7 @@ export const InputControls = memo(function InputControls({
                 <>
                   <ThinkingControl isMobile={false} modelState={modelState} isStreaming={isStreaming} onChange={onThinkingLevelChange} />
                   {!isStreaming && <FastModeControl isMobile={false} modelState={modelState} onChange={modelActions.changeFastEnabled} />}
-                  <ToolPresetControl isMobile={false} toolPreset={toolPreset} customToolNames={customToolNames} activeBuiltinTools={activeBuiltinTools} pinnedToolNames={pinnedToolNames} toolSelectionKnown={toolSelectionKnown} onChange={onToolPresetChange} isStrayClick={isStrayClick} disabled={isStreaming} />
+                  <ToolPresetControl isMobile={false} toolPreset={toolPreset} customToolNames={customToolNames} activeBuiltinTools={activeBuiltinTools} pinnedToolNames={pinnedToolNames} toolSelectionKnown={toolSelectionKnown} onChange={onToolPresetChange} isStrayClick={isStrayClick} disabled={isStreaming || toolSelectionPending} />
                 </>
               )}
               runControls={(
@@ -659,7 +661,7 @@ export const InputControls = memo(function InputControls({
  */
 export const MobileComposerMenu = memo(function MobileComposerMenu({
   isStreaming, modelState, modelActions, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames,
-  toolSelectionKnown, onToolPresetChange, onCompact, onAbortCompaction, isCompacting, onAbort,
+  toolSelectionKnown, toolSelectionPending, onToolPresetChange, onCompact, onAbortCompaction, isCompacting, onAbort,
   soundEnabled, onSoundToggle, notificationEnabled, notificationPermission, onNotificationToggle,
   endAction,
 }: Omit<InputControlsProps, "isMobile">) {
@@ -694,7 +696,7 @@ export const MobileComposerMenu = memo(function MobileComposerMenu({
         modelControls={(
           <>
             {!isStreaming && <FastModeControl isMobile modelState={modelState} onChange={modelActions.changeFastEnabled} />}
-            <ToolPresetControl isMobile toolPreset={toolPreset} customToolNames={customToolNames} activeBuiltinTools={activeBuiltinTools} pinnedToolNames={pinnedToolNames} toolSelectionKnown={toolSelectionKnown} onChange={onToolPresetChange} isStrayClick={isStrayClick} disabled={isStreaming} />
+            <ToolPresetControl isMobile toolPreset={toolPreset} customToolNames={customToolNames} activeBuiltinTools={activeBuiltinTools} pinnedToolNames={pinnedToolNames} toolSelectionKnown={toolSelectionKnown} onChange={onToolPresetChange} isStrayClick={isStrayClick} disabled={isStreaming || toolSelectionPending} />
           </>
         )}
         runControls={(
@@ -735,6 +737,8 @@ interface ComposerTopUtilitiesProps {
   pinnedToolNames?: readonly string[] | null;
   toolSelectionKnown?: boolean;
   onToolPresetChange?: (preset: ToolPreset, customNames?: string[] | null) => void;
+  /** 上一次工具切换还没落地：候选名单仍是旧的，这时再点会用它算出一份过时的请求。 */
+  toolSelectionPending?: boolean;
   onCompact?: () => void;
   onAbortCompaction?: () => void;
   isCompacting?: boolean;
@@ -759,6 +763,7 @@ export const ComposerTopUtilities = memo(function ComposerTopUtilities({
   activeBuiltinTools,
   pinnedToolNames,
   toolSelectionKnown,
+  toolSelectionPending,
   onToolPresetChange,
   onCompact,
   onAbortCompaction,
@@ -791,7 +796,7 @@ export const ComposerTopUtilities = memo(function ComposerTopUtilities({
         toolSelectionKnown={toolSelectionKnown}
         onChange={onToolPresetChange}
         isStrayClick={isStrayClick}
-        disabled={isStreaming}
+        disabled={isStreaming || toolSelectionPending}
       />
       {(!isStreaming || isCompacting) && onCompact && (
         <RunControls

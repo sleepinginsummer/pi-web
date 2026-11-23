@@ -431,6 +431,8 @@ export interface WorktreeState {
 export interface SessionContext {
   messages: AgentMessage[];
   entryIds: string[]; // parallel to messages — the session entry id for each message
+  /** 当前分支尾页的原始条目 ID，包括聊天投影省略的元数据。 */
+  branchTailEntryIds?: string[];
   oldestEntryId: string | null;
   hasMore: boolean;
   /** Turns on the branch before `oldestEntryId`, not loaded (the minimap numbers from it). */

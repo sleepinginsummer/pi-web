@@ -867,6 +867,7 @@ export function buildSessionContext(
   return {
     messages,
     entryIds,
+    ...(tail && tail > 0 && !excludeLeaf && !options.fullHistory ? { branchTailEntryIds: sliced.map((entry) => entry.id) } : {}),
     oldestEntryId: oldestCursorEntry?.id ?? null,
     hasMore,
     turnsBefore,

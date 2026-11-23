@@ -1,12 +1,14 @@
 import { NextResponse } from "next/server";
 import { jsonError, readMutationBody } from "@/lib/dev-server-api";
 import {
+  ensureTeamMemberRolePromptAddonLocked,
   readDefaultSystemPromptAddonText,
-  updateSessionSystemPromptAddon,
+  updateSessionSystemPromptAddonLocked,
   viewSessionSystemPromptAddon,
   writeDefaultSystemPromptAddonText,
   type SessionSystemPromptAddon,
 } from "@/lib/system-prompt-addon";
+import { findMembershipBySession } from "@/lib/teams";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -19,9 +21,17 @@ function errorResponse(error: unknown) {
 export async function GET(req: Request) {
   const sessionId = new URL(req.url).searchParams.get("sessionId");
   try {
-    return NextResponse.json(sessionId
-      ? viewSessionSystemPromptAddon(sessionId)
-      : { enabled: false, text: readDefaultSystemPromptAddonText() });
+    if (sessionId) {
+      const membership = findMembershipBySession(sessionId);
+      if (membership && membership.member.prompt.trim()) {
+        await ensureTeamMemberRolePromptAddonLocked(
+          sessionId,
+          () => findMembershipBySession(sessionId)?.member.prompt ?? null,
+        );
+      }
+      return NextResponse.json(viewSessionSystemPromptAddon(sessionId));
+    }
+    return NextResponse.json({ enabled: false, text: readDefaultSystemPromptAddonText() });
   } catch (error) {
     return errorResponse(error);
   }
@@ -42,7 +52,7 @@ export async function PUT(req: Request) {
         ...(body.text !== undefined ? { text: body.text as string } : {}),
         ...(body.enabled !== undefined ? { enabled: body.enabled as boolean } : {}),
       };
-      return NextResponse.json(updateSessionSystemPromptAddon(body.sessionId, patch));
+      return NextResponse.json(await updateSessionSystemPromptAddonLocked(body.sessionId, patch));
     }
     if (typeof body.text !== "string") return jsonError(400, "text is required without sessionId");
     return NextResponse.json({ enabled: false, text: writeDefaultSystemPromptAddonText(body.text) });

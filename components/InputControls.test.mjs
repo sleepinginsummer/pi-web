@@ -171,7 +171,8 @@ test("the phone's More menu keeps the tool row but no longer hides reasoning", a
   assert.ok(menu.includes("ToolPresetControl"));
   assert.ok(!menu.includes("ThinkingControl"), "思考强度不再藏在「更多」里");
   assert.doesNotMatch(menu, /!isStreaming && <ToolPresetControl/);
-  assert.match(menu, /<ToolPresetControl[^>]*disabled=\{isStreaming\}/);
+  // 运行中锁住；上一次工具切换还没落地时也锁住（那时候选名单仍是旧的）。
+  assert.match(menu, /<ToolPresetControl[^>]*disabled=\{isStreaming \|\| toolSelectionPending\}/);
 
 });
 
@@ -180,7 +181,7 @@ test("shows the configured preset's tools without editing them from the menu", a
 
   // configured 的名单只在 Settings › General 里改：菜单只展示，勾选禁用并给出去处。
   assert.match(source, /const followsSettings = toolPreset === "configured" && !customToolNames;/);
-  assert.match(source, /disabled=\{!selectedTools \|\| followsSettings\}/);
+  assert.match(source, /disabled=\{!selectedTools \|\| followsSettings \|\| disabled\}/);
   assert.match(source, /followsSettings \? "cursor-default" : "cursor-pointer"/);
   assert.match(source, /\{followsSettings && \([\s\S]*?chat\.toolsFollowSettingsHint/);
 });
@@ -214,4 +215,12 @@ test("compacting shows one stop control, not two", () => {
   const running = renderControls(false, { isStreaming: true, isCompacting: false });
   assert.match(running, /aria-label="Stop agent"/);
   assert.doesNotMatch(running, /aria-label="Stop compaction"/);
+});
+
+test("a pending tool change locks the preset control and the checklist", async () => {
+  const source = await readFile(new URL("./InputControls.tsx", import.meta.url), "utf8");
+
+  // 上一次切换还没落地时候选名单仍是旧的：再点一次只会拿着旧名单算出一份过时的请求。
+  assert.match(source, /disabled=\{isStreaming \|\| toolSelectionPending\}/);
+  assert.match(source, /disabled=\{!selectedTools \|\| followsSettings \|\| disabled\}/);
 });

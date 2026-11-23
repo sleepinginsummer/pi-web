@@ -32,6 +32,8 @@ function setup() {
     enterMainRun() {}, flushStreamDeltas() {}, invalidateSessionContext() {}, loadSession: async () => {},
     scheduleEventStreamClose() {}, requestScrollPosition() {},
     setIsCompacting() {}, setCompactError() {}, setCompactResult() {}, readCompactResult: () => null,
+    // 压缩事件会推进这个代次：迟到快照据此判断能不能覆盖实时压缩状态。
+    compactionEpochRef: { current: 0 },
   });
   return { handle: handler.runInContext(context), banner };
 }

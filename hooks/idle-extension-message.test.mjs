@@ -24,7 +24,7 @@ const user = (text) => ({ role: "user", content: text, timestamp: 1 });
 const assistant = (text) => ({ role: "assistant", content: [{ type: "text", text }], timestamp: 1 });
 const custom = (text, display = true) => ({ role: "custom", customType: "watcher", content: text, display, timestamp: 2 });
 
-async function setup({ hold = [] } = {}) {
+async function setup({ hold = [], entries, fullWindow = 2 } = {}) {
   mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
   const sources = [];
   // The branch as the live wrapper holds it; a full read answers its newest two
@@ -33,7 +33,7 @@ async function setup({ hold = [] } = {}) {
   // (an entry no message shows). `hold` keeps a kind of read, or a `!` command
   // ("bash"), from answering.
   const server = {
-    entries: [["e1", user("one")], ["e2", assistant("two")], ["e3", user("three")], ["e4", assistant("four")]],
+    entries: entries ?? [["e1", user("one")], ["e2", assistant("two")], ["e3", user("three")], ["e4", assistant("four")]],
     leafId: null,
     hold: new Set(hold),
     held: [],
@@ -42,8 +42,9 @@ async function setup({ hold = [] } = {}) {
   };
   const leaf = () => server.leafId ?? server.entries.at(-1)[0];
   const context = (slice, hasMore) => ({
-    messages: slice.map(([, message]) => message),
-    entryIds: slice.map(([id]) => id),
+    messages: slice.flatMap(([, message]) => message ? [message] : []),
+    entryIds: slice.flatMap(([id, message]) => message ? [id] : []),
+    branchTailEntryIds: slice.map(([id]) => id),
     oldestEntryId: slice[0]?.[0] ?? null,
     hasMore,
     turnsBefore: 0,
@@ -74,7 +75,7 @@ async function setup({ hold = [] } = {}) {
     if (url.pathname.startsWith("/api/models")) return json({ models: {}, modelList: [] });
     if (url.pathname === "/api/sessions/A/context" && !url.searchParams.has("before") && url.searchParams.get("tail") !== "1") {
       return answer("full", () => {
-        const start = Math.max(0, server.entries.length - 2);
+        const start = Math.max(0, server.entries.length - fullWindow);
         const ids = server.entries.map(([id]) => id).join(",");
         return { sessionId: "A", filePath: "/A.jsonl", leafId: leaf(), tree: [], treeFormat: "summary", version: `r:${ids}:${leaf()}`, context: context(server.entries.slice(start), start > 0) };
       });
@@ -90,7 +91,7 @@ async function setup({ hold = [] } = {}) {
       assert.equal(url.searchParams.get("tail"), "1");
       return answer("tail", () => {
         let start = server.entries.length - 1;
-        while (start > 0 && !["user", "assistant"].includes(server.entries[start][1].role)) start--;
+        while (start > 0 && !["user", "assistant"].includes(server.entries[start][1]?.role)) start--;
         return { context: context(server.entries.slice(start), start > 0), leafId: leaf(), version: `r:${leaf()}` };
       });
     }
@@ -157,6 +158,29 @@ test("an idle message appends after the window and keeps the pages loaded above"
     // The hidden one comes with it, as a full read holds it; the chat leaves it out.
     assert.deepEqual(env.texts().slice(-3), ["Build finished", "hidden", "truthy"]);
     assert.deepEqual(env.hook.result.entryIds.slice(-3), ["c1", "c2", "c3"]);
+  } finally {
+    env.teardown();
+  }
+});
+
+test("空闲短尾页保留共享锚点前的改名记录，替换锚点后的原始记录", async () => {
+  const env = await setup({
+    entries: [["u1", user("问题")], ["rename", null], ["a1", assistant("答复")], ["old-meta", null]],
+    fullWindow: 3,
+  });
+  try {
+    assert.deepEqual(env.hook.result.branchTailEntryIds, ["rename", "a1", "old-meta"]);
+    assert.deepEqual(env.hook.result.entryIds, ["a1"]);
+    const fullReads = env.server.reads.full;
+    // 新尾页只读到答复。改名记录仍是公共祖先，答复后的记录以新尾页为准。
+    env.server.entries.pop();
+    env.server.entries.push(["new-meta", null]);
+    await env.post("c1", custom("扩展消息"));
+    assert.deepEqual(env.hook.result.entryIds, ["a1", "c1"]);
+    assert.deepEqual(env.hook.result.branchTailEntryIds, ["rename", "a1", "new-meta", "c1"]);
+    await env.post("c2", custom("另一条扩展消息"));
+    assert.deepEqual(env.hook.result.branchTailEntryIds, ["rename", "a1", "new-meta", "c1", "c2"]);
+    assert.equal(env.server.reads.full, fullReads);
   } finally {
     env.teardown();
   }

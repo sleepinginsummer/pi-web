@@ -5,6 +5,7 @@ import { isSessionExternalWritePayload, SessionExternalWriteError } from "./sess
 export interface SessionContextSnapshot {
   messages: AgentMessage[];
   entryIds: string[];
+  branchTailEntryIds?: string[];
   oldestEntryId: string | null;
   hasMore: boolean;
   /** 当前页之上的轮次数，minimap 从会话第一轮开始编号（#791）。 */

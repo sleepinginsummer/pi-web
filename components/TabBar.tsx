@@ -8,7 +8,7 @@ import type { FileTab } from "@/lib/file-panel-model";
 import type { FileViewerDisplayMode, FileViewerState } from "@/lib/file-viewer-state";
 
 export type Tab = FileTab & {
-  kind?: "terminal" | "agent" | "side" | "server";
+  kind?: "terminal" | "agent" | "side" | "server" | "board";
   closing?: boolean;
   sourceSessionId?: string | null;
   initialDisplayMode?: FileViewerDisplayMode;
@@ -57,7 +57,7 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onReorderTa
           <div
             key={tab.id}
             role="tab"
-            aria-label={tab.kind === "terminal" ? t("terminal.tabLabel", { name: tab.label }) : tab.kind === "agent" ? t("subagent.tabLabel", { name: tab.label }) : tab.kind === "server" ? t("servers.tabLabel", { name: tab.label }) : tab.label}
+            aria-label={tab.kind === "terminal" ? t("terminal.tabLabel", { name: tab.label }) : tab.kind === "agent" ? t("subagent.tabLabel", { name: tab.label }) : tab.kind === "server" ? t("servers.tabLabel", { name: tab.label }) : tab.kind === "board" ? t("teams.boardTabLabel", { name: tab.label }) : tab.label}
             aria-selected={isActive}
             draggable={Boolean(onReorderTab)}
             onDragStart={(event) => {
@@ -145,6 +145,10 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onReorderTa
               ) : tab.kind === "server" ? (
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                   <rect x="3" y="4" width="18" height="16" rx="2" /><path d="M3 9h18M7 6.5h.01M10 6.5h.01" />
+                </svg>
+              ) : tab.kind === "board" ? (
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16M15 4v16" />
                 </svg>
               ) : tab.kind === "side" ? (
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">

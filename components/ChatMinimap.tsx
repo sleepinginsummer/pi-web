@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useEffect, useRef, useState, useCallback, useMemo, type RefObject } from "react";
+import { memo, useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo, type RefObject } from "react";
 import ReactMarkdown, { type Options as ReactMarkdownOptions } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import {
@@ -21,6 +21,8 @@ interface Props {
   leafId?: string | null;
   messages: AgentMessage[];
   entryIds: string[];
+  messageKeys?: readonly string[];
+  branchTailEntryIds?: readonly string[];
   /** 在节流测量时读取正文，不随每个 chunk 更新 props。 */
   getStreamingMessage: () => Partial<AgentMessage> | null;
   isStreaming: boolean;
@@ -63,6 +65,7 @@ interface AssistantPreview {
 
 interface TurnInfo {
   entryId?: string;
+  messageKey?: string;
   userMessage: UserMessage | CustomMessage;
   /** 1-A：仅保留本轮最终回答，过滤中途过程回复。 */
   finalAssistant: AssistantPreview | null;
@@ -361,7 +364,7 @@ function sameTurnNodes(previous: readonly NodeInfo[], next: readonly NodeInfo[])
     if (before.index !== after.index || before.turnNumber !== after.turnNumber) return false;
     const a = before.targetTurn;
     const b = after.targetTurn;
-    if (a.entryId !== b.entryId || a.userMessage !== b.userMessage) return false;
+    if (a.entryId !== b.entryId || a.messageKey !== b.messageKey || a.userMessage !== b.userMessage) return false;
     if (a.scrollTop !== b.scrollTop || a.toolCount !== b.toolCount) return false;
     if (a.finalAssistant?.entryId !== b.finalAssistant?.entryId) return false;
     if (a.finalAssistant?.blocks !== b.finalAssistant?.blocks) return false;
@@ -438,6 +441,8 @@ export const ChatMinimap = memo(function ChatMinimap({
   leafId,
   messages,
   entryIds,
+  messageKeys,
+  branchTailEntryIds,
   getStreamingMessage,
   isStreaming,
   scrollContainer,
@@ -454,7 +459,8 @@ export const ChatMinimap = memo(function ChatMinimap({
   const containerRef = useRef<HTMLDivElement>(null);
   const previewBoxRef = useRef<HTMLDivElement>(null);
   const previewListRef = useRef<HTMLDivElement>(null);
-  const previewItemRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+  const sheetPositionRef = useRef<{ list: HTMLDivElement; historyReady: boolean } | null>(null);
+  const railPositionRef = useRef<{ list: HTMLDivElement; target: string | number | undefined; history: string } | null>(null);
   const previewHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeNodeLockRef = useRef<{ index: number; until: number } | null>(null);
   const headingAnchorRef = useRef<{ heading: HTMLElement; until: number } | null>(null);
@@ -482,24 +488,27 @@ export const ChatMinimap = memo(function ChatMinimap({
   const [locked, setLocked] = useState(() => loadMinimapPreviewLocked());
   /** 浮层此刻是否展开：悬停打开的那一份、锁定后点胶囊钉住的那一份，或移动端抽屉。 */
   const previewOpen = minimapHovered || previewPinned || variant === "sheet";
-  const [activeIndex, setActiveIndex] = useState<number | null>(null);
-  const [allNodes, setAllNodes] = useState<NodeInfo[]>([]);
+  const [activeIndex, setActiveIndex] = useState<number | "before-first" | null>(null);
+  const [allNodes, setAllNodes] = useState<NodeInfo[] | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   /** 手动展开或收起记录：正数表示展开对应轮次，负数表示手动折叠当前激活轮。 */
   const [toggledTurns, setToggledTurns] = useState<Set<number>>(() => new Set());
-  const [remoteOutline, setRemoteOutline] = useState<{ key: string; turns: SessionOutlineTurn[] } | null>(null);
+  const [remoteOutline, setRemoteOutline] = useState<{ key: string; sessionId: string; leafId?: string | null; turns: SessionOutlineTurn[] } | null>(null);
   const [outlineLoading, setOutlineLoading] = useState(false);
   const [loadingEntryId, setLoadingEntryId] = useState<string | null>(null);
   /** 按需加载没能把目标轮次带进来时的提示，避免点了大纲却停在原地。 */
   const [revealFailed, setRevealFailed] = useState(false);
 
-  const allNodesRef = useRef<NodeInfo[]>([]);
+  const allNodesRef = useRef<NodeInfo[] | null>(null);
+  const leadingReplyTopRef = useRef<number | null>(null);
   const messagesRef = useRef(messages);
   const entryIdsRef = useRef(entryIds);
+  const messageKeysRef = useRef(messageKeys);
   const turnsBeforeRef = useRef(turnsBefore);
   const turnAnchorsRef = useRef(turnAnchors);
   messagesRef.current = messages;
   entryIdsRef.current = entryIds;
+  messageKeysRef.current = messageKeys;
   turnsBeforeRef.current = turnsBefore;
   turnAnchorsRef.current = turnAnchors;
   // 「这段回答有没有标题」的结果按正文缓存：滚动重测会反复问同一批回答。
@@ -520,7 +529,6 @@ export const ChatMinimap = memo(function ChatMinimap({
     jumpTargetRef.current = null;
     // 上一分支的待定位目标在新分支上永远不会出现，留着只会等一个不存在的条目。
     pendingNavigationRef.current = null;
-    setRemoteOutline(null);
     // 旧会话的正文不会被再问到，缓存跟着会话/分支一起清掉。
     headingScanCache.clear();
   }, [headingScanCache, sessionId, leafId]);
@@ -545,7 +553,7 @@ export const ChatMinimap = memo(function ChatMinimap({
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const payload = await response.json() as SessionOutlineResponse;
         if (!controller.signal.aborted) {
-          setRemoteOutline({ key: outlineRequestKey, turns: Array.isArray(payload.turns) ? payload.turns : [] });
+          setRemoteOutline({ key: outlineRequestKey, sessionId, leafId, turns: Array.isArray(payload.turns) ? payload.turns : [] });
         }
       })
       .catch((error) => {
@@ -559,17 +567,25 @@ export const ChatMinimap = memo(function ChatMinimap({
     return () => controller.abort();
   }, [leafId, outlineRequestKey, previewOpen, remoteOutline?.key, sessionId, turnsBefore]);
 
+  // 原始尾页能确认 session_info 等元数据，已加载消息则能跨过空闲刷新带回的短尾页。
+  const outlineForView = remoteOutline && remoteOutline.sessionId === sessionId && (
+    remoteOutline.key === outlineRequestKey || (
+      remoteOutline.leafId && (
+        branchTailEntryIds?.includes(remoteOutline.leafId) || entryIds.includes(remoteOutline.leafId)
+      )
+    )
+  ) ? remoteOutline : null;
   const unloadedOutlineTurns = useMemo(() => {
-    if (turnsBefore <= 0 || !remoteOutline || remoteOutline.key !== outlineRequestKey) return [];
+    if (turnsBefore <= 0 || !outlineForView) return [];
     const loadedIdSet = new Set(entryIds);
     // 按 entryId 判断是否已加载，**不要**再拿 turnNumber 和 turnsBefore 比：
     // 大纲只列用户提问后，编号会跳过被隐藏的轮次（1、2、5、9…），而 turnsBefore 是
     // 轮次**个数**。两者口径不同，`turnNumber <= turnsBefore` 会把后面的提问整段丢掉。
-    return remoteOutline.turns.filter((turn) => !loadedIdSet.has(turn.entryId));
-  }, [entryIds, outlineRequestKey, remoteOutline, turnsBefore]);
+    return outlineForView.turns.filter((turn) => !loadedIdSet.has(turn.entryId));
+  }, [entryIds, outlineForView, turnsBefore]);
 
   /** 历史大纲是否已经拿到（拿到后才知道哪些历史轮次是提问）。 */
-  const outlineResolved = Boolean(remoteOutline && remoteOutline.key === outlineRequestKey);
+  const outlineResolved = Boolean(outlineForView);
 
   const lockActiveNode = useCallback((index: number) => {
     activeNodeLockRef.current = {
@@ -596,27 +612,29 @@ export const ChatMinimap = memo(function ChatMinimap({
     }
     activeNodeLockRef.current = null;
 
-    const measuredNodes = nextNodes.filter((node) => node.targetTurn.scrollTop !== null);
-    if (measuredNodes.length === 0) {
-      setActiveIndex(null);
-      return;
-    }
     const focusTop = scrollEl.scrollTop + scrollEl.clientHeight * 0.3;
-    const nextActiveNode = measuredNodes.reduce((bestNode, node) => (
-      Math.abs((node.targetTurn.scrollTop ?? 0) - focusTop)
-        < Math.abs((bestNode.targetTurn.scrollTop ?? 0) - focusTop)
-        ? node
-        : bestNode
-    ), measuredNodes[0]);
-    setActiveIndex(nextActiveNode.index);
+    const atBottom = scrollEl.scrollHeight - scrollEl.clientHeight - scrollEl.scrollTop <= 1;
+    let nextActiveIndex: typeof activeIndex = null;
+    // 阅读点属于开在它前面的那一轮。到底时末轮可能很短，直接取最后一个已挂载的轮次。
+    for (const { index, targetTurn } of nextNodes) {
+      if (targetTurn.scrollTop === null) continue;
+      if (!atBottom && targetTurn.scrollTop > focusTop) {
+        const leadingReplyTop = leadingReplyTopRef.current;
+        nextActiveIndex ??= leadingReplyTop !== null && leadingReplyTop <= focusTop ? "before-first" : index;
+        break;
+      }
+      nextActiveIndex = index;
+    }
+    setActiveIndex(nextActiveIndex);
   }, []);
 
   const updateScroll = useCallback(() => {
     const scrollEl = scrollContainer.current;
     if (!scrollEl) return;
     const scrollable = scrollEl.scrollHeight - scrollEl.clientHeight;
-    setVisible(scrollable > 20 || turnsBeforeRef.current > 0 || allNodesRef.current.length > 0);
-    syncActiveNode(scrollEl, allNodesRef.current);
+    const nodes = allNodesRef.current ?? [];
+    setVisible(scrollable > 20 || turnsBeforeRef.current > 0 || nodes.length > 0);
+    syncActiveNode(scrollEl, nodes);
   }, [scrollContainer, syncActiveNode]);
 
   const measureThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -630,6 +648,7 @@ export const ChatMinimap = memo(function ChatMinimap({
       const refs = messageRefs.current;
       const containerRect = scrollEl.getBoundingClientRect();
       const turns: TurnInfo[] = [];
+      let leadingReplyTop: number | null = null;
       let refIndex = 0;
       let currentTurn: TurnInfo | null = null;
 
@@ -651,6 +670,7 @@ export const ChatMinimap = memo(function ChatMinimap({
           const elementRect = element?.getBoundingClientRect();
           currentTurn = {
             entryId: entryIdsRef.current[messageIndex],
+            messageKey: messageKeysRef.current?.[messageIndex],
             userMessage: message as UserMessage | CustomMessage,
             finalAssistant: null,
             scrollTop: elementRect
@@ -662,7 +682,13 @@ export const ChatMinimap = memo(function ChatMinimap({
           continue;
         }
 
-        if (!currentTurn) continue;
+        if (!currentTurn) {
+          // 记下第一条已挂载的跨页回复，阅读线在它上方的加载提示内时仍选首个轮次。
+          if (element && leadingReplyTop === null) {
+            leadingReplyTop = element.getBoundingClientRect().top - containerRect.top + scrollEl.scrollTop;
+          }
+          continue;
+        }
         // A turn a hidden message opened starts where its first reply shows.
         if (currentTurn.scrollTop === null && element && isHiddenCustomMessage(currentTurn.userMessage)) {
           currentTurn.scrollTop = element.getBoundingClientRect().top - containerRect.top + scrollEl.scrollTop;
@@ -685,8 +711,9 @@ export const ChatMinimap = memo(function ChatMinimap({
 
       const nextNodes = createTurnNodes(turns, turnsBeforeRef.current);
       // 位置和内容都没变时不必换新数组：`allNodes` 一变，整份预览就重渲染一遍。
-      const changed = !sameTurnNodes(allNodesRef.current, nextNodes);
+      const changed = allNodesRef.current === null || !sameTurnNodes(allNodesRef.current, nextNodes);
       allNodesRef.current = nextNodes;
+      leadingReplyTopRef.current = leadingReplyTop;
       if (changed) setAllNodes(nextNodes);
       setVisible(scrollEl.scrollHeight - scrollEl.clientHeight > 20 || turnsBeforeRef.current > 0 || nextNodes.length > 0);
       syncActiveNode(scrollEl, nextNodes);
@@ -756,7 +783,7 @@ export const ChatMinimap = memo(function ChatMinimap({
         measureThrottleRef.current = null;
       }
     };
-  }, [messages, entryIds, isStreaming, turnsBefore, turnAnchors, measureNodes]);
+  }, [messages, entryIds, messageKeys, isStreaming, turnsBefore, turnAnchors, measureNodes]);
 
   useEffect(() => {
     const scrollEl = scrollContainer.current;
@@ -956,36 +983,6 @@ export const ChatMinimap = memo(function ChatMinimap({
 
   useEffect(() => () => cancelPreviewHide(), [cancelPreviewHide]);
 
-  /** 抽屉是否已经落位：只在打开时定位一次，之后用户自己滚动不再被拉回去。 */
-  const sheetSettledRef = useRef(false);
-
-  // 桌面浮层：打开时把当前所在轮滚进可视区，方便直接看到上下文位置。
-  // 抽屉不这么做——它按用户的要求固定落在最后一轮。
-  useEffect(() => {
-    if (variant === "sheet" || !previewOpen || activeIndex === null || searchQuery.trim()) return;
-    const targetItem = previewItemRefs.current.get(activeIndex);
-    if (!targetItem) return;
-    targetItem.scrollIntoView({ block: "nearest" });
-  }, [activeIndex, previewOpen, searchQuery, variant]);
-
-  // 手机抽屉打开时落到**最后**：一屏只放得下几轮，停在第一轮等于什么都没看到。
-  // 只在打开那一刻做一次，之后用户自己滚动不会被拉回；活动轮仍然高亮，只是不再决定落点。
-  // 行是异步来的（未加载轮的目录要走一次接口），所以盯着列表的子节点：第一次能滚就落位。
-  useEffect(() => {
-    if (variant !== "sheet" || !previewOpen || searchQuery.trim()) return;
-    const list = previewListRef.current;
-    if (!list) return;
-    const settle = () => {
-      if (sheetSettledRef.current || list.scrollHeight <= list.clientHeight) return;
-      list.scrollTop = list.scrollHeight;
-      sheetSettledRef.current = true;
-    };
-    settle();
-    if (sheetSettledRef.current) return;
-    const observer = new MutationObserver(settle);
-    observer.observe(list, { childList: true, subtree: true });
-    return () => observer.disconnect();
-  }, [variant, previewOpen, searchQuery]);
 
   const toggleTurnExpanded = useCallback((turnNumber: number, isActiveLoaded: boolean) => {
     setToggledTurns((prev) => {
@@ -1010,9 +1007,61 @@ export const ChatMinimap = memo(function ChatMinimap({
 
   // 大纲只列用户提问：自定义消息（压缩卡片、唤醒、子代理回报）和合成的分支摘要都不算。
   const loadedUserNodes = useMemo(
-    () => allNodes.filter((node) => isOutlineAnchorMessage(node.targetTurn.userMessage)),
+    () => allNodes?.filter((node) => isOutlineAnchorMessage(node.targetTurn.userMessage)) ?? [],
     [allNodes],
   );
+  // 聊天的当前轮可能是压缩卡片或唤醒消息。大纲只列提问，沿用最近一次提问的位置。
+  const latestLoadedIndex = loadedUserNodes.at(-1)?.index;
+  // 没有测到轮次时可先显示最新提问；阅读点在首轮之前时走历史目录。
+  let activeOutlineIndex = activeIndex === null ? latestLoadedIndex : undefined;
+  if (typeof activeIndex === "number") {
+    for (let i = loadedUserNodes.length - 1; i >= 0; i--) {
+      if (loadedUserNodes[i].index <= activeIndex) {
+        activeOutlineIndex = loadedUserNodes[i].index;
+        break;
+      }
+    }
+  }
+  const latestUnloadedEntry = unloadedOutlineTurns.at(-1)?.entryId;
+  const previewTargetIndex = variant === "sheet" ? latestLoadedIndex : activeOutlineIndex;
+  const waitingForSheetMeasurement = variant === "sheet" && allNodes === null;
+  const previewTargetTurn = previewTargetIndex === undefined ? undefined : allNodes?.[previewTargetIndex]?.targetTurn;
+  // 复用聊天的 key，临时提问拿到持久化 ID 时仍是同一个定位目标。
+  const previewTargetKey = previewTargetIndex === undefined
+    ? latestUnloadedEntry
+    : (previewTargetTurn?.messageKey ?? previewTargetTurn?.entryId) || previewTargetIndex;
+  const outlineHistoryKey = useMemo(() => JSON.stringify(unloadedOutlineTurns.map((turn) => turn.entryId)), [unloadedOutlineTurns]);
+
+  useLayoutEffect(() => {
+    const list = previewListRef.current;
+    if (!list || !previewOpen || normalizedQuery) {
+      railPositionRef.current = null;
+      return;
+    }
+    // 目录可以先于聊天测量返回。测量完成后，才能确定是否需要回退到最后一条历史提问。
+    if (waitingForSheetMeasurement) return;
+    const historyReady = turnsBefore <= 0 || outlineResolved;
+    const sheetPosition = sheetPositionRef.current;
+    if (variant === "sheet" && sheetPosition?.list === list && (sheetPosition.historyReady || !historyReady)) return;
+    // 回复刷新会重建数组。桌面只在实际显示的目标或历史条目变化时重新对齐。
+    const railPosition = railPositionRef.current;
+    if (variant === "rail" && railPosition?.list === list
+      && railPosition.target === previewTargetKey && railPosition.history === outlineHistoryKey) return;
+    const turn = previewTargetIndex !== undefined
+      ? list.querySelector(`[data-minimap-preview-index="${previewTargetIndex}"]`)
+      : latestUnloadedEntry && list.querySelector(`[data-minimap-outline-entry="${CSS.escape(latestUnloadedEntry)}"]`);
+    const row = turn ? turn.firstElementChild : null;
+    if (!row) return;
+    // 抽屉打开和早期目录首次补齐时各对齐一次，之后保留用户在列表里滚到的位置。
+    if (variant === "sheet") sheetPositionRef.current = { list, historyReady };
+    else railPositionRef.current = { list, target: previewTargetKey, history: outlineHistoryKey };
+
+    // 历史目录异步插在前面，提交后重新对齐。只滚这份列表，避免带动主对话。
+    const viewport = list.getBoundingClientRect();
+    const { top, bottom } = row.getBoundingClientRect();
+    if (top < viewport.top) list.scrollTop += top - viewport.top;
+    else if (bottom > viewport.bottom) list.scrollTop += bottom - viewport.bottom;
+  }, [latestUnloadedEntry, normalizedQuery, outlineHistoryKey, outlineResolved, previewOpen, previewTargetIndex, previewTargetKey, turnsBefore, variant, visible, waitingForSheetMeasurement]);
   const filteredLoadedNodes = useMemo(() => {
     if (!normalizedQuery) return loadedUserNodes;
     return loadedUserNodes.filter((node) => {
@@ -1031,7 +1080,7 @@ export const ChatMinimap = memo(function ChatMinimap({
   // 回答直接取缓存（滚动重测每次都会新建 allNodes，内容却没变）。
   const nodesWithHeadings = useMemo(() => {
     const indexes = new Set<number>();
-    for (const node of allNodes) {
+    for (const node of allNodes ?? []) {
       const finalAssistant = node.targetTurn.finalAssistant;
       // 流式正文每帧都是新内容，进缓存只会占位并把它挤掉，直接扫这一份。
       // 逐块判断：预览也按块渲染，拼接后才出现的标题不该让折叠箭头出现。
@@ -1048,8 +1097,8 @@ export const ChatMinimap = memo(function ChatMinimap({
   }, [allNodes, headingScanCache]);
 
   const railTicks = useMemo(
-    () => sampleRailTicks(outlineResolved ? unloadedOutlineTurns.length : turnsBefore, loadedUserNodes, activeIndex),
-    [activeIndex, loadedUserNodes, outlineResolved, turnsBefore, unloadedOutlineTurns.length],
+    () => sampleRailTicks(outlineResolved ? unloadedOutlineTurns.length : turnsBefore, loadedUserNodes, activeOutlineIndex ?? null),
+    [activeOutlineIndex, loadedUserNodes, outlineResolved, turnsBefore, unloadedOutlineTurns.length],
   );
 
   // 总数只算会显示的轮次：历史大纲拿到后按它自己的条目数算（已剔除隐藏轮次），
@@ -1200,6 +1249,7 @@ export const ChatMinimap = memo(function ChatMinimap({
                   key={`outline-${turn.entryId}`}
                   className={`${styles.turn} ${styles.turnUnloaded}`}
                   data-minimap-outline-entry={turn.entryId}
+                  data-located={activeOutlineIndex === undefined && turn.entryId === latestUnloadedEntry ? "true" : undefined}
                 >
                   <button
                     type="button"
@@ -1255,7 +1305,7 @@ export const ChatMinimap = memo(function ChatMinimap({
 
             {/* 1-A：已加载轮次，仅当前所在轮默认展开最终回答的 h1/h2，单击展开/折叠、双击跳转 */}
             {filteredLoadedNodes.map((node) => {
-              const isActive = activeIndex === node.index;
+              const isActive = activeOutlineIndex === node.index;
               const finalAssistant = node.targetTurn.finalAssistant;
               const hasHeadings = nodesWithHeadings.has(node.index);
               const isExpanded = hasHeadings && (
@@ -1267,10 +1317,6 @@ export const ChatMinimap = memo(function ChatMinimap({
               return (
                 <div
                   key={node.index}
-                  ref={(element) => {
-                    if (element) previewItemRefs.current.set(node.index, element);
-                    else previewItemRefs.current.delete(node.index);
-                  }}
                   className={styles.turn}
                   data-minimap-preview-index={node.index}
                   data-located={isActive ? "true" : undefined}

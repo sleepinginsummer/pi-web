@@ -6,7 +6,7 @@ import type { ModelSelectionViewActions, ModelSelectionViewState } from "@/lib/m
 import type { ModelsDataDiagnostic } from "@/lib/model-types";
 import type { WorktreeInfo } from "@/lib/types";
 import type { SkillsResponse } from "@/lib/api-types";
-import { clearDraft, createDraftFromUserMessage, getDraft, setDraft, type ChatDraft, type ChatDraftImage } from "@/lib/draft-store";
+import { clearDraft, createDraftFromUserMessage, getDraft, recallRevision, setDraft, subscribeRecalledDraft, type ChatDraft, type ChatDraftImage } from "@/lib/draft-store";
 import type { UserMessage } from "@/lib/types";
 import { prependChatDraft, type QueuedMessage } from "@/lib/queued-messages";
 import { applySlashSelection, findSlashQuery } from "@/lib/slash-command";
@@ -83,6 +83,8 @@ interface Props {
   activeBuiltinTools?: readonly string[];
   pinnedToolNames?: readonly string[] | null;
   toolSelectionKnown?: boolean;
+  /** 上一次工具切换还没落地：候选名单仍是旧的，这时再点会用它算出一份过时的请求。 */
+  toolSelectionPending?: boolean;
   onToolPresetChange?: (preset: ToolPreset, customNames?: string[] | null) => void;
   retryInfo?: { attempt: number; maxAttempts: number; errorMessage?: string } | null;
   queuedMessages?: QueuedMessages | null;
@@ -516,7 +518,7 @@ export function ModelDataDiagnosticBanner({ diagnostics }: { diagnostics?: Model
 }
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, sendError, onAbort, onSideChat, onQueuedSubmit, isStreaming, creationSettingsLocked = false, extensionsInitializing = false, modelState, modelActions, missingCwd, allModelList, onLoadAllModels,
-  contextUsage, sessionStats, onCompact, onAbortCompaction, isCompacting, compactError, onDismissCompactError, compactResult, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames, toolSelectionKnown, onToolPresetChange,
+  contextUsage, sessionStats, onCompact, onAbortCompaction, isCompacting, compactError, onDismissCompactError, compactResult, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames, toolSelectionKnown, toolSelectionPending, onToolPresetChange,
   retryInfo, queuedMessages, inputHistory = [], onRecallQueue,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   extensionUiOpen = false,
@@ -609,6 +611,70 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   attachedImagesRef.current = attachedImages;
   textAttachmentRef.current = textAttachment;
 
+  /**
+   * 把一份取回/移回的草稿并到输入框前面：原有 blob 预览继续复用，移回的 base64 图片不经过
+   * 上传数量/大小过滤，避免静默丢失。
+   */
+  const prependDraft = useCallback((draft: ChatDraft) => {
+    const ta = textareaRef.current;
+    const restored = prependChatDraft(draft, {
+      value: ta ? ta.value : valueRef.current,
+      images: attachedImagesRef.current.map(imageToDraftImage),
+      textAttachment: textAttachmentRef.current ?? undefined,
+    });
+    const images = [...draft.images.map(draftImageToAttachedImage), ...attachedImagesRef.current];
+    valueRef.current = restored.value;
+    attachedImagesRef.current = images;
+    setValue(restored.value);
+    setAttachedImages(images);
+    setAtQuery(null);
+    if (draftKeyRef.current) setDraft(draftKeyRef.current, restored);
+    requestAnimationFrame(() => {
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      textarea.focus();
+      textarea.setSelectionRange(restored.value.length, restored.value.length);
+      autoGrowTextarea(textarea);
+      scrollTextareaCaretIntoView(textarea);
+    });
+  }, []);
+
+  /** 直接采用草稿存储里的内容（取回结果已经和投递前的输入框内容合并过）。 */
+  const adoptStoredDraft = useCallback((key: string) => {
+    const stored = getDraft(key);
+    const images = draftImagesToAttachedImages(stored?.images);
+    valueRef.current = stored?.value ?? "";
+    attachedImagesRef.current = images;
+    setValue(stored?.value ?? "");
+    setTextAttachment(stored?.textAttachment ?? null);
+    setAttachedImages((previous) => {
+      previous.forEach(revokeImagePreview);
+      return images;
+    });
+    setAtQuery(null);
+  }, []);
+
+  // 取回请求可能在切走再切回之后才返回：正文由发起方写进草稿存储，这里接到通知就并进
+  // 已挂载的输入框，否则用户看不到它，下一次编辑还会把本地内容写回同一个键覆盖掉它。
+  const subscribedDraftKeyRef = useRef<string | null>(null);
+  // 首次渲染（也就是读初始草稿）时的取回版本：之后只要变过，就说明有投递落在了初读与订阅之间。
+  const initialRecallRevisionRef = useRef(draftKey ? recallRevision(draftKey) : 0);
+  useEffect(() => {
+    if (!draftKey) return;
+    const firstMount = subscribedDraftKeyRef.current === null;
+    subscribedDraftKeyRef.current = draftKey;
+    // 投递可能落在「读完初始草稿」之后、「订阅生效」之前：那份通知不会补发，所以先补收一次，
+    // 否则首次写回会拿旧内容覆盖刚取回的正文和附件。看取回版本，不看恢复标记——那个标记在
+    // 上下文加载成功时就会清掉，恰好是补页提交之后。
+    if (firstMount && recallRevision(draftKey) !== initialRecallRevisionRef.current) {
+      const stored = getDraft(draftKey);
+      if (stored && (stored.value !== valueRef.current || stored.images.length !== attachedImagesRef.current.length)) {
+        adoptStoredDraft(draftKey);
+      }
+    }
+    return subscribeRecalledDraft(draftKey, (draft) => prependDraft(draft));
+  }, [adoptStoredDraft, draftKey, prependDraft]);
+
   const resizeTextarea = useCallback((force = false) => {
     const ta = textareaRef.current;
     if (!ta || (!force && textareaAtMaxHeightRef.current)) return;
@@ -665,29 +731,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         scrollTextareaCaretIntoView(ta);
       });
     },
-    prependDraft(draft: ChatDraft) {
-      const ta = textareaRef.current;
-      const restored = prependChatDraft(draft, {
-        value: ta ? ta.value : valueRef.current,
-        images: attachedImagesRef.current.map(imageToDraftImage),
-        textAttachment: textAttachmentRef.current ?? undefined,
-      });
-      // 原有 blob 预览继续复用；移回的 base64 图片不经过上传数量/大小过滤，避免静默丢失。
-      const images = [...draft.images.map(draftImageToAttachedImage), ...attachedImagesRef.current];
-      valueRef.current = restored.value;
-      attachedImagesRef.current = images;
-      setValue(restored.value);
-      setAttachedImages(images);
-      setAtQuery(null);
-      if (draftKeyRef.current) setDraft(draftKeyRef.current, restored);
-      requestAnimationFrame(() => {
-        if (!ta) return;
-        ta.focus();
-        ta.setSelectionRange(restored.value.length, restored.value.length);
-        autoGrowTextarea(ta);
-        scrollTextareaCaretIntoView(ta);
-      });
-    },
+    prependDraft,
     prependText(text: string) {
       if (!text.trim()) return;
       const ta = textareaRef.current;
@@ -974,7 +1018,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   });
   useEffect(() => {
     // 发送清空或切换草稿 key 时，跳过已排队的旧 render effect，避免旧输入回写。
-    if (!draftKey || draftKeyRef.current !== draftKey || valueRef.current !== value) return;
+    // 附件也按同一份判据：补收刚采用存储内容时，这一帧的渲染值还是旧的，不能拿它覆盖回去。
+    if (!draftKey || draftKeyRef.current !== draftKey || valueRef.current !== value
+      || attachedImagesRef.current !== attachedImages) return;
     setDraft(draftKey, {
       value,
       images: attachedImages.map(imageToDraftImage),
@@ -2109,6 +2155,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 activeBuiltinTools={activeBuiltinTools}
                 pinnedToolNames={pinnedToolNames}
                 toolSelectionKnown={toolSelectionKnown}
+                toolSelectionPending={toolSelectionPending}
                 onToolPresetChange={creationSettingsLocked ? undefined : onToolPresetChange}
                 onCompact={onCompact}
                 onAbortCompaction={onAbortCompaction}
@@ -2136,6 +2183,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   activeBuiltinTools={activeBuiltinTools}
                   pinnedToolNames={pinnedToolNames}
                   toolSelectionKnown={toolSelectionKnown}
+                  toolSelectionPending={toolSelectionPending}
                   onToolPresetChange={creationSettingsLocked ? undefined : onToolPresetChange}
                   onCompact={onCompact}
                   onAbortCompaction={onAbortCompaction}
@@ -2369,6 +2417,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 activeBuiltinTools={activeBuiltinTools}
                 pinnedToolNames={pinnedToolNames}
                 toolSelectionKnown={toolSelectionKnown}
+                toolSelectionPending={toolSelectionPending}
                 onToolPresetChange={creationSettingsLocked ? undefined : onToolPresetChange}
                 onCompact={onCompact}
                 onAbortCompaction={onAbortCompaction}

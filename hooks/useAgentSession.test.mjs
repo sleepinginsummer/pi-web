@@ -66,11 +66,15 @@ test("restores unfinished detached subagents from session history", () => {
     source.indexOf("// Load session on mount"),
     source.indexOf("onSystemPromptChange?."),
   );
+  const restoreSource = source.slice(
+    source.indexOf("const restoreRuntimeFromLoad = useCallback"),
+    source.indexOf("const handleRetryBlockedLoad = useCallback"),
+  );
 
   assert.match(rebuildSource, /pending\.add\(agentId\)/);
   assert.match(rebuildSource, /completedDetachedSubagentIds\(message\)/);
   assert.match(loadSource, /pendingDetachedSubagentIdsRef\.current = pendingDetachedSubagentIds\(snapshot\.messages\)/);
-  assert.match(mountSource, /pendingDetachedSubagentIdsRef\.current\.size > 0/);
+  assert.match(restoreSource, /pendingDetachedSubagentIdsRef\.current\.size > 0/);
   assert.match(mountSource, /connectEvents\(session\.id\)/);
   assert.doesNotMatch(
     mountSource.slice(mountSource.indexOf("pendingDetachedSubagentIdsRef.current.size > 0")),
@@ -94,12 +98,16 @@ test("本地发送、外部启动和挂载恢复统一采用主运行入口", ()
     source.indexOf("// Load session on mount"),
     source.indexOf("onSystemPromptChange?."),
   );
+  const restoreSource = source.slice(
+    source.indexOf("const restoreRuntimeFromLoad = useCallback"),
+    source.indexOf("const handleRetryBlockedLoad = useCallback"),
+  );
 
   assert.match(enterSource, /beginRun\(runId\)/);
   assert.match(eventSource, /case "agent_start":[\s\S]*?enterMainRun\(\{ kind: "waiting_model" \}\)/);
   assert.match(sendSource, /const promptRunId = enterMainRun\(/);
-  assert.match(mountSource, /agentState\.busy[\s\S]*?enterMainRun\(/);
-  assert.doesNotMatch(mountSource, /agentState\.busy[\s\S]*?agentRunningRef\.current = true/);
+  assert.match(restoreSource, /agentState\.busy[\s\S]*?enterMainRun\(/);
+  assert.doesNotMatch(restoreSource, /agentState\.busy[\s\S]*?agentRunningRef\.current = true/);
 });
 
 test("明确拒绝 prompt 时恢复输入并显示错误", () => {
@@ -169,13 +177,17 @@ test("uses one snapshot reconciliation path for SSE, polling, and mount recovery
     source.indexOf("// Load session on mount"),
     source.indexOf("onSystemPromptChange?."),
   );
+  const restoreSource = source.slice(
+    source.indexOf("const restoreRuntimeFromLoad = useCallback"),
+    source.indexOf("const handleRetryBlockedLoad = useCallback"),
+  );
 
   assert.match(reconcileSource, /readAgentSnapshot\(sid\)/);
   assert.match(reconcileSource, /reconcileRequestGenerationRef\.current = generation/);
   assert.match(reconcileSource, /generation !== reconcileRequestGenerationRef\.current/);
   assert.equal((source.match(/const reconcileAgentState = useCallback/g) ?? []).length, 1);
-  assert.match(mountSource, /agentState\.busy && runtimeState/);
-  assert.match(reconcileSource, /applyRuntimeState\(snapshot\.state, \{ sid, runId, requestId: usageRequestId \}\)/);
+  assert.match(restoreSource, /agentState\.busy && runtimeState/);
+  assert.match(reconcileSource, /applyRuntimeSnapshot\(read, snapshot\.state, \{ sid, runId, requestId: usageRequestId \}\)/);
   assert.equal((source.match(/setExtensionStatuses\(state\.extensionStatuses\)/g) ?? []).length, 1);
   assert.match(mountSource, /connectEvents\(session\.id\)/);
 });
@@ -296,6 +308,21 @@ test("refuses a normal send while the hook knows an asynchronous run is active",
 
   assert.match(sendSource, /if \(\(agentRunningRef\.current && !isBashCommand\) \|\| bashRunningRef\.current\) return false;/);
   assert.match(sendSource, /return Boolean\(sentSessionId\);/);
+});
+
+test("Stop 被扩展命令挡住时仍把已撤回的排队消息放回输入框", () => {
+  const abortSource = source.slice(
+    source.indexOf("  const handleAbort = useCallback"),
+    source.indexOf("  const handleFork = useCallback"),
+  );
+
+  // 只有当命令真的跑着时才提示；提示之后必须继续走撤回消息的恢复路径，
+  // 否则 Stop 之后那条消息还会在命令结束时发出去。
+  assert.match(abortSource, /const blocked = recall\?\.blockedByCommands;/);
+  assert.match(
+    abortSource,
+    /blocked\?\.length[\s\S]*?stopBlockedByCommand[\s\S]*?restoreRecalledPrompts\(sid, recall as QueuedMessages \| null\)[\s\S]*?return;/,
+  );
 });
 
 test("旧 SSE 连接和旧会话事件不能写入当前会话", () => {
@@ -476,7 +503,10 @@ test("refreshes Shadow runtime state after a cold SSE connection becomes ready",
     source.indexOf("const ensureEventsConnected"),
   );
 
-  assert.match(connector, /event\.type === "connected"[\s\S]*?fetchRuntimeState\(sid, controller\.signal\)[\s\S]*?applyRuntimeState\(snapshot\.state\)/);
+  assert.match(
+    connector,
+    /event\.type === "connected"[\s\S]*?fetchRuntimeState\(sid, controller\.signal\)[\s\S]*?applyRuntimeState\(snapshot\.state, undefined, \{\s*queue: queueStateGenerationRef\.current === queueGeneration && isNewest,\s*compaction: compactionEpochRef\.current === compactionEpoch && isNewest,[\s\S]*?thinking: isNewest && thinkingChoiceRevisionRef\.current === thinkingRevision,?\s*\}\)/,
+  );
   assert.match(connector, /eventSourceRef\.current === es && sessionIdRef\.current === sid/);
 });
 
@@ -497,6 +527,294 @@ test("历史页缓存仅在会话版本和 leaf 均与 context 响应一致时�
   // 只有确认视图一致的路径才允许读本地缓存（重写重试另加 reloadedAfterRewrite 条件）。
   assert.match(source, /skipCache: options\.validateView \|\| options\.reloadedAfterRewrite === true/);
   assert.match(source, /setSessionViewSnapshot\(\{ sessionId: sid, revision: contextVersionRef\.current/);
+});
+
+test("每一次运行态快照都按读取坐标投影，迟到的快照不覆盖实时队列", () => {
+  // 统一的边界：坐标在发请求之前取，回来时用它判断哪些字段已被更新的实时事件取代。
+  assert.match(source, /const beginRuntimeRead = useCallback\(\(\): RuntimeRead => \(\{/);
+  assert.match(source, /queue: queueStateGenerationRef\.current === read\.queueGeneration && newest,/);
+  assert.match(source, /compaction: compactionEpochRef\.current === read\.compactionEpoch && newest,/);
+  assert.match(source, /thinking: newest && read\.thinkingRevision === thinkingChoiceRevisionRef\.current,/);
+  // 预读改用统一坐标（不再就地算判据），建连补读就地判据也要带上档位版本。
+  assert.match(source, /applyRuntimeSnapshot\(runtimeRead, snapshot\.state\)/);
+  assert.match(source, /const runtimeRead = beginRuntimeRead\(\);/);
+  assert.match(source, /thinking: isNewest && thinkingChoiceRevisionRef\.current === thinkingRevision,/);
+  assert.match(source, /const thinkingRevision = thinkingChoiceRevisionRef\.current;\s*void fetchRuntimeState\(sid, controller\.signal\)/);
+  // 轮询对账（运行中每几秒一次）此前无条件写队列：一次取样于入队之前的 /state 回来就会把
+  // 刚显示的队列行清掉，而服务端还留着它——用户看到的就是「消息没了」。
+  assert.match(source, /const read = beginRuntimeRead\(\);\s*const snapshot = await readAgentSnapshot\(sid\);/);
+  assert.match(source, /await applyAgentSnapshot\(sid, runId, snapshot, usageRequestId, read\)/);
+  assert.match(source, /applyRuntimeSnapshot\(read, snapshot\.state, \{ sid, runId, requestId: usageRequestId \}\)/);
+  // 其余读取入口同样带坐标。
+  for (const pattern of [
+    /const read = beginRuntimeRead\(\);\s*const snapshot = await readAgentSnapshot\(sid\);/,
+    /const read = beginRuntimeRead\(\);\s*const snapshot = await fetchRuntimeState\(activeSessionId/,
+    /const stagedRead = beginRuntimeRead\(\);/,
+    /const attachRead = beginRuntimeRead\(\);/,
+  ]) assert.match(source, pattern);
+  // 绑定轮询在每次读取发起前记录坐标（轮询串行，一个 ref 就够）。
+  assert.match(source, /beforeRead: \(\) => \{ bindingPollReadRef\.current = beginRuntimeRead\(\); \}/);
+  // 只有「建连补读」就地算判据：它没有加载自己的队列表，但要带加载期间的队列代次。
+  const raw = [...source.matchAll(/applyRuntimeState\(snapshot\.state, undefined, \{/g)];
+  assert.equal(raw.length, 1, "建连补读之外，运行态快照都必须走 applyRuntimeSnapshot");
+});
+
+test("迟到的 /state 不覆盖后来入队的队列行", async () => {
+  const ts = (await import("typescript")).default;
+  const { Script } = await import("node:vm");
+  const ast = ts.createSourceFile("useAgentSession.ts", source, ts.ScriptTarget.Latest, true);
+  function findCallback(name) {
+    function visit(node) {
+      if (ts.isVariableDeclaration(node) && node.name.getText(ast) === name) return node.initializer.arguments[0];
+      return ts.forEachChild(node, visit);
+    }
+    return visit(ast);
+  }
+  const compile = (name) => new Script(ts.transpileModule(`(${findCallback(name).getText(ast)})`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2020 },
+  }).outputText);
+  const queueWrites = [];
+  const levels = [];
+  const sandbox = {
+    sessionIdRef: { current: "s1" },
+    setIsCompacting() {},
+    setQueuedMessages: (value) => queueWrites.push(value),
+    normalizeQueuedMessages: (value) => value ?? { steering: [], followUp: [] },
+    setRunningCommands() {}, setFastEnabled() {}, setRuntimeFastAvailable() {}, applyShadowRuntimeState() {},
+    setContextUsage() {}, applyContextUsage() {}, setSystemPrompt() {}, setLiveTotalActiveMs() {},
+    modelSelectionActions: { setThinkingLevel: (value) => levels.push(value) },
+    setExtensionStatuses() {}, setExtensionWidgets() {}, filterVisibleExtensionWidgets: (value) => value ?? [],
+    newSessionCwd: null, projectExtensionBinding: () => "bound", onPendingNewSessionEvent() {},
+    runtimeThinkingLevelSessionRef: { current: null },
+    runtimeBusySnapshotRef: { current: null },
+    runtimeReadSeqRef: { current: 0 },
+    queueStateGenerationRef: { current: 0 },
+    compactionEpochRef: { current: 0 },
+    lastAppliedRuntimeSeqRef: { current: 0 },
+    thinkingChoiceRevisionRef: { current: 0 },
+  };
+  const { createContext } = await import("node:vm");
+  const context = createContext(sandbox);
+  context.applyRuntimeState = compile("applyRuntimeState").runInContext(context);
+  context.applyRuntimeSnapshot = compile("applyRuntimeSnapshot").runInContext(context);
+  context.beginRuntimeRead = compile("beginRuntimeRead").runInContext(context);
+
+  // 轮询对账发起（队列还是空的），随后用户的消息在压缩期间入队。
+  const read = context.beginRuntimeRead();
+  sandbox.queueStateGenerationRef.current += 1;
+  const parked = { steering: [], followUp: [{ text: "后续消息", images: [] }] };
+  context.setQueuedMessages(parked);
+  // 那份旧的 /state 现在才回来：它看到的队列是空的，但不能把刚显示的队列行清掉。
+  context.applyRuntimeSnapshot(read, { queuedMessages: { steering: [], followUp: [] }, thinkingLevel: "high" });
+  assert.deepEqual(queueWrites, [parked], "迟到的快照不写队列");
+  assert.deepEqual(levels, ["high"], "其它字段照常应用");
+
+  // 没有实时事件时，快照仍然照旧生效（否则轮询就无法纠正错过的队列变化）。
+  const fresh = context.beginRuntimeRead();
+  context.applyRuntimeSnapshot(fresh, { queuedMessages: { steering: [], followUp: [] }, thinkingLevel: "low" });
+  assert.deepEqual(queueWrites.at(-1), { steering: [], followUp: [] }, "没有更新的实时状态时快照照常生效");
+
+  // 断线期间错过的 `queue_update` 不会推进队列代次：只比代次的话，另一标签页提交的消息会被
+  // 「取到空队列、回来得更晚」的对账响应清掉。读取序号必须一起校验。
+  const reconcile = context.beginRuntimeRead();   // 先发出的对账请求
+  const reconnect = context.beginRuntimeRead();   // 之后建连的补读
+  assert.equal(reconnect.queueGeneration, reconcile.queueGeneration, "两份快照的队列代次相同");
+  context.applyRuntimeSnapshot(reconnect, { queuedMessages: { steering: [{ text: "另一标签页的消息", images: [] }], followUp: [] } });
+  const afterReconnect = queueWrites.at(-1);
+  context.applyRuntimeSnapshot(reconcile, { queuedMessages: { steering: [], followUp: [] } });
+  assert.equal(queueWrites.at(-1), afterReconnect, "旧的对账响应不能清掉重连补读显示的队列");
+});
+
+test("用户改档之后，切换之前取的那份快照不再写回旧档位", async () => {
+  const ts = (await import("typescript")).default;
+  const { Script, createContext } = await import("node:vm");
+  const ast = ts.createSourceFile("useAgentSession.ts", source, ts.ScriptTarget.Latest, true);
+  function findCallback(name) {
+    function visit(node) {
+      if (ts.isVariableDeclaration(node) && node.name.getText(ast) === name) return node.initializer.arguments[0];
+      return ts.forEachChild(node, visit);
+    }
+    return visit(ast);
+  }
+  const compile = (name) => new Script(ts.transpileModule(`(${findCallback(name).getText(ast)})`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2020 },
+  }).outputText);
+  const levels = [];
+  const sandbox = {
+    sessionIdRef: { current: "s1" },
+    setIsCompacting() {}, setQueuedMessages() {},
+    normalizeQueuedMessages: (value) => value ?? { steering: [], followUp: [] },
+    setRunningCommands() {}, setFastEnabled() {}, setRuntimeFastAvailable() {}, applyShadowRuntimeState() {},
+    setContextUsage() {}, applyContextUsage() {}, setSystemPrompt() {}, setLiveTotalActiveMs() {},
+    modelSelectionActions: { setThinkingLevel: (value) => levels.push(value) },
+    setExtensionStatuses() {}, setExtensionWidgets() {}, filterVisibleExtensionWidgets: (value) => value ?? [],
+    newSessionCwd: null, projectExtensionBinding: () => "bound", onPendingNewSessionEvent() {},
+    runtimeThinkingLevelSessionRef: { current: null },
+    runtimeBusySnapshotRef: { current: null },
+    runtimeReadSeqRef: { current: 0 },
+    queueStateGenerationRef: { current: 0 },
+    compactionEpochRef: { current: 0 },
+    lastAppliedRuntimeSeqRef: { current: 0 },
+    thinkingChoiceRevisionRef: { current: 0 },
+  };
+  const context = createContext(sandbox);
+  context.applyRuntimeState = compile("applyRuntimeState").runInContext(context);
+  context.applyRuntimeSnapshot = compile("applyRuntimeSnapshot").runInContext(context);
+  context.beginRuntimeRead = compile("beginRuntimeRead").runInContext(context);
+
+  // 输入栏已经可操作：建连补读取到 high，响应还没回来，用户先把档位切到 low 并收到确认。
+  const read = context.beginRuntimeRead();
+  sandbox.thinkingChoiceRevisionRef.current += 1;
+  context.modelSelectionActions.setThinkingLevel("low");
+  // 旧响应现在才回来：它是「最新的一份快照」，但档位在选择之前取样，已被用户的操作作废。
+  context.applyRuntimeSnapshot(read, { thinkingLevel: "high" });
+  assert.deepEqual(levels, ["low"], "选择器停在用户确认的值");
+
+  // 请求期间发出的读取：它带着发送时的版本，但可能采到改档之前的值——确认时再推进一次版本。
+  const duringRequest = context.beginRuntimeRead();
+  sandbox.thinkingChoiceRevisionRef.current += 1;
+  context.modelSelectionActions.setThinkingLevel("low");
+  context.applyRuntimeSnapshot(duringRequest, { thinkingLevel: "high" });
+  assert.deepEqual(levels, ["low", "low"], "确认前发出的读取也被作废");
+
+  // 生产代码里两次推进：发送前一次（让在途快照失效），确认时再一次（让请求期间发出的读取失效）。
+  const thinkingHandler = source.slice(
+    source.indexOf("const handleThinkingLevelChange = useCallback"),
+    source.indexOf("const handleFastEnabledChange = useCallback"),
+  );
+  assert.equal((thinkingHandler.match(/thinkingChoiceRevisionRef\.current \+= 1;/g) ?? []).length, 2);
+
+  // 之后发的读取带着新版本，仍然可以纠正（例如别的标签页又改过档）。
+  const later = context.beginRuntimeRead();
+  context.applyRuntimeSnapshot(later, { thinkingLevel: "medium" });
+  assert.deepEqual(levels, ["low", "low", "medium"]);
+});
+
+test("重试完成时不会用旧快照清掉已经开始流式输出的回复", async () => {
+  const ts = (await import("typescript")).default;
+  const { Script, createContext } = await import("node:vm");
+  const ast = ts.createSourceFile("useAgentSession.ts", source, ts.ScriptTarget.Latest, true);
+  function findCallback(name) {
+    function visit(node) {
+      if (ts.isVariableDeclaration(node) && node.name.getText(ast) === name) return node.initializer.arguments[0];
+      return ts.forEachChild(node, visit);
+    }
+    return visit(ast);
+  }
+  const compiled = new Script(ts.transpileModule(`(${findCallback("restoreRuntimeFromLoad").getText(ast)})`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2020 },
+  }).outputText);
+  const sandbox = {
+    sessionIdRef: { current: "s1" },
+    agentRunningRef: { current: false },
+    lastAppliedRuntimeSeqRef: { current: 0 },
+    runtimeBusySnapshotRef: { current: null },
+    pendingDetachedSubagentIdsRef: { current: new Set() },
+    bashRunningRef: { current: false },
+    loadTools() {}, setBashRunning() {}, waitForBashSettlement() {}, connectEvents() {},
+    scroll: [],
+    requestScrollPosition: (value) => sandbox.scroll.push(value),
+    entered: [],
+    enterMainRun: (phase) => sandbox.entered.push(phase),
+  };
+  const context = createContext(sandbox);
+  const restore = compiled.runInContext(context);
+
+  // 界面已经接管主回合（后续消息开始流式输出）：旧快照不许再重设阶段。
+  sandbox.agentRunningRef.current = true;
+  restore("s1", { alive: true, busy: true, state: { isStreaming: true } }, { seq: 4 });
+  assert.equal(sandbox.entered.length, 0, "不覆盖正在流式输出的回合");
+
+  // 更新的快照说了空闲（命令已经结束）：同样不再开回合。
+  sandbox.agentRunningRef.current = false;
+  sandbox.lastAppliedRuntimeSeqRef.current = 6;
+  sandbox.runtimeBusySnapshotRef.current = false;
+  restore("s1", { alive: true, busy: true, state: {} }, { seq: 4 });
+  assert.equal(sandbox.entered.length, 0, "更新的快照说了空闲");
+
+  // 常态：命令还在跑，界面还没有主回合——按快照恢复。
+  sandbox.lastAppliedRuntimeSeqRef.current = 4;
+  sandbox.runtimeBusySnapshotRef.current = true;
+  restore("s1", { alive: true, busy: true, state: {} }, { seq: 4 });
+  assert.equal(sandbox.entered.length, 1, "仍在执行的命令要恢复成运行中");
+  assert.equal(sandbox.entered[0].kind, "running_command");
+});
+
+test("首屏加载与错误页重试共用同一份运行态恢复", () => {
+  // 命令在跑时 SSE 建连不会把界面标记为运行中：只有加载返回的快照能说清是否 busy。
+  assert.match(source, /const restoreRuntimeFromLoad = useCallback\(\(\s*sid: string,\s*agentState: AgentRuntimeSnapshot \| null \| undefined,\s*read\?: RuntimeRead \| null,\s*\) => \{/);
+  assert.match(source, /if \(!takenOver && agentState\.busy && runtimeState && !runtimeState\.isBashRunning\) \{/);
+  // 重试必须用它，不能丢弃 agentState。
+  const retry = source.slice(
+    source.indexOf("const handleRetryBlockedLoad = useCallback"),
+    source.indexOf("const handleThinkingLevelChange = useCallback"),
+  );
+  assert.match(retry, /loadSession\(sid, true, true, \{ validateView: true \}\)\.then\(\(\{ agentState, runtimeRead \}\) => \{/);
+  assert.match(retry, /restoreRuntimeFromLoad\(sid, agentState, runtimeRead\)/);
+  // 首次加载同样只走这一份，不再就地重写一遍。
+  assert.match(source, /loadSession\(session\.id, true, true, \{ validateView: true \}\)\.then\(\(\{ agentState, runtimeRead \}\) => \{\s*restoreRuntimeFromLoad\(session\.id, agentState, runtimeRead\);\s*\}\)/);
+});
+
+test("普通加载失败也按本次有效的运行态快照给出「移回」入口", () => {
+  const catchSource = source.slice(
+    source.indexOf("Failed to load early session runtime state"),
+    source.indexOf("const loadContext = useCallback"),
+  );
+  // 只有外部写入才重新查询队列；普通 500 用这次加载的预读结果，仍然按队列代次校验。
+  assert.match(catchSource, /if \(!isSessionExternalWriteError\(error\) && earlyRuntimePromise\) \{/);
+  assert.match(catchSource, /if \(!snapshot \|\| queueStateGenerationRef\.current !== runtimeRead\.queueGeneration\) return;/);
+  assert.match(catchSource, /setBlockedRecall\(queued\.steering\.length > 0 \|\| queued\.followUp\.length > 0 \? queued : null\);/);
+});
+
+test("乱序的运行态响应：迟到的预读不会把思考强度写回旧档", async () => {
+  const ts = (await import("typescript")).default;
+  const { Script } = await import("node:vm");
+  const ast = ts.createSourceFile("useAgentSession.ts", source, ts.ScriptTarget.Latest, true);
+  function findApply(node) {
+    if (ts.isVariableDeclaration(node) && node.name.getText(ast) === "applyRuntimeState") return node.initializer.arguments[0];
+    return ts.forEachChild(node, findApply);
+  }
+  const body = findApply(ast);
+  assert.ok(body, "missing applyRuntimeState");
+  const script = new Script(ts.transpileModule(`(${body.getText(ast)})`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2020 },
+  }).outputText);
+  const levels = [];
+  const compacting = [];
+  let runtimeThinkingLevelSessionRef = { current: null };
+  const runtimeReadSeqRef = { current: 0 };
+  const lastAppliedRuntimeSeqRef = { current: 0 };
+  const apply = script.runInNewContext({
+    sessionIdRef: { current: "s1" },
+    options_placeholder: undefined,
+    setIsCompacting: (value) => compacting.push(value),
+    setQueuedMessages() {},
+    normalizeQueuedMessages: (value) => value ?? { steering: [], followUp: [] },
+    setRunningCommands() {},
+    setFastEnabled() {}, setRuntimeFastAvailable() {}, applyShadowRuntimeState() {},
+    setContextUsage() {}, applyContextUsage() {}, setSystemPrompt() {}, setLiveTotalActiveMs() {},
+    modelSelectionActions: { setThinkingLevel: (value) => levels.push(value) },
+    setExtensionStatuses() {}, setExtensionWidgets() {}, filterVisibleExtensionWidgets: (value) => value ?? [],
+    newSessionCwd: null, projectExtensionBinding: () => "bound", onPendingNewSessionEvent() {},
+    runtimeThinkingLevelSessionRef,
+  });
+  // 与调用点同一份判据：读取序号更新才允许写「此刻的运行状态」。
+  const submit = (state, seq) => {
+    const isNewest = seq > lastAppliedRuntimeSeqRef.current;
+    apply(state, undefined, { queue: true, compaction: isNewest, thinking: isNewest });
+    lastAppliedRuntimeSeqRef.current = Math.max(lastAppliedRuntimeSeqRef.current, seq);
+  };
+  // 预读取到 high 后响应延迟；建连补读取到 low 并先应用。
+  const seqPreRead = ++runtimeReadSeqRef.current;
+  const seqConnect = ++runtimeReadSeqRef.current;
+  const high = { thinkingLevel: "high", isCompacting: false };
+  const low = { thinkingLevel: "low", isCompacting: true };
+  submit(low, seqConnect);
+  submit(high, seqPreRead);
+  // 最终显示 low：迟到的预读既不写档位，也不写压缩状态。
+  assert.deepEqual(levels, ["low"]);
+  assert.deepEqual(compacting, [true]);
+  assert.equal(runtimeThinkingLevelSessionRef.current, "s1");
 });
 
 test("移回请求期间切换会话，图片恢复到原会话草稿而非新输入框", async () => {
@@ -600,3 +918,136 @@ test("大纲跳转逐页请求同样带期限，失败走同一套清理", () =>
   );
   assert.equal((jumpSource.match(/fetchSessionContext\(/g) ?? []).length, 1);
 });
+test("a tool preset change is shown only after the server applies it", () => {
+  const body = source.slice(
+    source.indexOf("const handleToolPresetChange"),
+    source.indexOf("// One lease request:"),
+  );
+
+  // 切换可能被拒绝（例如还有待移回的消息）：档位与勾选必须在服务端确认之后才改，
+  // 否则用户以为换了档，模型还在用旧工具。
+  const sendIndex = body.indexOf('type: "set_tools"');
+  assert.ok(sendIndex > 0, "the request is there");
+  assert.match(body.slice(sendIndex), /setToolPresetState\(preset\)/, "the chip follows the server");
+
+  // 上一次切换没落地时忽略新的点击：它只能拿到同一份旧名单，晚到的请求会覆盖前一次。
+  // 连浏览器偏好都不能写——那是新建会话的来源，写了就会采用这份旧名单。
+  const guardIndex = body.indexOf("if (toolSelectionPendingRef.current) return;");
+  assert.ok(guardIndex > 0, "the re-entry guard is there");
+  assert.ok(guardIndex < body.indexOf("setPreferredToolPreset(preset)"), "it runs before the preference is written");
+  assert.match(body, /finally \{\s*toolSelectionPendingRef\.current = false;\s*setToolSelectionPending\(false\);/);
+
+  // 派发之前只有一条提前设置：还没有会话时，这一档就是待创建会话要用的选择。
+  const beforeSend = body.slice(0, sendIndex);
+  assert.equal((beforeSend.match(/setToolPresetState\(preset\)/g) ?? []).length, 1);
+  assert.match(beforeSend, /if \(!sid\) \{[\s\S]*?setToolPresetState\(preset\);\s*return;/);
+});
+
+test("the external-write error path keeps the queued messages reachable", () => {
+  const loader = source.slice(
+    source.indexOf("const loadSession = useCallback"),
+    source.indexOf("const scheduleContextRefresh"),
+  );
+  // 外部写入时 /context 一直 409，但 get_state / clear_queue 仍可用：读出队列，交给错误页。
+  assert.match(loader, /isSessionExternalWriteError\(error\)[\s\S]{0,600}fetchRuntimeState\(sid/);
+  assert.match(loader, /setBlockedRecall\(/);
+
+  const handler = source.slice(
+    source.indexOf("const handleRecallBlockedQueue"),
+    source.indexOf("const handleThinkingLevelChange"),
+  );
+  assert.match(handler, /type: "clear_queue"/);
+  assert.match(handler, /setDraft\(sid, prependChatDraft\(draft/);
+  assert.match(handler, /setBlockedRecall\(null\)/);
+  assert.match(handler, /setError\(null\)/);
+  // 队列清空后 wrapper 才能被淘汰，/context 也才能重新读盘；带缓存的首屏必须让服务端复验，
+  // 否则会直接提交旧内容并清掉恢复状态。
+  assert.match(handler, /await loadSession\(sid, true, true, \{ validateView: true \}\)/);
+  // 取回之后草稿是唯一一份：重读失败也要保留恢复状态，并给出只重试读取的入口。
+  assert.match(handler, /setRecalledPending\(true\)/);
+  assert.match(handler, /markDraftRestorePending\(sid\)/);
+  // 取回结果按会话 ID 送到当前挂载的输入框；旧实例卸载后只写存储，不再碰界面也不再重读。
+  assert.match(handler, /notifyRecalledDraft\(sid, draft\)/);
+  assert.ok(
+    handler.indexOf("if (!mountedRef.current) return;") < handler.indexOf("await loadSession(sid, true, true, { validateView: true })"),
+    "an unmounted instance does not reload",
+  );
+  assert.match(handler, /setRecallError\(e instanceof Error \? e\.message : String\(e\)\)/);
+  // 重载成功也要恢复运行态：命令还在跑时建连不会把界面标记成运行中。
+  assert.match(handler, /const reloaded = await loadSession\(sid, true, true, \{ validateView: true \}\);/);
+  assert.match(handler, /restoreRuntimeFromLoad\(sid, reloaded\.agentState, reloaded\.runtimeRead\)/);
+  const retry = source.slice(source.indexOf("const handleRetryBlockedLoad"), source.indexOf("const handleThinkingLevelChange"));
+  assert.match(retry, /void loadSession\(sid, true, true, \{ validateView: true \}\)/);
+  assert.match(source, /setExternalWriteBlocked\(isSessionExternalWriteError\(error\)\)/);
+  // 切走再切回来会重新挂载：恢复状态按会话 ID 留在草稿存储里，挂载时读回来。
+  assert.match(
+    source,
+    /const sid = sessionIdRef\.current \?\? "";\s*setRecalledPending\(hasPendingDraftRestore\(sid\)\);/,
+    "a remount reads the marker back",
+  );
+  assert.match(source, /clearDraftRestorePending\(sid\)/);
+  // 取回请求可能在新实例挂载之后才返回：当前会话订阅恢复标记，立刻转成「已取回」并清掉队列提示。
+  assert.match(
+    source,
+    /return subscribeDraftRestore\(sid, \(\) => \{[\s\S]{0,900}?blockedRecallRequestRef\.current \+= 1;[\s\S]{0,900}?setRecalledPending\(true\);\s*setBlockedRecall\(null\);/,
+    "a late queue probe cannot bring the stale recall entry back",
+  );
+  assert.match(source, /if \(requestId !== blockedRecallRequestRef\.current\) return;/);
+  // 通过校验的查询结果始终应用：另一个标签页已经取回时队列是空的，入口要跟着消失。
+  assert.match(source, /setBlockedRecall\(queued\.steering\.length > 0 \|\| queued\.followUp\.length > 0 \? queued : null\)/);
+  // 队列状态按代次校验：预读可能在取回清空队列之前采集、之后才回来，不能把队列写回去。
+  // 加载自己推进队列代次，预读的坐标里记的就是这一代（不再另算 queueIsCurrent）。
+  assert.match(source, /queueStateGenerationRef\.current \+= 1;\s*\/\/ 预读也用统一读取坐标/);
+  assert.match(source, /applyRuntimeSnapshot\(runtimeRead, snapshot\.state\)/);
+  assert.doesNotMatch(
+    source.slice(source.indexOf("const agentState = earlyRuntimePromise"), source.indexOf("return { loaded: true, agentState, runtimeRead };")),
+    /applyRuntimeState\(/,
+  );
+  assert.match(handler, /queueStateGenerationRef\.current \+= 1;/);
+  // 旧实例的取回通知也要让新实例的队列代次失效、并清空输入框里的队列。
+  assert.match(
+    source,
+    /blockedRecallRequestRef\.current \+= 1;\s*setQueuedMessages\(\{ steering: \[\], followUp: \[\] \}\);/,
+  );
+  // 预读失败同样按代次校验队列：否则超时的旧请求会把后来出现的排队消息清空。
+  // 状态请求失败不重置运行状态：否则旧预读超时会清掉建连补读或 compaction_start 刚设好的压缩状态。
+  const earlyFailure = source.slice(
+    source.indexOf("Failed to load early session runtime state"),
+    source.indexOf("if (showLoading) setLoading(true);"),
+  );
+  assert.doesNotMatch(earlyFailure, /applyRuntimeState\(undefined\)/);
+  // 错误的队列更新与取回后的补查都要写进错误页读的那一份。
+  assert.match(source, /case "queue_update": \{[\s\S]{0,600}?setBlockedRecall\(queued\.steering\.length > 0 \|\| queued\.followUp\.length > 0 \? queued : null\)/);
+  assert.match(source, /const queued = normalizeQueuedMessages\(snapshot\?\.state\?\.queuedMessages\);\s*setQueuedMessages\(queued\);\s*\/\/[^\n]*\n\s*setBlockedRecall\(/);
+  // 建连后的补读同样按代次校验队列。
+  assert.match(
+    source,
+    /const queueGeneration = queueStateGenerationRef\.current;\s*const compactionEpoch = compactionEpochRef\.current;\s*const runtimeReadSeq = \+\+runtimeReadSeqRef\.current;\s*const thinkingRevision = thinkingChoiceRevisionRef\.current;\s*void fetchRuntimeState\(sid, controller\.signal\)/,
+  );
+  // 读取序号：较新的快照提交后，更早的响应不许再覆盖压缩状态（压缩可能发生在取样之后、监听之前）。
+  assert.match(source, /compaction: compactionEpochRef\.current === compactionEpoch && isNewest,/);
+  assert.match(source, /lastAppliedRuntimeSeqRef\.current = Math\.max\(lastAppliedRuntimeSeqRef\.current, runtimeReadSeq\);/);
+  // 上下文的思考档位只作回退：运行态已经给过这个会话档位时不再覆盖。
+  assert.match(source, /runtimeThinkingLevelSessionRef\.current !== sid/);
+  // 迟到的预读同样不许写回旧档位：思考强度与压缩状态共用读取序号。
+  assert.match(source, /applyRuntimeSnapshot\(runtimeRead, snapshot\.state\);/);
+  assert.match(source, /compaction: compactionEpochRef\.current === compactionEpoch && isNewest,[\s\S]*?thinking: isNewest && thinkingChoiceRevisionRef\.current === thinkingRevision,/);
+  // 每次加载错误都按本次结果更新外部写入标记，重试成普通 500 时不会继续误报。
+  assert.match(source, /setExternalWriteBlocked\(isSessionExternalWriteError\(error\)\);/);
+  // 实时队列更新让在途补读/重查作废；取回通知清空后按最新状态补一次查询。
+  assert.match(source, /case "queue_update":[\s\S]{0,200}?queueStateGenerationRef\.current \+= 1;/);
+  assert.match(source, /const generation = queueStateGenerationRef\.current \+ 1;\s*queueStateGenerationRef\.current = generation;\s*void fetchRuntimeState\(sid/);
+  // 错误页的探查也要按队列代次校验：实时 queue_update 之后回来的旧空队列不能清掉入口。
+  assert.match(source, /const queueGeneration = queueStateGenerationRef\.current;\s*void fetchRuntimeState\(sid, new AbortController\(\)\.signal\)/);
+  assert.match(source, /if \(queueStateGenerationRef\.current !== queueGeneration\) return;/);
+  // 压缩状态另有代次：预读只应用一次，迟到快照不许把 compaction_start 盖回去。
+  assert.match(source, /compactionEpochRef\.current \+= 1;/);
+  assert.doesNotMatch(
+    source.slice(source.indexOf("const agentState = earlyRuntimePromise"), source.indexOf("return { loaded: true, agentState, runtimeRead };")),
+    /applyRuntimeState\(/,
+    "the pre-read is applied once, not again after the load",
+  );
+  // Strict Mode 多跑一次 setup/cleanup：清理后必须恢复，否则仍然挂着的实例会跳过取回后的重载。
+  assert.match(source, /mountedRef\.current = true;\s*return \(\) => \{ mountedRef\.current = false; \};/);
+});
+

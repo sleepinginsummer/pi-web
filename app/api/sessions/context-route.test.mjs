@@ -62,6 +62,21 @@ test("context route data reports when pagination reaches the root", () => {
   assert.equal(page.hasMore, false);
 });
 
+test("分支尾页保留未投影成聊天的改名记录，并排除旁支", () => {
+  const timestamp = new Date(1000).toISOString();
+  const entries = [
+    { id: "user", parentId: null, type: "message", timestamp, message: { role: "user", content: "问题" } },
+    { id: "rename", parentId: "user", type: "session_info", timestamp, name: "新名称" },
+    { id: "other", parentId: "user", type: "session_info", timestamp, name: "旁支" },
+    { id: "answer", parentId: "rename", type: "message", timestamp, message: { role: "assistant", content: "答复" } },
+  ];
+  const page = buildSessionContext(entries, "answer", { tail: 10 });
+  assert.deepEqual(page.entryIds, ["user", "answer"]);
+  assert.deepEqual(page.branchTailEntryIds, ["user", "rename", "answer"]);
+  assert.deepEqual(buildSessionContext(entries, "other", { tail: 10 }).branchTailEntryIds, ["user", "other"]);
+  assert.equal(buildSessionContext(entries, "answer", { tail: 10, excludeLeaf: true }).branchTailEntryIds, undefined);
+});
+
 test("context 首屏先检查外部写入，运行中返回冲突而不是读取旧 wrapper", () => {
   assert.match(routeSrc, /liveRpc\.diskFreshness\(\)/);
   assert.match(routeSrc, /liveRpc\.isRunning\(\)/);

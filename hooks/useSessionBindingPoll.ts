@@ -22,6 +22,8 @@ export const SESSION_BINDING_DEADLINE_MS = 60_000;
  */
 export function createSerialPoller<T>(options: {
   intervalMs: number;
+  /** 每次读取发起前回调：调用方在这里记下代次，迟到的结果据此判断能否覆盖更新的实时状态。 */
+  beforeRead?: () => void;
   read: (signal: AbortSignal) => Promise<T>;
   onResult: (value: T) => void;
   onError?: (error: unknown) => void;
@@ -43,6 +45,7 @@ export function createSerialPoller<T>(options: {
     timer = null;
     controller = new AbortController();
     try {
+      options.beforeRead?.();
       const value = await options.read(controller.signal);
       if (!stopped) options.onResult(value);
     } catch (error) {
@@ -90,6 +93,8 @@ export function createSerialPoller<T>(options: {
 export function useSessionBindingPoll(options: {
   sessionId: string | null;
   enabled: boolean;
+  /** 每次读取发起前回调：调用方在这里记下代次，迟到的快照据此判断能否覆盖实时状态。 */
+  beforeRead?: () => void;
   onSnapshot: (snapshot: AgentRuntimeSnapshot) => void;
   /** 等待总期限到期时回调（只一次），用于收敛到可重试的失败态。 */
   onDeadline?: () => void;
@@ -97,9 +102,11 @@ export function useSessionBindingPoll(options: {
   /** 不传表示不限时；等待态应当传值，否则界面可能永久停在初始化中。 */
   deadlineMs?: number;
 }): void {
-  const { sessionId, enabled, onSnapshot, onDeadline, intervalMs = SESSION_BINDING_POLL_INTERVAL_MS, deadlineMs } = options;
+  const { sessionId, enabled, beforeRead, onSnapshot, onDeadline, intervalMs = SESSION_BINDING_POLL_INTERVAL_MS, deadlineMs } = options;
+  const beforeReadRef = useRef(beforeRead);
   const onSnapshotRef = useRef(onSnapshot);
   const onDeadlineRef = useRef(onDeadline);
+  beforeReadRef.current = beforeRead;
   onSnapshotRef.current = onSnapshot;
   onDeadlineRef.current = onDeadline;
 
@@ -107,6 +114,7 @@ export function useSessionBindingPoll(options: {
     if (!enabled || !sessionId) return;
     const poller = createSerialPoller<AgentRuntimeSnapshot>({
       intervalMs,
+      beforeRead: () => beforeReadRef.current?.(),
       read: (signal) => fetchRuntimeState(sessionId, signal),
       onResult: (snapshot) => onSnapshotRef.current(snapshot),
       onError: () => {

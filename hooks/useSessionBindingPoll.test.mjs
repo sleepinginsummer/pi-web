@@ -32,6 +32,21 @@ test("上一次读取未返回时不发第二次请求", async (t) => {
   pendingCalls[1].resolve("ready");
 });
 
+test("每次读取发起前先回调 beforeRead，迟到的快照才有判据", async (t) => {
+  const order = [];
+  const poller = createSerialPoller({
+    intervalMs: 5,
+    read: async () => { order.push("read"); return "state"; },
+    beforeRead: () => order.push("beforeRead"),
+    onResult: () => order.push("result"),
+  });
+  t.after(() => poller.stop());
+  poller.start();
+  await wait(40);
+  assert.ok(order.length >= 3, "至少完整跑了一轮");
+  assert.deepEqual(order.slice(0, 3), ["beforeRead", "read", "result"], "回调必须早于请求");
+});
+
 test("stop 会取消在途读取并停止后续调度", async (t) => {
   const pending = deferred();
   const calls = [];

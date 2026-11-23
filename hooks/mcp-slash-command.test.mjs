@@ -233,7 +233,7 @@ test("the /mcp case returns before anything a prompt does, and the list ref has 
   // set_tools clears the list through the same writer, so a cleared list is never read as loaded.
   assert.equal(hookSource.match(/\bsetSlashCommands\(/g).length, 1);
   const toolSwitch = hookSource.slice(hookSource.indexOf("const handleToolPresetChange"), hookSource.indexOf("// Load session on mount"));
-  assert.match(toolSwitch, /clearSlashCommands\(\);[\s\S]*?await loadTools\(activeSessionId\);[\s\S]*?applyRuntimeState\(snapshot\.state\)/);
+  assert.match(toolSwitch, /clearSlashCommands\(\);[\s\S]*?await loadTools\(activeSessionId\);[\s\S]*?applyRuntimeSnapshot\(read, snapshot\.state\)/);
 });
 
 test("AppShell opens Settings on the section the chat asks for", () => {

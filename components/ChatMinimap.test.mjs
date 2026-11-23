@@ -5,6 +5,7 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createJiti } from "jiti";
 import { readFile } from "node:fs/promises";
+import { JSDOM } from "jsdom";
 
 registerHooks({
   load(url, context, nextLoad) {
@@ -23,6 +24,8 @@ const jiti = createJiti(import.meta.url, {
 });
 const { isOutlineAnchorMessage, AssistantOutline, ChatMinimap, cachedAssistantAnswer, canLocateAnswerHeadings, getAssistantAnswer, getAssistantAnswerMarkdown } = await jiti.import("./ChatMinimap.tsx");
 const { I18nProvider } = await jiti.import("@/hooks/useI18n");
+const { carryMessageKeys, messageRenderKeys } = await jiti.import("@/lib/message-keys");
+const { mergeBranchTailEntryIds } = await jiti.import("@/lib/idle-message-read");
 const source = await readFile(new URL("./ChatMinimap.tsx", import.meta.url), "utf8");
 const bodySource = await readFile(new URL("./MarkdownBody.tsx", import.meta.url), "utf8");
 const messageSource = await readFile(new URL("./MessageView.tsx", import.meta.url), "utf8");
@@ -345,7 +348,7 @@ test("未加载轮次按 entryId 判定，不再拿轮次号与轮次个数比",
   // 大纲只列用户提问后编号会跳号（1、2、5、9…），turnsBefore 是轮次个数：
   // 用 `turnNumber <= turnsBefore` 会把后面的提问整段截掉（真机里 65 轮只剩约 40 行）。
   assert.doesNotMatch(source, /turn\.turnNumber <= turnsBefore/);
-  assert.match(source, /remoteOutline\.turns\.filter\(\(turn\) => !loadedIdSet\.has\(turn\.entryId\)\)/);
+  assert.match(source, /outlineForView\.turns\.filter\(\(turn\) => !loadedIdSet\.has\(turn\.entryId\)\)/);
 });
 
 test("大纲只列用户提问：自定义消息与合成的分支摘要都不算", () => {
@@ -357,3 +360,202 @@ test("大纲只列用户提问：自定义消息与合成的分支摘要都不�
     assert.equal(isOutlineAnchorMessage(custom(type)), false, type);
   }
 });
+
+for (const { variant, historyFirst = false, noLoadedQuestions = false, noHistory = false, metadataLeaf = false, optimistic = false, idleAppend = false, startsWithReply = false, retryAtTop = false, replyUnmounted = false } of [
+  { variant: "rail" },
+  { variant: "rail", startsWithReply: true },
+  { variant: "rail", retryAtTop: true },
+  { variant: "rail", retryAtTop: true, startsWithReply: true, replyUnmounted: true },
+  { variant: "rail", retryAtTop: true, startsWithReply: true },
+  { variant: "rail", noHistory: true },
+  { variant: "rail", noHistory: true, optimistic: true },
+  { variant: "sheet" },
+  { variant: "sheet", idleAppend: true },
+  { variant: "sheet", metadataLeaf: true },
+  { variant: "sheet", metadataLeaf: true, idleAppend: true },
+  { variant: "sheet", historyFirst: true },
+  { variant: "sheet", historyFirst: true, noLoadedQuestions: true },
+]) {
+  const order = historyFirst ? "目录先返回" : "聊天先测量";
+  const scenario = optimistic ? "新提问落盘" : idleAppend ? `短尾页接续刷新${metadataLeaf ? "（旧末尾是改名记录）" : ""}`
+    : retryAtTop ? (replyUnmounted ? "跨页回复未挂载且页首只有重试提示" : startsWithReply ? "阅读线在已挂载跨页回复上方的重试提示内" : "页首只有加载重试提示") : startsWithReply ? "页首是跨页回复" : noHistory ? "钉住后刷新" : metadataLeaf ? "末尾是改名记录" : noLoadedQuestions ? "页内没有提问" : order;
+  test(`${variant}：${scenario}时保留目录位置`, async (t) => {
+    const { window } = new JSDOM("<!doctype html><div id='root'></div><div id='chat'></div>", { url: "http://localhost" });
+    const { document } = window;
+    const globals = {
+      window, document, ResizeObserver: class { observe() {} disconnect() {} },
+      CSS: { escape: (entryId) => entryId }, IS_REACT_ACT_ENVIRONMENT: true,
+    };
+    const previous = Object.getOwnPropertyDescriptors(globalThis);
+    for (const [name, value] of Object.entries(globals)) {
+      Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+    }
+    const { createRoot } = await import("react-dom/client");
+    const root = createRoot(document.querySelector("#root"));
+    t.after(async () => {
+      await React.act(() => root.unmount());
+      window.close();
+      for (const name of Object.keys(globals)) {
+        if (previous[name]) Object.defineProperty(globalThis, name, previous[name]);
+        else delete globalThis[name];
+      }
+    });
+
+    const chat = document.querySelector("#chat");
+    Object.defineProperties(chat, { clientHeight: { value: 100 }, scrollHeight: { value: 500 } });
+    const readingOlderQuestion = variant === "rail" && !noHistory && !startsWithReply;
+    const initialScrollTop = startsWithReply || retryAtTop ? 0 : readingOlderQuestion ? 100 : 400;
+    chat.scrollTop = initialScrollTop;
+    const reply = { role: "assistant", content: [{ type: "text", text: "跨页回复" }] };
+    const questions = ["较早提问", "正在阅读的提问", "最新提问"].map((content) => ({ role: "user", content }));
+    const messages = noLoadedQuestions ? [reply] : startsWithReply ? [reply, ...questions] : questions;
+    const messageRefs = messages.map((_, index) => {
+      if (replyUnmounted && index === 0) return null;
+      const element = chat.appendChild(document.createElement("div"));
+      element.getBoundingClientRect = () => ({ top: (retryAtTop ? 50 : 0) + index * 110 - chat.scrollTop });
+      return element;
+    });
+
+    // 用固定行高模拟列表。旧目录插到前面时，每个已加载行的坐标都会改变。
+    const getBoundingClientRect = window.HTMLElement.prototype.getBoundingClientRect;
+    t.mock.method(window.HTMLElement.prototype, "getBoundingClientRect", function () {
+      if (this.matches(".list")) return { top: 0, bottom: 40 };
+      if (this.matches(".turnRow")) {
+        const turn = this.parentElement;
+        const list = turn.parentElement;
+        const top = Array.from(list.children).indexOf(turn) * 20 - list.scrollTop;
+        return { top, bottom: top + 20 };
+      }
+      return getBoundingClientRect.call(this);
+    });
+
+    const response = Promise.withResolvers();
+    const refreshedResponse = Promise.withResolvers();
+    const fetchOutline = t.mock.method(globalThis, "fetch", () => response.promise);
+    fetchOutline.mock.mockImplementationOnce(() => refreshedResponse.promise, 1);
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const entryIds = startsWithReply ? ["previous-answer", "e5", "e6", "e7"] : noLoadedQuestions ? ["e7"] : optimistic ? ["e5", "e6"] : ["e5", "e6", "e7"];
+    const aliases = new Map();
+    const props = {
+      variant, sessionId: "outline-test", leafId: metadataLeaf ? "session-info" : entryIds.at(-1),
+      messages, entryIds, messageKeys: messageRenderKeys(entryIds, messages.length, aliases),
+      scrollContainer: { current: chat }, messageRefs: { current: messageRefs },
+      getStreamingMessage: () => null, isStreaming: false, onRevealHistory() {},
+      turnsBefore: noHistory ? 0 : 4, turnAnchors: messages.map((message) => message.role === "user"),
+    };
+    await React.act(() => root.render(React.createElement(I18nProvider, null, React.createElement(ChatMinimap, props))));
+    if (!historyFirst) await React.act(() => t.mock.timers.tick(100));
+    if (variant === "rail") {
+      const pill = document.querySelector("[data-minimap-pill]");
+      if (noHistory) {
+        await React.act(() => pill.querySelector("[data-minimap-lock]").click());
+        await React.act(() => pill.click());
+        assert.ok(document.querySelector("[data-minimap-preview-pinned]"));
+      } else {
+        await React.act(() => pill.dispatchEvent(new window.MouseEvent("mouseover", { bubbles: true })));
+      }
+    }
+
+    const turns = Array.from({ length: 4 }, (_, index) => ({ entryId: `e${index + 1}`, turnNumber: index + 1 }));
+    await React.act(() => response.resolve({ ok: true, json: async () => ({ turns }) }));
+    if (historyFirst) {
+      assert.equal(document.querySelectorAll("[data-minimap-outline-entry]").length, 4);
+      assert.equal(document.querySelectorAll("[data-minimap-preview-index]").length, 0);
+      assert.equal(document.querySelector(".list").scrollTop, 0, "聊天测量前先保留列表位置");
+      await React.act(() => t.mock.timers.tick(100));
+    }
+
+    const list = document.querySelector(".list");
+    assert.equal(list.querySelectorAll("[data-minimap-outline-entry]").length, noHistory ? 0 : 4);
+    const target = list.querySelector(noLoadedQuestions || (startsWithReply && !retryAtTop)
+      ? "[data-minimap-outline-entry='e4'] button"
+      : `[data-minimap-preview-index='${retryAtTop ? 0 : readingOlderQuestion ? 1 : 2}'] button`);
+    const { top, bottom } = target.getBoundingClientRect();
+    assert.ok(top >= 0 && bottom <= 40, `${variant} 的目标行位置为 ${top}–${bottom}`);
+    assert.equal(chat.scrollTop, initialScrollTop);
+    if (retryAtTop) {
+      assert.equal(list.querySelector('[data-located="true"]').dataset.minimapPreviewIndex, "0", "顶部提示下方仍选首条已加载提问");
+    }
+    if (retryAtTop && startsWithReply && !replyUnmounted) {
+      // 重试提示占 50px，100px 视口的阅读线在 30px。滚 20px 后刚好读到回复顶部。
+      chat.scrollTop = 20;
+      await React.act(() => chat.dispatchEvent(new window.Event("scroll")));
+      assert.equal(list.querySelector('[data-located="true"]').dataset.minimapOutlineEntry, "e4");
+      chat.scrollTop = 19;
+      await React.act(() => chat.dispatchEvent(new window.Event("scroll")));
+      assert.equal(list.querySelector('[data-located="true"]').dataset.minimapPreviewIndex, "0");
+    }
+    if (startsWithReply && !retryAtTop) {
+      assert.equal(list.querySelector('[data-located="true"]').dataset.minimapOutlineEntry, "e4", "仍在阅读上一轮回复");
+      chat.scrollTop = 110;
+      await React.act(() => chat.dispatchEvent(new window.Event("scroll")));
+      assert.equal(list.querySelector('[data-located="true"]').dataset.minimapPreviewIndex, "0", "读到下一问后切换高亮");
+      chat.scrollTop = 0;
+      await React.act(() => chat.dispatchEvent(new window.Event("scroll")));
+      assert.equal(list.querySelector('[data-located="true"]').dataset.minimapOutlineEntry, "e4", "向上读回跨页回复时恢复历史高亮");
+    }
+
+    if ((variant === "sheet" && !historyFirst) || noHistory) {
+      const manualScrollTop = noHistory ? 0 : 20;
+      list.scrollTop = manualScrollTop;
+      const persisted = {
+        entryIds: ["e5", "e6", "e7", "answer"],
+        messages: [...messages, { role: "assistant", content: [{ type: "text", text: "回复完成" }] }],
+      };
+      await React.act(() => root.render(React.createElement(I18nProvider, null, React.createElement(ChatMinimap, {
+        ...props,
+        ...(noHistory ? {
+          ...persisted, leafId: "answer",
+          messageKeys: messageRenderKeys(persisted.entryIds, persisted.messages.length, carryMessageKeys({ ...props, aliases }, persisted)),
+          turnAnchors: [...props.turnAnchors, false],
+        } : { entryIds: [...props.entryIds] }),
+      }))));
+      await React.act(() => t.mock.timers.tick(100));
+      assert.equal(list.scrollTop, manualScrollTop, "刷新同一份历史时保留手动滚动位置");
+      if (noHistory) {
+        list.scrollTop = 20;
+        chat.scrollTop = 0;
+        await React.act(() => chat.dispatchEvent(new window.Event("scroll")));
+        assert.equal(list.scrollTop, 0, "聊天切到另一问时仍会对齐大纲");
+        return;
+      }
+
+      // 最终回复推进 leaf 时，目录会重新请求。请求期间保留旧行，返回后也不再自动定位。
+      const answerTail = [...props.entryIds, ...(metadataLeaf ? ["session-info"] : []), "answer"];
+      await React.act(() => root.render(React.createElement(I18nProvider, null, React.createElement(ChatMinimap, {
+        ...props, leafId: "answer", entryIds: [...props.entryIds, "answer"],
+        branchTailEntryIds: answerTail,
+        messages: [...messages, { role: "assistant", content: [{ type: "text", text: "回复完成" }] }],
+        turnAnchors: [...props.turnAnchors, false],
+      }))));
+      assert.equal(list.querySelectorAll("[data-minimap-outline-entry]").length, 4);
+      assert.equal(list.scrollTop, 20);
+      assert.equal(fetchOutline.mock.callCount(), 2);
+      if (idleAppend) {
+        const nextResponse = Promise.withResolvers();
+        fetchOutline.mock.mockImplementationOnce(() => nextResponse.promise, 2);
+        const extension = { role: "custom", customType: "idle-extension", content: "扩展消息", display: true };
+        await React.act(() => root.render(React.createElement(I18nProvider, null, React.createElement(ChatMinimap, {
+          ...props, leafId: "extension", entryIds: [...persisted.entryIds, "extension"],
+          branchTailEntryIds: metadataLeaf ? mergeBranchTailEntryIds("answer", answerTail, ["answer", "extension"]) : ["answer", "extension"],
+          messages: [...persisted.messages, extension],
+          turnAnchors: [...props.turnAnchors, false, true],
+        }))));
+        assert.equal(list.querySelectorAll("[data-minimap-outline-entry]").length, 4, "短尾页刷新期间保留已加载历史");
+        assert.equal(list.scrollTop, 20);
+        assert.equal(fetchOutline.mock.callCount(), 3);
+        await React.act(() => nextResponse.resolve({ ok: true, json: async () => ({ turns }) }));
+      }
+      await React.act(() => refreshedResponse.resolve({ ok: true, json: async () => ({ turns: turns.map((turn) => ({ ...turn })) }) }));
+      await React.act(() => t.mock.timers.tick(100));
+      assert.equal(list.scrollTop, 20, "新目录返回后仍保留手动滚动位置");
+      if (metadataLeaf) {
+        fetchOutline.mock.mockImplementationOnce(() => Promise.withResolvers().promise, fetchOutline.mock.callCount());
+        await React.act(() => root.render(React.createElement(I18nProvider, null, React.createElement(ChatMinimap, {
+          ...props, leafId: "other-branch", branchTailEntryIds: [...props.entryIds, "other-branch"],
+        }))));
+        assert.equal(list.querySelectorAll("[data-minimap-outline-entry]").length, 0, "切到旁支时不复用旧目录");
+      }
+    }
+  });
+}

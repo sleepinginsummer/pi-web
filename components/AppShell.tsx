@@ -20,7 +20,8 @@ import { SessionChatPanel } from "./SessionChatPanel";
 import { createSideChat, deleteSideChat } from "@/lib/side-chat-client";
 import { sideChatHit } from "@/lib/session-search-hit";
 import { DevServerViewer } from "./DevServerViewer";
-import { agentOverlayTabId, serverOverlayTabId, type OverlayTab } from "./overlay-tabs";
+import { TeamBoardViewer } from "./TeamBoardViewer";
+import { agentOverlayTabId, boardOverlayTabId, serverOverlayTabId, type OverlayTab } from "./overlay-tabs";
 import { newTerminalTab, restoreTerminalTabs, TERMINAL_TABS_KEY, type TerminalTab } from "./terminal-tab-state";
 import { appendSideTab, restoreSideTabs, sideTabsKey } from "./side-tab-state";
 import { useFontPreferences } from "@/hooks/useFontPreferences";
@@ -193,7 +194,7 @@ export function AppShell() {
   })), ...overlayTabs.map((tab) => ({
     id: tab.id,
     label: tab.label,
-    filePath: tab.kind === "agent" ? tab.sessionId : tab.serverId,
+    filePath: tab.kind === "agent" ? tab.sessionId : tab.kind === "server" ? tab.serverId : tab.teamId,
     kind: tab.kind === "agent" && tab.side ? "side" as const : tab.kind,
   }))], panelTabOrder);
   // A closed tab leaves the saved order, so reopening it appends it like any new tab.
@@ -664,8 +665,8 @@ export function AppShell() {
     // 子代理标签属于旧项目的会话，直接丢弃；终端跨项目保留，激活中的终端继续占用面板。
     const keepPanelForTerminal = activeTerminalTabId !== null && rightPanelOpen;
     switchFileWorkspaceTabs(currentProject, newProject);
-    setOverlayTabs([]);
-    setActiveOverlayTabId(null);
+    setOverlayTabs((prev) => prev.filter((tab) => tab.kind === "board"));
+    setActiveOverlayTabId((current) => (current?.startsWith("board:") ? current : null));
     if (keepPanelForTerminal) activatePanelTab(activeTerminalTabId);
     if (!skipWorkspaceRestore) restoreWorkspaceContext(newProject);
     router.replace(typeof window !== "undefined" ? window.location.pathname : "/", { scroll: false });
@@ -777,6 +778,27 @@ export function AppShell() {
     openFilePanel();
     if (isMobile) setSidebarOpen(false);
   }, [isMobile, openFilePanel]);
+
+  const handleOpenTeamBoard = useCallback((teamId: string, teamName: string) => {
+    const id = boardOverlayTabId(teamId);
+    setOverlayTabs((prev) => prev.some((tab) => tab.id === id)
+      ? prev.map((tab) => tab.id === id && tab.kind === "board" ? { ...tab, label: teamName } : tab)
+      : [...prev, { id, kind: "board", teamId, label: teamName }]);
+    setActiveTerminalTabId(null);
+    setActiveOverlayTabId(id);
+    openFilePanel();
+    if (isMobile) setSidebarOpen(false);
+  }, [isMobile, openFilePanel]);
+
+  const handleOpenTeamMemberSession = useCallback((sessionId: string) => {
+    void fetch("/api/sessions", { cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { sessions?: SessionInfo[] } | null) => {
+        const match = data?.sessions?.find((s) => s.id === sessionId);
+        if (match) handleSidebarSelectSession(match);
+      })
+      .catch(() => undefined);
+  }, [handleSidebarSelectSession]);
 
   // The agent switcher's side-panel button: opens a subagent's tab, or closes
   // it when the open panel already has it (the panel closes with its last tab).
@@ -1068,6 +1090,7 @@ export function AppShell() {
         worktreeState={worktreeState}
         onOpenFile={handleOpenFile}
         onOpenTerminal={handleOpenTerminal}
+        onOpenTeamBoard={handleOpenTeamBoard}
         explorerRefreshKey={explorerRefreshKey}
         onExplorerRefresh={handleExplorerRefresh}
         onAtMention={handleAtMention}
@@ -1586,6 +1609,14 @@ export function AppShell() {
               key={activeOverlayTab.serverId}
               serverId={activeOverlayTab.serverId}
               fallbackLabel={activeOverlayTab.label}
+            />
+          )}
+          {activeOverlayTab?.kind === "board" && (
+            <TeamBoardViewer
+              key={activeOverlayTab.teamId}
+              teamId={activeOverlayTab.teamId}
+              fallbackLabel={activeOverlayTab.label}
+              onOpenMemberSession={handleOpenTeamMemberSession}
             />
           )}
           {activeOverlayTab?.kind === "agent" && activeOverlayTab.side && (

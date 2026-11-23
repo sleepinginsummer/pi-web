@@ -21,7 +21,8 @@ test("消息提交成功后直接确认，不被后续状态读取推翻", () =>
 
 test("prompt 在服务端接受前失败时返回明确拒绝", () => {
   const postSource = source.slice(source.indexOf("export async function POST"), source.indexOf("// GET /api/agent/[id]"));
-  assert.match(postSource, /commandType === "prompt"/);
+  // 提示形态的提交（含 steer / follow_up）都要带上「没有发出」，客户端据此保留草稿。
+  assert.match(postSource, /getSubmitMode\(commandType\) && !promptAccepted/);
   assert.match(postSource, /code: "prompt_rejected", accepted: false/);
 });
 

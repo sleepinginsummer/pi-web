@@ -59,3 +59,16 @@ export function entriesAfter<T>(
   if (index < 0) return null;
   return { messages: tail.messages.slice(index + 1), entryIds: tail.entryIds.slice(index + 1) };
 }
+
+/** 两页都含同一锚点时，旧页补足祖先，新页提供锚点之后的分支。 */
+export function mergeBranchTailEntryIds(
+  anchor: string,
+  previous: readonly string[] | undefined,
+  next: string[] | undefined,
+): string[] | undefined {
+  if (!previous || !next) return next;
+  const oldIndex = previous.lastIndexOf(anchor);
+  const nextIndex = next.lastIndexOf(anchor);
+  if (nextIndex < 0 || oldIndex <= nextIndex) return next;
+  return [...previous.slice(0, oldIndex), ...next.slice(nextIndex)];
+}
