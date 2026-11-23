@@ -143,6 +143,8 @@ export async function GET(
       sessionId: id, // local: lazy URLs for historical tool-result images
       ...(indexed ? { effectiveSettings: indexed.settings } : {}),
     }), transcriptNotices);
+    // 索引路径只读到尾页，页内向上数不到更早的轮次；改用索引的完整祖先链（#791）。
+    if (indexed && context.hasMore && context.oldestEntryId) context.turnsBefore = indexed.turnsBefore(context.oldestEntryId);
     perf?.span("context");
 
     const ownLiveEntries = liveEntries ? sideOwnEntries(liveEntries as unknown as SessionEntry[]) : null;

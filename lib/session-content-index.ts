@@ -710,6 +710,8 @@ export interface IndexedSessionFullView {
   firstUserMessage?: string;
   metaEntries: SessionEntry[];
   version: string;
+  /** 某条记录之上的轮次数，按索引里的完整祖先链算（首屏只读了尾页）。 */
+  turnsBefore: (entryId: string) => number;
 }
 
 /** 供 `GET /api/sessions/[id]` 按索引组装完整视图：仅读取尾页消息与极少数自定义元数据记录。 */
@@ -736,6 +738,7 @@ export async function readIndexedSessionFullView(
     firstUserMessage: index.firstUserMessage,
     metaEntries,
     version: index.version,
+    turnsBefore: page.turnsBefore,
   };
 }
 /** 只读索引身份（文件签名、活动 leaf），供调用方先查上层缓存再决定是否逐条读记录。 */
