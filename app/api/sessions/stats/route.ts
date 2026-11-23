@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import { getRpcSession } from "@/lib/rpc-manager";
-import { getSessionSettings, openSessionManager, resolveSessionPath, SESSION_ID_PATTERN } from "@/lib/session-reader";
+import { getSessionSettings, resolveSessionPath, SESSION_ID_PATTERN } from "@/lib/session-reader";
+import { readIndexedSessionUsageSummary } from "@/lib/session-content-index";
 import { computeSessionStats, type SessionUsageSummary } from "@/lib/session-stats";
 import { computeSessionTotalActiveMs } from "@/lib/session-timing";
 import { sideOwnEntries } from "@/lib/side-session";
@@ -18,7 +19,10 @@ export const dynamic = "force-dynamic";
 const MAX_SESSION_STATS_IDS = 200;
 const NO_STORE = { "Cache-Control": "no-store" };
 
-type SessionManagerLike = ReturnType<typeof openSessionManager>;
+interface LiveSessionManagerLike {
+  getEntries(): unknown[];
+  getLeafId(): string | null;
+}
 
 interface CachedSummary {
   entryCount: number;
@@ -27,7 +31,7 @@ interface CachedSummary {
   summary: SessionUsageSummary;
 }
 
-const summaries = new WeakMap<SessionManagerLike, CachedSummary>();
+const summaries = new WeakMap<LiveSessionManagerLike, CachedSummary>();
 
 function refusal(status: number, error: string) {
   return NextResponse.json({ error }, { status, headers: NO_STORE });
@@ -35,27 +39,25 @@ function refusal(status: number, error: string) {
 
 async function readSummary(id: string): Promise<SessionUsageSummary | null> {
   const rpc = getRpcSession(id);
-  let sm: SessionManagerLike;
-  if (rpc?.isAlive()) {
-    sm = rpc.inner.sessionManager as SessionManagerLike;
-  } else {
+  if (!rpc?.isAlive()) {
     const path = await resolveSessionPath(id);
     if (!path) return null;
-    sm = openSessionManager(path);
+    return readIndexedSessionUsageSummary(path);
   }
+  const sm = rpc.inner.sessionManager as unknown as LiveSessionManagerLike;
   const entries = sm.getEntries();
   const lastEntryId = (entries[entries.length - 1] as { id?: string } | undefined)?.id;
   const leafId = sm.getLeafId();
   const cached = summaries.get(sm);
   if (cached && cached.entryCount === entries.length && cached.lastEntryId === lastEntryId && cached.leafId === leafId) return cached.summary;
 
-  const ownEntries = sideOwnEntries(entries);
-  const stats = computeSessionStats(ownEntries as unknown as SessionEntry[]);
+  const ownEntries = sideOwnEntries(entries as unknown as SessionEntry[]);
+  const stats = computeSessionStats(ownEntries);
   const summary: SessionUsageSummary = {
     tokens: stats.tokens,
     cost: stats.cost,
     toolCalls: stats.toolCalls,
-    totalActiveMs: computeSessionTotalActiveMs(ownEntries as typeof entries),
+    totalActiveMs: computeSessionTotalActiveMs(ownEntries),
     ...getSessionSettings(entries as unknown as SessionEntry[], leafId),
   };
   summaries.set(sm, { entryCount: entries.length, lastEntryId, leafId, summary });

@@ -28,7 +28,7 @@ export interface SessionUsageSummary {
   thinkingLevel?: string;
 }
 
-function emptyStats(): SessionFileStats {
+export function createEmptySessionStats(): SessionFileStats {
   return {
     userMessages: 0,
     assistantMessages: 0,
@@ -38,6 +38,10 @@ function emptyStats(): SessionFileStats {
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
     cost: 0,
   };
+}
+
+function emptyStats(): SessionFileStats {
+  return createEmptySessionStats();
 }
 
 function addUsage(stats: SessionFileStats, usage?: AgentUsage): void {
@@ -122,16 +126,24 @@ export function mergeSessionStats(
  * summarized away, which is what made the UI token/cost counters appear to be
  * reset after compaction.
  */
-export function computeSessionStats(entries: SessionEntry[]): SessionFileStats {
+export function accumulateSessionStatsEntry(stats: SessionFileStats, entry: SessionEntry): void {
+  if (entry.type === "compaction" || entry.type === "branch_summary" || entry.type === "usage") {
+    addUsage(stats, entry.usage);
+    return;
+  }
+  if (entry.type !== "message") return;
+  addMessage(stats, entry.message);
+}
+
+export function finalizeSessionStats(stats: SessionFileStats): SessionFileStats {
+  return finishStats(stats);
+}
+
+export function computeSessionStats(entries: readonly SessionEntry[]): SessionFileStats {
   const stats = emptyStats();
 
   for (const entry of entries) {
-    if (entry.type === "compaction" || entry.type === "branch_summary" || entry.type === "usage") {
-      addUsage(stats, entry.usage);
-      continue;
-    }
-    if (entry.type !== "message") continue;
-    addMessage(stats, entry.message);
+    accumulateSessionStatsEntry(stats, entry);
   }
 
   return finishStats(stats);

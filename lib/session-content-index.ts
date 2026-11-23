@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createReadStream, existsSync, mkdirSync, openSync, closeSync, readFileSync, readSync, statSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, openSync, closeSync, readdirSync, readFileSync, readSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { writePrivateFileAtomicSync } from "./atomic-file";
@@ -10,6 +10,15 @@ import { getTurnAnchors, type TurnAnchorMessage } from "./message-display";
 import { hasOutlineFinalAnswer } from "./outline-final-answer";
 import type { SessionContext, SessionEntry, SessionTreeNode } from "./types";
 import { readShadowMindStateEntry, type ShadowStateEntryLike } from "./shadow-session-protocol";
+import { observerEnabledChange, observerRecord, SESSION_OBSERVER_ENTRY } from "./session-observer-protocol";
+import {
+  accumulateSessionStatsEntry,
+  createEmptySessionStats,
+  finalizeSessionStats,
+  type SessionFileStats,
+  type SessionUsageSummary,
+} from "./session-stats";
+import { SIDE_META_TYPE } from "./side-session";
 
 interface IndexedRecord {
   id: string;
@@ -24,6 +33,8 @@ interface IndexedRecord {
   thinkingLevel?: string;
   model?: { provider: string; modelId: string };
   shadowMindEnabled?: boolean;
+  /** custom 记录的 customType，用于按需读取观察员/侧聊/子代理/工具选择等极少数元数据行。 */
+  customType?: string;
 }
 
 interface FileIdentity {
@@ -35,8 +46,8 @@ interface FileIdentity {
 }
 
 interface PersistedSessionContentIndex {
-  // 4：保存轮次判断所需的消息字段，旧索引需重建。
-  format: 4;
+  // 5：新增会话用量统计、观察员开关、side 边界和摘要元数据，旧索引需重建。
+  format: 5;
   filePath: string;
   identity: FileIdentity;
   indexedBytes: number;
@@ -46,6 +57,13 @@ interface PersistedSessionContentIndex {
   leafId: string | null;
   totalActiveMs: number;
   previousTimingTimestamp?: number;
+  sideCreatedAt: string | null;
+  ownStats: SessionFileStats;
+  ownTotalActiveMs: number;
+  ownPreviousTimingTimestamp?: number;
+  observerEnabledBySession: Record<string, boolean>;
+  sessionName?: string;
+  firstUserMessage?: string;
   tree: SessionTreeNode[];
   version: string;
 }
@@ -64,24 +82,32 @@ declare global {
  *
  * 索引本身已经落盘（`writePrivateFileAtomicSync`），淘汰只是让下次重新读一遍文件；
  * 不设上限时，每个浏览过的会话的 `records` + `tree` 会一直驻留，长时间开着页面
- * 会把几百万条记录留在内存里。128 份足够覆盖最近浏览的几个项目。
+ * 会把几百万条记录留在内存里。32 份足够覆盖最近浏览的几个项目，兼顾内存占用。
  */
-const MAX_CACHED_INDEXES = 128;
+const MAX_CACHED_INDEXES = 32;
+/** 内存索引总记录数上限（约 30MB 堆占用），防止多个超大会话叠加撑爆内存。 */
+export const MAX_CACHED_INDEX_RECORDS = 100_000;
+const ORPHAN_GC_INTERVAL_MS = 30 * 60 * 1000;
+let lastOrphanGcAt = 0;
 
 function indexes(): Map<string, PersistedSessionContentIndex> {
   globalThis.__piSessionContentIndexes ??= new Map();
   return globalThis.__piSessionContentIndexes;
 }
 
-/** 写入最近使用的一份，并按 LRU 从最久未用的开始淘汰。 */
+/** 写入最近使用的一份，并按份数与总记录数双重上限从最久未用开始 LRU 淘汰。 */
 function rememberIndex(filePath: string, index: PersistedSessionContentIndex): void {
   const map = indexes();
   map.delete(filePath);
   map.set(filePath, index);
-  while (map.size > MAX_CACHED_INDEXES) {
+  let totalRecords = 0;
+  for (const item of map.values()) totalRecords += item.records.length;
+  while (map.size > MAX_CACHED_INDEXES || (map.size > 1 && totalRecords > MAX_CACHED_INDEX_RECORDS)) {
     const oldest = map.keys().next().value;
     if (oldest === undefined) break;
+    const evicted = map.get(oldest);
     map.delete(oldest);
+    if (evicted) totalRecords -= evicted.records.length;
   }
 }
 
@@ -148,7 +174,7 @@ function loadPersisted(filePath: string): PersistedSessionContentIndex | null {
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as PersistedSessionContentIndex;
     if (
-      parsed.format !== 4
+      parsed.format !== 5
       || parsed.filePath !== filePath
       || !isRecord(parsed.identity)
       || !Number.isSafeInteger(parsed.indexedBytes)
@@ -156,6 +182,11 @@ function loadPersisted(filePath: string): PersistedSessionContentIndex | null {
       || typeof parsed.headHash !== "string"
       || typeof parsed.boundaryHash !== "string"
       || typeof parsed.version !== "string"
+      || (parsed.sideCreatedAt !== null && typeof parsed.sideCreatedAt !== "string")
+      || !isRecord(parsed.ownStats)
+      || !isRecord(parsed.ownStats.tokens)
+      || typeof parsed.ownTotalActiveMs !== "number"
+      || !isRecord(parsed.observerEnabledBySession)
       || !Array.isArray(parsed.records)
       || !parsed.records.every((record) => (
         isRecord(record)
@@ -215,19 +246,93 @@ function toIndexedRecord(entry: Record<string, unknown>, offset: number, length:
     ...(entry.type === "thinking_level_change" && typeof entry.thinkingLevel === "string" ? { thinkingLevel: entry.thinkingLevel } : {}),
     ...(model ? { model } : {}),
     ...(shadowMindEnabled !== null ? { shadowMindEnabled } : {}),
+    ...(entry.type === "custom" && typeof entry.customType === "string" ? { customType: entry.customType } : {}),
   };
 }
 
-function updateTiming(index: PersistedSessionContentIndex, entry: Record<string, unknown>): void {
+function updateTimingFields(
+  target: { totalActiveMs: number; previousTimingTimestamp?: number },
+  entry: Record<string, unknown>,
+): void {
   const type = entry.type;
   if (type !== "message" && type !== "compaction" && type !== "branch_summary" && type !== "custom_message") return;
   const timestamp = Date.parse(String(entry.timestamp ?? ""));
   if (!Number.isFinite(timestamp)) return;
   const role = type === "message" && isRecord(entry.message) ? entry.message.role : undefined;
-  if (role !== "user" && role !== "bashExecution" && index.previousTimingTimestamp !== undefined && timestamp > index.previousTimingTimestamp) {
-    index.totalActiveMs += timestamp - index.previousTimingTimestamp;
+  if (role !== "user" && role !== "bashExecution" && target.previousTimingTimestamp !== undefined && timestamp > target.previousTimingTimestamp) {
+    target.totalActiveMs += timestamp - target.previousTimingTimestamp;
   }
-  index.previousTimingTimestamp = timestamp;
+  target.previousTimingTimestamp = timestamp;
+}
+
+function updateTiming(index: PersistedSessionContentIndex, entry: Record<string, unknown>): void {
+  updateTimingFields(index, entry);
+}
+
+function updateOwnTiming(index: PersistedSessionContentIndex, entry: Record<string, unknown>): void {
+  const holder = {
+    totalActiveMs: index.ownTotalActiveMs,
+    previousTimingTimestamp: index.ownPreviousTimingTimestamp,
+  };
+  updateTimingFields(holder, entry);
+  index.ownTotalActiveMs = holder.totalActiveMs;
+  index.ownPreviousTimingTimestamp = holder.previousTimingTimestamp;
+}
+
+function extractFirstUserMessageText(entry: Record<string, unknown>): string | undefined {
+  if (entry.type !== "message" || !isRecord(entry.message) || entry.message.role !== "user") return undefined;
+  const content = entry.message.content;
+  let text = "";
+  if (typeof content === "string") {
+    text = content;
+  } else if (Array.isArray(content)) {
+    const firstText = content.find((block) => isRecord(block) && block.type === "text" && typeof block.text === "string") as { text: string } | undefined;
+    text = firstText?.text ?? "";
+  }
+  // 防止超长首条用户消息把索引文件撑大；列表与信息面板不需要超过 4KB 的首句。
+  return text.length > 4096 ? text.slice(0, 4096) : text;
+}
+
+function updateIndexMetadata(index: PersistedSessionContentIndex, entry: Record<string, unknown>): void {
+  if (
+    index.sideCreatedAt === null
+    && entry.type === "custom"
+    && entry.customType === SIDE_META_TYPE
+    && isRecord(entry.data)
+    && entry.data.version === 1
+    && typeof entry.data.parentSessionId === "string"
+    && typeof entry.data.createdAt === "string"
+  ) {
+    index.sideCreatedAt = entry.data.createdAt;
+    // side 元数据之前的记录均属于继承历史，重置自有统计与耗时。
+    index.ownStats = createEmptySessionStats();
+    index.ownTotalActiveMs = 0;
+    index.ownPreviousTimingTimestamp = undefined;
+  }
+
+  const timestamp = typeof entry.timestamp === "string" ? entry.timestamp : "";
+  const isOwn = index.sideCreatedAt === null || timestamp > index.sideCreatedAt;
+  if (isOwn) {
+    accumulateSessionStatsEntry(index.ownStats, entry as unknown as SessionEntry);
+    updateOwnTiming(index, entry);
+  }
+
+  if (entry.type === "custom" && entry.customType === SESSION_OBSERVER_ENTRY && isRecord(entry.data) && typeof entry.data.sessionId === "string") {
+    const enabled = observerEnabledChange(observerRecord(entry as { type: string; customType?: string; data?: unknown }, entry.data.sessionId));
+    if (typeof enabled === "boolean") {
+      index.observerEnabledBySession[entry.data.sessionId] = enabled;
+    }
+  }
+
+  if (entry.type === "session_info" && typeof entry.name === "string") {
+    const trimmed = entry.name.trim();
+    index.sessionName = trimmed || undefined;
+  }
+
+  if (index.firstUserMessage === undefined) {
+    const firstText = extractFirstUserMessageText(entry);
+    if (firstText !== undefined) index.firstUserMessage = firstText;
+  }
 }
 
 function buildProjectedTree(records: IndexedRecord[]): SessionTreeNode[] {
@@ -253,7 +358,7 @@ function buildProjectedTree(records: IndexedRecord[]): SessionTreeNode[] {
 
 function blankIndex(filePath: string, identity: FileIdentity): PersistedSessionContentIndex {
   return {
-    format: 4,
+    format: 5,
     filePath,
     identity,
     indexedBytes: 0,
@@ -262,6 +367,10 @@ function blankIndex(filePath: string, identity: FileIdentity): PersistedSessionC
     records: [],
     leafId: null,
     totalActiveMs: 0,
+    sideCreatedAt: null,
+    ownStats: createEmptySessionStats(),
+    ownTotalActiveMs: 0,
+    observerEnabledBySession: {},
     tree: [],
     version: "",
   };
@@ -273,6 +382,38 @@ function canAppend(filePath: string, current: FileIdentity, previous: PersistedS
   return hashes.headHash === previous.headHash && hashes.boundaryHash === previous.boundaryHash;
 }
 
+const FAST_OBSERVER_LINE_MIN_BYTES = 16 * 1024;
+const FAST_OBSERVER_PREFIX_BYTES = 1024;
+
+/**
+ * 200MB 级大会话里 `pi-web:session-observer` 交互记录可达上百 MB（单行最大 1.6MB）。
+ * 建索引时它们只贡献 id/parentId/type/customType/timestamp，不需要 JSON.parse 整段大交互正文；
+ * 仅对开关类记录（enabled/settings）或非常规字段顺序回退完整 JSON.parse。
+ */
+function tryFastParseLargeObserverLine(line: Buffer): Record<string, unknown> | null {
+  if (line.length < FAST_OBSERVER_LINE_MIN_BYTES) return null;
+  const prefix = line.subarray(0, Math.min(line.length, FAST_OBSERVER_PREFIX_BYTES)).toString("utf8");
+  if (!prefix.includes(`"${SESSION_OBSERVER_ENTRY}"`)) return null;
+  if (prefix.includes('"kind":"enabled"') || prefix.includes('"kind":"settings"')) return null;
+
+  const typeMatch = /"type"\s*:\s*"custom"/.exec(prefix);
+  const customTypeMatch = /"customType"\s*:\s*"pi-web:session-observer"/.exec(prefix);
+  const idMatch = /"id"\s*:\s*"([^"\\]+)"/.exec(prefix);
+  if (!typeMatch || !customTypeMatch || !idMatch) return null;
+
+  const parentNullMatch = /"parentId"\s*:\s*null\b/.exec(prefix);
+  const parentStrMatch = /"parentId"\s*:\s*"([^"\\]+)"/.exec(prefix);
+  if (!parentNullMatch && !parentStrMatch) return null;
+
+  const timestampMatch = /"timestamp"\s*:\s*"([^"\\]+)"/.exec(prefix);
+  return {
+    type: "custom",
+    customType: SESSION_OBSERVER_ENTRY,
+    id: idMatch[1],
+    parentId: parentStrMatch ? parentStrMatch[1] : null,
+    ...(timestampMatch ? { timestamp: timestampMatch[1] } : {}),
+  };
+}
 async function scanFrom(filePath: string, index: PersistedSessionContentIndex): Promise<void> {
   let pending = Buffer.alloc(0);
   let pendingOffset = index.indexedBytes;
@@ -287,13 +428,15 @@ async function scanFrom(filePath: string, index: PersistedSessionContentIndex): 
       const line = raw.at(-1) === 0x0d ? raw.subarray(0, -1) : raw;
       const offset = pendingOffset + lineStart;
       try {
-        const entry = JSON.parse(line.toString("utf8")) as Record<string, unknown>;
+        const entry = tryFastParseLargeObserverLine(line)
+          ?? JSON.parse(line.toString("utf8")) as Record<string, unknown>;
         if (entry.type !== "session") {
           const record = toIndexedRecord(entry, offset, line.length);
           if (record) {
             index.records.push(record);
             index.leafId = record.id;
             updateTiming(index, entry);
+            updateIndexMetadata(index, entry);
           }
         }
       } catch {
@@ -314,16 +457,22 @@ async function scanFrom(filePath: string, index: PersistedSessionContentIndex): 
 async function buildOrUpdateIndex(filePath: string, attempt = 1): Promise<PersistedSessionContentIndex> {
   const current = fileIdentity(filePath);
   const memory = indexes().get(filePath);
-  const persisted = (memory?.format === 4 ? memory : null) ?? loadPersisted(filePath);
+  const persisted = (memory?.format === 5 ? memory : null) ?? loadPersisted(filePath);
   if (persisted && persisted.identity.size === current.size && persisted.identity.mtimeNs === current.mtimeNs && persisted.identity.ctimeNs === current.ctimeNs) {
     rememberIndex(filePath, persisted);
     return persisted;
   }
 
   const index = persisted && canAppend(filePath, current, persisted)
-    ? { ...persisted, records: [...persisted.records] }
+    ? {
+        ...persisted,
+        records: [...persisted.records],
+        ownStats: { ...persisted.ownStats, tokens: { ...persisted.ownStats.tokens } },
+        observerEnabledBySession: { ...persisted.observerEnabledBySession },
+      }
     : blankIndex(filePath, current);
   await scanFrom(filePath, index);
+  finalizeSessionStats(index.ownStats);
   const finalIdentity = fileIdentity(filePath);
   if (finalIdentity.size !== current.size || finalIdentity.mtimeNs !== current.mtimeNs || finalIdentity.ctimeNs !== current.ctimeNs) {
     if (attempt >= MAX_INDEX_BUILD_ATTEMPTS) throw new Error("会话文件持续变化，无法发布一致的内容索引");
@@ -337,6 +486,7 @@ async function buildOrUpdateIndex(filePath: string, attempt = 1): Promise<Persis
   index.tree = buildProjectedTree(index.records);
   writePrivateFileAtomicSync(indexPath(filePath), JSON.stringify(index));
   rememberIndex(filePath, index);
+  scheduleOrphanIndexGc();
   return index;
 }
 
@@ -434,18 +584,7 @@ export async function readIndexedContextPage(
     if (walker.accept(countsAsVisible, current.length)) break;
     current = current.parentId ? byId.get(current.parentId) : undefined;
   }
-  let thinkingLevel: string | undefined;
-  let model: SessionContext["model"] | undefined;
-  let settingsCursor = byId.get(options.before ?? activeLeafId ?? "");
-  // 环检测：同一条父链上面的分页遍历也要能停（损坏文件缺少设置时会一直找不到）。
-  const visitedSettings = new Set<string>();
-  while (settingsCursor && !visitedSettings.has(settingsCursor.id)
-    && (thinkingLevel === undefined || model === undefined)) {
-    visitedSettings.add(settingsCursor.id);
-    thinkingLevel ??= settingsCursor.thinkingLevel;
-    model ??= settingsCursor.model;
-    settingsCursor = settingsCursor.parentId ? byId.get(settingsCursor.parentId) : undefined;
-  }
+  const settings = resolveBranchSettings(byId, options.before ?? activeLeafId ?? null);
   selected.reverse();
   return {
     entries: readRecords(filePath, selected),
@@ -458,7 +597,7 @@ export async function readIndexedContextPage(
       const page = oldest < 0 ? [record] : selected.slice(oldest);
       return countTurnsBefore(byId, page, (entry) => entry.turn ?? null);
     },
-    settings: { thinkingLevel: thinkingLevel ?? "off", model: model ?? null },
+    settings,
     // 与 wrapper 的 getEntries() 一致：开关属于整个会话，不随分支或分页回退。
     shadowMindEnabled: index.records.findLast((record) => typeof record.shadowMindEnabled === "boolean")?.shadowMindEnabled ?? false,
     totalActiveMs: index.totalActiveMs,
@@ -475,6 +614,130 @@ export async function readIndexedSessionDetails(filePath: string): Promise<{
   return { leafId: index.leafId, tree: index.tree, version: index.version };
 }
 
+function resolveBranchSettings(
+  byId: ReadonlyMap<string, IndexedRecord>,
+  leafId: string | null,
+): Pick<SessionContext, "thinkingLevel" | "model"> {
+  if (!leafId) return { thinkingLevel: "off", model: null };
+  let thinkingLevel: string | undefined;
+  let modelChange: SessionContext["model"] | undefined;
+  let responseModel: SessionContext["model"] | undefined;
+  let cursor = byId.get(leafId);
+  // 环检测：损坏文件缺少设置时防止死循环。
+  const visited = new Set<string>();
+  while (cursor && !visited.has(cursor.id) && (thinkingLevel === undefined || modelChange === undefined)) {
+    visited.add(cursor.id);
+    if (thinkingLevel === undefined && cursor.thinkingLevel !== undefined) {
+      thinkingLevel = cursor.thinkingLevel;
+    }
+    if (modelChange === undefined && cursor.type === "model_change" && cursor.model) {
+      modelChange = cursor.model;
+    } else if (responseModel === undefined && cursor.type !== "model_change" && cursor.model) {
+      responseModel = cursor.model;
+    }
+    cursor = cursor.parentId ? byId.get(cursor.parentId) : undefined;
+  }
+  return {
+    thinkingLevel: thinkingLevel ?? "off",
+    model: modelChange ?? responseModel ?? null,
+  };
+}
+
+/** 按索引读取会话累计用量与活动分支设置，供 `/api/sessions/stats` 免全量解析。 */
+export async function readIndexedSessionUsageSummary(
+  filePath: string,
+  leafId?: string | null,
+): Promise<SessionUsageSummary> {
+  const index = await getSessionContentIndex(filePath);
+  const byId = new Map(index.records.map((record) => [record.id, record]));
+  const activeLeafId = leafId === undefined ? index.leafId : leafId;
+  return {
+    tokens: { ...index.ownStats.tokens },
+    cost: index.ownStats.cost,
+    toolCalls: index.ownStats.toolCalls,
+    totalActiveMs: index.ownTotalActiveMs,
+    ...resolveBranchSettings(byId, activeLeafId),
+  };
+}
+
+/** O(1) 读取会话观察员开关状态，免全量解析。 */
+export async function readIndexedObserverEnabled(filePath: string, sessionId: string): Promise<boolean> {
+  const index = await getSessionContentIndex(filePath);
+  return index.observerEnabledBySession[sessionId] === true;
+}
+
+/** 仅按偏移读取 `pi-web:session-observer` 记录，避免打开观察员面板时全量解析大会话。 */
+export async function readIndexedObserverEntries(
+  filePath: string,
+  leafId?: string | null,
+): Promise<{ entries: SessionEntry[]; branch: SessionEntry[] }> {
+  const index = await getSessionContentIndex(filePath);
+  const observerRecords = index.records.filter((record) => record.type === "custom" && record.customType === SESSION_OBSERVER_ENTRY);
+  if (observerRecords.length === 0) return { entries: [], branch: [] };
+
+  const activeLeafId = leafId === undefined ? index.leafId : leafId;
+  const branchIds = new Set<string>();
+  if (activeLeafId) {
+    const byId = new Map(index.records.map((record) => [record.id, record]));
+    let cursor = byId.get(activeLeafId);
+    const visited = new Set<string>();
+    while (cursor && !visited.has(cursor.id)) {
+      visited.add(cursor.id);
+      if (cursor.type === "custom" && cursor.customType === SESSION_OBSERVER_ENTRY) {
+        branchIds.add(cursor.id);
+      }
+      cursor = cursor.parentId ? byId.get(cursor.parentId) : undefined;
+    }
+  }
+
+  const entries = readRecords(filePath, observerRecords);
+  const branch = entries.filter((entry) => branchIds.has(entry.id));
+  return { entries, branch };
+}
+
+const SKIPPED_INFO_CUSTOM_TYPES = new Set([SESSION_OBSERVER_ENTRY, "shadow-mind-event"]);
+
+export interface IndexedSessionFullView {
+  leafId: string | null;
+  tree: SessionTreeNode[];
+  entries: SessionEntry[];
+  settings: Pick<SessionContext, "thinkingLevel" | "model">;
+  stats: SessionFileStats;
+  totalActiveMs: number;
+  entryCount: number;
+  latestEntryId: string | null;
+  sessionName?: string;
+  firstUserMessage?: string;
+  metaEntries: SessionEntry[];
+  version: string;
+}
+
+/** 供 `GET /api/sessions/[id]` 按索引组装完整视图：仅读取尾页消息与极少数自定义元数据记录。 */
+export async function readIndexedSessionFullView(
+  filePath: string,
+  options: { tail: number },
+): Promise<IndexedSessionFullView> {
+  const index = await getSessionContentIndex(filePath);
+  const page = await readIndexedContextPage(filePath, { tail: options.tail });
+  const metaRecords = index.records.filter(
+    (record) => record.type === "custom" && record.customType !== undefined && !SKIPPED_INFO_CUSTOM_TYPES.has(record.customType),
+  );
+  const metaEntries = readRecords(filePath, metaRecords);
+  return {
+    leafId: index.leafId,
+    tree: index.tree,
+    entries: page.entries,
+    settings: page.settings,
+    stats: { ...index.ownStats, tokens: { ...index.ownStats.tokens } },
+    totalActiveMs: index.ownTotalActiveMs,
+    entryCount: index.records.length,
+    latestEntryId: index.records.at(-1)?.id ?? null,
+    sessionName: index.sessionName,
+    firstUserMessage: index.firstUserMessage,
+    metaEntries,
+    version: index.version,
+  };
+}
 /** 只读索引身份（文件签名、活动 leaf），供调用方先查上层缓存再决定是否逐条读记录。 */
 export async function readIndexedOutlineIdentity(
   filePath: string,
@@ -494,6 +757,77 @@ export interface IndexedBranchOutlineSlice {
   }>;
 }
 
+/** 删除指定会话对应的内存与磁盘内容索引（删除/归档会话时调用）。 */
+export function deleteSessionContentIndex(filePath: string): void {
+  indexes().delete(filePath);
+  try {
+    unlinkSync(indexPath(filePath));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
+      console.warn("[pi-web] 删除会话内容索引失败:", error instanceof Error ? error.message : error);
+    }
+  }
+}
+
+function readIndexedFilePathQuick(indexFilePath: string): string | null {
+  try {
+    const fd = openSync(indexFilePath, "r");
+    try {
+      const buffer = Buffer.allocUnsafe(4096);
+      const bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
+      if (bytesRead <= 0) return null;
+      const head = buffer.toString("utf8", 0, bytesRead);
+      const match = /"filePath"\s*:\s*("(?:[^"\\]|\\.)*")/.exec(head);
+      if (!match) return null;
+      const parsed = JSON.parse(match[1]);
+      return typeof parsed === "string" ? parsed : null;
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+}
+
+/** 清理磁盘上对应原会话已不存在的孤儿索引文件，返回清理数量。 */
+export function pruneOrphanSessionContentIndexes(): number {
+  const directory = join(getAgentDir(), "pi-web-session-content-index-v1");
+  if (!existsSync(directory)) return 0;
+  let removed = 0;
+  let files: string[];
+  try {
+    files = readdirSync(directory);
+  } catch {
+    return 0;
+  }
+  for (const name of files) {
+    if (!name.endsWith(".json")) continue;
+    const fullPath = join(directory, name);
+    const targetSessionPath = readIndexedFilePathQuick(fullPath);
+    if (!targetSessionPath || !existsSync(targetSessionPath)) {
+      try {
+        unlinkSync(fullPath);
+        removed += 1;
+      } catch {
+        // 并发已被删除则忽略
+      }
+    }
+  }
+  return removed;
+}
+
+function scheduleOrphanIndexGc(): void {
+  const now = Date.now();
+  if (now - lastOrphanGcAt < ORPHAN_GC_INTERVAL_MS) return;
+  lastOrphanGcAt = now;
+  setTimeout(() => {
+    try {
+      pruneOrphanSessionContentIndexes();
+    } catch {
+      // 后台清理失败不影响主流程
+    }
+  }, 5_000).unref?.();
+}
 /**
  * 仅按字节偏移读取当前活动分支上每轮的锚点记录和最终助手记录，
  * 跳过全部 toolResult 与中间过程消息，用于快速生成全量轻量大纲。

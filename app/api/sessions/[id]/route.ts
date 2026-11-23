@@ -1,7 +1,7 @@
 import { deleteScheduledTasksForSession } from "@/lib/scheduled-tasks";
 import { stopBackgroundCommandsForSession } from "@/lib/background-commands";
 import { NextResponse } from "next/server";
-import { existsSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs";
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import {
   attachSessionProjectInfo,
@@ -31,10 +31,27 @@ import { readSessionToolSelection } from "@/lib/session-tool-selection";
 import { trashSessionFile } from "@/lib/trash";
 import { queueTrashSessionTitle } from "@/lib/session-file-title";
 import { jsonResponse } from "@/lib/json-response";
-import { attachTranscriptNotices, readSessionTranscriptNotices } from "@/lib/transcript-notices-server";
+import { attachTranscriptNotices, readSessionTranscriptNotices, readShowCacheMissNotices } from "@/lib/transcript-notices-server";
+import { deleteSessionContentIndex, readIndexedSessionFullView } from "@/lib/session-content-index";
 import { sessionExternalWritePayload } from "@/lib/session-external-write";
 import { writeSessionInfoThroughLiveSession } from "@/lib/session-info-writer";
 
+/** 仅读取文件开头若干字节的完整行，避免删除会话时把同目录几百 MB 的 JSONL 全量读入内存。 */
+function readPrefixLines(filePath: string, maxBytes = 64 * 1024, maxLines = 16): string[] {
+  const fd = openSync(filePath, "r");
+  try {
+    const buffer = Buffer.allocUnsafe(maxBytes);
+    const bytesRead = readSync(fd, buffer, 0, maxBytes, 0);
+    if (bytesRead <= 0) return [];
+    const text = buffer.toString("utf8", 0, bytesRead);
+    const parts = text.split("\n");
+    // 若刚好截断在缓冲区末尾且未到换行符，丢弃最后一条残行，避免误解析。
+    if (bytesRead === maxBytes && !text.endsWith("\n")) parts.pop();
+    return parts.slice(0, maxLines);
+  } finally {
+    closeSync(fd);
+  }
+}
 /**
  * 级联改写是 pi-web 自己做的文件改写：属于该会话的存活 wrapper 必须登记这次改写，
  * 否则它会把自己人写的文件判成外部修改，运行中的子会话随后每个 /context 都 409。
@@ -87,69 +104,97 @@ export async function GET(
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
 
-    const sm = liveRpc?.inner.sessionManager ?? openSessionManager(resolvedPath!);
-    perf?.span("open");
-    const filePath = liveRpc?.sessionFile || sm.getSessionFile() || resolvedPath || "";
-    const entries = sm.getEntries();
-    const leafId = sm.getLeafId();
-    const summaryTree = searchParams.get("tree") === "summary";
-    const tree = summaryTree
-      ? toSummaryTree(projectTreeForResponse(sm.getTree()))
-      : projectTreeForResponse(sm.getTree());
-    perf?.span("tree");
     const deferThinking = searchParams.has("deferThinking");
     const deferToolResultImages = searchParams.has("deferMedia");
     const rawTail = Number(searchParams.get("tail"));
     const tail = Number.isFinite(rawTail) && rawTail > 0 ? Math.min(rawTail, 1000) : 50;
-    // pi's showCacheMissNotices (#1265): cache, cost and provider notices on the messages they follow.
-    const transcriptNotices = readSessionTranscriptNotices({
-      entries: entries as unknown as SessionEntry[],
-      cwd: sm.getHeader()?.cwd ?? "",
-      leafId: leafId,
-      models: liveRpc?.inner.modelRuntime,
-    });
-    const context = attachTranscriptNotices(buildSessionContext(entries as never, leafId, {
+    const summaryTree = searchParams.get("tree") === "summary";
+
+    const liveSm = liveRpc?.inner.sessionManager;
+    const indexed = liveSm ? null : await readIndexedSessionFullView(resolvedPath!, { tail });
+    perf?.span("open");
+
+    const filePath = liveRpc?.sessionFile || liveSm?.getSessionFile() || resolvedPath || "";
+    const header = liveSm ? liveSm.getHeader() : readSessionHeader(resolvedPath!);
+    const leafId = liveSm ? liveSm.getLeafId() : indexed!.leafId;
+    const projectedTree = liveSm ? projectTreeForResponse(liveSm.getTree()) : indexed!.tree;
+    const tree = summaryTree ? toSummaryTree(projectedTree) : projectedTree;
+    perf?.span("tree");
+
+    const liveEntries = liveSm ? liveSm.getEntries() : null;
+    const noticesCwd = header?.cwd ?? "";
+    // 仅在开启 showCacheMissNotices（默认关闭）时才按需全量读取计算缓存/费用通知；
+    // 关闭时非存活会话全程走内容索引，避免大文件全量解析。
+    const transcriptNotices = noticesCwd && readShowCacheMissNotices(noticesCwd)
+      ? readSessionTranscriptNotices({
+          entries: (liveEntries ?? openSessionManager(resolvedPath!).getEntries()) as unknown as SessionEntry[],
+          cwd: noticesCwd,
+          leafId,
+          models: liveRpc?.inner.modelRuntime,
+        })
+      : undefined;
+
+    const contextEntries = (liveEntries ?? indexed!.entries) as unknown as SessionEntry[];
+    const contextLeafId = liveSm ? leafId : contextEntries.at(-1)?.id ?? null;
+    const context = attachTranscriptNotices(buildSessionContext(contextEntries, contextLeafId, {
       deferThinking,
       deferToolResultImages,
       tail,
       sessionId: id, // local: lazy URLs for historical tool-result images
+      ...(indexed ? { effectiveSettings: indexed.settings } : {}),
     }), transcriptNotices);
     perf?.span("context");
-    const ownEntries = sideOwnEntries(entries) as typeof entries;
-    const totalActiveMs = computeSessionTotalActiveMs(ownEntries);
+
+    const ownLiveEntries = liveEntries ? sideOwnEntries(liveEntries as unknown as SessionEntry[]) : null;
+    const totalActiveMs = ownLiveEntries ? computeSessionTotalActiveMs(ownLiveEntries) : indexed!.totalActiveMs;
     // Cumulative usage over ALL entries, including history compacted away —
     // the same aggregation the SDK's getSessionStats() uses. Lets the client
     // keep monotonic token/cost counters across compaction and page reloads.
-    const stats = computeSessionStats(ownEntries as unknown as SessionEntry[]);
+    const stats = ownLiveEntries ? computeSessionStats(ownLiveEntries) : indexed!.stats;
     perf?.span("stats");
+
     // Opaque freshness token for the session view cache. Derived from the
     // disk fingerprint and the actual read source; null tells the client the
     // snapshot is unstable and must not be cached as fresh.
-    const latestEntry = entries[entries.length - 1] as { id?: string } | undefined;
+    const entryCount = liveEntries ? liveEntries.length : indexed!.entryCount;
+    const latestEntryId = liveEntries
+      ? (typeof (liveEntries[liveEntries.length - 1] as { id?: string } | undefined)?.id === "string"
+          ? (liveEntries[liveEntries.length - 1] as { id: string }).id
+          : null)
+      : indexed!.latestEntryId;
     const snapshotRevision = computeSessionRevision({
       filePath,
       // The notices switch changes the messages without touching the file.
       sourceId: `${liveRpc ? `runtime:${String(liveRpc.inner.sessionId)}` : "disk"}${transcriptNotices ? "+notices" : ""}`,
-      entryCount: entries.length,
-      latestEntryId: typeof latestEntry?.id === "string" ? latestEntry.id : null,
+      entryCount,
+      latestEntryId,
       leafId: leafId ?? null,
     });
-    const sessionName = sm.getSessionName();
-    const firstUserEntry = entries.find((entry) => entry.type === "message" && entry.message.role === "user");
-    const firstUserMessage = firstUserEntry?.type === "message" ? firstUserEntry.message : undefined;
+    const sessionName = liveSm ? liveSm.getSessionName() : indexed!.sessionName;
+    let firstMessage = "(no messages)";
+    if (liveEntries) {
+      const firstUserEntry = liveEntries.find((entry) => entry.type === "message" && entry.message.role === "user");
+      const firstUserMessage = firstUserEntry?.type === "message" ? firstUserEntry.message : undefined;
+      if (firstUserMessage) {
+        const c = (firstUserMessage as { content: unknown }).content;
+        firstMessage = (typeof c === "string" ? c : (Array.isArray(c) ? (c.find((b: { type: string }) => b.type === "text") as { text: string } | undefined)?.text ?? "" : "")) || "(no messages)";
+      }
+    } else if (indexed!.firstUserMessage) {
+      firstMessage = indexed!.firstUserMessage;
+    }
 
-    const header = sm.getHeader();
     let modified = header?.timestamp ?? new Date().toISOString();
     try { modified = statSync(filePath).mtime.toISOString(); } catch { /* use header timestamp */ }
     const parentSessionId = header?.parentSession
       ? await resolveSessionIdByPath(header.parentSession)
       : undefined;
+    const metaEntries = (liveEntries ?? indexed!.metaEntries) as unknown as SessionEntry[];
     const subagent = header
-      ? readSubagentRun(entries as never, header.id, filePath)
+      ? readSubagentRun(metaEntries, header.id, filePath)
       : null;
-    const side = !subagent && header ? readSideRelation(entries as never) : null;
-    const toolNames = readSubagentSessionResources(entries as never)?.tools
-      ?? readSessionToolSelection(entries as never);
+    const side = !subagent && header ? readSideRelation(metaEntries) : null;
+    const toolNames = readSubagentSessionResources(metaEntries)?.tools
+      ?? readSessionToolSelection(metaEntries);
     const info = header ? (await attachSessionProjectInfo([{
       path: filePath,
       id: header.id,
@@ -158,12 +203,7 @@ export async function GET(
       created: header.timestamp,
       modified,
       messageCount: stats.totalMessages,
-      firstMessage: firstUserMessage
-        ? (() => {
-            const c = (firstUserMessage as { content: unknown }).content;
-            return typeof c === "string" ? c : (Array.isArray(c) ? (c.find((b: { type: string }) => b.type === "text") as { text: string } | undefined)?.text ?? "" : "") || "(no messages)";
-          })()
-        : "(no messages)",
+      firstMessage,
       parentSessionId,
       ...(subagent
         ? { relation: { kind: "subagent" as const, parentSessionId: subagent.parentSessionId, profile: subagent.profile, description: subagent.description, status: subagentDisplayStatus(header.id, subagent.status) } }
@@ -303,12 +343,15 @@ export async function DELETE(
         const childPath = join(dir, file);
         if (sessionPathKey(childPath) === targetPathKey) continue;
         try {
-          const lines = readFileSync(childPath, "utf8").split("\n");
+          const lines = readPrefixLines(childPath);
+          if (lines.length < 2) continue;
           const header = JSON.parse(lines[0]) as { type?: string; id?: string };
           if (header.type !== "session" || typeof header.id !== "string") continue;
           const entries = lines.slice(1).flatMap((line) => {
+            if (!line.includes(SUBAGENT_META_TYPE)) return [];
             try { return [JSON.parse(line) as SessionEntry]; } catch { return []; }
           });
+          if (entries.length === 0) continue;
           const subagent = readSubagentRun(entries, header.id, childPath);
           if (!subagent) continue;
           const children = childrenByParent.get(subagent.parentSessionId) ?? [];
@@ -354,16 +397,17 @@ export async function DELETE(
         const childPath = join(dir, file);
         if (deletedPathKeys.has(sessionPathKey(childPath))) continue;
         try {
-          const content = readFileSync(childPath, "utf8");
-          const lines = content.split("\n");
-          const header = JSON.parse(lines[0]) as { type?: string; id?: string; parentSession?: string };
+          const header = readSessionHeader(childPath);
           // pi-web 自己改写的 entry（当前只有下面的 subagent meta），写完要登记给存活 wrapper。
           const rewrittenEntries: unknown[] = [];
           if (
+            header &&
             header.type === "session" &&
             header.parentSession &&
             sessionPathKey(header.parentSession) === targetPathKey
           ) {
+            const content = readFileSync(childPath, "utf8");
+            const lines = content.split("\n");
             // Rewrite header with new parentSession
             header.parentSession = parentSessionPath;
             lines[0] = JSON.stringify(header);
@@ -421,6 +465,7 @@ export async function DELETE(
       }
       invalidateSessionPathCache(deletedId);
       invalidateSessionManagerCache(deletedPath);
+      deleteSessionContentIndex(deletedPath);
     }
     try {
       await removeSidebarPreferenceIds({ sessionIds: [...deletedSessionIds] });

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
-import { invalidateSessionListCache, openSessionManager, resolveSessionPath } from "@/lib/session-reader";
+import { invalidateSessionListCache, resolveSessionPath } from "@/lib/session-reader";
+import { readIndexedObserverEnabled, readIndexedObserverEntries } from "@/lib/session-content-index";
 import { sessionExternalWritePayload } from "@/lib/session-external-write";
 import { canRunWithExternalSessionChange } from "@/lib/session-write-policy";
 import {
@@ -122,11 +123,14 @@ export async function POST(
       }
       const filePath = await resolveSessionPath(id);
       if (!filePath) return NextResponse.json({ error: "Session not found" }, { status: 404 });
-      const manager = openSessionManager(filePath);
-      const entries = manager.getEntries();
-      const data = history ? readObserverHistory(id, entries, cursor)
-        : body.enabledOnly === true ? { enabled: readObserverEnabled(entries, id) }
-        : readObserverState(id, entries, manager.getBranch());
+      if (body.enabledOnly === true) {
+        const enabled = await readIndexedObserverEnabled(filePath, id);
+        return NextResponse.json({ success: true, data: { enabled } });
+      }
+      const { entries, branch } = await readIndexedObserverEntries(filePath);
+      const data = history
+        ? readObserverHistory(id, entries, cursor)
+        : readObserverState(id, entries, branch);
       return NextResponse.json({ success: true, data });
     }
     if (body.type === "set_tools") {
