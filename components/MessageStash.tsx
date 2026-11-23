@@ -1,7 +1,7 @@
 "use client";
 
-import { Archive, X } from "lucide-react";
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { Archive, MoreHorizontal, X } from "lucide-react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import { MAX_ATTACHED_IMAGE_BYTES, MAX_ATTACHED_IMAGES } from "@/lib/image-attachments";
 import type { StashedContent, StashedMessage, StashSnapshot } from "@/lib/message-stash-protocol";
@@ -9,8 +9,7 @@ import type { StashedContent, StashedMessage, StashSnapshot } from "@/lib/messag
 type SendMode = "send" | "steer" | "followUp";
 type Selection = { item: StashedMessage } & (
   | { kind: "edit" | "preview"; draft: StashedContent }
-  | { kind: "schedule"; time: string }
-  | { kind: "send" | "delete" | "recover" }
+  | { kind: "delete" | "recover" }
 );
 
 interface Props {
@@ -49,7 +48,7 @@ async function request<T>(cwd: string, action: string, parameters: object = {}, 
 }
 
 export function MessageStash({ cwd, mobile, hasDraft, session, sendMode, onSaveDraft, onSendDraft }: Props) {
-  const { t, locale } = useI18n();
+  const { t } = useI18n();
   const titleId = useId();
   const trigger = useRef<HTMLButtonElement>(null);
   const dialog = useRef<HTMLDialogElement>(null);
@@ -59,6 +58,8 @@ export function MessageStash({ cwd, mobile, hasDraft, session, sendMode, onSaveD
   const [busy, setBusy] = useState(false);
   const [snapshot, setSnapshot] = useState<StashSnapshot | null>(null);
   const [selection, setSelection] = useState<Selection | null>(null);
+  const [defaultTime, setDefaultTime] = useState("");
+  const [times, setTimes] = useState<Record<string, { revision: string; value: string }>>({});
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const refresh = useCallback(async (signal?: AbortSignal) => {
@@ -129,6 +130,11 @@ export function MessageStash({ cwd, mobile, hasDraft, session, sendMode, onSaveD
     void perform(async () => {
       await request(cwd, action, { id: item.id, revision: item.revision, ...extra });
       setSelection(null);
+      setTimes((previous) => {
+        const next = { ...previous };
+        delete next[item.id];
+        return next;
+      });
     });
   }
 
@@ -140,7 +146,7 @@ export function MessageStash({ cwd, mobile, hasDraft, session, sendMode, onSaveD
       close();
       let sent: boolean;
       try {
-        sent = await onSendDraft(draft, mode);
+        sent = await onSendDraft(draft, sendMode === "idle" ? "send" : mode);
         await request(cwd, "finish", { id: item.id, token, sent });
       } catch (error) {
         // 确认丢失时保留认领，避免自动再发一遍。
@@ -161,11 +167,19 @@ export function MessageStash({ cwd, mobile, hasDraft, session, sendMode, onSaveD
     setSelection((latest) => latest === current ? { ...current, draft: { ...current.draft, images: [...current.draft.images, ...added] } } : latest);
   }
 
-  const date = useMemo(() => new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" }), [locale]);
+  function schedule(item: StashedMessage, time: string, now: number) {
+    const target = item.schedule ?? (session && { sessionId: session.id, label: session.label });
+    const at = new Date(time).getTime();
+    if (!target || !Number.isSafeInteger(at) || at <= now) {
+      setError(t(target ? "stash.invalidTime" : "stash.requiresSession"));
+      return;
+    }
+    change(item, "schedule", { at, sessionId: target.sessionId, label: target.label });
+  }
   return (
     <>
       <button ref={trigger} type="button" className="message-stash-trigger" title={t("stash.label")} aria-label={t("stash.label")}
-        aria-haspopup="dialog" aria-expanded={open} onClick={() => { setOpen(true); setError(""); setNotice(""); }}>
+        aria-haspopup="dialog" aria-expanded={open} onClick={() => { setDefaultTime(localTime(Date.now() + 600_000)); setTimes({}); setOpen(true); setError(""); setNotice(""); }}>
         <Archive size={16} aria-hidden="true" />
       </button>
       {open && <dialog ref={dialog} aria-labelledby={titleId} className={`message-stash-dialog${mobile ? " is-mobile" : ""}`}
@@ -188,6 +202,8 @@ export function MessageStash({ cwd, mobile, hasDraft, session, sendMode, onSaveD
               const active = selection?.item.id === item.id ? selection : null;
               const locked = busy || item.status === "sending" || item.status === "uncertain";
               const stale = Boolean(active && active.item.revision !== item.revision);
+              const mode = item.mode ?? "followUp";
+              const time = times[item.id]?.revision === item.revision ? times[item.id].value : item.schedule ? localTime(item.schedule.at) : defaultTime;
               return <article key={item.id}>
                 {active?.kind === "edit" ? (
                   <textarea aria-label={t("stash.edit")} value={active.draft.text} rows={3} disabled={busy} onChange={(event) => {
@@ -215,45 +231,47 @@ export function MessageStash({ cwd, mobile, hasDraft, session, sendMode, onSaveD
                     onClick={() => change(active.item, "edit", active.draft)}>{t("stash.save")}</button>
                   <button type="button" onClick={() => setSelection(null)}>{t("i18n.cancel")}</button>
                 </div> : <>
-                  {item.schedule && <p className="stash-meta">{date.format(item.schedule.at)} · {item.schedule.label}</p>}
-                  {item.status !== "ready" && <p className="stash-meta">{t(`stash.status.${item.status}`)}</p>}
-                  <div className="stash-actions">
-                    {item.imageCount > 0 && <button type="button" disabled={busy} onClick={() => active?.kind === "preview" ? setSelection(null) : choose(item, "preview")}>
-                      {t("stash.images", { count: item.imageCount })}
-                    </button>}
-                    {!item.schedule && item.status !== "uncertain" && <button type="button" className="stash-primary" disabled={locked || sendMode === "unavailable"} onClick={() => sendMode === "running" ? setSelection({ item, kind: "send" }) : send(item, "send")}>
-                      {sendMode === "running" ? t("stash.sendOptions") : t("chat.send")}
-                    </button>}
-                    {item.status !== "uncertain" && <button type="button" disabled={locked || !snapshot?.schedulingEnabled || (!item.schedule && !session)}
-                      title={!session && !item.schedule ? t("stash.requiresSession") : undefined}
-                      onClick={() => setSelection({ item, kind: "schedule", time: localTime(item.schedule?.at ?? Date.now() + 600_000) })}>
-                      {item.schedule ? t("stash.reschedule") : t("stash.schedule")}
-                    </button>}
-                    {item.schedule && <button type="button" disabled={locked} onClick={() => change(item, "cancelSchedule")}>{t("stash.cancelSchedule")}</button>}
-                    {item.status === "uncertain" ? <button type="button" disabled={busy} onClick={() => setSelection({ item, kind: "recover" })}>{t("stash.recover")}</button>
-                      : <button type="button" disabled={locked} onClick={() => choose(item, "edit")}>{t("stash.edit")}</button>}
-                    <button type="button" className="stash-danger" disabled={busy || item.status === "sending"} onClick={() => setSelection({ item, kind: "delete" })}>{t("stash.delete")}</button>
+                  <div className="stash-card-controls">
+                    <div className="stash-mode" role="radiogroup" aria-label={t("stash.sendMode")}>
+                      {(["steer", "followUp"] as const).map((value) => <label key={value} title={t(value === "steer" ? "chat.steerHint" : "chat.followUpHint")}>
+                        <input type="radio" name={`stash-mode-${item.id}`} value={value} checked={mode === value} disabled={locked}
+                          onChange={() => change(item, "setMode", { mode: value })} />
+                        <span>{t(value === "steer" ? "chat.steer" : "stash.followUp")}</span>
+                      </label>)}
+                    </div>
+                    <label className="stash-timer" title={!session && !item.schedule ? t("stash.requiresSession") : undefined}>
+                      {t("stash.schedule")}
+                      <span className="stash-switch">
+                        <input type="checkbox" role="switch" aria-label={t("stash.schedule")} checked={Boolean(item.schedule)}
+                          disabled={locked || (!item.schedule && (!snapshot?.schedulingEnabled || !session))}
+                          onChange={(event) => event.target.checked ? schedule(item, time, Date.now()) : change(item, "cancelSchedule")} />
+                        <span aria-hidden="true" />
+                      </span>
+                    </label>
+                    <input className="stash-time" type="datetime-local" aria-label={t("stash.sendAt")} value={time}
+                      disabled={locked || !item.schedule || !snapshot?.schedulingEnabled}
+                      title={item.schedule ? t("stash.target", { session: item.schedule.label }) : t("stash.sendAt")}
+                      onChange={(event) => setTimes((previous) => ({ ...previous, [item.id]: { revision: item.revision, value: event.target.value } }))}
+                      onBlur={(event) => {
+                        // 原生日期控件分段编辑，只在离开控件时保存，避免输入一半年份就改写定时。
+                        // 切换类型或关闭定时时以点击动作优先，避免 blur 的改期请求抢先占锁。
+                        if (event.relatedTarget instanceof HTMLInputElement && event.relatedTarget.matches('[role="switch"], [type="radio"]')) return;
+                        if (item.schedule && time !== localTime(item.schedule.at)) schedule(item, time, Date.now());
+                      }} />
                   </div>
+                  <details className="stash-more">
+                    <summary aria-label={t("stash.more")} title={t("stash.more")}><MoreHorizontal size={14} aria-hidden="true" /></summary>
+                    <div className="stash-more-actions">
+                      {!item.schedule && item.status !== "uncertain" && <button type="button" disabled={locked || sendMode === "unavailable"} onClick={() => send(item, mode)}>{t("chat.send")}</button>}
+                      {item.imageCount > 0 && <button type="button" disabled={busy} onClick={() => active?.kind === "preview" ? setSelection(null) : choose(item, "preview")}>{t("stash.images", { count: item.imageCount })}</button>}
+                      {item.status === "uncertain" ? <button type="button" disabled={busy} onClick={() => setSelection({ item, kind: "recover" })}>{t("stash.recover")}</button>
+                        : <button type="button" disabled={locked} onClick={() => choose(item, "edit")}>{t("stash.edit")}</button>}
+                      <button type="button" className="stash-danger" disabled={busy || item.status === "sending"} onClick={() => setSelection({ item, kind: "delete" })}>{t("stash.delete")}</button>
+                    </div>
+                  </details>
+                  {item.status !== "ready" && <p className="stash-meta">{t(`stash.status.${item.status}`)}</p>}
                 </>}
                 {stale && <p className="stash-meta">{t("stash.changed")}</p>}
-                {active?.kind === "send" && <div className="stash-actions">
-                  <button type="button" disabled={locked || stale || sendMode !== "running"} onClick={() => send(active.item, "steer")}>{t("chat.steer")}</button>
-                  <button type="button" disabled={locked || stale || sendMode !== "running"} onClick={() => send(active.item, "followUp")}>{t("chat.followUp")}</button>
-                  <button type="button" onClick={() => setSelection(null)}>{t("i18n.cancel")}</button>
-                </div>}
-                {active?.kind === "schedule" && (() => {
-                  const target = active.item.schedule ?? (session && { sessionId: session.id, label: session.label });
-                  const at = new Date(active.time).getTime();
-                  return <div className="stash-schedule">
-                    <label>{t("stash.sendAt")} <input type="datetime-local" value={active.time} onChange={(event) => setSelection({ ...active, time: event.target.value })} /></label>
-                    {target && <p className="stash-meta">{t("stash.target", { session: target.label })}</p>}
-                    <div className="stash-actions">
-                      <button type="button" className="stash-primary" disabled={locked || stale || !target || !(at > Date.now())}
-                        onClick={() => target && change(active.item, "schedule", { at, sessionId: target.sessionId, label: target.label })}>{t("stash.confirmSchedule")}</button>
-                      <button type="button" onClick={() => setSelection(null)}>{t("i18n.cancel")}</button>
-                    </div>
-                  </div>;
-                })()}
                 {(active?.kind === "delete" || active?.kind === "recover") && <div className="stash-actions">
                   <span>{t(active.kind === "delete" ? "stash.confirmDelete" : "stash.confirmRecover")}</span>
                   <button type="button" disabled={busy || stale} onClick={() => change(active.item, active.kind)}>{t("stash.confirm")}</button>

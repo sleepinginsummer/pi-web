@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>暂存库 · 小卡片 Demo</title>
+<style>
+:root{color-scheme:light dark;--bg:#f4f5f6;--card:#fff;--text:#30343b;--muted:#818791;--line:#e5e7eb;--field:#f6f7f8;--accent:#527b63;--selected:#30343b;--on:#fff}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:13px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif}main{width:min(100% - 32px,380px);margin:48px auto}h1{font-size:16px;font-weight:600;margin:0 0 16px}.cards{display:grid;gap:12px}.card{padding:16px;background:var(--card);border:1px solid var(--line);border-radius:10px}.message{margin:0 0 16px;line-height:1.85;overflow-wrap:anywhere}.controls{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}.mode{display:flex;gap:2px;border:1px solid var(--line);border-radius:6px;padding:3px;background:var(--field)}.mode label{position:relative;cursor:pointer}.mode input{position:absolute;opacity:0;width:1px;height:1px}.mode span{display:block;padding:2px 14px;border-radius:3px;font-size:12px;color:var(--muted)}.mode input:checked+span{background:var(--selected);color:var(--on)}.mode input:focus-visible+span{outline:2px solid var(--accent);outline-offset:2px}.timer{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);cursor:pointer}.switch{position:relative;display:inline-block;width:32px;height:19px}.switch input{position:absolute;inset:0;width:100%;height:100%;margin:0;opacity:0;z-index:1;cursor:pointer}.track{display:block;width:32px;height:19px;border-radius:12px;background:#c9cdd2}.track:after{content:"";position:absolute;top:3px;left:3px;width:13px;height:13px;background:#fff;border-radius:50%}.switch input:checked+.track{background:var(--accent)}.switch input:checked+.track:after{transform:translateX(13px)}.switch input:focus-visible+.track{outline:2px solid var(--accent);outline-offset:3px}.time{display:block;width:100%;min-width:0;border:1px solid var(--line);border-radius:6px;background:var(--field);color:var(--text);font:inherit;font-size:12px;padding:8px 10px}.time:disabled{opacity:.4;cursor:not-allowed}.time:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.note{font-size:11px;color:var(--muted);margin:14px 0;text-align:center}
+/* 消息下方的类型、定时开关与时间共用一行。 */
+main{width:min(100% - 24px,336px)}
+.card{padding:12px}
+.controls{justify-content:flex-start;gap:8px;margin-bottom:0}
+.mode,.timer{flex-shrink:0}
+.mode span{padding:2px 8px}
+.timer{gap:5px}
+.time{flex:0 1 auto;width:142px;field-sizing:content;padding:5px 4px;font-size:11px}
+.time::-webkit-datetime-edit{flex:0 0 auto;padding:0}
+.time::-webkit-calendar-picker-indicator{margin:0 0 0 3px;padding:0}
+@media(max-width:400px){.card{padding:12px}.controls{gap:6px}.mode span{padding:2px 5px}.timer{gap:4px;font-size:11px}.time{padding:6px 3px;font-size:10px}}
+@media(prefers-color-scheme:dark){:root{--bg:#191b1e;--card:#24272c;--text:#e2e5e9;--muted:#9ba3ad;--line:#363b42;--field:#292d33;--accent:#85af93;--selected:#e2e5e9;--on:#24272c}}
+</style>
+</head>
+<body>
+<main>
+<h1>暂存库</h1>
+<div class="cards">
+<article class="card">
+<p class="message">先把暂存库改成小卡片，文字下面放两个开关和时间输入框。</p>
+<div class="controls">
+<div class="mode" role="radiogroup" aria-label="第一条消息的发送类型"><label><input type="radio" name="mode-1" value="steer" checked><span>引导</span></label><label><input type="radio" name="mode-1" value="followUp"><span>后续</span></label></div>
+<label class="timer">定时<span class="switch"><input type="checkbox" role="switch" aria-label="第一条消息的定时开关"><span class="track"></span></span></label>
+<input class="time" type="datetime-local" aria-label="第一条消息的发送时间" disabled>
+</div>
+</article>
+<article class="card">
+<p class="message">这一轮完成后，整理修改内容和验证结果。</p>
+<div class="controls">
+<div class="mode" role="radiogroup" aria-label="第二条消息的发送类型"><label><input type="radio" name="mode-2" value="steer"><span>引导</span></label><label><input type="radio" name="mode-2" value="followUp" checked><span>后续</span></label></div>
+<label class="timer">定时<span class="switch"><input type="checkbox" role="switch" aria-label="第二条消息的定时开关" checked><span class="track"></span></span></label>
+<input class="time" type="datetime-local" aria-label="第二条消息的发送时间">
+</div>
+</article>
+<article class="card">
+<p class="message">补充检查手机上的显示效果。</p>
+<div class="controls">
+<div class="mode" role="radiogroup" aria-label="第三条消息的发送类型"><label><input type="radio" name="mode-3" value="steer"><span>引导</span></label><label><input type="radio" name="mode-3" value="followUp" checked><span>后续</span></label></div>
+<label class="timer">定时<span class="switch"><input type="checkbox" role="switch" aria-label="第三条消息的定时开关"><span class="track"></span></span></label>
+<input class="time" type="datetime-local" aria-label="第三条消息的发送时间" disabled>
+</div>
+</article>
+</div>
+<p class="note">交互 Demo · 不会实际发送</p>
+</main>
+<script>
+// 每张卡片独立切换，定时关闭时保留已选时间。
+for(const card of document.querySelectorAll('.card')){
+  const toggle=card.querySelector('[role="switch"]');
+  const time=card.querySelector('.time');
+  const date=new Date(Date.now()+30*60*1000);
+  time.value=new Date(date-date.getTimezoneOffset()*60000).toISOString().slice(0,16);
+  toggle.addEventListener('change',()=>{time.disabled=!toggle.checked});
+}
+</script>
+</body>
+</html>

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ChevronDown } from "lucide-react";
 import { useI18n } from "@/hooks/useI18n";
 import type { AskQuestionnaireAnswer, AskQuestionnaireState } from "@/hooks/useAgentSession";
@@ -19,6 +19,7 @@ export function AskQuestionnaire({
 }) {
   const { t } = useI18n();
   const [page, setPage] = useState(0);
+  const bodyRef = useRef<HTMLDivElement>(null);
   const [answers, setAnswers] = useState<Array<AskQuestionnaireAnswer | null>>(
     () => questionnaire.questions.map(() => null),
   );
@@ -31,6 +32,10 @@ export function AskQuestionnaire({
     setAnswers(questionnaire.questions.map(() => null));
   }, [questionnaire.toolCallId, questionnaire.questions]);
 
+  useLayoutEffect(() => {
+    // 切题从正文顶部开始，底部按钮与收起按钮不随正文滚动。
+    if (bodyRef.current) bodyRef.current.scrollTop = 0;
+  }, [page]);
   const setAnswer = (answer: AskQuestionnaireAnswer) => {
     setAnswers((current) => current.map((value, index) => index === page ? answer : value));
   };
@@ -90,7 +95,7 @@ export function AskQuestionnaire({
           </button>
         ) : null}
 
-        <div className="ask-questionnaire-body">
+        <div ref={bodyRef} className="ask-questionnaire-body">
           {isReview ? (
             <>
               <h2>{t("chat.askReview")}</h2>

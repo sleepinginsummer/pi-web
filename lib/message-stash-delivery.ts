@@ -32,7 +32,7 @@ async function deliver(item: ReturnType<typeof dueStashedMessages>[number]): Pro
     await checkStashTarget(project, schedule.sessionId);
     const session = await openSessionForDelivery(schedule.sessionId);
     if (!samePath(await resolveStashProject(session.cwd), project)) throw new Error("Scheduled session changed project");
-    await session.send({ type: "prompt", message: claim.draft.text, images: claim.draft.images.map((image) => ({ ...image, type: "image" })), streamingBehavior: "followUp" });
+    await session.send({ type: "prompt", message: claim.draft.text, images: claim.draft.images.map((image) => ({ ...image, type: "image" })), streamingBehavior: item.mode });
     accepted = true;
   } catch (error) {
     console.warn("[pi-web] 暂存消息定时投递失败", { id, sessionId: schedule.sessionId, error });

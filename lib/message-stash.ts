@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { withPrivateFileLock, writePrivateFileAtomicSync } from "./atomic-file";
 import { validateAgentImages } from "./image-attachments";
-import type { StashedContent, StashedMessage } from "./message-stash-protocol";
+import type { StashedContent, StashedMessage, StashSendMode } from "./message-stash-protocol";
 import { samePath } from "./paths";
 
 interface Item extends Omit<StashedMessage, "preview" | "status"> {
@@ -53,6 +53,7 @@ function content(path: string, item: Item): StashedContent {
 function view(item: Item, now = Date.now()): StashedMessage {
   return {
     id: item.id, revision: item.revision, preview: item.text.slice(0, 280), imageCount: item.imageCount,
+    mode: item.mode ?? "followUp",
     schedule: item.schedule,
     status: item.claim ? now - item.claim.at >= CLAIM_TIMEOUT_MS ? "uncertain" : "sending" : item.failed ? "failed" : "ready",
   };
@@ -107,7 +108,8 @@ export function saveStashedMessage(project: string, draft: StashedContent, ident
     const revision = randomUUID();
     const attachment = draft.images.length ? revision : undefined;
     // 编辑保存等于重新排队：上一次投递失败的标记必须清掉，否则界面还显示「失败」。
-    const next: Item = { ...item, project, id: item?.id ?? randomUUID(), revision, text: draft.text, imageCount: draft.images.length, attachment, failed: false };
+    // 缺少类型的旧消息保持后续；新消息默认引导。
+    const next: Item = { ...item, project, id: item?.id ?? randomUUID(), revision, mode: item?.mode ?? (item ? "followUp" : "steer"), text: draft.text, imageCount: draft.images.length, attachment, failed: false };
     if (item) items[items.indexOf(item)] = next;
     else items.unshift(next);
     if (attachment) writePrivateFileAtomicSync(imageFile(path, attachment), JSON.stringify(draft.images));
@@ -115,7 +117,7 @@ export function saveStashedMessage(project: string, draft: StashedContent, ident
   });
 }
 
-export function changeStashedMessage(project: string, id: unknown, revision: unknown, change: "delete" | "recover" | Item["schedule"] | null, path = pathForStore()): Promise<void> {
+export function changeStashedMessage(project: string, id: unknown, revision: unknown, change: "delete" | "recover" | StashSendMode | Item["schedule"] | null, path = pathForStore()): Promise<void> {
   return mutate(path, (items) => {
     const item = find(items, project, id, revision);
     if (item.claim && !(view(item).status === "uncertain" && (change === "recover" || change === "delete"))) {
@@ -128,13 +130,17 @@ export function changeStashedMessage(project: string, id: unknown, revision: unk
     item.revision = randomUUID();
     item.claim = undefined;
     item.failed = false;
+    if (change === "steer" || change === "followUp") {
+      item.mode = change;
+      return;
+    }
     item.schedule = change === "recover" ? undefined : change ?? undefined;
   });
 }
 
 export function dueStashedMessages(now = Date.now(), path = pathForStore()) {
-  return readIndex(path).flatMap(({ id, project, revision, schedule, claim }) => schedule && !claim && schedule.at <= now
-    ? [{ id, project, revision, schedule }] : []).sort((a, b) => a.schedule.at - b.schedule.at);
+  return readIndex(path).flatMap(({ id, project, revision, schedule, claim, mode }) => schedule && !claim && schedule.at <= now
+    ? [{ id, project, revision, schedule, mode: mode ?? "followUp" }] : []).sort((a, b) => a.schedule.at - b.schedule.at);
 }
 
 export function claimStashedMessage(project: string, id: unknown, revision: unknown, scheduled = false, path = pathForStore()) {

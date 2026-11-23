@@ -36,6 +36,10 @@ export async function POST(req: Request) {
     switch (action) {
       case "load":
         return NextResponse.json(await loadStashedContent(project, id, revision));
+      case "setMode":
+        if (body.mode !== "steer" && body.mode !== "followUp") return jsonError(400, "Invalid stash send mode");
+        await changeStashedMessage(project, id, revision, body.mode);
+        break;
       case "edit":
         return NextResponse.json(await saveStashedMessage(project, parseStashedContent(body.text, body.images), { id, revision }));
       case "claim":

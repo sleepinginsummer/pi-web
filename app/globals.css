@@ -2725,7 +2725,7 @@ span.token.table {
   border-color: var(--accent);
 }
 .chat-window {
-  --ask-max-height: min(620px, calc(100dvh - 150px));
+  --ask-max-height: min(620px, var(--ask-available-height, calc(100dvh - 150px)));
   --ask-gap: 8px;
   --ask-collapsed-height: 44px;
 }
@@ -2822,6 +2822,7 @@ span.token.table {
 .ask-questionnaire {
   display: flex;
   width: 100%;
+  min-height: 0;
   max-height: var(--ask-max-height);
   flex-direction: column;
   overflow: hidden;
@@ -2834,6 +2835,7 @@ span.token.table {
 
 .ask-questionnaire-header {
   display: flex;
+  flex-shrink: 0;
   min-width: 0;
   align-items: center;
   border-bottom: 1px solid var(--border);
@@ -2877,9 +2879,11 @@ span.token.table {
 }
 
 .ask-questionnaire-body {
+  flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   padding: 18px;
 }
 
@@ -3045,6 +3049,7 @@ span.token.table {
 
 .ask-questionnaire-actions {
   display: flex;
+  flex-shrink: 0;
   justify-content: space-between;
   gap: 12px;
   padding: 10px 12px;
@@ -3083,7 +3088,7 @@ span.token.table {
 
 @media (max-width: 640px) {
   .chat-window {
-    --ask-max-height: min(560px, calc(100dvh - 130px));
+    --ask-max-height: min(560px, var(--ask-available-height, calc(var(--app-viewport-height, 100dvh) - 130px)));
   }
 
   .ask-input-flyout {
@@ -3537,7 +3542,7 @@ span.token.table {
   inset: auto var(--stash-right, 8px) var(--stash-bottom, 8px) auto;
   margin: 0;
   padding: 0;
-  width: min(470px, calc(100vw - 16px));
+  width: min(362px, calc(100vw - 16px));
   max-width: none;
   max-height: min(440px, calc(100dvh - var(--stash-bottom, 8px) - 8px));
   overflow: hidden;
@@ -3570,16 +3575,40 @@ span.token.table {
 .message-stash-panel .stash-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 88%, #000); }
 .message-stash-panel .stash-close { border-color: transparent; }
 .message-stash-panel .stash-danger, .message-stash-panel .stash-error { color: var(--ansi-red); }
-.message-stash-list { min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 10px 12px 12px; }
-.message-stash-list > article { padding: 8px 0; }
-.message-stash-list > article + article { border-top: 1px solid var(--border); }
-.stash-preview { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; max-height: 126px; overflow: auto; }
+.message-stash-list { display: flex; flex-direction: column; gap: 10px; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 10px 12px 12px; }
+.message-stash-list > article { position: relative; padding: 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--bg-panel); }
+.stash-preview { margin: 0 0 12px; padding-inline-end: 20px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; max-height: 126px; overflow: auto; }
+.stash-card-controls { display: flex; align-items: center; gap: 8px; }
+.stash-mode { display: flex; flex: none; gap: 2px; padding: 3px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
+.stash-mode label { position: relative; cursor: pointer; }
+.stash-mode input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.stash-mode span { display: block; padding: 2px 8px; border-radius: 3px; color: var(--text-muted); font-size: 12px; white-space: nowrap; }
+.stash-mode input:checked + span { background: var(--text); color: var(--bg); }
+.stash-mode input:disabled + span { opacity: .5; cursor: default; }
+.stash-timer { display: flex; flex: none; align-items: center; gap: 5px; color: var(--text-muted); font-size: 12px; cursor: pointer; white-space: nowrap; }
+.stash-switch { position: relative; width: 32px; height: 19px; flex: none; }
+.stash-switch input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: inherit; z-index: 1; }
+.stash-switch > span { display: block; width: 32px; height: 19px; border-radius: 12px; background: var(--text-muted); }
+.stash-switch > span::after { content: ""; position: absolute; top: 3px; left: 3px; width: 13px; height: 13px; border-radius: 50%; background: white; }
+.stash-switch input:checked + span { background: var(--accent); }
+.stash-switch input:checked + span::after { transform: translateX(13px); }
+.stash-switch:has(input:disabled) { opacity: .45; cursor: default; }
+.stash-mode input:focus-visible + span, .stash-switch input:focus-visible + span, .stash-more summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.stash-time { flex: 0 1 auto; width: 142px; min-width: 0; field-sizing: content; padding: 5px 4px; font-size: 11px; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; }
+.stash-time::-webkit-datetime-edit { flex: 0 0 auto; padding: 0; }
+.stash-time::-webkit-calendar-picker-indicator { margin: 0 0 0 3px; padding: 0; }
+.stash-time:disabled { opacity: .4; cursor: not-allowed; }
+.stash-more { position: static; }
+.stash-more summary { position: absolute; top: 8px; inset-inline-end: 8px; display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 4px; color: var(--text-muted); cursor: pointer; list-style: none; }
+.stash-more summary::-webkit-details-marker { display: none; }
+.stash-more summary:hover { background: var(--bg-hover); }
+/* 更多操作在卡片内展开，避免末张卡片的菜单被滚动区域裁掉。 */
+.stash-more-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .stash-actions, .stash-images { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 7px; }
 .stash-meta, .stash-feedback, .message-stash-list > p { color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
 .stash-feedback { padding: 8px 12px 0; }
 .stash-meta { margin-top: 5px; }
-.stash-schedule { margin-top: 7px; }
-.stash-schedule input, .message-stash-list textarea {
+.message-stash-list textarea {
   padding: 6px;
   background: var(--bg);
   color: var(--text);
@@ -3604,6 +3633,13 @@ span.token.table {
 .message-stash-dialog.is-mobile::backdrop { background: #0005; }
 .message-stash-dialog.is-mobile button, .message-stash-dialog.is-mobile .stash-file { min-height: 44px; }
 .message-stash-dialog.is-mobile .stash-images button { width: 44px; }
+.message-stash-dialog.is-mobile .stash-more summary { width: 32px; height: 32px; }
+@media (max-width: 400px) {
+  .stash-card-controls { gap: 6px; }
+  .stash-mode span { padding: 2px 5px; }
+  .stash-timer { gap: 4px; font-size: 11px; }
+  .stash-time { padding: 6px 3px; font-size: 10px; }
+}
 @media (max-width: 640px) {
   .message-stash-trigger { width: 44px; height: 44px; }
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ChevronUp } from "lucide-react";
 import { useI18n } from "@/hooks/useI18n";
 import type { AskQuestionnaireAnswer, AskQuestionnaireState } from "@/hooks/useAgentSession";
@@ -33,6 +33,7 @@ interface AskInputFlyoutProps {
 export function AskInputFlyout({ ask, actions, isMobile }: AskInputFlyoutProps) {
   const { t } = useI18n();
   const activeAskId = ask?.kind === "questionnaire" ? ask.value.toolCallId : ask?.value.id ?? null;
+  const flyoutRef = useRef<HTMLDivElement>(null);
   const [collapseState, setCollapseState] = useState({ id: activeAskId, collapsed: false });
   const collapsed = collapseState.id === activeAskId && collapseState.collapsed;
   const title = ask?.kind === "questionnaire"
@@ -50,6 +51,34 @@ export function AskInputFlyout({ ask, actions, isMobile }: AskInputFlyoutProps) 
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, [expiresAt]);
+  useLayoutEffect(() => {
+    const flyout = flyoutRef.current;
+    const chat = flyout?.closest<HTMLElement>(".chat-window");
+    const anchor = flyout?.parentElement;
+    if (!activeAskId || !flyout || !chat || !anchor) return;
+    const viewport = window.visualViewport;
+    const update = () => {
+      // 浮层底边锚定输入框，顶部只能到聊天区可见边界，不能按整个屏幕估算。
+      const top = Math.max(chat.getBoundingClientRect().top, viewport?.offsetTop ?? 0);
+      const available = Math.max(0, Math.floor(flyout.getBoundingClientRect().bottom - top - 8));
+      chat.style.setProperty("--ask-available-height", `${available}px`);
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(chat);
+    observer.observe(anchor);
+    if (anchor.parentElement && anchor.parentElement !== chat) observer.observe(anchor.parentElement);
+    viewport?.addEventListener("resize", update);
+    viewport?.addEventListener("scroll", update);
+    window.addEventListener("resize", update);
+    return () => {
+      observer.disconnect();
+      viewport?.removeEventListener("resize", update);
+      viewport?.removeEventListener("scroll", update);
+      window.removeEventListener("resize", update);
+      chat.style.removeProperty("--ask-available-height");
+    };
+  }, [activeAskId, isMobile]);
   if (!activeAskId) return null;
 
   const setCollapsed = (nextCollapsed: boolean) => {
@@ -57,9 +86,9 @@ export function AskInputFlyout({ ask, actions, isMobile }: AskInputFlyoutProps) 
   };
 
   return (
-    <div className="ask-input-flyout" style={{ paddingRight: isMobile ? 16 : 52 }}>
+    <div ref={flyoutRef} className="ask-input-flyout" style={{ paddingRight: isMobile ? 16 : 52 }}>
       <div className={`ask-input-flyout-content${collapsed ? " is-collapsed" : ""}`}>
-        {collapsed ? (
+        {collapsed && (
           <button
             type="button"
             className="ask-collapsed-bar"
@@ -71,29 +100,28 @@ export function AskInputFlyout({ ask, actions, isMobile }: AskInputFlyoutProps) 
             {countdown && <span>{countdown}</span>}
             <ChevronUp size={17} aria-hidden="true" />
           </button>
-        ) : (
-          <div className="ask-expanded-content">
-            {ask?.kind === "questionnaire" ? (
-              <AskQuestionnaire
-                key={ask.value.toolCallId}
-                questionnaire={ask.value}
-                onSubmit={actions.submitQuestionnaire}
-                onCancel={actions.cancelQuestionnaire}
-                onCollapse={() => setCollapsed(true)}
-              />
-            ) : ask?.kind === "select" ? (
-              <AskDialog
-                request={ask.value}
-                remainingSeconds={remainingSeconds}
-                onSelect={actions.select}
-                onCancel={actions.cancelSelect}
-                onCustomSubmit={actions.submitCustom}
-                onStop={actions.stop}
-                onCollapse={() => setCollapsed(true)}
-              />
-            ) : null}
-          </div>
         )}
+        <div className="ask-expanded-content" hidden={collapsed}>
+          {ask?.kind === "questionnaire" ? (
+            <AskQuestionnaire
+              key={ask.value.toolCallId}
+              questionnaire={ask.value}
+              onSubmit={actions.submitQuestionnaire}
+              onCancel={actions.cancelQuestionnaire}
+              onCollapse={() => setCollapsed(true)}
+            />
+          ) : ask?.kind === "select" ? (
+            <AskDialog
+              request={ask.value}
+              remainingSeconds={remainingSeconds}
+              onSelect={actions.select}
+              onCancel={actions.cancelSelect}
+              onCustomSubmit={actions.submitCustom}
+              onStop={actions.stop}
+              onCollapse={() => setCollapsed(true)}
+            />
+          ) : null}
+        </div>
       </div>
     </div>
   );

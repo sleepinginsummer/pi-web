@@ -30,7 +30,10 @@ test("ask flyout supports collapse and preserves transcript scrolling", () => {
   assert.match(flyoutSource, /className="ask-input-flyout"/);
   assert.match(flyoutSource, /<AskQuestionnaire/);
   assert.doesNotMatch(chatWindowSource, /ask-questionnaire-backdrop/);
-  assert.match(globalStyles, /\.chat-window\s*\{[\s\S]*?--ask-max-height: min\(620px, calc\(100dvh - 150px\)\);[\s\S]*?--ask-gap: 8px;[\s\S]*?--ask-collapsed-height: 44px/);
+  const chatRule = globalStyles.slice(globalStyles.indexOf(".chat-window {"), globalStyles.indexOf(".ask-input-flyout {"));
+  assert.ok(chatRule.includes("--ask-max-height: min(620px, var(--ask-available-height,"));
+  assert.ok(chatRule.includes("--ask-gap: 8px;"));
+  assert.ok(chatRule.includes("--ask-collapsed-height: 44px"));
   assert.match(globalStyles, /\.ask-input-flyout\s*\{[\s\S]*?bottom: calc\(100% \+ var\(--ask-gap\)\);[\s\S]*?pointer-events: none/);
   assert.match(globalStyles, /\.ask-input-flyout-content\s*\{[\s\S]*?pointer-events: auto/);
   assert.match(questionnaireSource, /className="ask-collapse-button"[\s\S]*?chat\.askCollapse/);
@@ -40,7 +43,7 @@ test("ask flyout supports collapse and preserves transcript scrolling", () => {
   assert.doesNotMatch(chatWindowSource, /askCollapseState|askCollapsed/);
   assert.match(globalStyles, /\.chat-scroll-ask-reserve\s*\{[\s\S]*?padding-bottom: calc\(var\(--ask-max-height\) \+ var\(--ask-gap\)\)/);
   assert.match(globalStyles, /\.chat-window:has\(\.ask-input-flyout-content\.is-collapsed\) \.chat-scroll-ask-reserve\s*\{[\s\S]*?padding-bottom: calc\(var\(--ask-collapsed-height\) \+ var\(--ask-gap\)\)/);
-  assert.match(globalStyles, /@media \(max-width: 640px\)[\s\S]*?\.chat-window\s*\{[\s\S]*?--ask-max-height: min\(560px, calc\(100dvh - 130px\)\)/);
+  assert.ok(globalStyles.includes("--ask-max-height: min(560px, var(--ask-available-height, calc(var(--app-viewport-height, 100dvh) - 130px)))"));
   assert.match(askDialogSource, /onCollapse[\s\S]*?className=\{styles\.collapse\}/);
   assert.match(askDialogStyles, /\.card\s*\{[\s\S]*?max-height: var\(--ask-max-height\)/);
   assert.doesNotMatch(askDialogStyles, /max-height: min\(/);
