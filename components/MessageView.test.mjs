@@ -1010,3 +1010,17 @@ test("最终回答的顶层标题带大纲跳转标记，过程副本不带", as
 
   assert.doesNotMatch(renderMessage(views.answer, {}), /data-answer-heading/, "没要求时不标记");
 });
+
+test("一条消息被切成多片渲染时只有整条那一次带模型行", () => {
+  const message = {
+    role: "assistant",
+    provider: "openai",
+    model: "gpt-test",
+    content: [{ type: "text", text: "过程段落的正文" }],
+    timestamp: 1,
+  };
+  // 一轮的正文段落会按块切片渲染：同一条消息出现多次时，模型名只在整条渲染里出现一次。
+  assert.doesNotMatch(renderMessage(message, { visibleBlockLimit: 1 }), /gpt-test/);
+  assert.doesNotMatch(renderMessage(message, { visibleBlockOffset: 1, visibleBlockLimit: 1 }), /gpt-test/);
+  assert.match(renderMessage(message), /gpt-test/);
+});

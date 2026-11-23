@@ -748,11 +748,15 @@ function AssistantMessageView({
       onMouseLeave={() => setHovered(false)}
       onPointerDown={reveal.onPointerDown}
     >
-      <AssistantMessageHeader
-        modelName={message.provider ? getModelDisplayName(message.provider, message.model, modelNames) : undefined}
-        estimatedTokens={isStreaming ? Math.round(estimatedTokens) : 0}
-        tps={isStreaming ? tps : null}
-      />
+      {/* 消息被切成多片渲染时（一轮的正文段落、折叠起来的过程详情），只有覆盖整条消息的那一次
+          渲染带模型行：否则同一轮里会重复出现同一个模型名，语义上也只属于最终答复。 */}
+      {visibleBlockLimit === undefined && (
+        <AssistantMessageHeader
+          modelName={message.provider ? getModelDisplayName(message.provider, message.model, modelNames) : undefined}
+          estimatedTokens={isStreaming ? Math.round(estimatedTokens) : 0}
+          tps={isStreaming ? tps : null}
+        />
+      )}
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {/* Not keyed by the entry id: a message of this run gets one when the file is
