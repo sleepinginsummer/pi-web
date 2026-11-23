@@ -171,6 +171,13 @@ hooks/
 - Pi SDK 1.0.0–1.2.0 仍使用单 cwd 的扩展模块缓存（三个版本的缓存段逐字一致）；`scripts/patch-pi-sdk-extension-cache.mjs` 只接受 `REVIEWED_SDK_VERSIONS` 中已复核的版本，补丁保留最近八个 cwd 的工厂模块，每个会话继续创建独立 runtime。升级 SDK 时必须复核 `extensions/loader` 并更新版本集合或移除补丁，源结构或版本不符时须拒绝安装。
 - 保留 Pi SDK 原生的上下文阈值检查与自动压缩（1.0.0–1.2.0 触发条件与调用点一致，1.2.0 只是摘要输入不再包含 thinking）；升级 SDK 时须复核其压缩时机与完整上下文投影，不得重新引入已移除的 pi-web 运行中压缩补丁。
 
+### 大会话内存控制
+- 内容索引（`lib/session-content-index.ts`）是格式 5：除轮次字段外还落盘会话自有用量统计（`ownStats`，side 边界之前的继承历史不计入）、观察员开关（`observerEnabledBySession`）、会话名和首条用户消息。没有存活 wrapper 时，`/api/sessions/[id]`、`/api/sessions/stats` 和观察员只读入口都走索引，不再全量解析文件；改索引格式必须同步 `readIndexedSessionFullView` 的调用方和 `loadPersisted` 的 `format` 校验。
+- 索引内存按份数（32）与总记录数（100 000）双重上限 LRU 淘汰；会话永久删除后 `deleteSessionContentIndex` 清掉磁盘索引，孤儿索引由 `pruneOrphanSessionContentIndexes` 每 30 分钟扫一次。
+- 超过 16 KB 的 `pi-web:session-observer` 交互记录行只用前缀正则取 id/parentId/type/timestamp，不 `JSON.parse` 整段大正文；开关与设置类记录仍走完整解析。
+- 内存里同时保留的空闲 wrapper 上限 6 个（`MAX_IDLE_SESSIONS`，运行中、等待输入、有子代理、有活跃租约的会话绝不回收），空闲超时按会话文件体积缩短：≥32 MB 用 2 分钟，≥8 MB 用 5 分钟。`PI_WEB_IDLE_TIMEOUT_MS=0` 时两者都不生效。`lib/session-reader.ts` 和 `lib/session-browse-snapshot.ts` 的解析缓存同样按 32 MB 收紧。
+- 免全量解析地判断「某个 /tmp 文件是否被该会话引用」时，`lib/session-file-references.ts` 按行流式扫描会话文件、先用文件名粗筛；存活 wrapper 仍直接读内存条目。
+
 ### Session first-paint loading
 - Existing sessions load `/api/sessions/[id]/context` first and commit messages immediately. 切回已结束的会话时，只有 `/context` 验证文件版本与活动 leaf 均一致，才恢复有上限的页面内历史快照；不一致就丢弃。 `/details` (file path + projected branch tree) and `/state` use independent abort controllers and load afterward; details failures must not hide a valid context or runtime snapshot.
 - Delayed details are identity-bound to the session id so an old tree cannot pair with a new leaf. `/details` must not read entries or build context.
@@ -217,7 +224,7 @@ The top bar Shadow switch controls only the current session. `lib/shadow-session
 
 开关同时决定模型能否看到 pi-shadow-mind 自己的管理工具（`list_shadows`、`create_shadow`、`update_shadow`、`enable_shadow`、`disable_shadow`、`delete_shadow`、`get_shadow_config`、`update_shadow_config`）：`ShadowSessionSetting` 每次应用或恢复后调用 host 的 `onApplied`，wrapper 的 `syncShadowMindTools()` 按 `sourceInfo` 识别这些工具，关闭时从激活工具里移除，开启时加回；`setActiveToolSelection()` 在开关关闭时再过滤一次，所以 `set_tools`、reload、树导航都不会把它们带回来。工具可见性不单独持久化，以开关 entry 为准；扩展绑定前（`get_tools` 不触发绑定）仍显示为激活，任何 prompt 都会先等绑定。Chat only 与子代理不处理。
 
-历史开关通过 `/context` 的 `shadowMindEnabled` 返回；索引格式 4 保留整个文件最后一次有效开关，不能只读取当前页或当前分支。前端在 runtime 缺失或扩展初始化期间保留历史值、禁用交互，就绪的 runtime/SSE/用户操作优先于延迟历史响应；切换会话不得继承上一会话的开关。
+历史开关通过 `/context` 的 `shadowMindEnabled` 返回；索引格式 5 保留整个文件最后一次有效开关，不能只读取当前页或当前分支。前端在 runtime 缺失或扩展初始化期间保留历史值、禁用交互，就绪的 runtime/SSE/用户操作优先于延迟历史响应；切换会话不得继承上一会话的开关。
 
 新会话 `ensure_session` 使用两阶段创建：`create` 只返回 `runtime-created` 与真实 session id，不等待扩展审批；前端进入 `initializing`，接管 id 并连接 SSE 后，再调用 `finalize-existing` 应用 Shadow 预设及读取完整状态。只有 `ready` 才解锁模型和发送控件。扩展审批仍需用户明确确认，不得自动批准或通过全局配置绕过。切换页面后重新挂载须恢复同一个 runtime 的 SSE 和初始化请求，失败重试不得创建第二个会话。已创建但尚未发送的新会话切换模型必须先等待服务端成功，再提交选择器状态；失败保留原选择并显示错误。
 
@@ -225,6 +232,8 @@ The top bar Shadow switch controls only the current session. `lib/shadow-session
 扩展 `session_start` 可能要很久（建索引、等审批），这段等待不能押在页面请求上，否则切换页面就会放弃发送、会话也不在侧栏。`staged` 状态发送首条消息时，`useAgentSession` 只等创建 runtime，随后 `POST /api/agent/new`（`operation: "submit-first-prompt"`）立即返回；`AgentSessionWrapper.submitFirstPrompt()` 先写入会话文件，把消息放进 `parkedDuringCompaction` 作为队列行（Stop、移回、`get_state` 都复用这条路径），再在后台无期限等待绑定和初始化，完成后走普通 `send({ type: "prompt" })`，所以 MCP 准备等都照常执行。同一 wrapper 只接受一次，响应丢失后的重试不会重复发送。初始化失败时消息留在队列行并广播 `prompt_error`，不静默丢弃。发送途中已切走时调用 `onSessionCreatedInBackground`：只清理待创建状态并刷新侧栏，不把用户拉回；只有用户又回到了同目录的新会话页才进入该会话。`/api/agent/running` 的 `startingSessions` 驱动侧栏“创建会话中”。这里不能调 `set_tools`：创建时已带同样的工具集，而运行中切工具会被拒绝。
 
 ### 内置会话观察员
+
+`lib/session-observer-protocol.ts` 的 `SESSION_OBSERVER_FEATURE_ENABLED` 目前是 `false`：长时间会话里的交互记录会膨胀到上百 MB，所以入口隐藏、wrapper 不启动观察员、`observer_checklist` 扩展也不注册，协议与实现全部保留；改回 `true` 即可恢复，不要只删其中一处判断。
 
 顶栏“观察”在瀑布流左侧打开悬浮清单，与 tips 共用浮层且 tips 优先占据顶部空间。顶栏开关默认关闭，新会话可在发送首条消息前预设。模型、思考强度、检查间隔、关注重点与补充规则在独立弹窗中保存。默认每十个完成的模型步骤尝试一次独立请求，正常结束时补查剩余步骤，未完成事项按紧急、重要、普通排序，已完成事项收进底部默认折叠区。普通模式的主 AI 可以用 `observer_checklist` 查询、增删改和重排，重要程度按普通、重要、紧急显示。
 
@@ -347,7 +356,7 @@ Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `au
 - 侧栏沿用项目排序、会话 Pin、回收站和虚拟列表。共用会话选择入口负责请求滚动定位。侧聊搜索只扫描分叉边界后的正文，点结果会打开父会话和右侧聊天。Agents 条在主聊天切到家族成员时出现，也可在浏览器锁定显示。
 - 已读记录按会话写入 `pi-web-session-read-receipts.json`，沿用私有文件锁。`POST /api/sessions/[id]/read` 以服务端时间记账，现有运行轮询分发记录。只有可见、聚焦且有近期操作的页面上报。当前会话由运行转入空闲时按结束轮次上报，等到页面重新满足关注条件再补报。本地未读标记仍保留在浏览器。
 - 新会话继续先交付 runtime id 再处理扩展初始化。扩展加载错误可重放，延迟切模仍走可重试的单一任务。`!` 命令边执行边发送输出，先询问 `user_bash` 扩展，运行中的队列及附件继续由 fork 的队列协议处理。Stop 先移回尚未进入执行批次的队列，再等待 SDK 结束，避免停止时模型消费后续消息。
-- 扩展唤醒可另起一轮，聊天和索引分页共用 `getTurnAnchors` 规则。索引格式 4 只存轮次判断所需的角色、停止原因和自定义消息类型，不复制正文。
+- 扩展唤醒可另起一轮，聊天和索引分页共用 `getTurnAnchors` 规则。索引格式 5 只存轮次判断所需的角色、停止原因和自定义消息类型（外加用量、观察员开关这类元数据），不复制正文。
 - 手动压缩完成后保留输入框，通过新压缩卡片的 entryId 定位。历史缓存已收到 304 确认时直接使用该版本；侧聊搜索先查活动分支，找不到命中时走普通分支导航；目标历史窗口挂载后再滚到命中的正文块。
 ### Secret vault (pi-secret-vault extension)
 - 存储和遮蔽在扩展里，pi-web 只有界面：`lib/secret-vault.ts` 按扩展 `src/store.ts` 的磁盘约定（AES-256-GCM、record 绑定名字的 AAD、mkdir 锁、钥匙串条目）读写 `<agentDir>/pi-secret-vault/vault.json`，运行中的会话靠文件签名在下一个钩子同步。`/api/secret-vault` 仅返回元数据，按 `addedAt` 倒序、同时间按名称排序；用户点击“查看”时，`POST /api/secret-vault/reveal` 复用 proxy 登录态和同源校验，通过 `revealSecret` 解密单条原文，响应始终 `no-store`，不重复输入密码。前端一次只显示一条并支持复制，隐藏、成功修改记录或卸载面板时清除原文，不持久化到浏览器存储。`renameSecret` 仍因名字绑定密文而重新加密。改格式要两边一起改并升 `version`。
