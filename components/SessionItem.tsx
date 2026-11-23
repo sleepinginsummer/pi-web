@@ -3,6 +3,7 @@
 import { ArrowUpToLine, Pin as PinIcon } from "lucide-react";
 import { useCallback, useState, type CSSProperties, type MouseEvent, type ReactNode, type RefObject } from "react";
 import { useI18n } from "@/hooks/useI18n";
+import { formatRelativeTime } from "@/lib/i18n/format";
 import { useSessionItemMutations, type SessionDeleteMode, type SessionDeleteStep } from "@/hooks/useSessionItemMutations";
 import { useSwipeActions } from "@/hooks/useSwipeActions";
 import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
@@ -70,18 +71,6 @@ interface SessionItemProps {
   project?: { name: string; path: string };
 }
 
-function formatRelativeTime(dateStr: string): string {
-  const date = new Date(dateStr);
-  const diff = Date.now() - date.getTime();
-  const mins = Math.floor(diff / 60000);
-  const hours = Math.floor(diff / 3600000);
-  const days = Math.floor(diff / 86400000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
-  if (hours < 24) return `${hours}h ago`;
-  if (days < 7) return `${days}d ago`;
-  return date.toLocaleDateString();
-}
 
 function RenameIcon({ size }: { size: number }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" /></svg>;
@@ -244,14 +233,15 @@ function SessionStatusIndicator({ modified, isRunning, isAwaitingInput, backgrou
   nextScheduledTaskAt: number | null;
   isUnread?: boolean;
 }) {
+  const { locale } = useI18n();
   if (isRunning && isAwaitingInput) return <BackgroundCommandBadge count={backgroundCommands}><AwaitingInputSessionIndicator /></BackgroundCommandBadge>;
   if (isRunning) return <BackgroundCommandBadge count={backgroundCommands}><RunningSessionIndicator /></BackgroundCommandBadge>;
   if (backgroundCommands > 0) return <BackgroundCommandSessionIndicator count={backgroundCommands} />;
   if (isUnread) return <UnreadSessionIndicator />;
   if (nextScheduledTaskAt !== null) {
-    return <><ScheduledTaskSessionIndicator at={nextScheduledTaskAt} /><span title={modified}>{formatRelativeTime(modified)}</span></>;
+    return <><ScheduledTaskSessionIndicator at={nextScheduledTaskAt} /><span title={modified}>{formatRelativeTime(modified, locale)}</span></>;
   }
-  return <span title={modified}>{formatRelativeTime(modified)}</span>;
+  return <span title={modified}>{formatRelativeTime(modified, locale)}</span>;
 }
 
 function UnreadSessionIndicator() {
@@ -384,7 +374,7 @@ function SessionRowContent({ session, view, actions }: {
   const { isSelected, isRunning, isAwaitingInput, backgroundCommands = 0, nextScheduledTaskAt = null, isUnread, isPinned, isTopPinned, startingFirstMessage } = status;
   const { depth, hasChildren, collapsed } = tree;
   const { onToggleCollapse, onToggleTopPinned, onTogglePinned, onRename, onDelete } = actions;
-  const { t } = useI18n();
+  const { locale, t } = useI18n();
   const title = startingFirstMessage === undefined
     ? view.title
     : `${t("sidebar.creatingSession")} · ${startingFirstMessage.slice(0, 50)}`;
@@ -406,7 +396,7 @@ function SessionRowContent({ session, view, actions }: {
                   <ScheduledTaskSessionIndicator at={nextScheduledTaskAt} />
                 ) : null}
                 <span data-session-project title={project.path} style={{ color: "var(--text-muted)", fontWeight: 500, flex: "0 1 auto", minWidth: "2.5ch", overflow: "hidden", textOverflow: "ellipsis" }}>{project.name}</span>
-                <span title={session.modified} style={{ flexShrink: 0 }}>{formatRelativeTime(session.modified)}</span>
+                <span title={session.modified} style={{ flexShrink: 0 }}>{formatRelativeTime(session.modified, locale)}</span>
                 <span style={{ flexShrink: 0 }}>{t("sidebar.messagesCount", { count: session.messageCount })}</span>
               </>
             ) : (

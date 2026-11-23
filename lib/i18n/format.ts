@@ -46,6 +46,7 @@ export function translateMessage(
  */
 export function formatRelativeTime(date: Date | string, locale: Locale, now = new Date()): string {
   const target = date instanceof Date ? date : new Date(date);
+  if (Number.isNaN(target.getTime())) return "";
   const diffMs = target.getTime() - now.getTime();
   const absMs = Math.abs(diffMs);
   const [unit, divisor] = absMs < 60_000
