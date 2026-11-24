@@ -1,6 +1,6 @@
 {
   "name": "@agegr/pi-web",
-  "version": "0.17.0-merge.48",
+  "version": "0.17.0-merge.49",
   "description": "Web UI for the pi coding agent",
   "homepage": "https://github.com/agegr/pi-web#readme",
   "repository": {
@@ -48,6 +48,7 @@
     "lint": "eslint .",
     "test:terminal": "node e2e/terminal.mjs",
     "test:e2e": "node e2e/run.mjs",
+    "test:e2e:layout": "node e2e/run.mjs --layout-only",
     "test": "node scripts/run-tests.mjs",
     "release": "npm run build && npm publish --access public"
   },

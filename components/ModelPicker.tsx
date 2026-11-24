@@ -273,7 +273,7 @@ export const ModelPicker = memo(function ModelPicker({
   if (!onChange) return null;
 
   return (
-    <div ref={triggerRef} style={{ position: "relative", width: variant === "field" || isMobile ? "100%" : undefined, flex: variant === "toolbar" && isMobile ? "1 1 auto" : undefined, minWidth: 0 }}
+    <div className="model-selector" ref={triggerRef} style={{ position: "relative", width: variant === "field" || isMobile ? "100%" : undefined, flex: variant === "toolbar" && isMobile ? "1 1 auto" : undefined, minWidth: 0 }}
       onKeyDown={(event) => {
         if (event.key !== "Escape" || !open) return;
         event.preventDefault();

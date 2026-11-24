@@ -4,6 +4,7 @@ import test from "node:test";
 
 const source = await readFile(new URL("./useAgentSession.ts", import.meta.url), "utf8");
 const inputControlsSource = await readFile(new URL("../components/InputControls.tsx", import.meta.url), "utf8");
+const sessionNavigationSource = await readFile(new URL("./useSessionNavigation.ts", import.meta.url), "utf8");
 
 test("tracks detached subagents by id across parent turns", () => {
   const eventSource = source.slice(
@@ -188,7 +189,7 @@ test("uses one snapshot reconciliation path for SSE, polling, and mount recovery
   assert.equal((source.match(/const reconcileAgentState = useCallback/g) ?? []).length, 1);
   assert.match(restoreSource, /agentState\.busy && runtimeState/);
   assert.match(reconcileSource, /applyRuntimeSnapshot\(read, snapshot\.state, \{ sid, runId, requestId: usageRequestId \}\)/);
-  assert.equal((source.match(/setExtensionStatuses\(state\.extensionStatuses\)/g) ?? []).length, 1);
+  assert.equal(source.split("mergeExtensionUiSnapshot(prev, state.extensionStatuses,").length - 1, 1);
   assert.match(mountSource, /connectEvents\(session\.id\)/);
 });
 
@@ -399,7 +400,7 @@ test("临时会话升级前同步清空已提交输入，避免旧草稿在 key 
 
   assert.match(promoteSource, /opts\.chatInputRef\?\.current\?\.clearAcceptedPrompt\(\)/);
   assert.ok(
-    promoteSource.indexOf("clearAcceptedPrompt()") < promoteSource.indexOf("onSessionCreated?.({"),
+    promoteSource.indexOf("clearAcceptedPrompt()") < promoteSource.indexOf("onSessionCreated?.(createdSession,"),
     "输入必须在父级切换 draftKey 前清空",
   );
 });
@@ -477,7 +478,8 @@ test("new-session model side effects run only for the latest committed selection
     source.indexOf("const handleModelChange"),
     source.indexOf("const handleCompact"),
   );
-  assert.match(handler, /if \(!selection\.committed \|\| newSessionModelOverrideRef\.current !== selectedModel\) return/);
+  // 被另一次切换取代时才整体放弃；推荐本身没落地（期间用户手动选了档）仍要提交模型。
+  assert.match(handler, /if \(newSessionModelOverrideRef\.current !== selectedModel\) return null;/);
   assert.match(handler, /recommendedThinkingLevelRef\.current = selection\.preferredThinking/);
 });
 
@@ -597,6 +599,8 @@ test("迟到的 /state 不覆盖后来入队的队列行", async () => {
     runtimeThinkingLevelSessionRef: { current: null },
     runtimeBusySnapshotRef: { current: null },
     runtimeReadSeqRef: { current: 0 },
+    extensionStatusesRevisionRef: { current: 0 }, extensionWidgetsRevisionRef: { current: 0 },
+    extensionStatusKeyRevisionsRef: { current: new Map() }, extensionWidgetKeyRevisionsRef: { current: new Map() },
     queueStateGenerationRef: { current: 0 },
     compactionEpochRef: { current: 0 },
     lastAppliedRuntimeSeqRef: { current: 0 },
@@ -728,6 +732,8 @@ test("最新一次改档失败时，按服务端实际档位回填（并受版�
     runtimeThinkingLevelSessionRef: { current: null },
     runtimeBusySnapshotRef: { current: null },
     runtimeReadSeqRef: { current: 0 },
+    extensionStatusesRevisionRef: { current: 0 }, extensionWidgetsRevisionRef: { current: 0 },
+    extensionStatusKeyRevisionsRef: { current: new Map() }, extensionWidgetKeyRevisionsRef: { current: new Map() },
     queueStateGenerationRef: { current: 0 },
     compactionEpochRef: { current: 0 },
     lastAppliedRuntimeSeqRef: { current: 0 },
@@ -906,6 +912,8 @@ test("用户改档之后，切换之前取的那份快照不再写回旧档位",
     runtimeThinkingLevelSessionRef: { current: null },
     runtimeBusySnapshotRef: { current: null },
     runtimeReadSeqRef: { current: 0 },
+    extensionStatusesRevisionRef: { current: 0 }, extensionWidgetsRevisionRef: { current: 0 },
+    extensionStatusKeyRevisionsRef: { current: new Map() }, extensionWidgetKeyRevisionsRef: { current: new Map() },
     queueStateGenerationRef: { current: 0 },
     compactionEpochRef: { current: 0 },
     lastAppliedRuntimeSeqRef: { current: 0 },
@@ -969,6 +977,8 @@ test("建连补读说空闲后，加载完成时不会按旧预读恢复已结�
     lastAppliedQueueSeqRef: { current: 0 },
     lastAppliedThinkingSeqRef: { current: 0 },
     runtimeReadSeqRef: { current: 0 },
+    extensionStatusesRevisionRef: { current: 0 }, extensionWidgetsRevisionRef: { current: 0 },
+    extensionStatusKeyRevisionsRef: { current: new Map() }, extensionWidgetKeyRevisionsRef: { current: new Map() },
     queueStateGenerationRef: { current: 0 },
     compactionEpochRef: { current: 0 },
     thinkingChoiceRevisionRef: { current: 0 },
@@ -1109,6 +1119,7 @@ test("乱序的运行态响应：迟到的预读不会把思考强度写回旧�
   const apply = script.runInNewContext({
     sessionIdRef: { current: "s1" },
     options_placeholder: undefined,
+    extensionStatusKeyRevisionsRef: { current: new Map() }, extensionWidgetKeyRevisionsRef: { current: new Map() },
     setIsCompacting: (value) => compacting.push(value),
     setQueuedMessages() {}, updateQueuedMessages() {},
     normalizeQueuedMessages: (value) => value ?? { steering: [], followUp: [] },
@@ -1254,15 +1265,287 @@ test("a tool preset change is shown only after the server applies it", () => {
 
   // 上一次切换没落地时忽略新的点击：它只能拿到同一份旧名单，晚到的请求会覆盖前一次。
   // 连浏览器偏好都不能写——那是新建会话的来源，写了就会采用这份旧名单。
-  const guardIndex = body.indexOf("if (toolSelectionPendingRef.current) return;");
-  assert.ok(guardIndex > 0, "the re-entry guard is there");
+  // 运行、手动压缩和 `!` 命令期间服务端会拒绝 set_tools，这时同样不能写偏好。
+  const guardIndex = body.indexOf("if (toolSelectionPendingRef.current || agentRunningRef.current || bashRunningRef.current || isCompacting) return;");
+  assert.ok(guardIndex > 0, "the re-entry and busy guard is there");
   assert.ok(guardIndex < body.indexOf("setPreferredToolPreset(preset)"), "it runs before the preference is written");
   assert.match(body, /finally \{\s*toolSelectionPendingRef\.current = false;\s*setToolSelectionPending\(false\);/);
+
+  // 偏好要等服务端接受之后再写：被拒绝的切换不能变成之后新会话的默认工具。
+  const accepted = body.slice(sendIndex);
+  assert.match(accepted, /setPreferredToolPreset\(preset\);\s*\n\s*setPreferredCustomTools\(customNames\);/, "the preference follows the accepted request");
 
   // 派发之前只有一条提前设置：还没有会话时，这一档就是待创建会话要用的选择。
   const beforeSend = body.slice(0, sendIndex);
   assert.equal((beforeSend.match(/setToolPresetState\(preset\)/g) ?? []).length, 1);
-  assert.match(beforeSend, /if \(!sid\) \{[\s\S]*?setToolPresetState\(preset\);\s*return;/);
+  // 还没有会话时这一档直接生效，同时记进草稿状态（创建入口按草稿取名单，偏好只做新草稿的默认值）。
+  assert.match(beforeSend, /if \(!sid\) \{[\s\S]*?setPreferredToolPreset\(preset\);[\s\S]*?setToolPresetState\(preset\);\s*if \(newSessionCwd\) onPendingNewSessionEvent\(newSessionCwd, \{ type: "SET_TOOLS", tools: \{ preset, custom: customNames \} \}\);\s*return;/);
+});
+
+test("the read-only tool list keeps the server's tool names", () => {
+  const loader = source.slice(
+    source.indexOf("const loadTools = useCallback"),
+    source.indexOf("const promoteNewSession"),
+  );
+
+  // PowerShell 模式下 get_tools 激活的是 powershell：清单照实显示，只有推预设和标注差异时才归一成 bash。
+  assert.match(loader, /const activeNames = \[\.\.\.new Set\(tools\.filter\(\(tool\) => tool\.active\)\.map\(\(tool\) => tool\.name\)\)\];/);
+  assert.match(loader, /const names = activeNames\.map\(normalizeBuiltinToolName\)/);
+  assert.match(loader, /setActiveToolNames\(activeNames\);/);
+  // off 会话返回的就是空列表，不能因为「空」跳过写入：[] 与「拿不到名单」是两件事。
+  assert.doesNotMatch(loader, /activeNames\.length/);
+});
+
+test("re-reads the tool list when the read-only menu opens", () => {
+  // 运行中扩展、Shadow 开关会改服务端激活的工具：打开只读菜单前重读一次。
+  assert.match(source, /const refreshTools = useCallback\(\(\) => \{\s*const sid = sessionIdRef\.current;\s*if \(sid\) void loadTools\(sid\);/);
+  // 切换会话后返回的结果直接丢弃（loadTools 只在会话仍是这一个、且仍是最新一次读取时才写状态）。
+  assert.match(source, /if \(sessionIdRef\.current === sid && toolListReadSeqRef\.current === readSeq\) \{/);
+  assert.match(source, /loadTools, refreshTools, loadSlashCommands/);
+});
+
+test("only the latest tool read may commit its list", () => {
+  const loader = source.slice(
+    source.indexOf("const toolListReadSeqRef = useRef(0);"),
+    source.indexOf("const promoteNewSession"),
+  );
+
+  // 打开只读菜单会新发一次读取：较早那条可能先拿到 get_tools、卡在 get_tool_selection 上，
+  // 等新读取提交后才回来。只比会话 id 挡不住它，必须再比"自己是不是最新一次读取"。
+  assert.match(loader, /const readSeq = toolListReadSeqRef\.current \+ 1;/);
+  assert.match(loader, /toolListReadSeqRef\.current = readSeq;/);
+  assert.match(loader, /const tools = await sendAgentCommand<ToolEntry\[\]>\(sid, \{ type: "get_tools" \}\);/);
+  assert.match(loader, /const selection = await sendAgentCommand<\{ pinned: string\[\] \| null \}>\(sid, \{ type: "get_tool_selection" \}\)[\s\S]{0,80}\.catch\(\(\) => null\);/);
+  assert.match(loader, /if \(sessionIdRef\.current === sid && toolListReadSeqRef\.current === readSeq\) \{/);
+});
+
+test("草稿切模型把档位一起写进草稿状态，创建入口先等它落地", () => {
+  const handleModelChange = source.slice(
+    source.indexOf("const handleModelChange = useCallback"),
+    source.indexOf("const target = { provider, modelId };"),
+  );
+
+  // 档位要等推荐返回才定：整段切换是一个可等待的任务，创建入口按它串行。
+  assert.match(handleModelChange, /const switching = \(async \(\): Promise<DraftModelSelection \| null> => \{/);
+  // 档位解析本身出错不能把首条消息一起拒掉：创建入口等的是"已结算"的那个 promise。
+  assert.match(handleModelChange, /const settled = switching\.catch\(\(error: unknown\): DraftModelSelection \| null => \{/);
+  assert.match(handleModelChange, /await settled;/);
+  // 同 cwd 也登记一份：切走再回来重建的实例看不到这个 ref，只能按 cwd 找到这次切换。
+  // 同 cwd 也登记一份并带上版本：重建的实例看不到这个 ref，只能按 cwd 找到这次切换；
+  // 版本则让先发起、晚结算的那次认得出自己已经作废。
+  assert.match(handleModelChange, /const switchVersion = newSessionCwd \? beginDraftModelSwitch\(newSessionCwd\) : null;/);
+  assert.match(handleModelChange, /registerDraftModelSwitch\(newSessionCwd, switchVersion, settled\);/);
+  assert.match(handleModelChange, /settleDraftModelSwitch\(newSessionCwd, switchVersion\);/);
+  assert.match(handleModelChange, /draftModelSwitchRef\.current = \{ version: switchVersion \?\? 0, task: settled \};/);
+  // 提交前核对版本：同一草稿上已有更新的一轮时不再写回草稿。
+  assert.match(handleModelChange, /if \(newSessionCwd && switchVersion !== null && !isLatestDraftModelSwitch\(newSessionCwd, switchVersion\)\) \{\s*return null;/);
+  // 模型与档位在同一次草稿事件里提交：只写模型会留下「新模型 + 旧档位」的窗口，
+  // 用户正好这时切走再回来，重建的组件就会把旧档位套到新模型上。
+  assert.match(handleModelChange, /let committed: DraftModelSelection = \{ model: selectedModel, thinkingLevel: draftLevel, thinkingLevelSource \};/);
+  assert.match(handleModelChange, /let levelRevisionAtStart = startLevelRevision;/);
+  // 限幅后的值用读草稿那一刻的修订号提交：仍用发起时的旧值，reducer 会保留原始的越界手选值。
+  assert.match(handleModelChange, /levelRevisionAtStart = latestControl\.levelRevision \?\? levelRevisionAtStart;/);
+  assert.match(handleModelChange, /onPendingNewSessionEvent\(newSessionCwd, \{ type: "SET_MODEL", \.\.\.committed, levelRevisionAtStart \}\);/);
+  assert.doesNotMatch(handleModelChange, /type: "SET_THINKING_LEVEL"/);
+  // 兜底先取现有的手动覆盖/推荐档（重选同一个模型时档位不动），切到别的模型再按目标模型重算。
+  assert.match(handleModelChange, /let draftLevel: ThinkingLevelOption = thinkingLevelOverrideRef\.current \?\? recommendedThinkingLevelRef\.current \?\? "auto";/);
+  assert.match(handleModelChange, /draftLevel = parseThinkingLevelOption\(snapshot\.state\.thinkingLevel\);/);
+
+  // 首条消息与 materialize 这两个创建入口都先等它，不会拿新模型配旧档位。
+  const send = source.slice(
+    source.indexOf("const handleSend = useCallback"),
+    source.indexOf("const handleAbort = useCallback"),
+  );
+  assert.match(send, /if \(isNew\) await awaitDraftModelSwitch\(\);/);
+  const materialize = source.slice(
+    source.indexOf("const ensureNewSession"),
+    source.indexOf("const selectedModel = latest.model;", source.indexOf("const ensureNewSession")),
+  );
+  assert.match(materialize, /await awaitDraftModelSwitch\(\);/);
+  // 等待必须发生在 START 之前：状态机进入 materializing 后就不再接收档位事件。
+  const materializeFull = source.slice(
+    source.indexOf("const ensureNewSession"),
+    source.indexOf("const selectedModel = latest.model;", source.indexOf("const ensureNewSession")),
+  );
+  assert.match(materializeFull, /await awaitDraftModelSwitch\(\);[\s\S]{0,1200}type: "START"/);
+
+  // 发送时不能再用渲染闭包里的模型，也不能只用本实例的 ref：等待期间切走再回来，模型是在
+  // 另一个实例里改的，本实例的 ref 还停在旧模型上。
+  assert.match(send, /const latest = currentNewSessionSettings\(\);\s*const selectedModel = latest\.model;/);
+});
+
+test("切走再返回后，首个创建入口仍等同 cwd 登记的切模任务", () => {
+  // 重建的实例没有旧实例的 ref：只查 ref 会让首条消息绕过还在解析的切换，拿旧模型开跑。
+  assert.match(source, /const current = \(\) => newSessionCwd \? getDraftModelSwitch\(newSessionCwd\) : draftModelSwitchRef\.current;/);
+  assert.match(source, /const pending = current\(\);/);
+  assert.match(source, /await waitForDraftModelSwitchTask\(newSessionCwd, pending\)/);
+  // 采用结果前核对该轮仍是同一草稿上最新的一次：后来的选择不能被先发起的那份覆盖。
+  assert.match(source, /const latest = !newSessionCwd \|\| isLatestDraftModelSwitch\(newSessionCwd, pending\.version\);/);
+  assert.match(source, /if \(selection && latest\) \{\s*applyDraftSelection\(selection\);\s*return;/);
+  // 作废的那一份不能反复等：丢掉自己的 ref 再看下一轮（可能是别的实例登记的那次）。
+  assert.match(source, /if \(draftModelSwitchRef\.current\?\.task === pending\.task\) draftModelSwitchRef\.current = null;/);
+});
+
+test("切模期间手动选档时仍然提交目标模型", () => {
+  const handleModelChange = source.slice(
+    source.indexOf("const handleModelChange = useCallback"),
+    source.indexOf("const target = { provider, modelId };"),
+  );
+  // 选档会让推荐请求过期（committed=false），但用户已经选了模型：只提交档位不提交模型，
+  // 切走再回来就会恢复成「旧模型 + 给新模型选的档位」。
+  assert.match(handleModelChange, /if \(newSessionModelOverrideRef\.current !== selectedModel\) return null;/);
+  // 被另一轮切换取代时才整段放弃；用户手动选档只是让推荐作废，模型仍要提交。
+  assert.match(handleModelChange, /if \(selection\.status === "superseded"\) return null;/);
+  assert.match(handleModelChange, /else if \(selection\.status === "applied"\) \{/);
+  assert.match(handleModelChange, /status 为 "manual"（切模期间用户手动选了档）时保留用户刚选的那一档/);
+});
+
+test("创建参数按等完之后的草稿取，START 也排在等待之后", () => {
+  const materializeSlice = (marker) => source.slice(
+    source.indexOf("const ensureNewSession"),
+    source.indexOf(marker, source.indexOf("const ensureNewSession")),
+  );
+  const materialize = materializeSlice("const selectedModel = latest.model;");
+  // 等待期间草稿仍可改模型、档位和 Shadow 开关：等完之后按最新草稿取参数，否则运行时按旧设置初始化。
+  assert.match(materialize, /await awaitDraftModelSwitch\(\);[\s\S]{0,600}const latest = currentNewSessionSettings\(\);/);
+  assert.match(materialize, /const latestView = latest\.view;/);
+  assert.match(materialize, /const requestedShadowMindEnabled = latestView\.desiredShadowMindEnabled;/);
+  // 等的时候另一个入口可能已经建好 runtime：直接接管，不再重复创建。
+  assert.match(materialize, /if \(latestControl\.kind === "materialized" && latestView\.transportSessionId\)/);
+  // 首条消息那条路径同样按最新草稿取模型、档位和 Shadow。
+  assert.match(source, /const latest = currentNewSessionSettings\(\);\s*const selectedModel = latest\.model;\s*const selectedThinkingLevel = latest\.thinkingLevel;\s*const shadowMindEnabled = latest\.shadowMindEnabled;/);
+});
+
+test("创建参数读的是草稿的渲染无关镜像", () => {
+  const settings = source.slice(
+    source.indexOf("const currentNewSessionSettings = useCallback"),
+    source.indexOf("const promptRunIdRef = useRef"),
+  );
+  // 切走再回来会重建实例：等待期间用户是在新实例里改的设置，本实例的 props/refs 都过期了。
+  // 直接打开 `?cwd=` 时没有任何事件派发过，镜像还是空的：必须退回本实例 props，否则那次
+  // 算出来的推荐写不进草稿。
+  assert.match(source, /const currentDraftControl = useCallback\(\(\): PendingNewSessionControl => \(\s*\(newSessionCwd \? latestPendingNewSessionControl\(newSessionCwd\) : null\) \?\? pendingNewSessionControlRef\.current\s*\), \[newSessionCwd\]\);/);
+  assert.match(settings, /const control = currentDraftControl\(\);/);
+  assert.match(settings, /const model = settings\?\.model \?\? newSessionModelOverrideRef\.current \?\? null;/);
+  // 创建用的档位按真正被创建的那个模型限幅：切模等待期间界面还按切之前的模型给选项。
+  assert.match(settings, /thinkingLevel: recommendationMatches && level \? clampThinkingLevelToSupported\(level, supported\) : null,/);
+  assert.match(settings, /shadowMindEnabled: view\.desiredShadowMindEnabled,/);
+  // 归约的输入取镜像、结果同步写回：React state 的提交时机不确定，切模结算与它同在一个
+  // 微任务链里，按 state 归约可能接在还没提交的上一份后面。
+  assert.match(sessionNavigationSource, /const previous = latestPendingNewSessionControl\(cwd\) \?\? DEFAULT_PENDING_NEW_SESSION_CONTROL;/);
+  assert.match(sessionNavigationSource, /const control = reducePendingNewSession\(previous, event\);\s*mirrorPendingNewSessionControl\(cwd, control\);\s*if \(control === previous\) return;/);
+  // 建好会话 / 丢弃草稿时两边一起清，否则下一个草稿会从上一份记录继续。
+  assert.match(sessionNavigationSource, /clearPendingNewSessionControl\(session\.cwd\);/);
+});
+
+test("等待切模期间收紧的工具名单也要带进创建请求", () => {
+  // 等待期间草稿仍可改工具档位，而且可能是在切走再回来重建的实例里改的：创建入口读草稿
+  // 自己记下的那一份（同一 cwd 共享），浏览器偏好只用来初始化从没改过工具的草稿——
+  // 偏好是整台浏览器共用的一份，别的标签页改它或写入被拒时，界面和创建请求就会分叉。
+  assert.match(source, /const currentNewSessionToolNames = useCallback\(\(\) => \{\s*const control = currentDraftControl\(\);\s*const draftTools = "tools" in control \? control\.tools : null;/);
+  // 挂载时把这一刻真正显示的名单也记进草稿：不记的话，创建请求会重新读偏好，别的标签页
+  // 改偏好后界面显示一档、请求用另一档。
+  assert.match(source, /if \(!draftTools && newSessionCwd\) \{\s*onPendingNewSessionEvent\(newSessionCwd, \{ type: "SET_TOOLS", tools: \{ preset, custom \} \}\);/);
+  assert.match(source, /const preset = draftTools\?\.preset \?\? getPreferredToolPreset\(\);/);
+  assert.match(source, /const custom = draftTools \? draftTools\.custom : getPreferredCustomTools\(\);/);
+  assert.doesNotMatch(source, /newSessionToolsRef/);
+  // 选择时同时写进草稿状态：跨标签页改偏好也改不到已选好的一档。
+  assert.match(source, /onPendingNewSessionEvent\(newSessionCwd, \{ type: "SET_TOOLS", tools: \{ preset, custom: customNames \} \}\);/);
+  // 两个创建入口（materialize 和首条消息）都用这份最新名单。
+  assert.equal((source.match(/toolNames: currentNewSessionToolNames\(\),/g) ?? []).length, 2);
+  assert.doesNotMatch(source, /toolNames: customToolNames \?\? getToolNamesForPreset\(toolPreset\)/);
+});
+
+test("切模期间手选的档位要按目标模型限幅后再提交", () => {
+  const handleModelChange = source.slice(
+    source.indexOf("const handleModelChange = useCallback"),
+    source.indexOf("const target = { provider, modelId };"),
+  );
+  // 界面在等待期间还按切之前的模型给选项：A 支持 max、B 最高只到 high 时，直接保留手选值
+  // 会把 B 做不到的档位写进草稿和创建请求。
+  assert.match(handleModelChange, /const supported = thinkingLevelsRef\.current\[`\$\{selectedModel\.provider\}:\$\{selectedModel\.modelId\}`\] \?\? null;/);
+  assert.match(handleModelChange, /thinkingLevel: picked === "auto" \? picked : clampThinkingLevelToSupported\(picked, supported\),/);
+  // 创建入口再兜一次：草稿里残留的越界值也不会被发出去。
+  const settings = source.slice(
+    source.indexOf("const currentNewSessionSettings = useCallback"),
+    source.indexOf("const promptRunIdRef = useRef"),
+  );
+  assert.match(settings, /const target = model \?\? newSessionModel \?\? newSessionDefaultModel \?\? null;/);
+  assert.match(settings, /thinkingLevel: recommendationMatches && level \? clampThinkingLevelToSupported\(level, supported\) : null,/);
+});
+
+test("连续被取代的切模不能提前结束等待", () => {
+  const wait = source.slice(
+    source.indexOf("const awaitDraftModelSwitch = useCallback"),
+    source.indexOf("const currentNewSessionSettings = useCallback"),
+  );
+  // 每一轮都在结算前被下一轮取代时（包括第 21 次），循环不能提前返回：创建随后进入
+  // materializing，留下的那次选择会连同它的 SET_MODEL 一起被丢掉。所以不设轮数上限，
+  // 只要还有在途登记就继续等；同一份任务再次出现才结束。
+  assert.doesNotMatch(source, /MAX_DRAFT_SWITCH_WAITS/);
+  assert.match(wait, /let awaited: Promise<DraftModelSelection \| null> \| null = null;\s*for \(;;\) \{/);
+  assert.match(wait, /if \(!pending \|\| pending\.task === awaited\) return;/);
+});
+
+test("自动推荐档位与手动选择一起发给创建接口，但只有手动算显式选择", () => {
+  // 创建接口按这个标记决定要不要把档位写成新的全局默认：自动推荐只作用于这个会话，
+  // 写进 settings.json 的 defaultThinkingLevel 会影响之后创建的所有会话。
+  const settings = source.slice(
+    source.indexOf("const currentNewSessionSettings = useCallback"),
+    source.indexOf("const promptRunIdRef = useRef"),
+  );
+  assert.match(settings, /thinkingLevelExplicit: settings \? settings\.thinkingLevelSource === "manual" : thinkingLevelOverrideRef\.current !== null,/);
+  assert.equal((source.match(/thinkingLevelExplicit: latest\.thinkingLevelExplicit,/g) ?? []).length, 2);
+});
+
+test("手动选中的 auto 在重挂载后仍然算手动", () => {
+  // 标记从草稿恢复：新实例若从 false 起步，目录加载会把历史推荐显示出来，而草稿仍写着
+  // 手动 auto（创建请求省略档位），界面和请求又对不上。
+  assert.match(source, /const explicitAutoThinkingRef = useRef\(\s*initialPendingSettings\?\.thinkingLevel === "auto" && initialPendingSettings\.thinkingLevelSource === "manual",\s*\);/);
+  assert.match(source, /explicitAutoThinkingRef\.current = initialPendingSettings\.thinkingLevel === "auto"\s*&& initialPendingSettings\.thinkingLevelSource === "manual";/);
+});
+
+test("运行态快照要告诉调用方档位有没有被采纳", () => {
+  // 被跳过的旧档位不能再写回草稿或选择器，否则界面显示旧档位、运行时用新档位。
+  assert.match(source, /return \{ thinking: thinkingAdopted \};/);
+  assert.match(source, /const adoption = applyRuntimeSnapshot\(read, snapshot\.state\);/);
+});
+
+test("过期的默认档位加载不得清掉已切到的新模型的推荐", () => {
+  const loadModels = source.slice(
+    source.indexOf("const loadModels = useCallback"),
+    source.indexOf("const loadAllModels = useCallback"),
+  );
+  // load() 被切模型取代时返回 undefined：把它当成"没有推荐"写进去，
+  // 界面还显示着推荐档、创建请求却省掉了 thinkingLevel。
+  // `undefined` = 这次加载不适用/已被切模型取代，不能当成"没有推荐"；`null` 才是适用但没有值。
+  assert.match(loadModels, /if \(preferredThinking === undefined\) return;/);
+  assert.match(loadModels, /recommendedThinkingLevelRef\.current = preferredThinking;/);
+  // 推荐档同样要进草稿状态：它已经显示在输入框里，创建请求若省掉 thinkingLevel，服务端会按
+  // settings 的默认档位开跑，首条消息用的档位和界面显示的不是一个。
+  assert.match(loadModels, /const next = preferredThinking \?\? "auto";/);
+  assert.match(loadModels, /onPendingNewSessionEvent\(newSessionCwd, \{ type: "SET_THINKING_LEVEL", level: next, source: "auto", recommendationModel: recommendation.model \}\);/);
+  // 草稿跟着默认模型、档位是自动推荐时每次加载都重算：默认模型换人后，旧推荐属于上一个模型。
+  assert.match(loadModels, /const followsDefault = Boolean\(draftControl\)/);
+  assert.match(loadModels, /\(recommendedThinkingLevelRef\.current === null \|\| followsDefault\)/);
+  // 用户主动选的 `auto`（交给服务端定档）不该被目录刷新算出的推荐覆盖：否则输入框显示
+  // 一个创建请求不会带上的档位。
+  assert.match(loadModels, /applyPinnedThinking: !explicitAutoThinkingRef\.current/);
+  assert.match(source, /explicitAutoThinkingRef\.current = level === "auto";/);
+  assert.match(source, /if \(selection\.thinkingLevel !== "auto"\) explicitAutoThinkingRef\.current = false;/);
+});
+
+test("草稿恢复按来源把档位放回推荐值或手动覆盖", () => {
+  // 切模型解析出来的档位是"自动推荐"，用户点选的是"手动选择"：
+  // 恢复时都塞进手动覆盖，会让自动推荐在重新打开草稿后变成显式选择的档位。
+  assert.match(source, /const initialLevelIsManual = initialPendingSettings\?\.thinkingLevelSource === "manual";/);
+  assert.match(source, /initialLevelIsManual \? initialThinkingLevel : null,/);
+  assert.match(source, /initialLevelIsManual \? null : initialThinkingLevel,/);
+  assert.match(source, /onPendingNewSessionEvent\(newSessionCwd, \{ type: "SET_THINKING_LEVEL", level, source: "manual" \}\)/);
+  // 另一个实例（切走再回来重建的那个）把模型和档位一起写回草稿后，本实例没有在途切换时要跟进：
+  // 否则状态机和界面都换了模型，这个实例的创建请求还在用旧模型。
+  assert.match(source, /if \(!isNew \|\| !initialPendingSettings\?\.model \|\| draftModelSwitchRef\.current\) return;/);
+  assert.match(source, /newSessionModelOverrideRef\.current = selection\.model;/);
 });
 
 test("the external-write error path keeps the queued messages reachable", () => {

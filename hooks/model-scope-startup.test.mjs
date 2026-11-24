@@ -10,10 +10,18 @@ test("new-session startup sends only explicit browser overrides", () => {
     source.indexOf("const loadSlashCommands"),
   );
 
-  assert.match(ensureSource, /const selectedModel = newSessionModelOverrideRef\.current;/);
-  assert.doesNotMatch(ensureSource, /newSessionModel \?\? newSessionDefaultModel/);
-  assert.match(ensureSource, /const selectedThinkingLevel = thinkingLevelOverrideRef\.current \?\? recommendedThinkingLevelRef\.current;/);
+  // 创建参数按草稿的最新一份取（切走再回来时模型是在另一个实例里选的），但仍然只发显式选择：
+  // 草稿状态里的模型只由用户切模写入，档位也只在不是 "auto" 时才带上。
+  assert.match(ensureSource, /const selectedModel = latest\.model;/);
+  assert.match(ensureSource, /const selectedThinkingLevel = latest\.thinkingLevel;/);
+  assert.doesNotMatch(ensureSource, /newSessionDefaultModel/);
   assert.doesNotMatch(ensureSource, /thinkingLevel !== "auto"/);
+  const settingsSource = source.slice(
+    source.indexOf("const currentNewSessionSettings = useCallback"),
+    source.indexOf("const promptRunIdRef = useRef"),
+  );
+  assert.match(settingsSource, /const model = settings\?\.model \?\? newSessionModelOverrideRef\.current \?\? null;/);
+  assert.match(settingsSource, /settings\.thinkingLevel === "auto" \? null : settings\.thinkingLevel/);
 });
 
 test("new-session startup adopts server state only while explicit overrides are unchanged", () => {
@@ -41,7 +49,8 @@ test("model-list refresh does not overwrite a live session or explicit thinking 
     source.indexOf("const handleBuiltinSlashCommand"),
   );
 
-  assert.match(loadModelsSource, /if \(isNew && !sessionIdRef\.current\)/);
+  assert.match(loadModelsSource, /draftControl = isNew && !sessionIdRef\.current \? currentDraftControl\(\) : null;/);
+  assert.match(loadModelsSource, /if \(!isNew \|\| sessionIdRef\.current\) return;/);
   assert.match(
     loadModelsSource,
     /thinkingLevelOverrideRef\.current === null/,

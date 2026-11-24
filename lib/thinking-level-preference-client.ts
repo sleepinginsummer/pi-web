@@ -1,4 +1,4 @@
-import { isThinkingLevel, type ThinkingLevel } from "./thinking-levels";
+import { isThinkingLevel, resolvePreferredThinkingLevel, type ThinkingLevel, type ThinkingLevelOption } from "./thinking-levels";
 
 export async function fetchThinkingLevelRecommendation(
   modelId: string,
@@ -17,6 +17,23 @@ export async function fetchThinkingLevelRecommendation(
     console.error("[pi-web] 获取思考强度偏好失败:", error);
     return null;
   }
+}
+
+/**
+ * 切到这个模型时该用的档位：`enabledModels` 的 `:level` pin → 最近用过的众数 → 当前档位，
+ * 再限幅到该模型支持的列表（`supported` 未知时只做前两步）。
+ * 返回 null 表示保持不动——没有 pin/众数，而且当前档位本来就受支持。
+ */
+export async function fetchPreferredThinkingLevel(args: {
+  model: { provider: string; modelId: string };
+  pins?: Record<string, ThinkingLevel> | null;
+  supported?: readonly ThinkingLevel[] | null;
+  current?: ThinkingLevelOption | null;
+  signal?: AbortSignal;
+}): Promise<ThinkingLevel | null> {
+  const pin = args.pins?.[`${args.model.provider}/${args.model.modelId}`] ?? null;
+  const recommendation = pin ? null : await fetchThinkingLevelRecommendation(args.model.modelId, args.signal);
+  return resolvePreferredThinkingLevel({ pin, recommendation, supported: args.supported, current: args.current });
 }
 
 export async function recordThinkingLevelPreference(

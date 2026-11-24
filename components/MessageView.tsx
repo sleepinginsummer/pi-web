@@ -648,7 +648,8 @@ function AssistantMessageView({
 
   const stats = message.usage ? formatUsage(message.usage) : [];
   // A stop leads the line it ended on: "Stopped · ↑1.2k ↓567 · 12s".
-  if (aborted) stats.unshift({ text: t("chat.operationAborted") }, ...(stats.length > 0 ? [{ text: "·" }] : []));
+  // 中止标记单独用红色，和统计行其余的数字区分开。
+  if (aborted) stats.unshift({ text: t("chat.operationAborted"), color: "#ef4444" }, ...(stats.length > 0 ? [{ text: "·" }] : []));
   if (turnDurationMs !== undefined) {
     if (stats.length > 0) stats.push({ text: "·" });
     const time = formatTurnDuration(turnDurationMs);
@@ -1999,6 +2000,8 @@ interface StatPart {
   icon?: "up" | "down" | "clock";
   before?: string;
   after?: string;
+  /** 覆盖这一项的颜色（例如红色的中止标记）；不设时跟随统计行的 dim 色。 */
+  color?: string;
 }
 
 const STAT_ICON_PATHS = {
@@ -2017,7 +2020,7 @@ const HIDDEN_STAT_TEXT: CSSProperties = { fontSize: 0 };
 // Everything stays inline: a block or flex box would copy as a line break
 // between the icon and its count.
 function UsagePart({ part }: { part: StatPart }) {
-  if (!part.icon) return <span>{part.text}</span>;
+  if (!part.icon) return <span style={part.color ? { color: part.color } : undefined}>{part.text}</span>;
   return (
     <span>
       {part.before && <span style={HIDDEN_STAT_TEXT}>{part.before}</span>}

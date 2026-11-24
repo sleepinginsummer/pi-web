@@ -261,7 +261,7 @@ export function AppShell() {
     topBarRef,
   } = useTopPanel({ isMobile, onMobileOpen: closeMobileSidebar });
   const [mobileSidebarReady, setMobileSidebarReady] = useState(false);
-  const viewportHeight = useViewportHeight();
+  useViewportHeight();
   const sidebarWidthRef = useRef(SIDEBAR_DEFAULT_WIDTH);
   const rightPanelWidthRef = useRef(RIGHT_PANEL_FALLBACK_WIDTH);
   const getResponsiveRightPanelWidth = useCallback(
@@ -1229,7 +1229,6 @@ export function AppShell() {
       className="app-shell-root"
       style={{
         display: "flex",
-        height: viewportHeight ?? "100dvh",
         overflow: "hidden",
         paddingTop: "env(safe-area-inset-top)",
         paddingBottom: "env(safe-area-inset-bottom)",

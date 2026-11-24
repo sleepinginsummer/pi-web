@@ -53,19 +53,24 @@
   }
 
   /**
-   * 判断一帧是否是"连接就绪"标记。
-   * 会话流是 `data: {"type":"connected"}`，文件监听是 `event: connected`，
-   * 两者都必须缓存下来重放给后接入的订阅者，否则它们会一直等不到就绪。
+   * 一次解析就绪和不可重试的启动失败；命名 connected 与会话 data: connected 都表示就绪。
+   * 普通高频帧只解析一次，避免为了两个控制分支重复构造大对象。
    */
-  function isConnectedFrame(frame) {
-    if (frame.name === "connected") return true;
-    if (frame.name !== null) return false;
-    if (!frame.data) return false;
+  function classifyConnectionFrame(frame) {
+    if (frame.name === "connected") return "ready";
+    if (frame.name !== null || !frame.data) return null;
     try {
-      return JSON.parse(frame.data).type === "connected";
+      const event = JSON.parse(frame.data);
+      if (event.type === "connected") return "ready";
+      if (event.type === "startup_error" && event.retryable === false) return "failed";
+      return null;
     } catch {
-      return false;
+      return null;
     }
+  }
+
+  function isConnectedFrame(frame) {
+    return classifyConnectionFrame(frame) === "ready";
   }
 
   /** 重连退避：失败后翻倍，成功连接后重置。 */
@@ -74,5 +79,5 @@
     return Math.min(previousMs * 2, maxMs);
   }
 
-  scope.piWebSseBrokerCore = { createSseParser, isConnectedFrame, nextRetryDelay };
+  scope.piWebSseBrokerCore = { createSseParser, isConnectedFrame, classifyConnectionFrame, nextRetryDelay };
 })(typeof self !== "undefined" ? self : globalThis);

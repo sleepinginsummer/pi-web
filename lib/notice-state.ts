@@ -20,7 +20,7 @@ export type NoticeAction =
   | { type: "add"; notice: NoticeItem; now: number }
   | { type: "mark_expired"; now: number }
   | { type: "set_expanded"; id: string; expanded: boolean; now: number }
-  | { type: "remove"; id: string; now: number };
+  | { type: "remove"; id: string; now: number; expectedExit?: NoticeItem };
 
 export const MAX_NOTICES = 5;
 export const NOTICE_VISIBLE_MS = 5_000;
@@ -39,6 +39,18 @@ function fillPendingNotices(visible: NoticeItem[], pending: NoticeItem[], now: n
 export function noticeReducer(state: NoticeState, action: NoticeAction): NoticeState {
   switch (action.type) {
     case "add": {
+      const visibleIndex = state.visible.findIndex((notice) => notice.id === action.notice.id);
+      const pendingIndex = visibleIndex < 0 ? state.pending.findIndex((notice) => notice.id === action.notice.id) : -1;
+      const current = visibleIndex >= 0 ? state.visible[visibleIndex] : state.pending[pendingIndex];
+      if (current) {
+        // ID 标识同一条提示；更新正文时保留用户展开状态和排队位置，相同内容不续时。
+        if (current.message === action.notice.message && current.type === action.notice.type) return state;
+        const updated = { ...current, message: action.notice.message, type: action.notice.type,
+          ...(visibleIndex >= 0 ? { shownAt: action.now, exiting: false } : {}) };
+        return visibleIndex >= 0
+          ? { ...state, visible: state.visible.map((notice, index) => index === visibleIndex ? updated : notice) }
+          : { ...state, pending: state.pending.map((notice, index) => index === pendingIndex ? updated : notice) };
+      }
       if (state.visible.length >= MAX_NOTICES) {
         return { ...state, pending: [...state.pending, action.notice] };
       }
@@ -68,6 +80,11 @@ export function noticeReducer(state: NoticeState, action: NoticeAction): NoticeS
         )),
       };
     case "remove": {
+      // 旧计时器可能在更新 commit 前已入队；只有仍对应同一退场项时才能移除。
+      if (action.expectedExit !== undefined) {
+        const current = state.visible.find((notice) => notice.id === action.id);
+        if (current !== action.expectedExit || !current?.exiting) return state;
+      }
       const visible = state.visible.filter((notice) => notice.id !== action.id);
       return fillPendingNotices(visible, state.pending, action.now);
     }

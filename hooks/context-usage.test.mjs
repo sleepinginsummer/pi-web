@@ -38,6 +38,8 @@ function setup() {
     normalizeQueuedMessages: (value) => value, finishPromptWithoutStream: () => { throw new Error("busy run settled"); },
     // 运行态快照按读取坐标投影：迟到的不覆盖实时队列、压缩与思考强度。
     runtimeReadSeqRef: { current: 0 }, queueStateGenerationRef: { current: 0 },
+    extensionStatusesRevisionRef: { current: 0 }, extensionWidgetsRevisionRef: { current: 0 },
+    extensionStatusKeyRevisionsRef: { current: new Map() }, extensionWidgetKeyRevisionsRef: { current: new Map() },
     compactionEpochRef: { current: 0 }, lastAppliedRuntimeSeqRef: { current: 0 },
     lastAppliedQueueSeqRef: { current: 0 }, lastAppliedThinkingSeqRef: { current: 0 },
     runtimeThinkingLevelSessionRef: { current: null }, thinkingChoiceRevisionRef: { current: 0 },

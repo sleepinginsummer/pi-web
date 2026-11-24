@@ -17,6 +17,7 @@
  *                  { type: "event", url, name, data }
  *                  { type: "error", url }   上游断开/重连中（订阅仍然有效）
  *                  { type: "closed", url }  上游被拒绝（404/401）或无法流式读取
+ *                  { type: "failed", url }  不可重试的启动失败（详情由前一条 event 交付）
  *
  * 语义要点：后接入的订阅者会先收到缓存的"连接就绪"帧（会话流是 data:{"type":"connected"}，
  * 文件监听是 event: connected），因此现有代码里"等到 connected 才认为可用"的门控保持不变。
@@ -24,7 +25,7 @@
 /* global piWebSseBrokerCore, fetch, AbortController, TextDecoder */
 importScripts("./sse-broker-core.js");
 
-const { createSseParser, isConnectedFrame, nextRetryDelay } = piWebSseBrokerCore;
+const { createSseParser, classifyConnectionFrame, nextRetryDelay } = piWebSseBrokerCore;
 
 const RETRY_BASE_MS = 1000;
 const RETRY_MAX_MS = 15000;
@@ -147,8 +148,20 @@ function eachSubscriber(state, send) {
 }
 
 function deliver(state, frame) {
-  if (isConnectedFrame(frame)) state.connectedFrame = frame;
+  if (!isCurrent(state)) return;
+  // 每帧只解析一次控制类型，普通工具/正文大载荷不重复 JSON.parse。
+  const connectionState = classifyConnectionFrame(frame);
+  if (connectionState === "ready") {
+    state.connectedFrame = frame;
+    state.retryMs = 0;
+  }
   eachSubscriber(state, { type: "event", url: state.url, name: frame.name, data: frame.data });
+  if (connectionState === "failed") {
+    // 先传详情，再终止订阅；独立消息类型让旧客户端也不会误走 closed 的直连降级。
+    eachSubscriber(state, { type: "failed", url: state.url });
+    dropUpstream(state);
+    regrantLeases();
+  }
 }
 
 /** 所有权校验：await 之后 state 可能已被暂停/退订替换，旧回调不得再动这个 URL 的状态。 */
@@ -225,7 +238,7 @@ async function connectUpstream(state) {
       return;
     }
 
-    state.retryMs = 0;
+    // HTTP 200 只是传输打开；只有 connected 才能重置启动失败的退避。
     setPhase(state, "open");
     // 新连接意味着服务端会再按连接重放一次待处理状态：现有订阅者不需要额外补，
     // 这条连接之后接入的窗口才需要自己请求重放。
@@ -242,6 +255,7 @@ async function connectUpstream(state) {
       }
       if (done) break;
       if (value) parser.push(decoder.decode(value, { stream: true }));
+      if (!isCurrent(state)) return;
     }
     // 服务端正常结束了这条流（例如会话被回收）：通知并重连。
     eachSubscriber(state, { type: "error", url: state.url });

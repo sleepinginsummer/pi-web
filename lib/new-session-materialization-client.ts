@@ -59,6 +59,9 @@ type NewSessionMaterializationConfig = {
   shadowMindEnabled: boolean;
   model?: NewSessionModel;
   thinkingLevel?: unknown;
+  /** `thinkingLevel` 是用户显式选的（false = 自动推荐，只作用于这个会话；缺省保留旧客户端的显式选择语义）。 */
+  thinkingLevelExplicit?: boolean;
+  thinkingLevelModel?: NewSessionModel;
   fastEnabled?: boolean;
 };
 
@@ -96,6 +99,8 @@ async function requestNewSessionMaterialization(
         ...(request.shadowMindEnabled ? { shadowMindEnabled: true } : {}),
         ...(request.model ? { provider: request.model.provider, modelId: request.model.modelId } : {}),
         ...(request.thinkingLevel ? { thinkingLevel: request.thinkingLevel } : {}),
+        ...(request.thinkingLevelExplicit === false ? { thinkingLevelExplicit: false } : {}),
+        ...(request.thinkingLevelModel ? { thinkingLevelModel: request.thinkingLevelModel } : {}),
         ...(request.fastEnabled ? { fastEnabled: true } : {}),
       }),
     });

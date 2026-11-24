@@ -14,6 +14,16 @@ test("auto 通过省略 thinkingLevel 字段表达", () => {
   assert.match(source, /\.\.\.\(explicitThinkingLevel \? \{ thinkingLevel: explicitThinkingLevel \} : \{\}\)/);
 });
 
+test("自动推荐档位只作用于这个会话，不当成新的全局默认", () => {
+  // 客户端在档位来自历史推荐时带 thinkingLevelExplicit: false：会话按它开跑，但不写回
+  // settings.json 的 defaultThinkingLevel（那会影响之后创建的所有会话）。
+  assert.match(source, /thinkingLevelExplicit !== undefined && typeof thinkingLevelExplicit !== "boolean"/);
+  assert.match(source, /\.\.\.\(thinkingLevelExplicit === false \? \{ thinkingLevelExplicit: false \} : \{\}\)/);
+  assert.ok(source.includes('typeof thinkingLevelModel.provider !== "string"'));
+  assert.ok(source.includes('typeof thinkingLevelModel.modelId !== "string"'));
+  assert.ok(source.includes('thinkingLevelModel: recommendationModel'));
+});
+
 test("新会话仅在显式打开时初始化 Shadow，失败时返回同一 runtime", () => {
   assert.match(source, /if \(shadowMindEnabled === true\)/);
   assert.match(source, /session\.enableShadowAtStartup\(\)/);

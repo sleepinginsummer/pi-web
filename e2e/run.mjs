@@ -16,6 +16,7 @@ import { checkComposerFocus } from "./composer-focus.mjs";
 import { checkCodeBackground } from "./code-background.mjs";
 import { checkModelDiscovery } from "./model-discovery.mjs";
 import { checkModelContext } from "./model-context.mjs";
+import { checkResponsiveLayout } from "./responsive-layout.mjs";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const mode = process.env.E2E_SERVER_MODE || "dev";
@@ -29,6 +30,8 @@ const sessionDir = join(agentDir, "sessions", "e2e");
 mkdirSync(project);
 const previewFile = join(project, "preview.html");
 writeFileSync(previewFile, filePanelFixture);
+mkdirSync(join(project, "src"));
+writeFileSync(join(project, "src", "layout-example.ts"), "export const layoutExample = true;\n");
 mkdirSync(sessionDir, { recursive: true });
 const timestamp = "2026-08-23T00:00:00.000Z";
 const LONG = "e2e-long-session";
@@ -265,7 +268,7 @@ try {
     await api(`/api/sessions/${LONG}/state`);
   }
   browser = await chromium.launch();
-  for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
+  for (const viewport of (process.argv.includes("--layout-only") ? [] : [{ width: 1280, height: 800 }, { width: 390, height: 844 }])) {
     context = await browser.newContext({ viewport, locale: "en-US" });
     await context.tracing.start({ screenshots: true, snapshots: true });
     page = await context.newPage();
@@ -694,6 +697,7 @@ try {
     context = undefined;
     page = undefined;
   }
+  await checkResponsiveLayout(browser, { base, agentDir, project, artifacts });
 } catch (error) {
   console.error(error);
   process.exitCode = 1;

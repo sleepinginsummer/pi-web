@@ -20,6 +20,7 @@ import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
 import { cacheSessionPath, catalogFirstMessage, getLatestModelChange, invalidateSessionListCache, invalidateSessionPathCache, resolveSessionPath } from "./session-reader";
 import { SessionDiskInspector, type SessionDiskFreshness, type SessionSelfAuthoredRewrite } from "./session-disk-freshness";
 import { isolateSessionEntryPersistence } from "./session-message-persistence";
+import { installSessionCompactionWriteGuard, withSessionReloadWriteGuard } from "./session-reload-write-guard";
 import { canRunWithExternalSessionChange } from "./session-write-policy";
 import { isShadowMindSource, restoreShadowSessionSettingSafely, ShadowSessionSetting } from "./shadow-session-setting";
 import { parseShadowMindToggleCommand, SHADOW_MIND_SESSION_STATE } from "./shadow-session-protocol";
@@ -30,6 +31,7 @@ import { ObserverContextOverflow, observerModelTools, SessionObserver } from "./
 import { createObserverChecklistExtension } from "./observer-checklist-extension";
 import { isObserverFocusPreset, isObserverInterval, normalizeObserverFocusNote, SESSION_OBSERVER_ENTRY, SESSION_OBSERVER_FEATURE_ENABLED, type ObserverInteraction, type StoredObserverInteraction } from "./session-observer-protocol";
 import { isThinkingLevel } from "./thinking-levels";
+import { readThinkingLevelRecommendation } from "./thinking-level-preferences";
 import { isBlockingExtensionUiRequest } from "./extension-ui-queue";
 import { createDevServerExtension } from "./dev-server-extension";
 import { isDevServersEnabled } from "./dev-server-settings";
@@ -50,6 +52,9 @@ import { llamaCppExtension } from "./pi-sdk-internals";
 import { computeLiveSessionTotalActiveMs } from "./session-timing";
 import { getProjectTrustStatus, projectTrustReloadOptions } from "./project-trust";
 import { persistExplicitStartupPreferences } from "./startup-preferences";
+import { resolveStartupThinkingRecommendation } from "./startup-thinking-recommendation";
+import { withModelAuthWriteGuard } from "./model-auth-write-guard";
+import { isModelRuntimeReloadConflict } from "./model-runtime-reload-conflict";
 import { hasActiveSessionLivenessProvider } from "./session-liveness";
 import { registerLiveSessionInfoWriter } from "./session-info-writer";
 import { compactNotificationText, getAssistantNotificationPreview, NOTIFICATION_TITLE_CHARS } from "./notification-text";
@@ -387,6 +392,12 @@ export interface RpcSessionStartOptions {
   initialModel?: { provider: string; modelId: string };
   allowInitialModelFallback?: boolean;
   thinkingLevel?: ThinkingLevel;
+  /**
+   * `thinkingLevel` 是不是用户显式选的。自动推荐（历史众数）也用于这个会话，但不能当成
+   * 新的全局默认档位写回 settings.json——那会影响之后创建的所有会话。
+   */
+  thinkingLevelExplicit?: boolean;
+  thinkingLevelModel?: { provider: string; modelId: string };
   fastEnabled?: boolean;
   observerEnabled?: boolean;
 }
@@ -611,6 +622,8 @@ export class AgentSessionWrapper {
   private observerInstance?: SessionObserver;
   private fastRuntimeSnapshot: FastRuntimeSnapshot;
   private fastRuntimeGeneration = 0;
+  private runtimeReloadsInProgress = 0;
+  private runtimeReloadQueue: Promise<void> = Promise.resolve();
   private readonly exactSystemPrompt?: () => string;
   private readonly chatOnly: boolean;
   private sessionShutdownEmitted = false;
@@ -693,13 +706,52 @@ export class AgentSessionWrapper {
       entries: sessionEntries,
       currentModel: () => this.inner.model,
       runtimeSnapshot: () => this.fastRuntimeSnapshot,
-      setModel: (model) => this.inner.setModel(model),
+      isReloading: () => this.runtimeReloadsInProgress > 0,
+      captureRuntime: () => {
+        const state = this.inner.agent.state;
+        if (!state) throw new Error("无法捕获会话模型状态");
+        const model = this.inner.model;
+        const thinkingLevel = state.thinkingLevel;
+        return () => {
+          // 只恢复 Agent 的内存引用，不调 SDK setter，不向已冲突的文件追加任何记录。
+          state.model = model;
+          state.thinkingLevel = thinkingLevel;
+        };
+      },
+      prepareSameModel: async (model) => {
+        const state = this.inner.agent.state;
+        const current = this.inner.model;
+        if (!state || !current || current.provider !== model.provider || current.id !== model.id) {
+          throw new Error("Fast 应用的模型身份已变化");
+        }
+        const runtime = this.inner.modelRuntime as ModelRuntime;
+        if (!(await runtime.checkAuth(model.provider))) throw new Error(`No API key for ${model.provider}/${model.id}`);
+        const validate = () => {
+          this.assertModelPreferenceWritable();
+          if (this.inner.model !== current) throw new Error("Fast 鉴权期间模型已变化");
+        };
+        validate();
+        // 调用方从 await 恢复后再次 validate，校验到状态落盘及模型提交之间不再让出执行权。
+        return { validate, commit: () => { state.model = model; } };
+      },
+      setModel: async (model, beforeWrite) => {
+        // 真正切换模型身份时仍沿用 SDK 的选模与定档规则；同身份 Fast 走 prepareSameModel。
+        await withModelAuthWriteGuard(
+          this.inner.modelRuntime as ModelRuntime,
+          () => this.assertModelPreferenceWritable(),
+          () => this.inner.setModel(model),
+          beforeWrite,
+        );
+        this.assertModelPreferenceWritable();
+      },
       appendState: (enabled) => {
+        this.assertModelPreferenceWritable();
         const entryId = this.inner.sessionManager.appendCustomEntry(FAST_SESSION_STATE, { enabled });
         const entry = this.inner.sessionManager.getEntry(entryId);
         if (entry) this.emit({ type: "entry_appended", entry });
       },
     });
+    installSessionCompactionWriteGuard(this.inner.sessionManager, () => this.assertModelPreferenceWritable());
   }
 
   get sessionObserver(): SessionObserver {
@@ -818,9 +870,63 @@ export class AgentSessionWrapper {
   }
 
   private async reloadRuntime(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
-    const snapshot = await readModelsConfigSnapshot();
-    await this.inner.reload(options);
-    this.installFastRuntimeSnapshot(snapshot.fastModels, snapshot.generation);
+    // 先标记再 await：安装快照的微任务可能排在鉴权检查和 SDK 写入之间。
+    this.runtimeReloadsInProgress += 1;
+    const task = this.runtimeReloadQueue.then(async () => {
+      // 快照读取也必须排队，否则较早读取的能力配置可能在较晚完成时覆盖新版本。
+      const snapshot = await readModelsConfigSnapshot();
+      // 排队和配置读取都可能跨过外部写入；拒绝失效任务后才能清理 UI 或执行 session_start。
+      this.assertModelPreferenceWritable();
+      this.syncProjectTrust();
+      const oldRunner = this.inner.extensionRunner;
+      let oldComponentsCleared = false;
+      const clearOldComponents = () => {
+        oldComponentsCleared = true;
+        this.resetExtensionWidgetsForReload();
+        // 组件 dispose 也可能设置状态，因此释放组件后再逐项广播状态删除。
+        for (const key of [...this.extensionStatuses.keys()]) this.setExtensionStatus(key, undefined);
+      };
+      try {
+        await withSessionReloadWriteGuard(
+          this.inner.sessionManager,
+          () => this.assertModelPreferenceWritable(),
+          () => this.inner.reload({
+            ...options,
+            beforeSessionStart: async () => {
+              // 旧 runner 已失效，即使磁盘冲突也先释放其关闭钩子留下的组件。
+              clearOldComponents();
+              this.assertModelPreferenceWritable();
+              await options?.beforeSessionStart?.();
+            },
+          }),
+        );
+      } catch (error) {
+        if (!oldComponentsCleared && oldRunner?.createCommandContext) {
+          try {
+            // SDK 的公开上下文 getter 会拒绝访问已失效的 runner。
+            void oldRunner.createCommandContext().hasUI;
+          } catch {
+            // 资源加载可能在启动前回调之前失败；此时旧上下文失效才补做清理。
+            clearOldComponents();
+          }
+        }
+        throw error;
+      }
+      this.installFastRuntimeSnapshot(snapshot.fastModels, snapshot.generation);
+    });
+    this.runtimeReloadQueue = task.then(() => undefined, () => undefined);
+    try {
+      await task;
+    } finally {
+      this.runtimeReloadsInProgress -= 1;
+    }
+  }
+
+  private async waitForRuntimeReloads(): Promise<void> {
+    // 等待期间不持有模型偏好队列，reload 后的恢复任务和用户手动选择都能继续执行。
+    do {
+      await this.runtimeReloadQueue;
+    } while (this.runtimeReloadsInProgress > 0);
   }
 
   get sessionId(): string {
@@ -1753,16 +1859,29 @@ export class AgentSessionWrapper {
     if (this.startupModelSwitch || !this.startupModelPreferences) return;
     const preferences = this.startupModelPreferences;
     this.startupModelSwitchError = null;
-    const tracked = this.whenExtensionsBound().then(() => this.enqueueModelPreference(async () => {
-      if (!this.isAlive() || preferences.modelRevision !== this.modelChoiceRevision) return;
-      if (this.isRunning()) throw new Error(`Cannot initialize ${preferences.provider}/${preferences.modelId} while the session is running`);
-      await this.selectRuntimeModel(preferences.provider, preferences.modelId);
-      // 模型仍按启动目标恢复；较新的手动强度要在模型应用其默认强度后重新应用。
-      const level = preferences.thinkingRevision === this.thinkingChoiceRevision
-        ? preferences.thinkingLevel
-        : this.manualThinkingLevel;
-      if (level) this.applyThinkingLevel(level);
-    })).catch((error: unknown) => {
+    const tracked = this.whenExtensionsBound().then(async () => {
+      while (this.isAlive() && preferences.modelRevision === this.modelChoiceRevision) {
+        try {
+          await this.enqueueModelPreference(async () => {
+            if (!this.isAlive() || preferences.modelRevision !== this.modelChoiceRevision) return;
+            if (this.isRunning()) throw new Error(`Cannot initialize ${preferences.provider}/${preferences.modelId} while the session is running`);
+            await this.selectRuntimeModel(preferences.provider, preferences.modelId);
+            const level = preferences.thinkingRevision === this.thinkingChoiceRevision
+              ? preferences.thinkingLevel
+              : this.manualThinkingLevel;
+            if (level) this.applyThinkingLevel(level);
+          });
+          return;
+        } catch (error) {
+          if (!isModelRuntimeReloadConflict(error)) throw error;
+          // 临时重载冲突不写入永久启动错误；原 Promise 保持等待，重载完成后再按版本复核目标。
+          console.info("[pi-web] 启动选模等待重载后重试", {
+            sessionId: this.sessionId, provider: preferences.provider, modelId: preferences.modelId,
+          });
+          await this.waitForRuntimeReloads();
+        }
+      }
+    }).catch((error: unknown) => {
       // 手动选模已成功时，旧任务即使随后失败，也不能把错误写回当前有效选择。
       if (!this.isAlive() || preferences.modelRevision !== this.modelChoiceRevision) return;
       this.startupModelSwitchError = error;
@@ -1807,6 +1926,7 @@ export class AgentSessionWrapper {
       providers: [provider],
       signal: AbortSignal.timeout(MODEL_REFRESH_TIMEOUT_MS),
     }).catch(() => undefined);
+    this.fastSessionSetting.assertSelectionReady();
     const model = this.inner.modelRuntime.getModel(provider, modelId);
     if (!model) {
       throw this.chatOnly && findDeferredModel(this.inner.modelRuntime as ModelRuntime, provider, modelId)
@@ -1819,12 +1939,33 @@ export class AgentSessionWrapper {
     if (isDeepStrictEqual(previous, model)) return { id: model.id, provider: model.provider };
     const sameId = previous?.provider === model.provider && previous.id === model.id;
     const thinkingLevel = this.inner.agent.state?.thinkingLevel;
-    await this.fastSessionSetting.selectModel(model);
-    // A reselect to apply an edit is not a new model choice: keep the level (clamped by the SDK).
-    if (sameId && thinkingLevel) this.inner.setThinkingLevel(thinkingLevel);
+    await this.fastSessionSetting.selectModel(model, sameId ? {
+      expectedModel: previous,
+      afterSameModelCommit: () => {
+        // 在同步提交阶段读取最新档位；鉴权等待中的扩展改档也必须保留。
+        // SDK 先改内存再写记录，失败由同一提交范围恢复模型及档位。
+        const level = this.inner.agent.state?.thinkingLevel;
+        if (level) this.inner.setThinkingLevel(level);
+      },
+    } : undefined);
+    if (!sameId) this.applyModelDefaultThinking(provider, model.id, thinkingLevel);
     updateCachedDefaultModel(this.cwd, { provider: model.provider, modelId: model.id });
     invalidateSessionListCache();
     return { id: model.id, provider: model.provider };
+  }
+
+  /**
+   * 切到另一个模型后落一次思考强度：settings.json 里给这个模型写死的档位优先（SDK 已经应用），
+   * 其次 `enabledModels` 的 `:level` pin、这个模型最近用过的众数，都没有就沿用切换前的档位。
+   * 实际档位由 SDK 按目标模型能力限幅。
+   */
+  private applyModelDefaultThinking(provider: string, modelId: string, previousLevel: string | undefined): void {
+    if (this.inner.settingsManager.getModelThinkingLevel(provider, modelId)) return;
+    const pin = this.inner.scopedModels?.find(
+      (scoped) => scoped.model.provider === provider && scoped.model.id === modelId,
+    )?.thinkingLevel;
+    const level = pin ?? readThinkingLevelRecommendation(modelId) ?? previousLevel;
+    if (level) this.inner.setThinkingLevel(level);
   }
 
   private applyThinkingLevel(level: string): void {
@@ -1946,7 +2087,7 @@ export class AgentSessionWrapper {
         this.inner.extensionRunner.setUIContext?.(uiContext, "rpc");
       }
       await this.restoreShadowSessionSetting();
-      await this.fastSessionSetting.restoreAfterRuntimeReset();
+      await this.enqueueModelPreference(() => this.fastSessionSetting.restoreAfterRuntimeReset());
       this.extensionsBound = true;
       console.log(`[pi-web] session_start dispatched to extensions for session ${this.inner.sessionId}`);
       // 第二阶段只把绑定状态交给前端，不等它结束；完成时用事件解锁发送。
@@ -2977,8 +3118,12 @@ export class AgentSessionWrapper {
       }
 
       case "set_fast_enabled": {
-        const enabled = await this.fastSessionSetting.setEnabled(command.enabled === true);
-        return { enabled, available: this.fastSessionSetting.available };
+        return this.enqueueModelPreference(async () => {
+          // 入队后可能等过鉴权/模型刷新；出队时再次验证，不能沿外部已改写的旧分支追加。
+          this.assertModelPreferenceWritable();
+          const enabled = await this.fastSessionSetting.setEnabled(command.enabled === true);
+          return { enabled, available: this.fastSessionSetting.available };
+        });
       }
 
       case "compact": {
@@ -3106,9 +3251,6 @@ export class AgentSessionWrapper {
           this.extensionUiAbortController = new AbortController();
         }
         await this.waitForExtensionsBound();
-        this.extensionStatuses.clear();
-        this.resetExtensionWidgetsForReload();
-        this.syncProjectTrust();
         const activeToolNames = this.inner.getActiveToolNames();
         await this.reloadRuntime();
         this.reportReloadIssues();
@@ -3119,7 +3261,7 @@ export class AgentSessionWrapper {
           this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "rpc");
         }
         await this.restoreShadowSessionSetting();
-        await this.fastSessionSetting.restoreAfterRuntimeReset();
+        await this.enqueueModelPreference(() => this.fastSessionSetting.restoreAfterRuntimeReset());
         invalidateModelsCache(this.cwd);
         // /reload 会让编辑过的扩展生效；provider 列表使用的 runtime 一并失效。
         invalidateModelRuntimeWithExtensions();
@@ -3420,6 +3562,18 @@ export class AgentSessionWrapper {
     }
   }
 
+  private setExtensionStatus(key: string, text: string | undefined): void {
+    if (text === undefined) this.extensionStatuses.delete(key);
+    else this.extensionStatuses.set(key, text);
+    this.emit({
+      type: "extension_ui_request",
+      id: randomUUID(),
+      method: "setStatus",
+      statusKey: key,
+      statusText: text,
+    } as ExtensionUiRequest as AgentEvent);
+  }
+
   private emitExtensionWidgetClear(key: string): void {
     this.emit({
       type: "extension_ui_request",
@@ -3454,11 +3608,8 @@ export class AgentSessionWrapper {
   private resetExtensionWidgetsForReload(): void {
     this.extensionWidgetsResetting = true;
     try {
-      const factoryKeys = [...this.activeExtensionWidgets.keys()];
-      for (const key of factoryKeys) this.clearExtensionWidget(key);
-      // Keep the existing array-widget reload behavior: snapshots are reset and
-      // the next extension session_start repopulates them.
-      this.extensionWidgets.clear();
+      // 所有 widget 均广播现有删除事件，失败重载的客户端不能依赖成功后的快照刷新。
+      this.clearExtensionWidgets(true);
     } finally {
       this.extensionWidgetsResetting = false;
     }
@@ -3873,17 +4024,7 @@ export class AgentSessionWrapper {
         } as ExtensionUiRequest as AgentEvent);
       },
       onTerminalInput: () => () => {},
-      setStatus: (key, text) => {
-        if (text === undefined) this.extensionStatuses.delete(key);
-        else this.extensionStatuses.set(key, text);
-        this.emit({
-          type: "extension_ui_request",
-          id: randomUUID(),
-          method: "setStatus",
-          statusKey: key,
-          statusText: text,
-        } as ExtensionUiRequest as AgentEvent);
-      },
+      setStatus: (key, text) => this.setExtensionStatus(key, text),
       setWorkingMessage: () => {},
       setWorkingVisible: () => {},
       setWorkingIndicator: () => {},
@@ -3987,15 +4128,12 @@ export class AgentSessionWrapper {
           } as ExtensionUiRequest as AgentEvent);
           return;
         }
-        this.extensionStatuses.clear();
-        this.resetExtensionWidgetsForReload();
-        this.syncProjectTrust();
         await this.reloadRuntime({
           beforeSessionStart: () => {
             this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "rpc");
           },
         });
-        await this.fastSessionSetting.restoreAfterRuntimeReset();
+        await this.enqueueModelPreference(() => this.fastSessionSetting.restoreAfterRuntimeReset());
         // 与 reload 命令一致：provider 列表使用的 runtime 一并失效。
         invalidateModelRuntimeWithExtensions();
       },
@@ -4863,7 +5001,8 @@ export async function startRpcSession(
   cwd: string | undefined,
   options: RpcSessionStartOptions = {},
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
-  const { initialModel, allowInitialModelFallback, thinkingLevel, fastEnabled } = options;
+  const { initialModel, allowInitialModelFallback, thinkingLevel: requestedThinkingLevel, thinkingLevelExplicit = true, thinkingLevelModel, fastEnabled } = options;
+  let thinkingLevel = requestedThinkingLevel;
   const requestedToolNames = options.toolNames === undefined
     ? undefined
     : validateSessionToolSelection(options.toolNames);
@@ -5143,7 +5282,7 @@ export async function startRpcSession(
       : selectInitialModelScope(scope, {
         ...(effectiveInitialModel ? { requestedModel: effectiveInitialModel } : {}),
         ...(defaultModel ? { defaultModel } : {}),
-        ...(thinkingLevel ? { thinkingLevel } : {}),
+        ...(thinkingLevel && !thinkingLevelModel ? { thinkingLevel } : {}),
         availableModels,
       });
     const startupModel = restoredModel && services.modelRuntime.hasConfiguredAuth(restoredModel.provider)
@@ -5167,6 +5306,11 @@ export async function startRpcSession(
         ? findDeferredModel(services.modelRuntime, savedModel.provider, savedModel.modelId)
         : undefined
       : deferredInitialModel ?? deferredStartup?.model;
+    // 已知启动模型（含延迟 provider 目标）在 SDK 创建前核对，直接以构造参数定档，
+    // 避免在 session_start/UI 绑定前额外触发 thinking_level_select。仅未知的 SDK 兜底留到创建后。
+    thinkingLevel = thinkingLevelModel
+      ? resolveStartupThinkingRecommendation(requestedThinkingLevel, thinkingLevelModel, deferredModel ?? startupModel)
+      : requestedThinkingLevel;
     // set_model applies the model's modelThinkingLevels entry, else defaultThinkingLevel, else keeps
     // the current level: the stand-in model's (clamped, or its own pin). Apply what pi's
     // createAgentSession gives this model at startup instead: a resumed session's last saved level,
@@ -5225,6 +5369,11 @@ export async function startRpcSession(
         ? subagentToolOptions(subagentResources)
         : toolsOption !== undefined ? { tools: toolsOption } : {}),
     });
+    if (!hasExistingMessages && !deferredModel && !startupModel && thinkingLevelModel) {
+      // 无默认模型/作用域时由 SDK 兜底选模，不能拿空 startupModel 提前否决正确的推荐。
+      thinkingLevel = resolveStartupThinkingRecommendation(requestedThinkingLevel, thinkingLevelModel, inner.model);
+      if (thinkingLevel && inner.thinkingLevel !== thinkingLevel) inner.setThinkingLevel(thinkingLevel);
+    }
     startupTimings.sessionCreate = elapsedMs(stageStartedAt);
 
     startupStage = "preferences";
@@ -5233,7 +5382,8 @@ export async function startRpcSession(
       services.settingsManager,
       {
         ...(effectiveInitialModel ? { model: effectiveInitialModel } : {}),
-        ...(thinkingLevel ? { thinkingLevel } : {}),
+        // 只有显式选择才更新全局默认档位；自动推荐只作用于这个会话。
+        ...(thinkingLevel && thinkingLevelExplicit ? { thinkingLevel } : {}),
       },
       {
         ...(inner.model

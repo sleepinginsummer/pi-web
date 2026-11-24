@@ -228,6 +228,41 @@ test("上游被拒绝时通知 closed，交给页面按自身策略处理", asyn
   assert.deepEqual(client.received, [{ type: "closed", url: "/api/agent/expired/events" }]);
 });
 
+test("不可重试的启动失败先交付详情，再关闭上游且不排重试", async () => {
+  let signal;
+  const failure = { type: "startup_error", code: "sse_replay_budget_exceeded", retryable: false, errorMessage: "回放 70 KiB 超过 64 KiB" };
+  const worker = loadWorker((_url, init) => {
+    signal = init.signal;
+    return responseStream([`data: ${JSON.stringify(failure)}\n\n`]);
+  });
+  const clients = [worker.connect(), worker.connect()];
+  for (const client of clients) client.send({ type: "subscribe", url: "/api/agent/large/events" });
+  await new Promise(resolve => setImmediate(resolve));
+  for (const client of clients) {
+    const data = client.received.filter(message => message.type === "event").map(message => JSON.parse(message.data));
+    assert.deepEqual(data, [failure]);
+    assert.deepEqual(client.received.at(-1), { type: "failed", url: "/api/agent/large/events" });
+  }
+  assert.equal(signal.aborted, true);
+  assert.equal(worker.upstreamCount(), 0);
+  assert.equal(worker.timers.length, 0);
+});
+
+test("HTTP 200 后仍未就绪的连续失败递增退避，真正 connected 才重置", async () => {
+  let calls = 0;
+  const worker = loadWorker(() => responseStream([calls++ < 3
+    ? 'data: {"type":"startup_error","errorMessage":"暂时不可用"}\n\n'
+    : 'data: {"type":"connected"}\n\n']));
+  worker.connect().send({ type: "subscribe", url: "/api/agent/retry/events" });
+  for (const delay of [1000, 2000, 4000]) {
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(worker.timers[0].ms, delay);
+    worker.flushTimers();
+  }
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(worker.timers[0].ms, 1000);
+});
+
 test("断流退避期间的新订阅不收到 ready，重连成功后才收到", async () => {
   const responses = [];
   const worker = loadWorker(() => new Promise((resolve) => { responses.push(resolve); }));

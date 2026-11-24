@@ -44,7 +44,8 @@ type BrokerMessage =
   | { type: "reserve-granted"; leaseId: string; slots: number }
   | { type: "event"; url: string; name: string | null; data: string }
   | { type: "error"; url: string }
-  | { type: "closed"; url: string };
+  | { type: "closed"; url: string }
+  | { type: "failed"; url: string };
 
 /** 校验 worker 消息，非法负载直接丢弃（跨上下文边界不可信）。 */
 export function parseBrokerMessage(value: unknown): BrokerMessage | null {
@@ -65,6 +66,7 @@ export function parseBrokerMessage(value: unknown): BrokerMessage | null {
   if (message.type === "attached") {
     return { type: "attached", url: message.url, needsReplay: message.needsReplay === true };
   }
+  if (message.type === "failed") return { type: "failed", url: message.url };
   if (message.type === "error" || message.type === "closed") {
     return { type: message.type, url: message.url };
   }
@@ -308,6 +310,12 @@ function buildStreamSource(url: string, priority: StreamPriority): { source: Str
         readyState = STREAM_CONNECTING;
         source.onerror?.(errorEvent());
         for (const listener of [...(namedListeners.get("error") ?? [])]) listener(messageEvent(""));
+        return;
+      }
+      if (message.type === "failed") {
+        // 错误详情已由前一条 event 投递；不可重试失败不能被 closed 的直连降级重新打开。
+        source.close();
+        source.onerror?.(errorEvent());
         return;
       }
       // 上游被拒绝（404/401）或无法流式读取：退回直连，由调用方按自身策略处理。

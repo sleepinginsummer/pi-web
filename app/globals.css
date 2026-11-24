@@ -363,6 +363,14 @@ body {
    否则 body 可滚动，顶栏会被滚出视口（对话变长后尤其明显）。 */
 .app-shell-root {
   height: 100vh;
+  height: var(--app-viewport-height, 100vh);
+}
+
+/* 不支持 dvh 时不能把它留在 var() 的回退里，否则计算值失效会覆盖有效的 vh 声明。 */
+@supports (height: 100dvh) {
+  .app-shell-root {
+    height: var(--app-viewport-height, 100dvh);
+  }
 }
 
 /* Light text on a dark background renders heavier with subpixel smoothing
@@ -4162,11 +4170,8 @@ span.token.table {
   height: 28px !important;
 }
 
-/* Phone portrait: the send and queue buttons sit in the text row, so the whole
-   bottom bar can go while the keyboard is up. Stop still lives in that bar, so
-   it hides with the keyboard too. */
+/* 竖屏手机的操作行独立于底栏；键盘打开时收起底栏，模型筛选打开时保留。 */
 @media (max-width: 640px) {
-  html[data-keyboard-open] .chat-input-controls,
   html[data-keyboard-open] .extension-status-shelf,
   html[data-keyboard-open] .extension-status-bar {
     display: none !important;

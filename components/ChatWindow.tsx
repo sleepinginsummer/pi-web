@@ -89,7 +89,7 @@ interface Props {
   notificationController: CompletionNotificationController;
   onAgentEnd?: () => void;
   onSessionEnded?: (sessionId: string) => void;
-  onSessionCreated?: (session: SessionInfo) => void;
+  onSessionCreated?: (session: SessionInfo, options?: { preserveDraft?: boolean }) => void;
   onSessionCreatedInBackground?: (session: SessionInfo) => void;
   onSessionListRefresh?: (request: SessionListRefreshRequest) => void;
   onSessionForked?: (newSessionId: string) => void;
@@ -275,7 +275,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
 
   const {
     loading, error, sendError, activeLeafId, messages, entryIds, branchTailEntryIds, messageKeys, historyCursor, streamingStore, hasEarlierMessages, loadingEarlierMessages, earlierPageFailed, earlierTurnCount,
-    agentRunning, bashRunning, pendingBash, modelState, modelActions, missingCwd, isModelScopeActive, allModelList, loadAllModels, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames, toolSelectionKnown, toolSelectionPending,
+    agentRunning, bashRunning, pendingBash, modelState, modelActions, missingCwd, isModelScopeActive, allModelList, loadAllModels, toolPreset, customToolNames, activeToolNames, pinnedToolNames, toolSelectionKnown, toolSelectionPending, refreshTools,
     retryInfo, contextUsage, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
@@ -1065,11 +1065,12 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
       compactResult={compactResult}
       toolPreset={toolPreset}
       customToolNames={customToolNames}
-      activeBuiltinTools={activeBuiltinTools}
+      activeToolNames={activeToolNames}
       pinnedToolNames={pinnedToolNames}
       toolSelectionKnown={toolSelectionKnown}
       toolSelectionPending={toolSelectionPending}
       onToolPresetChange={(session && !isHiddenRelation(session.relation)) || isNew ? handleToolPresetChange : undefined}
+      onRefreshTools={refreshTools}
       retryInfo={retryInfo}
       queuedMessages={queuedMessages}
       inputHistory={inputHistory}

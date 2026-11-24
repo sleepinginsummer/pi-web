@@ -9,7 +9,7 @@ import type { ModelSelectionViewActions, ModelSelectionViewState } from "@/lib/m
 import { THINKING_LEVEL_OPTIONS, type ThinkingLevelOption } from "@/lib/thinking-levels";
 import { Ellipsis, Zap } from "lucide-react";
 import type { ToolPreset } from "@/lib/tool-presets";
-import { getPresetFromToolNames, getToolNamesForPreset, missingBuiltinTools, SETTINGS_BUILTIN_TOOLS, TOOL_PRESET_VALUES, toolPresetLabelKey } from "@/lib/tool-presets";
+import { getPresetFromToolNames, getToolNamesForPreset, missingBuiltinTools, normalizeBuiltinToolName, SETTINGS_BUILTIN_TOOLS, TOOL_PRESET_VALUES, toolPresetLabelKey } from "@/lib/tool-presets";
 import { useRunEndStrayClick } from "@/lib/run-end-click";
 const TOOL_PRESET_LABELS = ["off", ...TOOL_PRESET_VALUES.filter((preset) => preset !== "none")] as const;
 type ToolPresetLabel = typeof TOOL_PRESET_LABELS[number];
@@ -178,25 +178,43 @@ interface ToolPresetControlProps {
   isMobile: boolean;
   toolPreset?: ToolPreset;
   customToolNames?: readonly string[] | null;
-  activeBuiltinTools?: readonly string[];
+  /** `get_tools` 此刻激活的全部工具（扩展和 MCP 的也在内）：运行中的只读视图照实展示。 */
+  activeToolNames?: readonly string[];
   /** 会话钉死的内置工具名单；null/undefined 表示跟随 settings.json。只用于标注被扩展接替的工具。 */
   pinnedToolNames?: readonly string[] | null;
   /** 拿不到会话的工具名单时（刚打开、没有存活运行时）为 false：不显示预设标签。 */
   toolSelectionKnown?: boolean;
   onChange?: (preset: ToolPreset, customNames?: string[] | null) => void;
   isStrayClick: (event: { detail: number }) => boolean;
-  /** 运行中服务端会拒绝 set_tools：控件保留在原来的位置，只收起菜单并禁用点击。 */
+  /** 上一次工具切换还没落地：候选名单仍是旧的，点开菜单会用它算出过时的请求，所以整体禁用。 */
   disabled?: boolean;
+  /**
+   * 服务端此刻会拒绝 set_tools（运行中、手动压缩、`!` 命令）：菜单照常点开，
+   * 只展示本会话使用的工具，不能修改。
+   */
+  locked?: boolean;
+  /** 只读的原因，决定提示文案；默认按运行中处理。 */
+  lockedReason?: "running" | "compacting";
+  /** 打开只读菜单前重读一次激活名单：运行中扩展、Shadow 开关都会改服务端那边的工具。 */
+  onRefreshTools?: () => void;
 }
 
-export const ToolPresetControl = memo(function ToolPresetControl({ isMobile, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames, toolSelectionKnown = true, onChange, isStrayClick, disabled = false }: ToolPresetControlProps) {
+export const ToolPresetControl = memo(function ToolPresetControl({ isMobile, toolPreset, customToolNames, activeToolNames, pinnedToolNames, toolSelectionKnown = true, onChange, isStrayClick, disabled = false, locked = false, lockedReason = "running", onRefreshTools }: ToolPresetControlProps) {
   const { t } = useI18n();
+  // 预设回退与"扩展替换"标注只认内置工具（`powershell` 归一成 `bash`）；
+  // 只读清单要的是这个会话现在全部能用的工具，照服务端的名字显示。
+  const activeBuiltins = activeToolNames?.map(normalizeBuiltinToolName).filter((name) => SETTINGS_BUILTIN_TOOLS.includes(name));
   const [toolDropdownOpen, setToolDropdownOpen] = useState(false);
   const toolDropdownRef = useRef<HTMLDivElement>(null);
   const [configuredTools, setConfiguredTools] = useState<string[] | null>(null);
+  // 手机上弹层挂在「更多」面板上，而面板的位置随页面变（欢迎页输入框在屏幕中间、聊天里贴底）：
+  // 打开时按真实剩余空间决定向上还是向下展开，并按那一侧的空间收高度，否则固定的 420px
+  // 会把菜单顶出屏幕。视口变化（旋转、键盘弹出）时重新测一次。
+  const [toolDropdownFit, setToolDropdownFit] = useState<{ side: "up" | "down"; maxHeight: number } | null>(null);
   useEffect(() => {
     // 设置里的名单既是 configured 的展示来源，也是"设置开着、本会话却没有"的对照基准。
-    if (!toolDropdownOpen || configuredTools) return;
+    // 只读视图用不到它（那里不摆勾选清单），等菜单可编辑时再请求。
+    if (!toolDropdownOpen || configuredTools || locked) return;
     const controller = new AbortController();
     void fetch("/api/tools/settings", { signal: controller.signal })
       .then(async (response) => {
@@ -208,10 +226,10 @@ export const ToolPresetControl = memo(function ToolPresetControl({ isMobile, too
         if (!controller.signal.aborted) console.error("[pi-web] 无法读取内置工具默认设置", error);
       });
     return () => controller.abort();
-  }, [configuredTools, toolDropdownOpen]);
+  }, [configuredTools, locked, toolDropdownOpen]);
   // configured 展示设置本身（跟随它变化），其它预设展示预设名单；自定义勾选优先。
   const presetTools = toolPreset === "configured"
-    ? (configuredTools ?? activeBuiltinTools)
+    ? (configuredTools ?? activeBuiltins)
     : getToolNamesForPreset(toolPreset ?? "default");
   // 名单未知（刚打开、没有存活运行时）时不假装有选择：勾选留空，chip 用中性名字。
   const selectedTools = toolSelectionKnown ? (customToolNames ?? presetTools) : undefined;
@@ -227,7 +245,7 @@ export const ToolPresetControl = memo(function ToolPresetControl({ isMobile, too
   // 设置里启用、这个会话却拿不到的工具：通常是扩展用自己的实现接替了它
   // （例如 pi-hashline-edit-pro 把 edit 换成 replace/insert）。没有钉死名单时会话
   // 想要的就是设置本身，所以那时用设置当对照。
-  const missingHere = missingBuiltinTools(configuredTools, pinnedToolNames ?? configuredTools, activeBuiltinTools);
+  const missingHere = missingBuiltinTools(configuredTools, pinnedToolNames ?? configuredTools, activeBuiltins);
   useEffect(() => {
     if (!toolDropdownOpen) return;
     const close = (event: MouseEvent) => {
@@ -236,18 +254,58 @@ export const ToolPresetControl = memo(function ToolPresetControl({ isMobile, too
     document.addEventListener("mousedown", close);
     return () => document.removeEventListener("mousedown", close);
   }, [toolDropdownOpen]);
-  // 一轮开始时收起已打开的菜单，否则它会留在浮层里而每一项都点不动。
+  // 上一次工具切换还没落地时收起菜单：那时候选名单还是旧的，点开的行只会算出过时的请求。
   useEffect(() => {
     if (disabled) setToolDropdownOpen(false);
   }, [disabled]);
+  useEffect(() => {
+    if (!toolDropdownOpen || !isMobile) {
+      setToolDropdownFit(null);
+      return;
+    }
+    const measure = () => {
+      const wrapper = toolDropdownRef.current;
+      if (!wrapper) return;
+      // 弹层的定位祖先就是它实际贴着的那块面板（手机上是「更多」面板）。
+      const anchor = (wrapper.offsetParent as HTMLElement | null) ?? wrapper;
+      const rect = anchor.getBoundingClientRect();
+      const viewport = window.visualViewport;
+      const top = viewport?.offsetTop ?? 0;
+      const height = viewport?.height ?? window.innerHeight;
+      const roomUp = Math.max(0, Math.round(rect.top - top - 12));
+      const roomDown = Math.max(0, Math.round(top + height - rect.bottom - 12));
+      // 上方放得下就仍向上展开（保持原来的手感）；放不下时挑更宽敞的一侧，不再硬留 140px。
+      const side: "up" | "down" = roomUp >= 140 || roomUp >= roomDown ? "up" : "down";
+      setToolDropdownFit({ side, maxHeight: Math.max(1, side === "up" ? roomUp : roomDown) });
+    };
+    measure();
+    const viewport = window.visualViewport;
+    window.addEventListener("resize", measure);
+    viewport?.addEventListener("resize", measure);
+    viewport?.addEventListener("scroll", measure);
+    return () => {
+      window.removeEventListener("resize", measure);
+      viewport?.removeEventListener("resize", measure);
+      viewport?.removeEventListener("scroll", measure);
+    };
+  }, [isMobile, toolDropdownOpen]);
   const onToolPresetChange = onChange;
   if (!onToolPresetChange) return null;
+  // 手机上按钮容器不定位：弹层改用「更多」面板当定位祖先，右沿对齐面板，窄屏也不会裁掉左边。
   return (
-              <div ref={toolDropdownRef} style={{ position: "relative" }}>
+              <div ref={toolDropdownRef} style={{ position: isMobile ? "static" : "relative" }}>
                 <button
-                  onClick={(event) => { if (disabled || isStrayClick(event)) return; setToolDropdownOpen((open) => !open); }}
-                   title={disabled ? t("chat.toolsLockedWhileRunning") : t("chat.changeToolPreset") + `: ${toolPresetLabel}`}
-                   aria-label={t("chat.changeToolPreset")}
+                  onClick={(event) => {
+                    if (disabled || isStrayClick(event)) return;
+                    // 名单可能在上一轮之后变了（扩展切换、Shadow 开关都会改服务端激活的工具）：
+                    // 打开只读菜单前重读一次，切换会话后返回的结果由调用方按会话 id 丢弃。
+                    if (locked && !toolDropdownOpen) onRefreshTools?.();
+                    setToolDropdownOpen((open) => !open);
+                  }}
+                  title={disabled
+                    ? t("chat.toolsLockedWhileRunning")
+                    : locked ? t("chat.viewToolPreset") : `${t("chat.changeToolPreset")}: ${toolPresetLabel}`}
+                  aria-label={t(locked ? "chat.viewToolPreset" : "chat.changeToolPreset")}
                    aria-disabled={disabled ? true : undefined}
                   style={{
                     display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
@@ -280,11 +338,27 @@ export const ToolPresetControl = memo(function ToolPresetControl({ isMobile, too
                 </button>
                 {toolDropdownOpen && !disabled && (
                   <div style={{
-                    position: "absolute", bottom: "calc(100% + 6px)", right: 0,
+                    position: "absolute", right: 0,
+                    // 手机上由实测决定贴上方还是下方；桌面端固定向上展开。
+                    ...(isMobile && toolDropdownFit?.side === "down"
+                      ? { top: "calc(100% + 6px)" }
+                      : { bottom: "calc(100% + 6px)" }),
                     zIndex: 100, background: "var(--bg)", border: "1px solid var(--border)",
-                    borderRadius: 8, boxShadow: "0 -4px 16px rgba(0,0,0,0.10)",
-                    overflow: "hidden", minWidth: 120,
+                    borderRadius: 8, boxShadow: isMobile && toolDropdownFit?.side === "down"
+                      ? "0 4px 16px rgba(0,0,0,0.10)"
+                      : "0 -4px 16px rgba(0,0,0,0.10)",
+                    // 运行中多了整串扩展工具，菜单自己滚动，别把界面顶出屏幕。
+                    overflowX: "hidden", overflowY: "auto", minWidth: 120,
+                    maxHeight: isMobile
+                      ? (toolDropdownFit ? toolDropdownFit.maxHeight : "min(70vh, 420px)")
+                      : "min(70vh, 420px)",
+                    // 手机上弹层挂在「更多」面板上：右沿对齐面板，宽度不超出视口，窄屏也不会裁掉左边。
+                    ...(isMobile ? { maxWidth: "calc(100vw - 24px)" } : null),
                   }}>
+                    {/* 运行中只读：菜单照样打开，能看清这个会话用哪些工具，只是改不了。 */}
+                    {locked && (
+                      <p className="px-3 pt-2 pb-1 text-[11px] leading-snug text-text-dim">{t(lockedReason === "compacting" ? "chat.toolsLockedWhileCompacting" : "chat.toolsLockedWhileRunning")}</p>
+                    )}
                     {TOOL_PRESET_LABELS.map((label) => {
                       const preset = presetForLabel(label);
                       const isActive = toolSelectionKnown && !customToolNames && (toolPreset ?? "default") === preset;
@@ -300,6 +374,7 @@ export const ToolPresetControl = memo(function ToolPresetControl({ isMobile, too
                       return (
                         <button
                           key={label}
+                          disabled={locked}
                           onClick={() => { setToolDropdownOpen(false); if (!isActive) onToolPresetChange(preset); }}
                           style={{
                             display: "flex", alignItems: "center", gap: 8,
@@ -307,7 +382,7 @@ export const ToolPresetControl = memo(function ToolPresetControl({ isMobile, too
                             background: isActive ? "var(--bg-selected)" : "none",
                             border: "none",
                             color: isActive ? "var(--text)" : "var(--text-muted)",
-                            cursor: "pointer", fontSize: 12, textAlign: "left",
+                            cursor: locked ? "default" : "pointer", fontSize: 12, textAlign: "left",
                             fontWeight: isActive ? 600 : 400,
                             whiteSpace: "nowrap",
                           }}
@@ -324,8 +399,26 @@ export const ToolPresetControl = memo(function ToolPresetControl({ isMobile, too
                         </button>
                       );
                     })}
-                    <div className="border-t border-border px-3 py-2" role="group" aria-label={t("settings.builtinTools")}>
-                      {SETTINGS_BUILTIN_TOOLS.map((name) => (
+                    <div className="border-t border-border px-3 py-2" role="group" aria-label={locked ? t("chat.toolsInUseNow") : t("settings.builtinTools")}>
+                      {/* 运行中不摆一份可勾的清单：直接列出 get_tools 的激活名单，扩展和 MCP 的工具也在内。
+                          预设只是记录，选中状态不再代表此刻的真实工具，所以这里不拿它当勾选依据。 */}
+                      {locked && (
+                        <div>
+                          <p className="pb-1 text-[11px] leading-snug text-text-dim">{t("chat.toolsInUseNow")}</p>
+                          {/* 空名单和"拿不到名单"是两件事：off 会话确实没有任何启用工具。 */}
+                          {activeToolNames === undefined ? (
+                            <p className="text-[11px] leading-snug text-text-dim">{t("chat.toolsUnknown")}</p>
+                          ) : activeToolNames.length === 0 ? (
+                            <p className="text-[11px] leading-snug text-text-dim">{t("chat.toolsNoneInUse")}</p>
+                          ) : activeToolNames.map((name) => (
+                            <div key={name} className="flex items-center gap-2 py-0.5 text-xs text-text-muted">
+                              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
+                              <span>{name}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {!locked && SETTINGS_BUILTIN_TOOLS.map((name) => (
                         <label key={name} className={`flex items-center gap-2 py-1 text-xs text-text-muted ${followsSettings ? "cursor-default" : "cursor-pointer"}`}>
                           <input
                             type="checkbox"
@@ -348,7 +441,7 @@ export const ToolPresetControl = memo(function ToolPresetControl({ isMobile, too
                           )}
                         </label>
                       ))}
-                      {followsSettings && (
+                      {!locked && followsSettings && (
                         <p className="pt-1 text-[11px] leading-snug text-text-dim">{t("chat.toolsFollowSettingsHint")}</p>
                       )}
                     </div>
@@ -569,10 +662,12 @@ interface InputControlsProps {
   onThinkingLevelChange?: (level: ThinkingLevelOption) => void;
   toolPreset?: ToolPreset;
   customToolNames?: readonly string[] | null;
-  activeBuiltinTools?: readonly string[];
+  activeToolNames?: readonly string[];
   pinnedToolNames?: readonly string[] | null;
   toolSelectionKnown?: boolean;
   onToolPresetChange?: (preset: ToolPreset, customNames?: string[] | null) => void;
+  /** 打开只读菜单前重读激活名单（运行中扩展、Shadow 开关都会改服务端那边的工具）。 */
+  onRefreshTools?: () => void;
   /** 上一次工具切换还没落地：候选名单仍是旧的，这时再点会用它算出一份过时的请求。 */
   toolSelectionPending?: boolean;
   onCompact?: () => void;
@@ -589,7 +684,7 @@ interface InputControlsProps {
 
 /** 输入控制栏自行管理下拉菜单，输入文字变化时无需重建控制栏。 */
 export const InputControls = memo(function InputControls({
-  isMobile, isStreaming, modelState, modelActions, onThinkingLevelChange, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames, toolSelectionKnown, toolSelectionPending, onToolPresetChange,
+  isMobile, isStreaming, modelState, modelActions, onThinkingLevelChange, toolPreset, customToolNames, activeToolNames, pinnedToolNames, toolSelectionKnown, toolSelectionPending, onToolPresetChange, onRefreshTools,
   onCompact, onAbortCompaction, isCompacting, onAbort, soundEnabled, onSoundToggle,
   notificationEnabled, notificationPermission, onNotificationToggle,
   endAction,
@@ -620,7 +715,7 @@ export const InputControls = memo(function InputControls({
                 <>
                   <ThinkingControl isMobile={false} modelState={modelState} isStreaming={isStreaming} onChange={onThinkingLevelChange} />
                   {!isStreaming && <FastModeControl isMobile={false} modelState={modelState} onChange={modelActions.changeFastEnabled} />}
-                  <ToolPresetControl isMobile={false} toolPreset={toolPreset} customToolNames={customToolNames} activeBuiltinTools={activeBuiltinTools} pinnedToolNames={pinnedToolNames} toolSelectionKnown={toolSelectionKnown} onChange={onToolPresetChange} isStrayClick={isStrayClick} disabled={isStreaming || toolSelectionPending} />
+                  <ToolPresetControl isMobile={false} toolPreset={toolPreset} customToolNames={customToolNames} activeToolNames={activeToolNames} pinnedToolNames={pinnedToolNames} toolSelectionKnown={toolSelectionKnown} onChange={onToolPresetChange} onRefreshTools={onRefreshTools} isStrayClick={isStrayClick} locked={isStreaming || Boolean(isCompacting)} lockedReason={isCompacting ? "compacting" : "running"} disabled={toolSelectionPending} />
                 </>
               )}
               runControls={(
@@ -660,8 +755,8 @@ export const InputControls = memo(function InputControls({
  * 模型名称和 Stop，所以菜单按钮挪到输入框上方，不再占下方空间。
  */
 export const MobileComposerMenu = memo(function MobileComposerMenu({
-  isStreaming, modelState, modelActions, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames,
-  toolSelectionKnown, toolSelectionPending, onToolPresetChange, onCompact, onAbortCompaction, isCompacting, onAbort,
+  isStreaming, modelState, modelActions, toolPreset, customToolNames, activeToolNames, pinnedToolNames,
+  toolSelectionKnown, toolSelectionPending, onToolPresetChange, onRefreshTools, onCompact, onAbortCompaction, isCompacting, onAbort,
   soundEnabled, onSoundToggle, notificationEnabled, notificationPermission, onNotificationToggle,
   endAction,
 }: Omit<InputControlsProps, "isMobile">) {
@@ -696,7 +791,7 @@ export const MobileComposerMenu = memo(function MobileComposerMenu({
         modelControls={(
           <>
             {!isStreaming && <FastModeControl isMobile modelState={modelState} onChange={modelActions.changeFastEnabled} />}
-            <ToolPresetControl isMobile toolPreset={toolPreset} customToolNames={customToolNames} activeBuiltinTools={activeBuiltinTools} pinnedToolNames={pinnedToolNames} toolSelectionKnown={toolSelectionKnown} onChange={onToolPresetChange} isStrayClick={isStrayClick} disabled={isStreaming || toolSelectionPending} />
+            <ToolPresetControl isMobile toolPreset={toolPreset} customToolNames={customToolNames} activeToolNames={activeToolNames} pinnedToolNames={pinnedToolNames} toolSelectionKnown={toolSelectionKnown} onChange={onToolPresetChange} onRefreshTools={onRefreshTools} isStrayClick={isStrayClick} locked={isStreaming || Boolean(isCompacting)} lockedReason={isCompacting ? "compacting" : "running"} disabled={toolSelectionPending} />
           </>
         )}
         runControls={(
@@ -733,10 +828,12 @@ interface ComposerTopUtilitiesProps {
   sessionStats?: SessionStatsInfo | null;
   toolPreset?: ToolPreset;
   customToolNames?: readonly string[] | null;
-  activeBuiltinTools?: readonly string[];
+  activeToolNames?: readonly string[];
   pinnedToolNames?: readonly string[] | null;
   toolSelectionKnown?: boolean;
   onToolPresetChange?: (preset: ToolPreset, customNames?: string[] | null) => void;
+  /** 打开只读菜单前重读激活名单（运行中扩展、Shadow 开关都会改服务端那边的工具）。 */
+  onRefreshTools?: () => void;
   /** 上一次工具切换还没落地：候选名单仍是旧的，这时再点会用它算出一份过时的请求。 */
   toolSelectionPending?: boolean;
   onCompact?: () => void;
@@ -760,11 +857,12 @@ export const ComposerTopUtilities = memo(function ComposerTopUtilities({
   sessionStats,
   toolPreset,
   customToolNames,
-  activeBuiltinTools,
+  activeToolNames,
   pinnedToolNames,
   toolSelectionKnown,
   toolSelectionPending,
   onToolPresetChange,
+  onRefreshTools,
   onCompact,
   onAbortCompaction,
   isCompacting,
@@ -791,12 +889,13 @@ export const ComposerTopUtilities = memo(function ComposerTopUtilities({
         isMobile={false}
         toolPreset={toolPreset}
         customToolNames={customToolNames}
-        activeBuiltinTools={activeBuiltinTools}
+        activeToolNames={activeToolNames}
         pinnedToolNames={pinnedToolNames}
         toolSelectionKnown={toolSelectionKnown}
         onChange={onToolPresetChange}
         isStrayClick={isStrayClick}
-        disabled={isStreaming || toolSelectionPending}
+        onRefreshTools={onRefreshTools}
+        locked={isStreaming || Boolean(isCompacting)} lockedReason={isCompacting ? "compacting" : "running"} disabled={toolSelectionPending}
       />
       {(!isStreaming || isCompacting) && onCompact && (
         <RunControls

@@ -84,14 +84,17 @@ function logBackpressure(
   limitBytes: number,
   droppedEvents: number,
   closing: boolean,
+  stage: "queue" | "preparation" = "queue",
 ): void {
   const now = Date.now();
   if (now - lastBackpressureLogAt < BACKPRESSURE_LOG_INTERVAL_MS) return;
   lastBackpressureLogAt = now;
   const queued = `${Math.round(queuedBytes / 1024)} KB`;
+  const stageNote = stage === "preparation" ? " during initial replay preparation" : "";
+  const recovery = stage === "preparation" ? "startup failed before connected; adjust the replay budget before retrying." : "it reconnects and re-snapshots.";
   console.warn(closing
-    ? `[pi-web] Agent event stream for ${sessionId} closed: client backlog ${queued} exceeds ${Math.round(limitBytes / 1024)} KB; it reconnects and re-snapshots.`
-    : `[pi-web] Agent event stream for ${sessionId} is behind (${queued} queued): dropping rebuildable deltas (${droppedEvents} so far).`);
+    ? `[pi-web] Agent event stream for ${sessionId} closed${stageNote}: client backlog ${queued} exceeds ${Math.round(limitBytes / 1024)} KB; ${recovery}`
+    : `[pi-web] Agent event stream for ${sessionId} is behind${stageNote} (${queued} queued): dropping rebuildable deltas (${droppedEvents} so far).`);
 }
 
 /**
@@ -172,6 +175,15 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+// 必要回放自身超限时，自动重连不能修复同一份载荷。
+class ReplayBudgetExceededError extends Error {}
+
+interface PreparedClientEvent {
+  droppable: boolean;
+  data: Uint8Array;
+  bytes: number;
+}
+
 /**
  * Open the SSE transport immediately, then publish the session snapshot only
  * after the agent is ready and its event listener has been installed.
@@ -239,7 +251,7 @@ export function createAgentEventStream(
         queuedBytes: () => Math.max(0, STREAM_HIGH_WATER_MARK_BYTES - (controller.desiredSize ?? STREAM_HIGH_WATER_MARK_BYTES)),
       };
       streamInfos.set(cleanup, info);
-      const enqueueText = (text: string, options?: { droppable?: boolean }) => {
+      const enqueuePayload = (payload: string | Uint8Array, options?: { droppable?: boolean }) => {
         if (closed) return;
         const desiredSize = controller.desiredSize;
         if (desiredSize === null) {
@@ -261,14 +273,15 @@ export function createAgentEventStream(
           return;
         }
         try {
-          controller.enqueue(encoder.encode(text));
+          controller.enqueue(typeof payload === "string" ? encoder.encode(payload) : payload);
           info.lastWriteAt = Date.now();
         } catch {
           cleanup(false);
         }
       };
+      const serialize = (data: unknown) => `data: ${JSON.stringify(data)}\n\n`;
       const encode = (data: unknown, options?: { droppable?: boolean }) => {
-        enqueueText(`data: ${JSON.stringify(data)}\n\n`, options);
+        enqueuePayload(serialize(data), options);
       };
       const flushToolUpdates = () => {
         toolUpdateTimer = null;
@@ -282,9 +295,7 @@ export function createAgentEventStream(
           toolUpdateTimer ??= setTimeout(flushToolUpdates, TOOL_UPDATE_COALESCE_MS);
           return;
         }
-        // The end supersedes a partial result still waiting here, and the client
-        // would treat one arriving after the end as a tool that is running again.
-        // agent_end does the same for any tool call whose end never came.
+        // 结束事件清掉尚未刷新的更新，避免稍后又把已结束的工具显示为运行中。
         if (clientEvent.type === "tool_execution_end") {
           pendingToolUpdates.delete(clientEvent.toolCallId);
         } else if (clientEvent.type === "agent_end") {
@@ -292,9 +303,18 @@ export function createAgentEventStream(
         }
         encode(clientEvent, { droppable: isDroppableEvent(clientEvent) });
       };
+      const projectEvent = (event: AgentEventLike, snapshot: unknown) => {
+        if (isEventIncludedInSnapshot(event, snapshot)) return null;
+        return toClientAgentEvent(event);
+      };
+      // 初始回放预先编码；实时工具更新仍在合并刷新时序列化，避免高频路径重复处理旧快照。
+      const prepareEvent = (clientEvent: AgentEventLike): PreparedClientEvent => {
+        const droppable = isDroppableEvent(clientEvent);
+        const data = encoder.encode(serialize(clientEvent));
+        return { droppable, data, bytes: data.byteLength };
+      };
       const forwardEvent = (event: AgentEventLike, snapshot: unknown) => {
-        if (isEventIncludedInSnapshot(event, snapshot)) return;
-        const clientEvent = toClientAgentEvent(event);
+        const clientEvent = projectEvent(event, snapshot);
         if (clientEvent) sendClientEvent(clientEvent);
       };
 
@@ -340,30 +360,103 @@ export function createAgentEventStream(
           unsubscribe = stopListening;
 
           const snapshot = session.streamingMessage;
-          encode({
+          // 初始批次先合并工具更新，结束事件会撤销对应进度；过期副本不进入投影和序列化。
+          const latestToolUpdates = new Map<unknown, AgentEventLike>();
+          for (const event of bufferedEvents) {
+            options.onEvent?.(event);
+            if (event.type === "tool_execution_update") latestToolUpdates.set(event.toolCallId, event);
+            else if (event.type === "tool_execution_end") latestToolUpdates.delete(event.toolCallId);
+            else if (event.type === "agent_end") latestToolUpdates.clear();
+          }
+          if (closed) return;
+          const connectedData = encoder.encode(serialize({
             type: "connected",
             sessionId,
             isStreaming: session.isStreaming,
-            // onEvent() has just replayed every request the session still holds,
-            // so a reconnecting client can drop the ones closed while it was away.
             pendingExtensionUiIds: bufferedEvents
               .filter((event) => event.type === "extension_ui_request" && typeof event.id === "string")
               .map((event) => event.id as string),
-          });
+          }));
+          // 预留现有队列和全部必要帧，UTF-8 字节预算不能被待发送的序列化文本绕过。
+          let retainedBytes = Math.max(0, STREAM_HIGH_WATER_MARK_BYTES - (controller.desiredSize ?? STREAM_HIGH_WATER_MARK_BYTES));
+          const reserveRequired = (bytes: number) => {
+            const next = retainedBytes + bytes;
+            if (next > backlogLimitBytes) {
+              logBackpressure(sessionId, next, backlogLimitBytes, droppedEvents, true, "preparation");
+              throw new ReplayBudgetExceededError(`initial replay preparation backlog exceeded: ${next} bytes (limit ${backlogLimitBytes})`);
+            }
+            retainedBytes = next;
+          };
+          reserveRequired(connectedData.byteLength);
+          const replay: Array<PreparedClientEvent | null> = Array(bufferedEvents.length).fill(null);
+          const optionalReplay: Array<{ index: number; event: AgentEventLike }> = [];
+          for (let index = 0; index < bufferedEvents.length; index++) {
+            if (closed) return;
+            const event = bufferedEvents[index];
+            if (event.type === "tool_execution_update") continue;
+            const clientEvent = projectEvent(event, snapshot);
+            if (!clientEvent) continue;
+            if (isDroppableEvent(clientEvent)) {
+              optionalReplay.push({ index, event: clientEvent });
+              continue;
+            }
+            const prepared = prepareEvent(clientEvent);
+            reserveRequired(prepared.bytes);
+            replay[index] = prepared;
+          }
+          if (closed) return;
+          const snapshotEvent = snapshot !== undefined && snapshot !== null
+            ? projectEvent({ type: "message_start", message: snapshot }, undefined) : null;
+          const preparedSnapshot = snapshotEvent ? prepareEvent(snapshotEvent) : null;
+          if (preparedSnapshot) reserveRequired(preparedSnapshot.bytes);
+
+          let optionalExhausted = false;
+          const prepareOptional = (event: AgentEventLike) => {
+            if (optionalExhausted || retainedBytes > STREAM_HIGH_WATER_MARK_BYTES || retainedBytes >= backlogLimitBytes) {
+              droppedEvents++;
+              return null;
+            }
+            const prepared = prepareEvent(event);
+            if (retainedBytes + prepared.bytes > backlogLimitBytes) {
+              // 单帧也可能过大；丢弃后不再序列化其余可重建帧，避免逐个大快照重复分配和扫描。
+              droppedEvents++;
+              optionalExhausted = true;
+              return null;
+            }
+            retainedBytes += prepared.bytes;
+            return prepared;
+          };
+          for (const { index, event } of optionalReplay) {
+            if (closed) return;
+            replay[index] = prepareOptional(event);
+          }
+          const preparedToolUpdates: PreparedClientEvent[] = [];
+          for (const event of latestToolUpdates.values()) {
+            if (closed) return;
+            const clientEvent = projectEvent(event, snapshot);
+            if (!clientEvent) continue;
+            const prepared = prepareOptional(clientEvent);
+            if (prepared) preparedToolUpdates.push(prepared);
+          }
+          if (droppedEvents > 0) logBackpressure(sessionId, retainedBytes, backlogLimitBytes, droppedEvents, false, "preparation");
+          if (closed) return;
+          // 所有可失败准备均已完成，保持就绪、普通回放、快照、已合并工具进度的线序。
+          enqueuePayload(connectedData);
           info.connectedAt = Date.now();
-          for (const event of bufferedEvents) {
-            options.onEvent?.(event);
-            forwardEvent(event, snapshot);
-          }
-          if (snapshot !== undefined && snapshot !== null) {
-            forwardEvent({ type: "message_start", message: snapshot }, undefined);
-          }
+          for (const prepared of replay) if (prepared) enqueuePayload(prepared.data, { droppable: prepared.droppable });
+          if (preparedSnapshot) enqueuePayload(preparedSnapshot.data);
+          for (const prepared of preparedToolUpdates) enqueuePayload(prepared.data, { droppable: true });
+          // 初始批次已合并，直接发送后释放准备引用；不再把准备缓存留进实时更新的延迟队列。
+          replay.length = 0;
+          preparedToolUpdates.length = 0;
+          bufferedEvents.length = 0;
           snapshotPublished = true;
         } catch (error) {
           if (closed) return;
           encode({
             type: "startup_error",
             errorMessage: `Failed to start agent: ${errorMessage(error)}`,
+            ...(error instanceof ReplayBudgetExceededError ? { code: "sse_replay_budget_exceeded", retryable: false } : {}),
           });
           cleanup(true);
         }
@@ -384,7 +477,7 @@ export function createAgentEventStream(
 
       // Force the response headers through without claiming that the agent is
       // ready. The client waits for the later `connected` data event.
-      enqueueText(":\n\n");
+      enqueuePayload(":\n\n");
     },
     cancel() {
       cancelStream(false);

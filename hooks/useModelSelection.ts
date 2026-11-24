@@ -6,8 +6,8 @@ import { parseModelsData } from "@/lib/model-data-schema";
 import type { SelectedModel } from "@/lib/model-types";
 import type { ModelSelectionState } from "@/lib/model-selection-types";
 import { LatestRequestGate } from "@/lib/latest-request-gate";
-import { fetchThinkingLevelRecommendation } from "@/lib/thinking-level-preference-client";
-import { parseThinkingLevelOption, type ThinkingLevel, type ThinkingLevelOption } from "@/lib/thinking-levels";
+import { fetchPreferredThinkingLevel, fetchThinkingLevelRecommendation } from "@/lib/thinking-level-preference-client";
+import { parseThinkingLevelOption, resolveDisplayedThinkingLevel, resolvePreferredThinkingLevel, type ThinkingLevel, type ThinkingLevelOption } from "@/lib/thinking-levels";
 
 interface ModelsLoadedPayload {
   state: Pick<ModelSelectionState, "names" | "list" | "error" | "missingCwd" | "isScoped" | "scopeWarnings" | "dataDiagnostics" | "thinkingLevels" | "thinkingLevelMaps" | "thinkingLevelPins">;
@@ -59,6 +59,13 @@ export async function retryModelLoad(
     }
   }
 }
+
+/** 切模解析档位的结果：谁也没抢走才算 applied，被后来的选择取代时交给调用方决定怎么提交。 */
+export type ThinkingSwitchOutcome =
+  | { status: "applied"; preferredThinking: ThinkingLevel | undefined }
+  | { status: "preserved" }
+  | { status: "manual" }
+  | { status: "superseded" };
 
 export type ModelSelectionAction =
   | { type: "modelsLoaded"; payload: ModelsLoadedPayload; applyNewSessionDefaults: boolean; applyPinnedThinking: boolean }
@@ -143,14 +150,32 @@ export interface LoadModelsOptions {
   initializeNewSession: boolean;
   applyPinnedThinking: boolean;
   signal?: AbortSignal;
+  onPreferredThinking?: (model: SelectedModel, level: ThinkingLevel | null) => void;
 }
 export function useModelSelection() {
   const [state, dispatch] = useReducer(modelSelectionReducer, initialModelSelectionState);
   const loadGateRef = useRef(new LatestRequestGate());
   const thinkingLevelPinsRef = useRef(state.thinkingLevelPins);
   thinkingLevelPinsRef.current = state.thinkingLevelPins;
+  // 切换模型要读当前模型的档位与它支持的列表，但动作本身必须保持稳定依赖（[]），
+  // 否则每次 state 变化都会重建回调、取消还在路上的档位推荐请求。
+  const thinkingLevelsRef = useRef(state.thinkingLevels);
+  thinkingLevelsRef.current = state.thinkingLevels;
+  const thinkingLevelRef = useRef(state.thinkingLevel);
+  thinkingLevelRef.current = state.thinkingLevel;
+  // 内部 `auto` 表示"用户没显式选"，界面上此时显示 settings 的默认档位；切模型要拿显示值当兜底。
+  const newSessionDefaultThinkingLevelRef = useRef(state.newSessionDefaultThinkingLevel);
+  newSessionDefaultThinkingLevelRef.current = state.newSessionDefaultThinkingLevel;
+  // 界面显示的是 `newSessionModel ?? newSessionDefaultModel`；切模型时要拿它的支持档位去限幅兜底值。
+  const newSessionModelRef = useRef(state.newSessionModel);
+  newSessionModelRef.current = state.newSessionModel;
+  const newSessionDefaultModelRef = useRef(state.newSessionDefaultModel);
+  newSessionDefaultModelRef.current = state.newSessionDefaultModel;
+  // 用户（或另一份已采纳的结果）改过档位的次数：切模推荐回来时据此判断这次结果还算不算数。
+  // 目录刷新不算——它只关心自己的默认推荐，不能把在途的切模结果作废。
+  const thinkingChoiceRevisionRef = useRef(0);
 
-  const load = useCallback(async ({ cwd, initializeNewSession, applyPinnedThinking, signal }: LoadModelsOptions) => {
+  const load = useCallback(async ({ cwd, initializeNewSession, applyPinnedThinking, signal, onPreferredThinking }: LoadModelsOptions) => {
     const modelsGeneration = loadGateRef.current.begin("models");
     const defaultGeneration = loadGateRef.current.begin("thinking-default");
     try {
@@ -187,9 +212,35 @@ export function useModelSelection() {
       });
 
       if (!displayModel || !initializeNewSession || !applyPinnedThinking) return undefined;
-      const pinned = data.thinkingLevelPins?.[`${displayModel.provider}/${displayModel.id}`];
-      const preferred = pinned ?? (await fetchThinkingLevelRecommendation(displayModel.id, signal) ?? undefined);
-      if (!preferred || !loadGateRef.current.isLatest("thinking-default", defaultGeneration)) return undefined;
+      // 默认模型的推荐按它自己的 id 查历史得来，草稿选了别的模型时不能套过去：
+      // 那会把默认模型的档位（可能还是目标模型不支持的）写到它的首发请求上。此时让服务端按
+      // settings.json 的按模型档位 / 默认值决定，界面继续显示草稿已提交的那一档。
+      const draftModelMatches = () => {
+        const draftModel = newSessionModelRef.current;
+        return !draftModel || (draftModel.provider === displayModel.provider && draftModel.modelId === displayModel.id);
+      };
+      if (!draftModelMatches()) return undefined;
+      // 新会话默认档位：pin → 最近的众数，再限幅到该模型支持的档位（模型的默认值不保证它支持）。
+      // 两种键格式不能混：pin 来自 `enabledModels` 的 `provider/modelId`，支持档位表由 API 按
+      // `provider:modelId` 写出，用斜杠键去查支持列表永远是 undefined，限幅就等于没做。
+      const pinKey = `${displayModel.provider}/${displayModel.id}`;
+      const supportKey = `${displayModel.provider}:${displayModel.id}`;
+      const pin = data.thinkingLevelPins?.[pinKey] ?? null;
+      const preferred = resolvePreferredThinkingLevel({
+        pin,
+        recommendation: pin ? null : (await fetchThinkingLevelRecommendation(displayModel.id, signal) ?? null),
+        supported: data.thinkingLevels?.[supportKey] ?? null,
+      });
+      // `undefined` = 这次加载不适用/已被取代；`null` = 适用，但当前没有推荐值（调用方要据此
+      // 作废旧推荐，否则默认模型换了之后旧模型的推荐还留在草稿里）。
+      if (!loadGateRef.current.isLatest("thinking-default", defaultGeneration)) return undefined;
+      // 取推荐期间草稿可能已经切到别的模型：这份默认推荐不再适用，交给切模自己的结果。
+      if (!draftModelMatches()) return undefined;
+      onPreferredThinking?.({ provider: displayModel.provider, modelId: displayModel.id }, preferred);
+      if (!preferred) {
+        dispatch({ type: "setThinkingLevel", level: "auto" });
+        return null;
+      }
       dispatch({ type: "applyPreferredThinking", level: preferred });
       return preferred;
     } catch (error) {
@@ -206,30 +257,63 @@ export function useModelSelection() {
     }
   }, []);
 
+  /**
+   * 选模型：切到别的模型时档位换成它的常用档位（pin → 最近用过的众数 → 旧档位限幅），
+   * 重选同一个模型（例如为了应用 models.json 的修改）保持用户刚选的档位。
+   */
   const selectNewSessionModel = useCallback(async (
     model: SelectedModel,
-    applyDefaultThinking: boolean,
-  ) => {
+    options: { preserveLevel?: boolean } = {},
+  ): Promise<ThinkingSwitchOutcome> => {
+    // 手动选档算这一次切换期间的干扰：推荐回来时若已经改过档，结果就不再代表用户意图。
+    const manualRevision = thinkingChoiceRevisionRef.current;
     loadGateRef.current.invalidate("thinking-default");
+    // 兜底值必须是"切之前界面显示的那个档位"：它按切之前的模型限幅（默认 max、模型最高只到 high
+    // 时界面显示 high）。直接拿未限幅的原始默认值，切到支持 max 的模型后就会选出一个界面从没
+    // 显示过的档位。必须在 dispatch/await 之前取，之后 state 已经是新模型了。
+    const previousModel = newSessionModelRef.current ?? newSessionDefaultModelRef.current;
+    const previousDisplayedLevel = thinkingLevelRef.current === "auto"
+      ? resolveDisplayedThinkingLevel({
+          level: "auto",
+          fallback: newSessionDefaultThinkingLevelRef.current,
+          supported: previousModel
+            ? (thinkingLevelsRef.current[`${previousModel.provider}:${previousModel.modelId}`] ?? null)
+            : null,
+        })
+      : thinkingLevelRef.current;
     dispatch({ type: "selectNewSessionModel", model });
-    if (!applyDefaultThinking) return { committed: true, preferredThinking: undefined };
+    if (options.preserveLevel) return { status: "preserved" };
 
-    const generation = loadGateRef.current.begin("thinking-default");
+    // 走自己的 gate 通道：目录刷新（load）重新开始 "thinking-default" 时只作废它自己的默认推荐，
+    // 不能把这次切模的推荐也一起废掉，否则切模会退回用上一个模型的档位提交。
+    const generation = loadGateRef.current.begin("thinking-switch");
     try {
-      const pinned = thinkingLevelPinsRef.current[`${model.provider}/${model.modelId}`];
-      const preferredThinking = pinned ?? (await fetchThinkingLevelRecommendation(model.modelId) ?? undefined);
-      if (!loadGateRef.current.isLatest("thinking-default", generation)) {
-        return { committed: false, preferredThinking: undefined };
+      const preferred = await fetchPreferredThinkingLevel({
+        model,
+        pins: thinkingLevelPinsRef.current,
+        supported: thinkingLevelsRef.current[`${model.provider}:${model.modelId}`] ?? null,
+        // 兜底（没有 pin、也没有历史众数时）用切之前界面显示的档位，这里再按目标模型限幅一次。
+        current: previousDisplayedLevel,
+      });
+      // 用户在这次切换期间手动选了档：结果作废，模型仍要由调用方提交，档位用用户刚选的那个。
+      if (thinkingChoiceRevisionRef.current !== manualRevision) {
+        return { status: "manual" };
       }
-      if (preferredThinking) dispatch({ type: "applyPreferredThinking", level: preferredThinking });
-      return { committed: true, preferredThinking };
+      if (!loadGateRef.current.isLatest("thinking-switch", generation)) {
+        return { status: "superseded" };
+      }
+      if (preferred && preferred !== thinkingLevelRef.current) {
+        dispatch({ type: "applyPreferredThinking", level: preferred });
+      }
+      return { status: "applied", preferredThinking: preferred ?? undefined };
     } finally {
-      loadGateRef.current.finish("thinking-default");
+      loadGateRef.current.finish("thinking-switch");
     }
   }, []);
 
   const setThinkingLevel = useCallback((level: unknown) => {
     loadGateRef.current.invalidate("thinking-default");
+    thinkingChoiceRevisionRef.current += 1;
     dispatch({ type: "setThinkingLevel", level: parseThinkingLevelOption(level) });
   }, []);
 

@@ -6,7 +6,7 @@ import type { ModelSelectionViewActions, ModelSelectionViewState } from "@/lib/m
 import type { ModelsDataDiagnostic } from "@/lib/model-types";
 import type { WorktreeInfo } from "@/lib/types";
 import type { SkillsResponse } from "@/lib/api-types";
-import { clearDraft, createDraftFromUserMessage, getDraft, recallRevision, setDraft, subscribeRecalledDraft, type ChatDraft, type ChatDraftImage } from "@/lib/draft-store";
+import { clearDraft, createDraftFromUserMessage, getDraft, notifyRecalledDraft, recallRevision, setDraft, subscribeRecalledDraft, type ChatDraft, type ChatDraftImage } from "@/lib/draft-store";
 import type { UserMessage } from "@/lib/types";
 import { prependChatDraft, type QueuedMessage } from "@/lib/queued-messages";
 import { applySlashSelection, findSlashQuery } from "@/lib/slash-command";
@@ -80,12 +80,14 @@ interface Props {
   compactResult?: CompactResultInfo | null;
   toolPreset?: ToolPreset;
   customToolNames?: readonly string[] | null;
-  activeBuiltinTools?: readonly string[];
+  activeToolNames?: readonly string[];
   pinnedToolNames?: readonly string[] | null;
   toolSelectionKnown?: boolean;
   /** 上一次工具切换还没落地：候选名单仍是旧的，这时再点会用它算出一份过时的请求。 */
   toolSelectionPending?: boolean;
   onToolPresetChange?: (preset: ToolPreset, customNames?: string[] | null) => void;
+  /** 打开只读工具菜单前重读激活名单（运行中扩展、Shadow 开关都会改服务端那边的工具）。 */
+  onRefreshTools?: () => void;
   retryInfo?: { attempt: number; maxAttempts: number; errorMessage?: string } | null;
   queuedMessages?: QueuedMessages | null;
   inputHistory?: string[];
@@ -134,6 +136,8 @@ export interface ChatInputHandle {
   addImages: (files: File[]) => void;
   /** 首条消息获服务端确认、临时会话升级前同步清空输入与草稿。 */
   clearAcceptedPrompt: () => void;
+  /** 保存尚未落盘的新输入并交出旧草稿键，防止 key 切换时把已迁移内容写回。 */
+  prepareDraftKeyChange: (sourceKey: string) => void;
   focus: () => void;
 }
 
@@ -205,8 +209,9 @@ export function autoGrowTextarea(ta: HTMLTextAreaElement): void {
   // scroll the browser gave the caret (typing at the end had already scrolled
   // it into view), or the capped height hides the caret again.
   const scrollTop = ta.scrollTop;
+  const maxHeight = Math.min(TEXTAREA_MAX_HEIGHT, parseFloat(ta.style.maxHeight) || TEXTAREA_MAX_HEIGHT);
   ta.style.height = "auto";
-  ta.style.height = `${ta.value ? Math.min(ta.scrollHeight, TEXTAREA_MAX_HEIGHT) : ta.clientHeight}px`;
+  ta.style.height = `${ta.value ? Math.min(ta.scrollHeight, maxHeight) : ta.clientHeight}px`;
   ta.style.overflowY = ta.value && ta.scrollHeight > ta.clientHeight ? "auto" : "hidden";
   ta.scrollTop = scrollTop;
 }
@@ -285,16 +290,9 @@ export function canClearBuiltinCommandInput(message: string, imageCount: number,
   return imageCount === 0 && message.trim() === submittedMessage;
 }
 
-/**
- * Whether the composer box stacks its draft above its buttons instead of sitting
- * them side by side. A phone has no room for the steer and follow-up buttons next
- * to the draft: in one row the two of them take more than half the width and the
- * placeholder is cut to "立即引导 / 排队后...". So while a run streams they move to
- * their own right-aligned row below the draft. Quote mode (`compact`) stacks for
- * its own reason: it is a short excerpt, not a full composer.
- */
-export function stacksComposerLayout(compact: boolean, isMobile: boolean, isStreaming: boolean): boolean {
-  return compact || (isMobile && isStreaming);
+/** 手机始终给操作按钮独立一行，避免开始/结束输出时改变正文宽度和输入卡片高度。 */
+export function stacksComposerLayout(compact: boolean, isMobile: boolean): boolean {
+  return compact || isMobile;
 }
 
 // pi's TUI matches a skill by its bare name (pi-tui's
@@ -518,7 +516,7 @@ export function ModelDataDiagnosticBanner({ diagnostics }: { diagnostics?: Model
 }
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, sendError, onAbort, onSideChat, onQueuedSubmit, isStreaming, creationSettingsLocked = false, extensionsInitializing = false, modelState, modelActions, missingCwd, allModelList, onLoadAllModels,
-  contextUsage, sessionStats, onCompact, onAbortCompaction, isCompacting, compactError, onDismissCompactError, compactResult, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames, toolSelectionKnown, toolSelectionPending, onToolPresetChange,
+  contextUsage, sessionStats, onCompact, onAbortCompaction, isCompacting, compactError, onDismissCompactError, compactResult, toolPreset, customToolNames, activeToolNames, pinnedToolNames, toolSelectionKnown, toolSelectionPending, onToolPresetChange, onRefreshTools,
   retryInfo, queuedMessages, inputHistory = [], onRecallQueue,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   extensionUiOpen = false,
@@ -558,7 +556,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const enterSendMode = useEnterSendMode();
   const [value, setValue] = useState(() => (draftKey ? getDraft(draftKey)?.value ?? "" : ""));
   const [queuedSubmitPending, setQueuedSubmitPending] = useState(false);
-  const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
+  const [attachedImages, setAttachedImagesState] = useState<AttachedImage[]>(() => (
     draftKey ? draftImagesToAttachedImages(getDraft(draftKey)?.images) : []
   ));
   const [imageAttachmentError, setImageAttachmentError] = useState<string | null>(null);
@@ -577,6 +575,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [atActiveIndex, setAtActiveIndex] = useState(0);
   const [imageWarningDismissed, setImageWarningDismissed] = useState(false);
   const [historyMenuOpen, setHistoryMenuOpen] = useState(false);
+  const [textareaMaxHeight, setTextareaMaxHeight] = useState(TEXTAREA_MAX_HEIGHT);
   const [historyActiveIndex, setHistoryActiveIndex] = useState(0);
   const [fileIndex, setFileIndex] = useState<{ cwd: string; entries: FileIndexEntry[]; truncated: boolean } | null>(null);
   const [fileIndexLoading, setFileIndexLoading] = useState(false);
@@ -602,13 +601,23 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const draftKeyRef = useRef(draftKey);
   const valueRef = useRef(value);
   const attachedImagesRef = useRef(attachedImages);
+  // 附件引用是交接时的唯一同步来源，不能再从一次较早的 React render 反向覆盖。
+  const setAttachedImages = useCallback((update: React.SetStateAction<AttachedImage[]>) => {
+    const next = typeof update === "function" ? update(attachedImagesRef.current) : update;
+    attachedImagesRef.current = next;
+    setAttachedImagesState(next);
+  }, []);
   const textAttachmentRef = useRef<string | null>(textAttachment);
   const pendingImageCountRef = useRef(0);
+  const imageReaderMountedRef = useRef(true);
+  useEffect(() => {
+    imageReaderMountedRef.current = true;
+    return () => { imageReaderMountedRef.current = false; };
+  }, []);
   const resizeFrameRef = useRef<number | null>(null);
   const textareaAtMaxHeightRef = useRef(false);
   const queuedSubmitPendingRef = useRef(false);
   valueRef.current = value;
-  attachedImagesRef.current = attachedImages;
   textAttachmentRef.current = textAttachment;
 
   /**
@@ -624,7 +633,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     });
     const images = [...draft.images.map(draftImageToAttachedImage), ...attachedImagesRef.current];
     valueRef.current = restored.value;
-    attachedImagesRef.current = images;
     setValue(restored.value);
     setAttachedImages(images);
     setAtQuery(null);
@@ -637,14 +645,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       autoGrowTextarea(textarea);
       scrollTextareaCaretIntoView(textarea);
     });
-  }, []);
+  }, [setAttachedImages]);
 
   /** 直接采用草稿存储里的内容（取回结果已经和投递前的输入框内容合并过）。 */
   const adoptStoredDraft = useCallback((key: string) => {
     const stored = getDraft(key);
     const images = draftImagesToAttachedImages(stored?.images);
     valueRef.current = stored?.value ?? "";
-    attachedImagesRef.current = images;
     setValue(stored?.value ?? "");
     setTextAttachment(stored?.textAttachment ?? null);
     setAttachedImages((previous) => {
@@ -652,7 +659,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       return images;
     });
     setAtQuery(null);
-  }, []);
+  }, [setAttachedImages]);
 
   // 取回请求可能在切走再切回之后才返回：正文由发起方写进草稿存储，这里接到通知就并进
   // 已挂载的输入框，否则用户看不到它，下一次编辑还会把本地内容写回同一个键覆盖掉它。
@@ -672,7 +679,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         adoptStoredDraft(draftKey);
       }
     }
-    return subscribeRecalledDraft(draftKey, (draft) => prependDraft(draft));
+    return subscribeRecalledDraft(draftKey, (draft) => {
+      // 交出旧键后订阅清理尚未执行时，通知只能留在存储里，不能再改旧输入框或安排聚焦。
+      if (draftKeyRef.current !== draftKey) return;
+      prependDraft(draft);
+    });
   }, [adoptStoredDraft, draftKey, prependDraft]);
 
   const resizeTextarea = useCallback((force = false) => {
@@ -684,12 +695,17 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       const textarea = textareaRef.current;
       if (!textarea) return;
       if (!force && textarea.scrollHeight <= textarea.clientHeight) return;
-      if (force) textarea.style.height = "auto";
-      const height = Math.min(textarea.scrollHeight, TEXTAREA_MAX_HEIGHT);
-      textarea.style.height = `${height}px`;
-      textareaAtMaxHeightRef.current = textarea.scrollHeight > TEXTAREA_MAX_HEIGHT;
+      // 空值按单行测量，避免 placeholder 折行把输入卡片撑高；同时保留浏览器的光标滚动。
+      autoGrowTextarea(textarea);
+      if (document.activeElement === textarea) scrollTextareaCaretIntoView(textarea);
+      textareaAtMaxHeightRef.current = !!textarea.value && textarea.scrollHeight > textarea.clientHeight;
     });
   }, []);
+
+  const handlePaletteDraftMaxHeight = useCallback((height: number | null) => {
+    // 仅在补全展开期间借出草稿空间，关闭或空间变大后恢复正常上限。
+    setTextareaMaxHeight(Math.min(TEXTAREA_MAX_HEIGHT, Math.max(compact ? 96 : 24, height ?? TEXTAREA_MAX_HEIGHT)));
+  }, [compact]);
 
   useImperativeHandle(ref, () => ({
     setText(text: string) {
@@ -771,7 +787,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       const draft = createDraftFromUserMessage(message);
       const images = draft.images.map(draftImageToAttachedImage);
       valueRef.current = draft.value;
-      attachedImagesRef.current = images;
       textAttachmentRef.current = draft.textAttachment ?? null;
       setValue(draft.value);
       setAttachedImages(images);
@@ -805,6 +820,16 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       replaceTextareaRange(ta, start, end, quoteSeparator(ta.value.slice(0, start)) + text);
       setAtQuery(null);
     },
+    prepareDraftKeyChange(sourceKey: string) {
+      if (draftKeyRef.current !== sourceKey) return;
+      setDraft(sourceKey, {
+        value: textareaRef.current?.value ?? valueRef.current,
+        images: attachedImagesRef.current.map(imageToDraftImage),
+        textAttachment: textAttachmentRef.current ?? undefined,
+      });
+      // 旧 render 的写回 effect 和 key-change effect 都不再拥有这个键。
+      draftKeyRef.current = undefined;
+    },
     clearAcceptedPrompt() {
       clearInput();
     },
@@ -812,6 +837,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   const processImageFiles = useCallback(async (files: File[], options?: { clipboardFallback?: boolean }) => {
     if (compact) return;
+    const sourceDraftKey = draftKeyRef.current;
     const remaining = Math.max(
       0,
       MAX_ATTACHED_IMAGES - attachedImagesRef.current.length - pendingImageCountRef.current,
@@ -871,18 +897,32 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         }
         newImages = await readImages(usableFiles.slice(0, acceptedImageFiles.length));
       }
-      setAttachedImages((prev) => {
-        const accepted = newImages.slice(0, Math.max(0, MAX_ATTACHED_IMAGES - prev.length));
-        newImages.slice(accepted.length).forEach(revokeImagePreview);
-        return [...prev, ...accepted];
-      });
+      if (!imageReaderMountedRef.current || draftKeyRef.current !== sourceDraftKey) {
+        // 文件读取归属于开始时的草稿；首发交接/导航之后不能把迟到图片加进新输入框。
+        if (sourceDraftKey) {
+          const draft = getDraft(sourceDraftKey) ?? { value: "", images: [] };
+          const images = newImages.slice(0, Math.max(0, MAX_ATTACHED_IMAGES - draft.images.length)).map(imageToDraftImage);
+          if (images.length) {
+            setDraft(sourceDraftKey, { ...draft, images: [...draft.images, ...images] });
+            notifyRecalledDraft(sourceDraftKey, { value: "", images });
+          }
+        }
+        newImages.forEach(revokeImagePreview);
+        return;
+      }
+      const previous = attachedImagesRef.current;
+      const accepted = newImages.slice(0, Math.max(0, MAX_ATTACHED_IMAGES - previous.length));
+      newImages.slice(accepted.length).forEach(revokeImagePreview);
+      const next = [...previous, ...accepted];
+      // 交接可能早于 React 提交：先让 prepareDraftKeyChange 能同步读到已完成的图片。
+      setAttachedImages(next);
     } catch (error) {
       console.error("读取图片附件失败", error);
-      setImageAttachmentError(t("chat.imageAttachmentReadFailed"));
+      if (imageReaderMountedRef.current && draftKeyRef.current === sourceDraftKey) setImageAttachmentError(t("chat.imageAttachmentReadFailed"));
     } finally {
       pendingImageCountRef.current -= acceptedImageFiles.length;
     }
-  }, [compact, t]);
+  }, [compact, setAttachedImages, t]);
 
   const handleFilePick = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
@@ -900,14 +940,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       if (removed) revokeImagePreview(removed);
       return next;
     });
-  }, []);
+  }, [setAttachedImages]);
 
   const clearImages = useCallback((revoke = true) => {
     setAttachedImages((prev) => {
       if (revoke) prev.forEach(revokeImagePreview);
       return [];
     });
-  }, []);
+  }, [setAttachedImages]);
 
   const clearInput = useCallback((revokeImages = true) => {
     valueRef.current = "";
@@ -918,7 +958,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     setImageAttachmentError(null);
     if (draftKey) clearDraft(draftKey);
     if (draftKeyRef.current && draftKeyRef.current !== draftKey) clearDraft(draftKeyRef.current);
-    attachedImagesRef.current = [];
     textAttachmentRef.current = null;
     setTextAttachment(null);
     clearImages(revokeImages);
@@ -963,7 +1002,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       draftKey: draftKeyRef.current ?? null,
     });
     valueRef.current = snapshot.value;
-    attachedImagesRef.current = snapshot.images;
     textAttachmentRef.current = snapshot.textAttachment;
     setValue(snapshot.value);
     setAttachedImages(snapshot.images);
@@ -984,7 +1022,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       textarea.setSelectionRange(snapshot.value.length, snapshot.value.length);
       resizeTextarea(true);
     });
-  }, [resizeTextarea]);
+  }, [resizeTextarea, setAttachedImages]);
 
   const releaseSubmittedImages = useCallback((images: AttachedImage[]) => {
     images.forEach(revokeImagePreview);
@@ -1050,7 +1088,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       prev.forEach(revokeImagePreview);
       return draftImagesToAttachedImages(draft?.images);
     });
-  }, [draftKey]);
+  }, [draftKey, setAttachedImages]);
 
   // 字体族或字重变化会改变行高，需要强制重新测量输入框高度。
   useEffect(() => {
@@ -1059,7 +1097,22 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   useEffect(() => {
     resizeTextarea(true);
-  }, [draftKey, fontSize, resizeTextarea, value, width]);
+  }, [draftKey, fontSize, resizeTextarea, value, width, textareaMaxHeight]);
+
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    let measuredWidth = textarea.getBoundingClientRect().width;
+    // 侧栏、文件面板和窗口缩放都会改变实际宽度，聊天宽度偏好本身不一定变化。
+    const observer = new ResizeObserver(() => {
+      const nextWidth = textarea.getBoundingClientRect().width;
+      if (nextWidth === measuredWidth) return;
+      measuredWidth = nextWidth;
+      resizeTextarea(true);
+    });
+    observer.observe(textarea);
+    return () => observer.disconnect();
+  }, [resizeTextarea]);
 
   useEffect(() => {
     const ta = textareaRef.current;
@@ -1149,7 +1202,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     || (!value.trim() && !attachedImages.length && !textAttachment);
   const slashInputEnd = Math.min(slashCursor ?? value.length, value.length);
   const slashInputPrefix = value.slice(0, slashInputEnd);
-  const slash = compact ? null : findSlashQuery(slashInputPrefix);
+  // @ token 中的 / 属于路径；让 slashQuery 保持 null，避免计算候选并触发命令加载。
+  const slash = compact || atQuery !== null ? null : findSlashQuery(slashInputPrefix);
   const slashQuery = slash?.query ?? null;
 
   const filteredSlashCommands = useMemo(() => {
@@ -1173,7 +1227,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const hasInputText = Boolean(value.trim());
   const canQueueStreamingMessage = (hasInputText || attachedImages.length > 0) && !textAttachment && !queuedSubmitPending;
   // 模型能力未知时不阻止发送；仅对明确不支持图片的模型提示。
-  const stackedComposer = stacksComposerLayout(compact, isMobile, isStreaming);
+  const stackedComposer = stacksComposerLayout(compact, isMobile);
   const showImageUnsupportedWarning = (
     attachedImages.length > 0
     && !modelSupportsImageInput(modelState.model, modelState.list)
@@ -1231,6 +1285,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     && atServerResult.cwd === cwd
     && atServerResult.query === atQueryText;
   const atMatches: FileIndexEntry[] = serverResultInUse ? atServerResult.matches : atLocalMatches;
+
+  // 渲染和键盘共用唯一菜单；@ 路径收起后也不能把其中的 / 当作斜杠命令重新露出。
+  const activeInputPalette = historyMenuOpen ? "history"
+    : atQuery !== null ? (atMenuOpen ? "file" : null)
+      : slashMenuOpen && slashQuery !== null ? "slash" : null;
 
   // Open/reset the menu whenever the @token appears or changes (mirrors the
   // slash menu: Escape closes it, the next keystroke re-opens it).
@@ -1442,7 +1501,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         return;
       }
 
-      if (historyMenuOpen && !extensionUiOpen && !isComposing) {
+      if (activeInputPalette === "history" && !extensionUiOpen && !isComposing) {
         if (e.key === "ArrowDown") {
           e.preventDefault();
           setHistoryActiveIndex((i) => Math.min(Math.max(0, inputHistory.length - 1), i + 1));
@@ -1465,7 +1524,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         }
       }
 
-      if (slashMenuOpen && slashQuery !== null && !extensionUiOpen) {
+      if (activeInputPalette === "slash" && !extensionUiOpen) {
         if (e.key === "ArrowDown") {
           e.preventDefault();
           setSlashActiveIndex(getNextSlashIndex("down"));
@@ -1512,7 +1571,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
       // @ file menu — skip while composing so IME candidate navigation
       // (arrows/Enter/Tab) is never intercepted.
-      if (atMenuOpen && atQuery !== null && !extensionUiOpen && !isComposing) {
+      if (activeInputPalette === "file" && !extensionUiOpen && !isComposing) {
         if (e.key === "ArrowDown") {
           e.preventDefault();
           setAtActiveIndex((i) => Math.min(Math.max(0, atMatches.length - 1), i + 1));
@@ -1560,7 +1619,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         }
       }
     },
-    [isMobile, enterSendMode, isStreaming, onQueuedSubmit, onAbort, slashMenuOpen, slashQuery, displayedSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, extensionUiOpen, value]
+    [isMobile, enterSendMode, isStreaming, onQueuedSubmit, onAbort, activeInputPalette, displayedSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMatches, atActiveIndex, applyAtCompletion, inputHistory, historyActiveIndex, applyHistoryInput, extensionUiOpen, value]
   );
 
   const handleInput = useCallback((event: React.FormEvent<HTMLTextAreaElement>) => {
@@ -1640,7 +1699,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   // palette opens, so toggles made in the skills panel are reflected on the
   // next open. Failures degrade silently to the unannotated palette.
   useEffect(() => {
-    if (!slashMenuOpen || !cwd) return;
+    if (activeInputPalette !== "slash" || !cwd) return;
     const requestCwd = cwd;
     let cancelled = false;
     setSkillDormancyState({ cwd: requestCwd, values: {} });
@@ -1661,7 +1720,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     return () => {
       cancelled = true;
     };
-  }, [slashMenuOpen, cwd]);
+  }, [activeInputPalette, cwd]);
 
   useEffect(() => {
     if (slashActiveIndex >= displayedSlashCommands.length) {
@@ -1712,7 +1771,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   ) : null;
 
   const primaryActionButtons = isStreaming && !bashMode ? (
-    <div style={{ display: "flex", alignItems: "center", gap: 5, flexShrink: 0, alignSelf: isMobile || compact ? "flex-end" : "center" }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 5, minHeight: isMobile ? 34 : 32, flexShrink: 0, alignSelf: isMobile || compact ? "flex-end" : "center" }}>
       {onSideChat && (
         <button
           type="button"
@@ -2152,11 +2211,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 sessionStats={sessionStats}
                 toolPreset={toolPreset}
                 customToolNames={customToolNames}
-                activeBuiltinTools={activeBuiltinTools}
+                activeToolNames={activeToolNames}
                 pinnedToolNames={pinnedToolNames}
                 toolSelectionKnown={toolSelectionKnown}
                 toolSelectionPending={toolSelectionPending}
                 onToolPresetChange={creationSettingsLocked ? undefined : onToolPresetChange}
+                onRefreshTools={onRefreshTools}
                 onCompact={onCompact}
                 onAbortCompaction={onAbortCompaction}
                 isCompacting={isCompacting}
@@ -2180,11 +2240,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   onThinkingLevelChange={creationSettingsLocked ? undefined : onThinkingLevelChange}
                   toolPreset={toolPreset}
                   customToolNames={customToolNames}
-                  activeBuiltinTools={activeBuiltinTools}
+                  activeToolNames={activeToolNames}
                   pinnedToolNames={pinnedToolNames}
                   toolSelectionKnown={toolSelectionKnown}
                   toolSelectionPending={toolSelectionPending}
                   onToolPresetChange={creationSettingsLocked ? undefined : onToolPresetChange}
+                  onRefreshTools={onRefreshTools}
                   onCompact={onCompact}
                   onAbortCompaction={onAbortCompaction}
                   isCompacting={isCompacting}
@@ -2204,14 +2265,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         {/* Main input */}
         <div style={{ position: "relative", minWidth: 0 }}>
           <HistoryPalette
-            open={historyMenuOpen}
+            open={activeInputPalette === "history"}
             items={inputHistory}
             activeIndex={historyActiveIndex}
             onActiveIndexChange={setHistoryActiveIndex}
             onSelect={applyHistoryInput}
             containerRef={historyMenuRef}
+            onDraftMaxHeightChange={handlePaletteDraftMaxHeight}
           />
-          {slashMenuOpen && slashQuery !== null && (
+          {activeInputPalette === "slash" && (
             <SlashPalette
               open
               loading={slashCommandsLoading}
@@ -2223,9 +2285,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               onActiveIndexChange={setSlashActiveIndex}
               onSelect={applySlashCommand}
               itemRefs={slashItemRefs}
+              onDraftMaxHeightChange={handlePaletteDraftMaxHeight}
             />
           )}
-          {atMenuOpen && atQuery !== null && (
+          {activeInputPalette === "file" && (
             <FileMentionPalette
               open
               query={atQuery}
@@ -2238,6 +2301,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               needsServerSearch={needsServerSearch}
               onActiveIndexChange={setAtActiveIndex}
               onSelect={applyAtCompletion}
+              onDraftMaxHeightChange={handlePaletteDraftMaxHeight}
             />
           )}
           <div
@@ -2319,7 +2383,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               lineHeight: 1.6,
               fontFamily: "inherit",
               minHeight: compact ? 96 : 24,
-              maxHeight: 200,
+              maxHeight: textareaMaxHeight,
               overflow: "auto",
             }}
           />
@@ -2414,11 +2478,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 onThinkingLevelChange={creationSettingsLocked ? undefined : onThinkingLevelChange}
                 toolPreset={toolPreset}
                 customToolNames={customToolNames}
-                activeBuiltinTools={activeBuiltinTools}
+                activeToolNames={activeToolNames}
                 pinnedToolNames={pinnedToolNames}
                 toolSelectionKnown={toolSelectionKnown}
                 toolSelectionPending={toolSelectionPending}
                 onToolPresetChange={creationSettingsLocked ? undefined : onToolPresetChange}
+                onRefreshTools={onRefreshTools}
                 onCompact={onCompact}
                 onAbortCompaction={onAbortCompaction}
                 isCompacting={isCompacting}

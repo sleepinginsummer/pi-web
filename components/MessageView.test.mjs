@@ -428,7 +428,8 @@ test("a stopped reply's mark leads its usage line instead of a line of its own",
     errorMessage: "This operation was aborted",
     usage: { input: 1200, output: 34, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
   }, { turnDurationMs: 12_000 });
-  assert.match(html, /<span>Stopped<\/span> <span>·<\/span> <span><span[^>]*>↑<\/span>/);
+  // 中止标记是红色的，后面的用量数字仍走 dim 色。
+  assert.match(html, /<span style="color:#ef4444">Stopped<\/span> <span>·<\/span> <span><span[^>]*>↑<\/span>/);
   assert.equal(html.split(">Stopped<").length, 2);
 });
 

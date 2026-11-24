@@ -190,6 +190,8 @@ export interface AgentSessionLike {
       /** Replayed from the transcript's system messages since Pi 0.86; never assign it. */
       readonly systemPrompt?: string;
       thinkingLevel?: string;
+      /** Agent 的会话私有模型引用；只用于无磁盘写入的失败回滚，不修改 catalog 对象。 */
+      model?: ModelLike;
       streamingMessage?: PiAgentMessage;
       /** The declared tools, with the descriptions `prepareLoadout` hooks set for the model. */
       readonly tools?: readonly { readonly name: string; readonly description: string }[];
@@ -234,6 +236,8 @@ export interface AgentSessionLike {
   /** An auto-retry waiting out its backoff; optional because test sessions leave it out. */
   readonly isRetrying?: boolean;
   setModel(model: ModelLike): Promise<void>;
+  /** pi 的 scoped models：`--models` / `enabledModels` 解析结果，带 `:level` 的项有 thinkingLevel。 */
+  readonly scopedModels?: readonly { model: { readonly provider: string; readonly id: string }; readonly thinkingLevel?: string }[];
   navigateTree(targetId: string, options?: { summarize?: boolean }): Promise<NavigateTreeResult>;
   setThinkingLevel(level: string): void;
   compact(customInstructions?: string): Promise<unknown>;

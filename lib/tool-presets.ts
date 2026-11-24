@@ -43,11 +43,20 @@ export function getPresetFromTools(tools: ToolEntry[]): ConcreteToolPreset {
   return getPresetFromToolNames(activeTools.map((tool) => tool.name));
 }
 
+/**
+ * 内置工具在会话里的规范名：PowerShell 模式下 pi 激活的工具叫 `powershell`，
+ * 而预设、settings.json 的 defaultTools 与界面都用 `bash` 表示同一个位置。
+ * 只用于推算预设和标注差异，界面上照实显示服务端的名字。
+ */
+export function normalizeBuiltinToolName(name: string): string {
+  return name === "powershell" ? "bash" : name;
+}
+
 export function getPresetFromToolNames(toolNames: readonly string[]): ConcreteToolPreset {
   if (toolNames.length === 0) return "none";
 
   const active = toolNames
-    .map((name) => name === "powershell" ? "bash" : name)
+    .map(normalizeBuiltinToolName)
     .filter((name) => BUILTIN_TOOL_NAMES.has(name))
     .sort()
     .join(",");

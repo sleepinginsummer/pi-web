@@ -102,7 +102,7 @@ export async function POST(req: Request) {
     }
 
     // Use a one-time key so startRpcSession's lock doesn't conflict with real session ids
-    const { operation = "create", sessionId, operationId, provider, modelId, toolNames, thinkingLevel, fastEnabled, shadowMindEnabled, observerEnabled, ...promptCommand } = command as { operation?: unknown; sessionId?: unknown; operationId?: unknown; provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: unknown; fastEnabled?: unknown; shadowMindEnabled?: unknown; [key: string]: unknown };
+    const { operation = "create", sessionId, operationId, provider, modelId, toolNames, thinkingLevel, thinkingLevelExplicit, thinkingLevelModel, fastEnabled, shadowMindEnabled, observerEnabled, ...promptCommand } = command as { operation?: unknown; sessionId?: unknown; operationId?: unknown; provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: unknown; thinkingLevelExplicit?: unknown; thinkingLevelModel?: unknown; fastEnabled?: unknown; shadowMindEnabled?: unknown; [key: string]: unknown };
     if (operation !== "create" && operation !== "finalize-existing" && operation !== "submit-first-prompt") {
       throw new Error(`Invalid new-session operation: ${String(operation)}`);
     }
@@ -113,6 +113,18 @@ export async function POST(req: Request) {
       throw new Error("provider and modelId must be provided together");
     }
     const explicitThinkingLevel = parseThinkingLevel(thinkingLevel);
+    let recommendationModel: { provider: string; modelId: string } | undefined;
+    if (thinkingLevelModel !== undefined) {
+      if (!thinkingLevelModel || typeof thinkingLevelModel !== "object"
+        || !("provider" in thinkingLevelModel) || typeof thinkingLevelModel.provider !== "string" || !thinkingLevelModel.provider
+        || !("modelId" in thinkingLevelModel) || typeof thinkingLevelModel.modelId !== "string" || !thinkingLevelModel.modelId) {
+        throw new Error("thinkingLevelModel must contain provider and modelId");
+      }
+      recommendationModel = { provider: thinkingLevelModel.provider, modelId: thinkingLevelModel.modelId };
+    }
+    if (thinkingLevelExplicit !== undefined && typeof thinkingLevelExplicit !== "boolean") {
+      throw new Error("thinkingLevelExplicit must be a boolean");
+    }
     if (fastEnabled !== undefined && typeof fastEnabled !== "boolean") {
       throw new Error("fastEnabled must be a boolean");
     }
@@ -127,6 +139,9 @@ export async function POST(req: Request) {
       ...(toolNames ? { toolNames } : {}),
       ...(provider && modelId ? { initialModel: { provider, modelId } } : {}),
       ...(explicitThinkingLevel ? { thinkingLevel: explicitThinkingLevel } : {}),
+      // 自动推荐只作用于这个会话：不能当成新的全局默认档位落盘。
+      ...(thinkingLevelExplicit === false ? { thinkingLevelExplicit: false } : {}),
+      ...(recommendationModel ? { thinkingLevelModel: recommendationModel } : {}),
       ...(typeof fastEnabled === "boolean" ? { fastEnabled } : {}),
       ...(operation === "create" && observerEnabled === true ? { observerEnabled: true } : {}),
     };

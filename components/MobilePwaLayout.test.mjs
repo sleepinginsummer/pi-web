@@ -9,6 +9,7 @@ const appShellSource = await readFile(new URL("./AppShell.tsx", import.meta.url)
 const chatWindowSource = await readFile(new URL("./ChatWindow.tsx", import.meta.url), "utf8");
 const chatInputSource = await readFile(new URL("./ChatInput.tsx", import.meta.url), "utf8");
 const viewportHookSource = await readFile(new URL("../hooks/useViewportHeight.ts", import.meta.url), "utf8");
+const modelPickerSource = await readFile(new URL("./ModelPicker.tsx", import.meta.url), "utf8");
 const extensionStatusBarSource = await readFile(new URL("./ExtensionStatusBar.tsx", import.meta.url), "utf8");
 const mcpConfigSource = await readFile(new URL("./McpConfig.tsx", import.meta.url), "utf8");
 const mcpSignInSource = await readFile(new URL("./McpSignIn.tsx", import.meta.url), "utf8");
@@ -33,7 +34,9 @@ test("tracks the visual viewport while the software keyboard is open", () => {
   assert.match(appShellSource, /paddingBottom: "env\(safe-area-inset-bottom\)"/);
   assert.match(appShellSource, /paddingLeft: "env\(safe-area-inset-left\)"/);
   assert.match(appShellSource, /paddingRight: "env\(safe-area-inset-right\)"/);
-  assert.match(appShellSource, /height: viewportHeight \?\? "100dvh"/);
+  assert.match(cssRule(cssSource, ".app-shell-root"), /height: var\(--app-viewport-height, 100vh\)/);
+  assert.match(cssSource, /@supports \(height: 100dvh\) \{\s*\.app-shell-root \{\s*height: var\(--app-viewport-height, 100dvh\)/);
+  assert.doesNotMatch(appShellSource, /height: "var\(--app-viewport-height, 100dvh\)"/);
   assert.match(viewportHookSource, /window\.visualViewport/);
   assert.match(viewportHookSource, /--app-viewport-height/);
   assert.match(viewportHookSource, /window\.scrollTo\(0, 0\)/);
@@ -66,8 +69,10 @@ test("collapses secondary composer chrome while the mobile keyboard is open", ()
   assert.match(chatInputSource, /className=\{compact \? undefined : "chat-input-shell"\}/);
   assert.match(extensionStatusBarSource, /className=\{`extension-status-bar/);
   assert.match(chatWindowSource, /className="[^"]*chat-content /);
-  // Phone portrait: send/stop live in the text row, so the bar may collapse.
-  assert.match(cssSource, /@media \(max-width: 640px\) \{\s*html\[data-keyboard-open\] \.chat-input-controls,\s*html\[data-keyboard-open\] \.extension-status-shelf,\s*html\[data-keyboard-open\] \.extension-status-bar \{\s*display: none !important;/);
+  // 竖屏手机的主操作独立于底栏；打开模型筛选时必须保留它的容器。
+  assert.match(cssSource, /@media \(max-width: 640px\) \{\s*html\[data-keyboard-open\] \.extension-status-shelf,\s*html\[data-keyboard-open\] \.extension-status-bar \{\s*display: none !important;/);
+  assert.match(modelPickerSource, /className="model-selector"/);
+  assert.match(cssSource, /html\[data-keyboard-open\] \.chat-input-controls:not\(:has\(\.model-selector \[role="listbox"\]\)\) \{\s*display: none !important;/);
   // Phone landscape is wider than the breakpoint, so it keeps the desktop
   // composer whose send/stop/queue buttons sit in that bar: only the tools
   // group may collapse, never the whole row, or the keyboard hides sending.

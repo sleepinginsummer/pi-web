@@ -67,14 +67,14 @@ test("renders structured model-data diagnostics at the presentation layer", () =
 
 test("follow-up shortcuts preserve newline, IME, mobile and completion behavior", () => {
   const source = ts.createSourceFile("ChatInput.tsx", readFileSync(new URL("./ChatInput.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  function findHandler(node) {
-    if (ts.isVariableDeclaration(node) && node.name.getText(source) === "handleKeyDown") {
-      return node.initializer.arguments[0];
-    }
-    return ts.forEachChild(node, findHandler);
+  function findInitializer(node, name) {
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === name) return node.initializer;
+    return ts.forEachChild(node, child => findInitializer(child, name));
   }
-  // Execute the component's actual callback without mounting the rest of the UI.
-  const script = new Script(ts.transpileModule(findHandler(source).getText(source), {
+  // 同时执行实际菜单优先级表达式和键盘回调，避免测试另造一份判定逻辑。
+  const palette = findInitializer(source, "activeInputPalette").getText(source);
+  const callback = findInitializer(source, "handleKeyDown").arguments[0].getText(source);
+  const script = new Script(ts.transpileModule(`(() => { const activeInputPalette = ${palette}; return (${callback}); })()`, {
     compilerOptions: { target: ts.ScriptTarget.ES2020 },
   }).outputText);
   const cases = [
@@ -94,6 +94,9 @@ test("follow-up shortcuts preserve newline, IME, mobile and completion behavior"
     ["mobile modified Enter respects composition grace", { altKey: true, ctrlKey: true }, { isMobile: true, lastCompositionEndAtRef: { current: 950 } }, "prevented"],
     ["slash completion takes priority", { altKey: true }, { slashMenuOpen: true, slashQuery: "help" }, "slash"],
     ["file completion takes priority", { altKey: true }, { atMenuOpen: true, atQuery: {} }, "file"],
+    ["文件路径与斜杠同时命中时选择文件", {}, { atMenuOpen: true, atQuery: {}, slashMenuOpen: true, slashQuery: "" }, "file"],
+    ["Escape 关闭当前文件菜单", { key: "Escape" }, { atMenuOpen: true, atQuery: {}, slashMenuOpen: true, slashQuery: "" }, "closeFile"],
+    ["文件菜单收起后不重新露出路径中的斜杠菜单", {}, { isStreaming: false, atMenuOpen: false, atQuery: {}, slashMenuOpen: true, slashQuery: "" }, "send"],
     ["history selection takes priority", { altKey: true }, { historyMenuOpen: true }, "history"],
     ["Ctrl+Enter mode: Enter inserts a newline", {}, { enterSendMode: "ctrlEnter", isStreaming: false }, "native"],
     ["Ctrl+Enter mode: Ctrl+Enter sends", { ctrlKey: true }, { enterSendMode: "ctrlEnter", isStreaming: false }, "send"],
@@ -125,6 +128,7 @@ test("follow-up shortcuts preserve newline, IME, mobile and completion behavior"
       applySlashCommand() { action = "slash"; },
       submitsSlashCommandOnEnter, value: "", setSlashMenuOpen() {},
       applyAtCompletion() { action = "file"; },
+      setAtMenuOpen() { action = "closeFile"; },
       applyHistoryInput() { action = "history"; },
       ...state,
     });
@@ -260,8 +264,8 @@ test("ignores a pointer click that reaches Stop's slot just as the run ends", ()
   assert.match(hook, /useLayoutEffect\(\(\) => \{\s*if \(!isStreaming\) return;\s*return \(\) => \{ runEndedAtRef\.current = performance\.now\(\); \};\s*\}, \[isStreaming\]\);/);
   assert.match(controls, /const isStrayClick = useRunEndStrayClick\(isStreaming\);/);
   assert.match(controls, /onClick=\{isCompacting \? onAbortCompaction : \(event\) => \{ if \(!isStrayClick\(event\)\) onCompact\?\.\(\); \}\}/);
-  // 运行中控件禁用，误触判断排在禁用之后（disabled 时直接返回）。
-  assert.match(controls, /onClick=\{\(event\) => \{ if \(disabled \|\| isStrayClick\(event\)\) return; setToolDropdownOpen\(\(open\) => !open\); \}\}/);
+  // 运行中控件禁用，误触判断排在禁用之后（disabled 时直接返回）；只读菜单打开前先补读一次名单。
+  assert.match(controls, /if \(disabled \|\| isStrayClick\(event\)\) return;[\s\S]{0,300}?if \(locked && !toolDropdownOpen\) onRefreshTools\?\.\(\);[\s\S]{0,80}?setToolDropdownOpen\(\(open\) => !open\);/);
   assert.match(controls, /onClick=\{onAbort\}/, "Stop itself is never delayed");
 });
 
@@ -552,7 +556,9 @@ test("clearing an accepted new-session prompt cannot restore its draft", async (
 
   assert.match(clearInputSource, /valueRef\.current = "";[\s\S]*?setValue\(""\)/);
   assert.match(clearInputSource, /textareaRef\.current\.value = ""/);
-  assert.match(clearInputSource, /attachedImagesRef\.current = \[\]/);
+  assert.match(clearInputSource, /clearImages\(revokeImages\)/);
+  assert.match(source, /attachedImagesRef\.current = next;\s*setAttachedImagesState\(next\);/);
+  assert.doesNotMatch(source, /attachedImagesRef\.current = attachedImages;/);
   assert.match(persistDraftSource, /draftKeyRef\.current !== draftKey \|\| valueRef\.current !== value/);
 });
 
@@ -706,7 +712,7 @@ test("移回入口恢复完整图片预览并保留现有附件和草稿", async
     prependChatDraft,
     imageToDraftImage: ({ data, mimeType }) => ({ data, mimeType }),
     draftImageToAttachedImage: (image) => ({ ...image, previewUrl: `data:${image.mimeType};base64,${image.data}` }),
-    setValue() {}, setAttachedImages() {}, setAtQuery() {},
+    setValue() {}, setAttachedImages(images) { attachedImagesRef.current = images; }, setAtQuery() {},
     setDraft: (key, draft) => { persisted = { key, draft }; },
     requestAnimationFrame: (callback) => callback(),
     autoGrowTextarea() {},
@@ -797,7 +803,8 @@ test("a recall delivered after the composer mounted lands in the input", async (
 
   // 取回请求往返期间用户切走再切回：输入框已经挂载并读过草稿，迟到的结果只能靠订阅送进来，
   // 否则下一次编辑会把本地内容写回同一个键，服务端已清除的消息就丢了。
-  assert.match(source, /subscribeRecalledDraft\(draftKey, \(draft\) => prependDraft\(draft\)\)/);
+  assert.match(source, /subscribeRecalledDraft\(draftKey, \(draft\) => \{/);
+  assert.match(source, /if \(draftKeyRef\.current !== draftKey\) return;\s*prependDraft\(draft\);/);
   // 投递落在读完初始草稿之后、订阅生效之前时不会补发：订阅前先用恢复标记补收一次，
   // 否则首次写回会覆盖刚取回的正文与附件。
   assert.match(source, /if \(firstMount && recallRevision\(draftKey\) !== initialRecallRevisionRef\.current\) \{/);

@@ -20,7 +20,9 @@ test("思考控制只有一份，运行中仍可修改等级", () => {
 test("Auto 只表示新会话未显式选择，按钮展示已解析的默认等级", () => {
   assert.match(schema, /defaultThinkingLevel: isThinkingLevel\(value.defaultThinkingLevel\)/);
   assert.match(model, /newSessionDefaultThinkingLevel: action.payload.defaultThinkingLevel \?\? null/);
-  assert.match(session, /thinkingLevel: isNew && thinkingLevel === "auto"[\s\S]*?newSessionDefaultThinkingLevel \?\? "auto"/);
+  // 内部 auto 时显示 settings 的默认档位，但要按当前模型限幅（默认 max、模型最高只到 high 时
+  // 不能显示一个它做不到的档位），所以走 resolveDisplayedThinkingLevel 而不是直接回退。
+  assert.match(session, /thinkingLevel: resolveDisplayedThinkingLevel\(\{[\s\S]{0,80}level: thinkingLevel,[\s\S]{0,80}fallback: isNew \? newSessionDefaultThinkingLevel : null,[\s\S]{0,80}supported: modelKey \? \(modelThinkingLevels\[modelKey\] \?\? null\) : null,/);
   assert.match(session, /isAutoThinkingSelection: isNew && thinkingLevelOverrideRef.current === null/);
   assert.match(thinking, /lvl === "auto"[\s\S]*?isAutoThinkingSelection/);
 });

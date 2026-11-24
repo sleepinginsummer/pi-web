@@ -1,4 +1,5 @@
 import type { UserMessage } from "./types";
+import { prependChatDraft } from "./queued-messages";
 
 export interface ChatDraftImage {
   data: string;
@@ -110,12 +111,41 @@ export function setDraft(key: string, draft: ChatDraft): void {
     pendingRestores.delete(key);
     return;
   }
+  const current = drafts.get(key);
+  // 重挂载会把未编辑的内容再写一遍：保持记录身份，迁移不能把它误判为新输入。
+  if (current && current.value === draft.value
+    && (current.textAttachment ?? "") === (draft.textAttachment ?? "")
+    && current.images.length === draft.images.length
+    && current.images.every((image, index) => image.data === draft.images[index].data && image.mimeType === draft.images[index].mimeType)) return;
   drafts.set(key, cloneDraft(draft));
 }
 
 export function clearDraft(key: string): void {
   drafts.delete(key);
   pendingRestores.delete(key);
+}
+
+export type DraftTransfer = (targetKey: string) => void;
+
+/**
+ * 捕获一次草稿迁移。请求等待期间源草稿可能被另一输入框更新：迁移捕获的内容，
+ * 只有源记录仍是同一份时才删除；后写入的正文和附件必须留在源键。闭包只能提交一次。
+ */
+export function captureDraftTransfer(sourceKey: string): DraftTransfer | null {
+  const source = drafts.get(sourceKey);
+  if (!source) return null;
+  const captured = cloneDraft(source);
+  let committed = false;
+  return (targetKey) => {
+    if (committed || targetKey === sourceKey) return;
+    committed = true;
+    const current = getDraft(targetKey) ?? { value: "", images: [] };
+    setDraft(targetKey, {
+      ...prependChatDraft(captured, current),
+      textAttachment: [captured.textAttachment, current.textAttachment].filter(Boolean).join("\n\n") || undefined,
+    });
+    if (drafts.get(sourceKey) === source) clearDraft(sourceKey);
+  };
 }
 
 /** 将用户消息转换为新会话输入草稿；仅保留输入框支持的文本与 base64 图片。 */

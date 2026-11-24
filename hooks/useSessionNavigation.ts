@@ -7,6 +7,7 @@ import { clearDraft } from "@/lib/draft-store";
 import { releaseNewSessionMaterialization } from "@/lib/new-session-materialization-client";
 import { replaceSessionUrl } from "@/lib/session-navigation-url";
 import { clearLastOpen, getLastOpenSession, setLastOpenSession, workspaceKeyOf } from "@/lib/workspace-memory";
+import { clearPendingNewSessionControl, latestPendingNewSessionControl, mirrorPendingNewSessionControl } from "@/lib/pending-new-session-mirror";
 import { useNotificationSessionNavigation } from "@/hooks/useNotificationSessionNavigation";
 import {
   DEFAULT_PENDING_NEW_SESSION_CONTROL,
@@ -126,6 +127,7 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
     setSelectedSession(null);
     if (!pendingNewSessions.has(cwd)) {
       setPendingNewSessions((current) => new Map(current).set(cwd, DEFAULT_PENDING_NEW_SESSION_CONTROL));
+      mirrorPendingNewSessionControl(cwd, DEFAULT_PENDING_NEW_SESSION_CONTROL);
     }
     setNewSessionCwd(cwd);
     setTabOpenNewSession(cwd);
@@ -138,11 +140,12 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
     window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
   }, [bumpSessionKey, invalidateNotificationNavigation, invalidateWorkspaceRestore, isMobile, onMobileSelect, pendingNewSessions, resetSessionViews]);
 
-  const sessionCreated = useCallback((session: SessionInfo) => {
+  const sessionCreated = useCallback((session: SessionInfo, options?: { preserveDraft?: boolean }) => {
     invalidateWorkspaceRestore();
     invalidateNotificationNavigation();
     activeSessionIdRef.current = session.id;
-    clearDraft(`new:${session.cwd}`);
+    // 暂存库首发由捕获的迁移记录决定源清理，不能删除等待期间的新输入。
+    if (!options?.preserveDraft) clearDraft(`new:${session.cwd}`);
     releaseNewSessionMaterialization(session.cwd);
     setNewSessionCwd(null);
     setPendingNewSessions((current) => {
@@ -151,6 +154,7 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
       next.delete(session.cwd);
       return next;
     });
+    clearPendingNewSessionControl(session.cwd);
     setSelectedSession(session);
     requestSidebarLocate(session.id);
     setTabOpenSession(session.id);
@@ -168,6 +172,7 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
       next.delete(session.cwd);
       return next;
     });
+    clearPendingNewSessionControl(session.cwd);
     onRefresh();
     if (newSessionCwdRef.current !== session.cwd || activeSessionIdRef.current !== null) return;
     invalidateWorkspaceRestore();
@@ -209,14 +214,14 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
   }, [bumpSessionKey, invalidateNotificationNavigation, invalidateWorkspaceRestore, onRefresh, resetSessionViews, router]);
 
   const dispatchPending = useCallback((cwd: string, event: PendingNewSessionEvent) => {
-    setPendingNewSessions((current) => {
-      const previous = current.get(cwd) ?? DEFAULT_PENDING_NEW_SESSION_CONTROL;
-      const control = reducePendingNewSession(previous, event);
-      if (control === previous) return current;
-      const next = new Map(current);
-      next.set(cwd, control);
-      return next;
-    });
+    // 归约的输入取渲染无关的镜像，而不是 React state：创建入口可能在另一个已经卸载的实例里
+    // 等着，它读不到 state；而 state 的提交时机不确定，切模任务结算与它同在一个微任务链里，
+    // 按 state 归约可能接在还没提交的上一份后面。镜像同步推进，两边读到的是同一份。
+    const previous = latestPendingNewSessionControl(cwd) ?? DEFAULT_PENDING_NEW_SESSION_CONTROL;
+    const control = reducePendingNewSession(previous, event);
+    mirrorPendingNewSessionControl(cwd, control);
+    if (control === previous) return;
+    setPendingNewSessions((current) => new Map(current).set(cwd, control));
   }, []);
 
   const beginInitialCwd = useCallback((cwd: string) => {
@@ -241,11 +246,16 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
     resetSessionViews();
   }, [bumpSessionKey, invalidateNotificationNavigation, invalidateWorkspaceRestore, resetSessionViews]);
   const updateDraftCwd = useCallback((cwd: string | null) => {
+    if (newSessionCwdRef.current === cwd) return;
     invalidateWorkspaceRestore();
     invalidateNotificationNavigation();
+    // worktree 是另一份草稿：推进导航代次并重建 ChatWindow，让运行时 ID、切模引用与
+    // 所有异步回调仍留在原 cwd。正文和附件沿用按 cwd 的 draft-store 恢复路径。
+    bumpSessionKey();
+    newSessionCwdRef.current = cwd;
     setNewSessionCwd(cwd);
     if (cwd) setTabOpenNewSession(cwd);
-  }, [invalidateNotificationNavigation, invalidateWorkspaceRestore]);
+  }, [bumpSessionKey, invalidateNotificationNavigation, invalidateWorkspaceRestore]);
 
   const restoreWorkspaceContext = useCallback((workspaceKey: string) => {
     activeWorkspaceKeyRef.current = workspaceKey;

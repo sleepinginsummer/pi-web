@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useRef, useEffect, useMemo, useReducer } from "react";
 import { stripAnsi } from "@/lib/ansi";
+import { mergeExtensionUiSnapshot } from "@/lib/extension-ui-runtime-state";
 import type {
   UserMessage,
   ToolResultMessage,
@@ -20,10 +21,12 @@ import { resolveFastModeAvailability } from "@/lib/fast-mode";
 import { deleteSessionViewSnapshot, getSessionViewSnapshot, setSessionViewSnapshot } from "@/lib/session-view-cache";
 import { userMessageKey } from "@/lib/prompt-recovery";
 
-import { isThinkingLevel, type ThinkingLevel, type ThinkingLevelOption } from "@/lib/thinking-levels";
+import { clampThinkingLevelToSupported, isThinkingLevel, parseThinkingLevelOption, resolveDisplayedThinkingLevel, type ThinkingLevel, type ThinkingLevelOption } from "@/lib/thinking-levels";
 import { recordThinkingLevelPreference } from "@/lib/thinking-level-preference-client";
 import { createNewSessionRuntime, materializeNewSession, submitNewSessionFirstPrompt, releaseNewSessionMaterialization, type NewSessionMaterializationResult } from "@/lib/new-session-materialization-client";
-import { selectNewSessionRequest, selectPendingNewSession, type PendingNewSessionControl, type PendingNewSessionEvent } from "@/lib/pending-new-session";
+import { selectNewSessionRequest, selectPendingNewSession, type PendingNewSessionControl, type PendingNewSessionEvent, type ThinkingLevelSource } from "@/lib/pending-new-session";
+import { beginDraftModelSwitch, getDraftModelSwitch, isLatestDraftModelSwitch, registerDraftModelSwitch, settleDraftModelSwitch, waitForDraftModelSwitchTask, type DraftModelSelection } from "@/lib/draft-model-switch";
+import { latestPendingNewSessionControl } from "@/lib/pending-new-session-mirror";
 import { projectExtensionBinding } from "@/lib/new-session-protocol";
 import { retryModelLoad, useModelSelection } from "@/hooks/useModelSelection";
 import { useFrameBatchedStreamDispatch } from "@/hooks/useFrameBatchedStreamDispatch";
@@ -58,8 +61,10 @@ import {
   setDraft,
   subscribeDraftRestore,
   type ChatDraft,
+  captureDraftTransfer,
+  type DraftTransfer,
 } from "@/lib/draft-store";
-import { CONFIGURED_TOOL_PRESET, getPresetFromToolNames, getToolNamesForPreset, SETTINGS_BUILTIN_TOOLS, type ToolEntry } from "@/lib/tool-presets";
+import { CONFIGURED_TOOL_PRESET, getPresetFromToolNames, getToolNamesForPreset, normalizeBuiltinToolName, SETTINGS_BUILTIN_TOOLS, type ToolEntry } from "@/lib/tool-presets";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import { createShownNotices, extensionErrorMessage } from "@/lib/startup-issues";
 import type { BashResultLike } from "@/lib/pi-types";
@@ -94,6 +99,12 @@ import {
 } from "@/lib/streaming-message";
 import { getToolExecutionProgress } from "@/lib/tool-execution-progress";
 import type { SessionListRefreshRequest } from "@/lib/session-list-refresh-coordinator";
+
+/** 草稿的档位修订号（用户手动改档的次数）；不是设置态的草稿没有这个字段。 */
+function settingsLevelRevision(control: PendingNewSessionControl | null): number | undefined {
+  return control && "levelRevision" in control ? control.levelRevision : undefined;
+}
+
 const SESSION_CONTEXT_PAGE_SIZE = 50;
 /** 单页历史的期限：服务端卡住时不能让顶部一直停在「加载中」，超时按失败处理，按钮可重试。 */
 const EARLIER_PAGE_TIMEOUT_MS = 30_000;
@@ -151,13 +162,16 @@ interface PendingBash {
   result?: BashResultLike;
 }
 type DetachedSubagentMode = "auto-resume" | "next-turn";
-/** 一次运行态读取的坐标：发起时的读取序号、队列代次与压缩代次。 */
+/** 一次运行态读取的坐标：读取序号与队列、压缩、思考强度和扩展 UI 的事件版本。 */
 interface RuntimeRead {
   seq: number;
   queueGeneration: number;
   compactionEpoch: number;
   /** 取这份快照时用户档位选择的版本：之后用户改过档，这份快照的档位就是旧的。 */
   thinkingRevision: number;
+  /** 实时扩展 UI 按字段记版本，状态事件不能误伤仍有效的 widget 快照。 */
+  extensionStatusesRevision: number;
+  extensionWidgetsRevision: number;
 }
 
 export interface DetachedSubagentStatus {
@@ -453,7 +467,7 @@ export interface UseAgentSessionOptions {
   newSessionCwd: string | null;
   pendingNewSessionControl: PendingNewSessionControl;
   onPendingNewSessionEvent: (cwd: string, event: PendingNewSessionEvent) => void;
-  onSessionCreated?: (session: SessionInfo) => void;
+  onSessionCreated?: (session: SessionInfo, options?: { preserveDraft?: boolean }) => void;
   /** 发送途中已切走：会话照常创建，但不把用户拉回来。 */
   onSessionCreatedInBackground?: (session: SessionInfo) => void;
   // 新会话首次落盘或一轮运行结束后刷新侧栏列表。
@@ -495,18 +509,20 @@ const BASH_STATE_RECONCILE_MS = 1_000;
 const EVENT_STREAM_CONNECT_TIMEOUT_MS = 15_000;
 const NOTICE_EXIT_ANIMATION_MS = 180;
 
-type EventStreamConnectionStatus = "connected" | "timeout" | "closed";
+type EventStreamConnectionStatus = "connected" | "timeout" | "closed" | "startup_error";
 
 type EventStreamConnectionResult = {
   status: EventStreamConnectionStatus;
   source: StreamEventSource;
+  errorMessage?: string;
+  retryable?: boolean;
 };
 
 class EventStreamConnectionError extends Error {
-  constructor(public readonly status: Exclude<EventStreamConnectionStatus, "connected">) {
-    super(status === "timeout"
+  constructor(public readonly status: Exclude<EventStreamConnectionStatus, "connected">, message?: string, public readonly retryable = false) {
+    super(message ?? (status === "timeout"
       ? "Timed out connecting to the agent event stream. Please try again."
-      : "Failed to connect to the agent event stream. Please try again.");
+      : "Failed to connect to the agent event stream. Please try again."));
     this.name = "EventStreamConnectionError";
   }
 }
@@ -571,6 +587,7 @@ export interface ChatInputHandle {
   prependDraft: (draft: ChatDraft) => void;
   addImages: (files: File[]) => void;
   clearAcceptedPrompt: () => void;
+  prepareDraftKeyChange: (sourceKey: string) => void;
 }
 
 export interface AttachedImage {
@@ -595,6 +612,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const pendingSessionView = selectPendingNewSession(pendingNewSessionControl);
   const pendingShadowMindEnabled = pendingSessionView.desiredShadowMindEnabled;
   const creationSettingsLocked = pendingSessionView.busy;
+  // 创建参数要在等待（切模、初始化）之后再取：等待期间草稿仍可改 Shadow 开关和工具档位，
+  // 用等待之前捕获的那一份会让运行时按旧设置初始化。
+  const pendingNewSessionControlRef = useRef(pendingNewSessionControl);
+  pendingNewSessionControlRef.current = pendingNewSessionControl;
   // 挂载接管用的身份（有 runtime 就必须先连 SSE 再补读快照）；
   // 控制类 UI 的授权是另一个投影（runtimeSessionId），两者不要混用。
   const attachSessionId = pendingSessionView.transportSessionId;
@@ -694,11 +715,32 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [fastEnabled, setFastEnabled] = useState(false);
   const [runtimeFastAvailable, setRuntimeFastAvailable] = useState<boolean | null>(null);
   const [fastPending, setFastPending] = useState(false);
+  // 每个模型支持的档位（`provider:modelId` 键）：切模提交时要按目标模型限幅，创建入口再兜一次。
+  const thinkingLevelsRef = useRef(modelThinkingLevels);
+  thinkingLevelsRef.current = modelThinkingLevels;
   const [toolPreset, setToolPreset] = useState<ToolPreset>(CONFIGURED_TOOL_PRESET);
   const [customToolNames, setCustomToolNames] = useState<string[] | null>(null);
+  /**
+   * 草稿的最新一份设置：渲染无关的镜像优先（跨实例、跨切走再回来），没有登记过才退回本实例
+   * 的 props。直接打开 `?cwd=` 时没有任何事件派发过，镜像还是空的，这条回退就是那次的第一份。
+   */
+  const currentDraftControl = useCallback((): PendingNewSessionControl => (
+    (newSessionCwd ? latestPendingNewSessionControl(newSessionCwd) : null) ?? pendingNewSessionControlRef.current
+  ), [newSessionCwd]);
+  // 等待切模/初始化期间工具档位仍可修改：创建请求要在等完之后按最新选择取工具名单。
+  // 读草稿自己记下的那一份（挂载时把当时显示的档位也记进去），浏览器偏好只用来初始化——
+  // 偏好是整台浏览器共用的一份，别的标签页改它、或者写入被拒（隐私模式、配额）时，
+  // 输入框显示的档位和创建请求用的名单就会分叉。
+  const currentNewSessionToolNames = useCallback(() => {
+    const control = currentDraftControl();
+    const draftTools = "tools" in control ? control.tools : null;
+    const preset = draftTools?.preset ?? getPreferredToolPreset();
+    const custom = draftTools ? draftTools.custom : getPreferredCustomTools();
+    return custom ?? getToolNamesForPreset(preset);
+  }, [currentDraftControl]);
   // 工具切换还没有落地：这段时间里候选名单还是旧的，再点一次会用它算出「只取消了一个工具」的请求。
   const [toolSelectionPending, setToolSelectionPending] = useState(false);
-  const [activeBuiltinTools, setActiveBuiltinTools] = useState<string[] | undefined>();
+  const [activeToolNames, setActiveToolNames] = useState<string[] | undefined>();
   // 会话文件里钉死的内置工具名单；null 表示跟随 settings.json（configured）。只用于解释
   // "设置里开着、本会话却没有"的工具（例如扩展把 edit 换掉了），不决定控件显示哪一档。
   const [pinnedToolNames, setPinnedToolNames] = useState<string[] | null>(null);
@@ -777,8 +819,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const eventSourceRef = useRef<StreamEventSource | null>(null);
   const eventStreamConnectionRef = useRef<{
     sessionId: string; source: StreamEventSource;
-    promise: Promise<EventStreamConnectionResult>; settled: boolean;
+    promise: Promise<EventStreamConnectionResult>; settled: boolean; recovering: boolean; cancel?: () => void;
   } | null>(null);
+  // 超限载荷不会因重连变小；发送失败清理也不能解除，只有离开/重新打开会话才重试。
+  const eventStreamStartupFailureRef = useRef<{ sessionId: string; result: EventStreamConnectionResult } | null>(null);
+  // 一次恢复跨越底层重连甚至来源重建；同一会话只维护一条可重试错误通知。
+  const eventStreamRetryNoticeRef = useRef<{ sessionId: string; id: string; message: string } | null>(null);
+  useEffect(() => {
+    if (eventStreamStartupFailureRef.current?.sessionId !== (session?.id ?? attachSessionId)) {
+      eventStreamStartupFailureRef.current = null;
+    }
+    if (eventStreamRetryNoticeRef.current?.sessionId !== (session?.id ?? attachSessionId)) {
+      eventStreamRetryNoticeRef.current = null;
+    }
+  }, [session?.id, attachSessionId, newSessionCwd]);
   const eventStreamGraceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const eventStreamGraceGenerationRef = useRef(0);
   // detached 子代理可能跨越多个父轮，必须按 agentId 保持到对应 completion 到达。
@@ -828,20 +882,139 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const newSessionPromotedRef = useRef(false);
   const initialPendingSettings = "model" in pendingNewSessionControl ? pendingNewSessionControl : null;
   const newSessionModelOverrideRef = useRef<SelectedModel | null>(initialPendingSettings?.model ?? null);
+  // 草稿记下的档位要按来源放回对应的 ref：用户挑的进手动覆盖，切模型解析出来的进推荐值——
+  // 都塞进手动覆盖会让自动推荐在重新打开草稿后变成"用户显式选的档位"。
+  const initialThinkingLevel = initialPendingSettings?.thinkingLevel === "auto"
+    ? null
+    : initialPendingSettings?.thinkingLevel ?? null;
+  const initialLevelIsManual = initialPendingSettings?.thinkingLevelSource === "manual";
   const thinkingLevelOverrideRef = useRef<Exclude<ThinkingLevelOption, "auto"> | null>(
-    initialPendingSettings?.thinkingLevel === "auto" ? null : initialPendingSettings?.thinkingLevel ?? null,
+    initialLevelIsManual ? initialThinkingLevel : null,
   );
-  const recommendedThinkingLevelRef = useRef<Exclude<ThinkingLevelOption, "auto"> | null>(null);
+  // 用户主动选了 `auto`（交给服务端定档）：目录刷新不该再按默认模型算一遍推荐显示出来，
+  // 否则输入框显示一个创建请求不会带上的档位。
+  const explicitAutoThinkingRef = useRef(
+    initialPendingSettings?.thinkingLevel === "auto" && initialPendingSettings.thinkingLevelSource === "manual",
+  );
+  const recommendedThinkingLevelRef = useRef<Exclude<ThinkingLevelOption, "auto"> | null>(
+    initialLevelIsManual ? null : initialThinkingLevel,
+  );
+  // 草稿切模型的在途任务：档位要等推荐返回才定，首条消息和其它创建入口必须先等它。
+  const draftModelSwitchRef = useRef<{ version: number; task: Promise<DraftModelSelection | null> } | null>(null);
+  /** 把一份草稿选择写进本实例的 refs 和选择器；三者都没变就不动，免得反复触发状态更新。 */
+  const applyDraftSelection = useCallback((selection: DraftModelSelection) => {
+    const currentModel = newSessionModelOverrideRef.current;
+    const currentLevel = thinkingLevelOverrideRef.current ?? recommendedThinkingLevelRef.current ?? "auto";
+    const currentSource = thinkingLevelOverrideRef.current === null ? "auto" : "manual";
+    if (currentModel?.provider === selection.model.provider
+      && currentModel.modelId === selection.model.modelId
+      && currentLevel === selection.thinkingLevel
+      && currentSource === selection.thinkingLevelSource) {
+      return;
+    }
+    newSessionModelOverrideRef.current = selection.model;
+    if (selection.thinkingLevel !== "auto") explicitAutoThinkingRef.current = false;
+    const level = selection.thinkingLevel === "auto" ? null : selection.thinkingLevel;
+    if (selection.thinkingLevelSource === "manual") {
+      thinkingLevelOverrideRef.current = level;
+      recommendedThinkingLevelRef.current = null;
+    } else {
+      thinkingLevelOverrideRef.current = null;
+      recommendedThinkingLevelRef.current = level;
+    }
+    void modelSelectionActions.selectNewSessionModel(selection.model, { preserveLevel: true });
+    modelSelectionActions.setThinkingLevel(selection.thinkingLevel);
+    setPendingModel(selection.model);
+  }, [modelSelectionActions]);
   useEffect(() => {
     if (!isNew || !initialPendingSettings) return;
     if (initialPendingSettings.model) {
-      void modelSelectionActions.selectNewSessionModel(initialPendingSettings.model, false);
+      void modelSelectionActions.selectNewSessionModel(initialPendingSettings.model, { preserveLevel: true });
       setPendingModel(initialPendingSettings.model);
     }
     modelSelectionActions.setThinkingLevel(initialPendingSettings.thinkingLevel);
   // 仅在该 cwd 的新会话组件挂载时恢复一次，后续变更由交互处理器同步。
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  // 草稿状态也可能被另一个实例改写：切模型时切走再回来会重建组件，旧的实例在后台解析完档位后
+  // 才把模型和档位一起写进状态。没有在途切换时跟进它，否则这个实例的创建请求会用旧模型，
+  // 和状态机、界面显示的选择对不上。
+  useEffect(() => {
+    if (!isNew || !initialPendingSettings?.model || draftModelSwitchRef.current) return;
+    if (newSessionCwd && getDraftModelSwitch(newSessionCwd)) return;
+    applyDraftSelection({
+      model: initialPendingSettings.model,
+      thinkingLevel: initialPendingSettings.thinkingLevel,
+      thinkingLevelSource: initialPendingSettings.thinkingLevelSource,
+    });
+  }, [applyDraftSelection, initialPendingSettings, isNew, newSessionCwd]);
+  // 手动选中的 `auto` 也要跟着草稿恢复：重建出来的实例若从 false 起步，目录加载会把历史推荐
+  // 显示出来，而草稿仍写着手动 `auto`（创建请求省略档位），界面和请求又对不上。
+  useEffect(() => {
+    if (!isNew || !initialPendingSettings) return;
+    explicitAutoThinkingRef.current = initialPendingSettings.thinkingLevel === "auto"
+      && initialPendingSettings.thinkingLevelSource === "manual";
+  }, [initialPendingSettings, isNew]);
+  /**
+   * 等草稿切模落地。除了本实例的在途任务，还要看同 cwd 别处登记的那一次：切走再回来会换一个
+   * 实例，旧实例的 ref 已经不存在，只查 ref 就会让首条消息绕过还在解析的切换。
+   * 拿到的选择直接写进本实例，因为状态更新可能还没进入这次 render。
+   */
+  const awaitDraftModelSwitch = useCallback(async () => {
+    // cwd 已是草稿身份的一部分，不能拿组件残留任务与另一 cwd 的版本号比较。
+    const current = () => newSessionCwd ? getDraftModelSwitch(newSessionCwd) : draftModelSwitchRef.current;
+    // 每一轮都在结算前被下一轮取代时不能提前返回：那样创建入口会带着还没结算的那次选择去
+    // 创建，创建随即进入 materializing，它后来的 SET_MODEL 会被状态机丢掉，首条消息用的还是
+    // 旧模型。循环不设次数上限；每轮等待任务结算或共享版本更新，旧请求永久挂起也能被新选择唤醒。
+    let awaited: Promise<DraftModelSelection | null> | null = null;
+    for (;;) {
+      const pending = current();
+      // 同一份任务又回来了（结算与清登记之间的空档）：没有更新的等待对象，就此结束。
+      if (!pending || pending.task === awaited) return;
+      awaited = pending.task;
+      const selection = newSessionCwd
+        ? await waitForDraftModelSwitchTask(newSessionCwd, pending)
+        : await pending.task.catch(() => null);
+      // 版本对不上说明同一草稿上又起了新的切换：这一份已经作废，不能拿它覆盖后来的选择。
+      const latest = !newSessionCwd || isLatestDraftModelSwitch(newSessionCwd, pending.version);
+      if (selection && latest) {
+        applyDraftSelection(selection);
+        return;
+      }
+      // 已经作废：丢掉自己的 ref 再等下一轮，否则会一遍遍等同一份过期结果。
+      if (draftModelSwitchRef.current?.task === pending.task) draftModelSwitchRef.current = null;
+    }
+  }, [applyDraftSelection, newSessionCwd]);
+  /**
+   * 创建参数取草稿的最新一份。等待切模或初始化期间，用户可能已经切走再回来、在另一个实例里
+   * 改了模型、档位和 Shadow 开关：本实例的 props 与 refs 都停在离开那一刻，照它们创建就会
+   * 用上已经被取代的旧模型。状态机镜像由事件派发处同步写入，与哪个实例还挂着无关。
+   */
+  const currentNewSessionSettings = useCallback(() => {
+    const control = currentDraftControl();
+    const settings = "model" in control ? control : null;
+    const view = selectPendingNewSession(control);
+    const model = settings?.model ?? newSessionModelOverrideRef.current ?? null;
+    const level = settings
+      ? (settings.thinkingLevel === "auto" ? null : settings.thinkingLevel)
+      : (thinkingLevelOverrideRef.current ?? recommendedThinkingLevelRef.current);
+    // 限幅按真正被创建的那个模型来：界面在切模等待期间还按切之前的模型给选项，
+    // 用户可能选了一个目标模型做不到的档位。
+    const target = model ?? newSessionModel ?? newSessionDefaultModel ?? null;
+    const supported = target ? thinkingLevelsRef.current[`${target.provider}:${target.modelId}`] ?? null : null;
+    const owner = settings?.recommendationModel;
+    const recommendationMatches = !owner || (target?.provider === owner.provider && target.modelId === owner.modelId);
+    return {
+      control,
+      view,
+      model,
+      thinkingLevel: recommendationMatches && level ? clampThinkingLevelToSupported(level, supported) : null,
+      // 自动推荐与手动选择都用于这个会话，但只有手动选择才是"新的默认档位"。
+      thinkingLevelExplicit: settings ? settings.thinkingLevelSource === "manual" : thinkingLevelOverrideRef.current !== null,
+      thinkingLevelModel: settings?.thinkingLevelSource === "auto" ? owner ?? model ?? target ?? undefined : undefined,
+      shadowMindEnabled: view.desiredShadowMindEnabled,
+    };
+  }, [currentDraftControl, newSessionModel, newSessionDefaultModel]);
   const promptRunIdRef = useRef(0);
   const optimisticUserMessageKeyRef = useRef<string | null>(null);
   // 流式期间本地已收齐的消息条数（在 message_end 的 setMessages updater 内同步），
@@ -868,7 +1041,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const navigationGenerationRef = useRef(new Map<string, number>());
   const navigationChainRef = useRef(new Map<string, Promise<void>>());
 
-  const addNotice = useCallback((notice: { id?: string; message: string; type?: NoticeType }) => {
+  const addNotice = useCallback((notice: { id?: string; message: string; type?: NoticeType; expanded?: boolean }) => {
     const message = notice.message.trim();
     if (!message) return;
     dispatchNotice({
@@ -877,6 +1050,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         id: notice.id ?? createNoticeId(),
         message,
         type: notice.type ?? "info",
+        expanded: notice.expanded,
       },
       now: Date.now(),
     });
@@ -911,11 +1085,38 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   useEffect(() => {
     if (!isNew || sessionIdRef.current) return;
-    setToolPresetState(getPreferredToolPreset());
-    setCustomToolNames(getPreferredCustomTools());
+    // 草稿自己的记录优先：那是这个 cwd 的草稿真正选过的档位；浏览器偏好只是新草稿的默认值，
+    // 别的标签页随时可能改它。
+    const control = currentDraftControl();
+    const draftTools = "tools" in control ? control.tools ?? null : null;
+    const preset = draftTools?.preset ?? getPreferredToolPreset();
+    const custom = draftTools ? draftTools.custom : getPreferredCustomTools();
+    setToolPresetState(preset);
+    setCustomToolNames(custom);
+    // 记下这一刻真正显示的名单：创建请求之后按它发。只读当前偏好会让别的标签页改偏好后
+    // 这里显示一档、创建用另一档。
+    if (!draftTools && newSessionCwd) {
+      onPendingNewSessionEvent(newSessionCwd, { type: "SET_TOOLS", tools: { preset, custom } });
+    }
     // 新会话的档位来自浏览器里记住的选择，本身就是"已知"。
     setToolSelectionKnown(true);
-  }, [isNew, setToolPresetState]);
+    // worktree 切换仅更新 cwd，不重挂载；目标草稿也必须在此恢复或初始化。
+  }, [isNew, newSessionCwd, currentDraftControl, onPendingNewSessionEvent, setToolPresetState]);
+
+  // 工具档位也可能是在另一个实例里改的（切走再回来会重建组件）：跟着草稿走，否则输入框
+  // 显示一档、创建请求按另一档。
+  useEffect(() => {
+    if (!isNew) return;
+    const draftTools = initialPendingSettings?.tools;
+    if (!draftTools) return;
+    const sameCustom = draftTools.custom === customToolNames
+      || (draftTools.custom !== null && customToolNames !== null
+        && draftTools.custom.length === customToolNames.length
+        && draftTools.custom.every((name, index) => name === customToolNames[index]));
+    if (draftTools.preset === toolPreset && sameCustom) return;
+    setToolPresetState(draftTools.preset);
+    setCustomToolNames(draftTools.custom);
+  }, [customToolNames, initialPendingSettings?.tools, isNew, setToolPresetState, toolPreset]);
 
   const currentModel = currentModelOverride ?? contextModel ?? pendingModel ?? null;
   const displayModel = isNew ? (newSessionModel ?? newSessionDefaultModel) : currentModel;
@@ -1015,9 +1216,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const applyRuntimeState = useCallback((
     state: AgentRuntimeState | undefined,
     usageRead?: { sid: string; runId: number; requestId: number },
-    // 队列、压缩状态与思考强度按「谁最新」分别校验：一次预读可能在取回清空队列、
-    // 压缩开始或别的标签页调档之前采集、之后才回来。
-    options: { queue?: boolean; compaction?: boolean; thinking?: boolean } = {},
+    // 队列、压缩、思考强度及扩展 UI 各自校验，防止迟到快照覆盖较新的实时事件。
+    options: {
+      queue?: boolean; compaction?: boolean; thinking?: boolean;
+      extensionStatuses?: boolean; extensionWidgets?: boolean;
+      extensionStatusesRevision?: number; extensionWidgetsRevision?: number;
+    } = {},
   ) => {
     if (options.compaction !== false) setIsCompacting(state?.isCompacting ?? false);
     if (options.queue !== false) updateQueuedMessages(normalizeQueuedMessages(state?.queuedMessages));
@@ -1046,8 +1250,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     setFastEnabled(state.fastEnabled);
     setRuntimeFastAvailable(state.fastAvailable);
-    setExtensionStatuses(state.extensionStatuses);
-    setExtensionWidgets(filterVisibleExtensionWidgets(state.extensionWidgets));
+    const capturePendingRevisions = (revisions: Map<string, number>, readRevision: number | undefined) => {
+      // 旧读取已由序号挡住；只保留本次请求之后的事件，避免历史删除键一直积累。
+      if (readRevision !== undefined) {
+        for (const [key, revision] of revisions) if (revision <= readRevision) revisions.delete(key);
+      }
+      // React 可延后执行更新，固定剩余记录的副本，后续回收不会改动已经排队的更新。
+      return new Map(revisions);
+    };
+    if (options.extensionStatuses !== false) {
+      const revisions = capturePendingRevisions(extensionStatusKeyRevisionsRef.current, options.extensionStatusesRevision);
+      setExtensionStatuses(prev => mergeExtensionUiSnapshot(prev, state.extensionStatuses, revisions, options.extensionStatusesRevision));
+    }
+    if (options.extensionWidgets !== false) {
+      const revisions = capturePendingRevisions(extensionWidgetKeyRevisionsRef.current, options.extensionWidgetsRevision);
+      const widgets = filterVisibleExtensionWidgets(state.extensionWidgets);
+      setExtensionWidgets(prev => mergeExtensionUiSnapshot(prev, widgets, revisions, options.extensionWidgetsRevision));
+    }
     // 绑定完成事件可能早于监听建立；状态轮询也要按同一协议投影收敛（失败不能当成就绪）。
     if (newSessionCwd && sessionIdRef.current) {
       const binding = projectExtensionBinding(state);
@@ -1064,18 +1283,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [applyContextUsage, applyShadowRuntimeState, modelSelectionActions, newSessionCwd, onPendingNewSessionEvent, setRunningCommands, updateQueuedMessages]);
 
   /**
-   * 一次运行态读取的坐标：发起请求时的读取序号、队列代次与压缩代次。响应回来时用它判断哪些
-   * 字段已经被更新的实时事件取代——迟到的 `/state` 不许把刚入队的队列行、刚开始的压缩盖掉。
+   * 一次运行态读取的坐标：发起时的序号及各字段事件版本。较新的队列、压缩、扩展 UI
+   * 事件到达后，迟到的快照不得盖回旧字段；读取顺序也不能倒退。
    */
   const beginRuntimeRead = useCallback((): RuntimeRead => ({
     seq: ++runtimeReadSeqRef.current,
     queueGeneration: queueStateGenerationRef.current,
     compactionEpoch: compactionEpochRef.current,
     thinkingRevision: thinkingChoiceRevisionRef.current,
+    extensionStatusesRevision: extensionStatusesRevisionRef.current,
+    extensionWidgetsRevision: extensionWidgetsRevisionRef.current,
   }), []);
 
   /** 按读取坐标投影一份运行态快照：凡是比它新的实时状态都不覆盖。 */
-  const applyRuntimeSnapshot = useCallback((read: RuntimeRead, state: AgentRuntimeState | undefined, usageRead?: { sid: string; runId: number; requestId: number }) => {
+  const applyRuntimeSnapshot = useCallback((read: RuntimeRead, state: AgentRuntimeState | undefined, usageRead?: { sid: string; runId: number; requestId: number }): { thinking: boolean } => {
     const newest = read.seq > lastAppliedRuntimeSeqRef.current;
     // 队列也按读取序号校验：断线期间错过的 `queue_update` 不会推进代次，只比代次的话
     // 「取到空队列、回来时另一份快照已经显示了新队列」的响应仍然会把队列行清掉。
@@ -1087,6 +1308,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       queue: queueAdopted,
       compaction: compactionEpochRef.current === read.compactionEpoch && newest,
       thinking: thinkingAdopted,
+      extensionStatuses: newest,
+      extensionWidgets: newest,
+      extensionStatusesRevision: read.extensionStatusesRevision,
+      extensionWidgetsRevision: read.extensionWidgetsRevision,
     });
     if (queueAdopted) lastAppliedQueueSeqRef.current = read.seq;
     if (thinkingAdopted) lastAppliedThinkingSeqRef.current = read.seq;
@@ -1096,6 +1321,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         && (state.isStreaming === true || state.isPromptRunning === true || (state.runningCommands?.length ?? 0) > 0);
       lastAppliedRuntimeSeqRef.current = read.seq;
     }
+    // 调用方需要知道档位这份快照到底算不算数：被跳过的旧档位不能再写回草稿或选择器。
+    return { thinking: thinkingAdopted };
   }, [applyRuntimeState]);
 
   // extensions-binding 是等待态：绑定完成事件可能错过（例如切走期间绑定已完成），
@@ -1728,7 +1955,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [commitContextSnapshot]);
 
+  // 每次读取一个序号：两条请求交错时（打开只读菜单会新发一次），较早发起的那条可能先拿到
+  // `get_tools`、卡在 `get_tool_selection` 上，等新读取提交后才回来。只比较会话 id 挡不住它，
+  // 会把旧清单写回界面，所以提交前还要求自己仍是这个会话最近一次读取。
+  const toolListReadSeqRef = useRef(0);
   const loadTools = useCallback(async (sid: string) => {
+    const readSeq = toolListReadSeqRef.current + 1;
+    toolListReadSeqRef.current = readSeq;
     try {
       const tools = await sendAgentCommand<ToolEntry[]>(sid, { type: "get_tools" });
       // 钉死名单要单独问：`get_tools` 只知道此刻激活了哪些，分不清"用户没要"和"被扩展拿掉"。
@@ -1737,11 +1970,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         .catch(() => null);
       if (tools) {
         const { getPresetFromTools } = await import("@/lib/tool-presets");
-        if (sessionIdRef.current === sid) {
-          const names = tools.filter((tool) => tool.active)
-            .map((tool) => tool.name === "powershell" ? "bash" : tool.name)
-            .filter((name) => SETTINGS_BUILTIN_TOOLS.includes(name));
-          setActiveBuiltinTools(names);
+        if (sessionIdRef.current === sid && toolListReadSeqRef.current === readSeq) {
+          // 运行中的只读清单要照实展示这个会话能用哪些工具（扩展和 MCP 的也在内），
+          // 内置工具子集只用来推预设档位和标注差异。
+          // 名字保持服务端的：PowerShell 模式下激活的是 `powershell`，界面上不该冒充 `bash`；
+          // 归一化后的内置工具子集只用来推预设档位和标注差异。
+          const activeNames = [...new Set(tools.filter((tool) => tool.active).map((tool) => tool.name))];
+          const names = activeNames.map(normalizeBuiltinToolName).filter((name) => SETTINGS_BUILTIN_TOOLS.includes(name));
+          setActiveToolNames(activeNames);
           setPinnedToolNames(selection ? selection.pinned : null);
           setToolSelectionKnown(true);
           // 显示哪一档以会话记录的名单为准：扩展拿掉一个内置工具（如 hashline 替换 edit）
@@ -1776,17 +2012,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return [];
   }, [setToolPresetState]);
 
-  const promoteNewSession = useCallback((messageCount = 0, firstMessage = "(no messages)", fromStash = false) => {
+  const promoteNewSession = useCallback((messageCount = 0, firstMessage = "(no messages)", fromStash = false, capturedTransfer?: DraftTransfer | null) => {
     const sid = sessionIdRef.current;
     if (!isNew || !newSessionCwd || !sid || newSessionPromotedRef.current) return;
     newSessionPromotedRef.current = true;
+    const active = isNavigationActive(navigationKey);
+    if (fromStash && active) opts.chatInputRef?.current?.prepareDraftKeyChange(`new:${newSessionCwd}`);
     // 暂存库发送的是另一条消息，原输入需随新会话一起迁移。
     if (fromStash) {
-      const draft = getDraft(`new:${newSessionCwd}`);
-      if (draft) setDraft(sid, prependChatDraft(draft, getDraft(sid) ?? { value: "", images: [] }));
+      const transfer = capturedTransfer === undefined ? captureDraftTransfer(`new:${newSessionCwd}`) : capturedTransfer;
+      transfer?.(sid);
     }
-    opts.chatInputRef?.current?.clearAcceptedPrompt();
-    onSessionCreated?.({
+    const createdSession = {
       id: sid,
       path: "",
       cwd: newSessionCwd,
@@ -1795,10 +2032,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       modified: new Date().toISOString(),
       messageCount,
       firstMessage,
-    });
-  }, [isNew, newSessionCwd, onSessionCreated, opts.chatInputRef]);
+    };
+    // 共享输入框 ref 在切换 worktree 后指向新草稿：旧首发的迟到确认只能后台收尾。
+    if (!active) {
+      onSessionCreatedInBackground?.(createdSession);
+      return;
+    }
+    if (!fromStash) opts.chatInputRef?.current?.clearAcceptedPrompt();
+    onSessionCreated?.(createdSession, { preserveDraft: fromStash });
+  }, [isNew, isNavigationActive, navigationKey, newSessionCwd, onSessionCreated, onSessionCreatedInBackground, opts.chatInputRef]);
 
   const closeEvents = useCallback(() => {
+    // 主动关闭也必须结算建连等待，否则卸载后的首发会一直等到连接超时。
+    eventStreamConnectionRef.current?.cancel?.();
     eventSourceRef.current?.close();
     eventSourceRef.current = null;
     eventStreamConnectionRef.current = null;
@@ -1808,11 +2054,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // 都换代；这里用 ref 取最新实现，executeBash 才能稳定地挂在 executeBashRef 上。
   const ensureConnectedRef = useRef<(sid: string) => Promise<void>>(async () => {});
   const connectEvents = useCallback((sid: string): Promise<EventStreamConnectionResult> => {
+    if (eventStreamRetryNoticeRef.current?.sessionId !== sid) eventStreamRetryNoticeRef.current = null;
+    const startupFailure = eventStreamStartupFailureRef.current;
+    if (startupFailure?.sessionId === sid) return Promise.resolve(startupFailure.result);
+    eventStreamStartupFailureRef.current = null;
     // 并行的初始化请求复用同一条 SSE，避免互相关闭等待审批的连接。
     const existing = eventStreamConnectionRef.current;
     if (existing?.sessionId === sid && existing.source === eventSourceRef.current
       && existing.source.readyState !== STREAM_CLOSED
-      && (existing.source.readyState === STREAM_OPEN || !existing.settled)) return existing.promise;
+      && (existing.recovering || existing.source.readyState === STREAM_OPEN || !existing.settled)) return existing.promise;
     closeEvents();
     // 长连接经由同源 SharedWorker broker：连接数与窗口数解耦（不可用时自动直连）。
     const es = createStreamSource(`/api/agent/${encodeURIComponent(sid)}/events`);
@@ -1824,21 +2074,60 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       });
     };
     eventSourceRef.current = es;
+    let cancel: (() => void) | undefined;
     const promise = new Promise<EventStreamConnectionResult>((resolve) => {
       let settled = false;
-      const settle = (status: EventStreamConnectionStatus) => {
+      let terminalStartupFailure = false;
+      const settle = (status: EventStreamConnectionStatus, errorMessage?: string, retryable?: boolean) => {
         if (settled) return;
         settled = true;
         if (eventStreamConnectionRef.current?.source === es) eventStreamConnectionRef.current.settled = true;
         clearTimeout(timeout);
-        resolve({ status, source: es });
+        resolve({ status, source: es, errorMessage, retryable });
       };
       const timeout = setTimeout(() => settle("timeout"), EVENT_STREAM_CONNECT_TIMEOUT_MS);
+      cancel = () => settle("closed");
       es.onmessage = (e) => {
         if (eventSourceRef.current !== es || sessionIdRef.current !== sid) return;
         try {
           const event = JSON.parse(e.data) as AgentEvent;
+          if (event.type === "startup_error") {
+            const retryable = event.retryable !== false;
+            terminalStartupFailure = !retryable;
+            const detail = typeof event.errorMessage === "string" && event.errorMessage.trim()
+              ? event.errorMessage : "Failed to start the agent event stream. Please try again.";
+            const result: EventStreamConnectionResult = { status: "startup_error", source: es, errorMessage: detail, retryable };
+            const connection = eventStreamConnectionRef.current;
+            if (connection?.source === es) {
+              connection.recovering = retryable;
+              if (settled) connection.promise = Promise.resolve(result);
+            }
+            if (!retryable) eventStreamStartupFailureRef.current = { sessionId: sid, result };
+            settle("startup_error", detail, retryable);
+            if (!retryable) es.close();
+            if (retryable) {
+              const displayDetail = detail.trim();
+              const previous = eventStreamRetryNoticeRef.current;
+              if (!previous || previous.message !== displayDetail) {
+                const notice = { sessionId: sid, id: previous?.id ?? createNoticeId(), message: displayDetail };
+                eventStreamRetryNoticeRef.current = notice;
+                addNotice({ id: notice.id, type: "error", message: displayDetail });
+              }
+            } else {
+              addNotice({ id: `agent-event-startup:${sid}`, type: "error", expanded: true,
+                message: `${detail}\n${translateRef.current("chat.eventStreamReplayBudgetHint")}` });
+            }
+            return;
+          }
           if (event.type === "connected") {
+            eventStreamRetryNoticeRef.current = null;
+            terminalStartupFailure = false;
+            const connection = eventStreamConnectionRef.current;
+            if (connection?.source === es) {
+              connection.recovering = false;
+              // 第一次等待已向调用方报告失败，恢复后更新缓存结果，后续发送不再拿到旧失败。
+              if (settled) connection.promise = Promise.resolve({ status: "connected", source: es });
+            }
             settle("connected");
             // /state 可能早于冷启动完成返回；建连后重新读取扩展状态。
             // 与预读共用同一个入口：坐标在发请求前取，回来后按同一序号规则投影，
@@ -1861,6 +2150,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
       };
       es.onerror = () => {
+        if (terminalStartupFailure) return;
         if (es.readyState !== STREAM_CLOSED) return;
         settle("closed");
         if (eventSourceRef.current === es && agentRunningRef.current) {
@@ -1871,16 +2161,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
       };
     });
-    eventStreamConnectionRef.current = { sessionId: sid, source: es, promise, settled: false };
+    eventStreamConnectionRef.current = { sessionId: sid, source: es, promise, settled: false, recovering: false, cancel };
     return promise;
-  }, [applyRuntimeSnapshot, beginRuntimeRead, closeEvents]);
+  }, [addNotice, applyRuntimeSnapshot, beginRuntimeRead, closeEvents]);
 
   const ensureEventsConnected = useCallback(async (sid: string) => {
     const result = await connectEvents(sid);
-    if (result.status === "connected" || result.source.readyState === STREAM_OPEN) return;
-    if (eventSourceRef.current === result.source) eventSourceRef.current = null;
-    result.source.close();
-    throw new EventStreamConnectionError(result.status);
+    if (result.status === "connected") return;
+    const keepSubscription = result.status === "startup_error" && result.retryable !== false;
+    if (!keepSubscription) {
+      if (eventSourceRef.current === result.source) eventSourceRef.current = null;
+      result.source.close();
+    }
+    throw new EventStreamConnectionError(result.status, result.errorMessage, keepSubscription);
   }, [connectEvents]);
   ensureConnectedRef.current = ensureEventsConnected;
 
@@ -1897,34 +2190,57 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return pendingNewSessionControl.sessionId;
     }
 
+    // 先等草稿的模型切换落地，再发 START/RETRY：状态机进入 materializing 之后就不再接收档位事件，
+    // 在途的推荐档会被丢掉，创建请求会拿到新模型 + 旧档位。别的实例（切走再回来重建的那个）
+    // 登记的同 cwd 切换也要等，否则它会绕过还没落地的选择拿旧模型创建。
+    await awaitDraftModelSwitch();
+    // 等待期间草稿还能改（模型、档位、Shadow 开关、工具档位），而且可能是在另一个实例里改的：
+    // 创建参数按等完之后的最新草稿取，用等待之前捕获的那一份会让运行时按旧设置初始化。
+    const latest = currentNewSessionSettings();
+    const latestControl = latest.control;
+    const latestView = latest.view;
+    // 等的时候另一个入口可能已经把 runtime 建好了：直接接管，不再重复创建。
+    if (latestControl.kind === "materialized" && latestView.transportSessionId) {
+      sessionIdRef.current = latestView.transportSessionId;
+      return latestView.transportSessionId;
+    }
     // 身份一律取状态机的投影：漏掉任一等待态都会重复创建 runtime。
-    const sessionRequest = selectNewSessionRequest(pendingSessionView);
-    const requestedShadowMindEnabled = pendingSessionView.desiredShadowMindEnabled;
-    if (pendingControlKind === "materialization-failed") {
+    const sessionRequest = selectNewSessionRequest(latestView);
+    const requestedShadowMindEnabled = latestView.desiredShadowMindEnabled;
+    if (latestControl.kind === "materialization-failed") {
       onPendingNewSessionEvent(newSessionCwd, { type: "RETRY" });
-    } else if (pendingControlKind === "staged") {
+    } else if (latestControl.kind === "staged") {
       onPendingNewSessionEvent(newSessionCwd, { type: "START" });
     }
 
-    const selectedModel = newSessionModelOverrideRef.current;
-    const selectedThinkingLevel = thinkingLevelOverrideRef.current ?? recommendedThinkingLevelRef.current;
+    const selectedModel = latest.model;
+    const selectedThinkingLevel = latest.thinkingLevel;
     if (selectedModel) setPendingModel(selectedModel);
 
     let result: NewSessionMaterializationResult;
+    let streamConnectionError: EventStreamConnectionError | undefined;
     try {
       result = await materializeNewSession({
         ...sessionRequest,
         cwd: newSessionCwd,
-        toolNames: customToolNames ?? getToolNamesForPreset(toolPreset),
+        toolNames: currentNewSessionToolNames(),
         shadowMindEnabled: requestedShadowMindEnabled,
         ...(selectedModel ? { model: selectedModel } : {}),
         ...(selectedThinkingLevel ? { thinkingLevel: selectedThinkingLevel } : {}),
+        thinkingLevelExplicit: latest.thinkingLevelExplicit,
+        thinkingLevelModel: latest.thinkingLevelModel,
         ...(fastEnabled && displayModelFastAvailable ? { fastEnabled: true } : {}),
       }, async (realId) => {
         onPendingNewSessionEvent(newSessionCwd, { type: "RUNTIME_CREATED", sessionId: realId });
         if (!isNavigationActive(navigationKey)) throw new Error("会话已切换，初始化保留待恢复");
         sessionIdRef.current = realId;
-        await ensureEventsConnected(realId);
+        try {
+          await ensureEventsConnected(realId);
+        } catch (error) {
+          // 初始化适配器会把异常压成错误文本，保留原类型供发送收尾判断是否仍需订阅。
+          if (error instanceof EventStreamConnectionError) streamConnectionError = error;
+          throw error;
+        }
         if (!isNavigationActive(navigationKey)) throw new Error("会话已切换，初始化保留待恢复");
       });
     } catch (error) {
@@ -1945,7 +2261,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         sessionId: realId,
         error: result.error,
       });
-      throw new Error(result.error);
+      throw streamConnectionError ?? new Error(result.error);
     }
 
     applyShadowRuntimeState(result);
@@ -1985,7 +2301,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
     if (result.kind === "initialization-failed") throw new Error(result.error);
     return realId;
-  }, [applyShadowRuntimeState, displayModelFastAvailable, ensureEventsConnected, fastEnabled, isNavigationActive, isNew, loadTools, modelSelectionActions, navigationKey, newSessionCwd, onPendingNewSessionEvent, pendingControlKind, pendingNewSessionControl, pendingSessionView, toolPreset, customToolNames]);
+  }, [applyShadowRuntimeState, awaitDraftModelSwitch, currentNewSessionSettings, currentNewSessionToolNames, displayModelFastAvailable, ensureEventsConnected, fastEnabled, isNavigationActive, isNew, loadTools, modelSelectionActions, navigationKey, newSessionCwd, onPendingNewSessionEvent, pendingControlKind, pendingNewSessionControl]);
 
   // 系统面板可在首条消息发送前读取提示词；这里只初始化运行时并查询状态，
   // 不触发 prompt，也不会向会话历史追加消息。
@@ -2368,6 +2684,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
       case "setStatus":
+        extensionStatusesRevisionRef.current += 1;
+        extensionStatusKeyRevisionsRef.current.set(request.statusKey, extensionStatusesRevisionRef.current);
         setExtensionStatuses((prev) => {
           const rest = prev.filter((item) => item.key !== request.statusKey);
           return request.statusText !== undefined
@@ -2376,6 +2694,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
         break;
       case "setWidget":
+        extensionWidgetsRevisionRef.current += 1;
+        extensionWidgetKeyRevisionsRef.current.set(request.widgetKey, extensionWidgetsRevisionRef.current);
         setExtensionWidgets((prev) => {
           const rest = prev.filter((item) => item.key !== request.widgetKey);
           return request.widgetLines && request.widgetLines.length > 0
@@ -3037,6 +3357,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return false;
     }
     if ((agentRunningRef.current && !isBashCommand) || bashRunningRef.current) return false;
+    // 暂存库发送的不是输入框正文：捕获这一刻的草稿，确认后迁移，不能顺带清掉等待期间的新输入。
+    const capturedTransfer = fromStash && isNew && newSessionCwd ? captureDraftTransfer(`new:${newSessionCwd}`) : null;
     setSubmissionError(null);
     const activeCwd = session?.cwd ?? newSessionCwd;
     if (activeCwd) {
@@ -3104,12 +3426,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     let firstPromptRequestStarted = false;
 
     try {
+      // 草稿的切模型还没落地（档位要等推荐返回）：首条消息必须等它，否则会用新模型配旧档位。
+      // 切走再回来重建的实例看不到旧实例的 ref，所以还等同 cwd 登记的那次切换。
+      if (isNew) await awaitDraftModelSwitch();
       if (isNew && newSessionCwd && pendingControlKind === "staged") {
         // 首条消息交给服务端：只有创建 runtime 这一小段依赖页面，之后切走也会照常发送。
         const cwd = newSessionCwd;
-        const selectedModel = newSessionModelOverrideRef.current;
-        const selectedThinkingLevel = thinkingLevelOverrideRef.current ?? recommendedThinkingLevelRef.current;
-        const shadowMindEnabled = pendingSessionView.desiredShadowMindEnabled;
+        // 等切模的这段时间草稿还能改（模型、档位、Shadow 开关），改它的也可能是切走再回来重建的
+        // 另一个实例：按等完后的最新草稿取值，不用等待前的那份闭包。
+        const latest = currentNewSessionSettings();
+        const selectedModel = latest.model;
+        const selectedThinkingLevel = latest.thinkingLevel;
+        const shadowMindEnabled = latest.shadowMindEnabled;
         onPendingNewSessionEvent(cwd, { type: "START" });
         // 会话文件在第一条消息发出前还没有模型记录，等待期间继续显示当前选择。
         if (displayModel) setPendingModel(displayModel);
@@ -3117,10 +3445,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         try {
           sid = await createNewSessionRuntime({
             cwd,
-            toolNames: customToolNames ?? getToolNamesForPreset(toolPreset),
+            toolNames: currentNewSessionToolNames(),
             shadowMindEnabled,
             ...(selectedModel ? { model: selectedModel } : {}),
             ...(selectedThinkingLevel ? { thinkingLevel: selectedThinkingLevel } : {}),
+            // 自动推荐只作用于这个会话：不能当成新的全局默认档位写回 settings.json。
+            thinkingLevelExplicit: latest.thinkingLevelExplicit,
+            thinkingLevelModel: latest.thinkingLevelModel,
             ...(fastEnabled && displayModelFastAvailable ? { fastEnabled: true } : {}),
           });
         } catch (error) {
@@ -3132,7 +3463,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (isNavigationActive(navigationKey)) {
             sessionIdRef.current = sid;
             sentSessionId = sid;
-            await ensureEventsConnected(sid);
+            try {
+              await ensureEventsConnected(sid);
+            } catch (error) {
+              // 切走会主动关闭这条 SSE；运行时身份已拿到，首发仍须交给服务端后台提交。
+              if (isNavigationActive(navigationKey)) throw error;
+            }
           }
           firstPromptRequestStarted = true;
           await submitNewSessionFirstPrompt({ cwd, sessionId: sid, message, images: piImages, shadowMindEnabled });
@@ -3142,12 +3478,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
         const now = new Date().toISOString();
         if (!isNavigationActive(navigationKey)) {
+          // staged 首发的后台成功分支不经过 promoteNewSession，也必须完成已捕获草稿的迁移。
+          if (fromStash) capturedTransfer?.(sid);
           onSessionCreatedInBackground?.({ id: sid, path: "", cwd, created: now, modified: now, messageCount: 0, firstMessage: message });
           return true;
         }
         // 消息现在是队列行，真正发出时才进入对话。
         dropOptimisticUserMessage();
-        promoteNewSession(0, message, fromStash);
+        promoteNewSession(0, message, fromStash, capturedTransfer);
         void loadTools(sid);
         const stagedRead = beginRuntimeRead();
         void fetchRuntimeState(sid, new AbortController().signal).then((snapshot) => {
@@ -3158,8 +3496,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         return true;
       }
       if (isNew && newSessionCwd) {
-        const selectedModel = newSessionModel;
         const alreadyMaterialized = pendingControlKind === "materialized";
+        // 模型取创建时真正提交的那一份（ref），不取渲染闭包里的状态：发送前刚切过模型时闭包里
+        // 还是上一个模型，之后补发的 set_model 会把已经切好的运行时又切回去。
+        const selectedModel = newSessionModelOverrideRef.current ?? newSessionModel;
         const sid = await ensureNewSession();
 
         if (sid) {
@@ -3189,7 +3529,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           } catch (preferenceError) {
             console.error("[pi-web] 获取思考强度实际值失败:", preferenceError);
           }
-          promoteNewSession(1, message, fromStash);
+          promoteNewSession(1, message, fromStash, capturedTransfer);
         }
       } else if (session) {
         const sid = requestSessionId;
@@ -3250,7 +3590,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // banner names it (translated) instead of the server's English notice.
       if (e instanceof AgentCommandError && e.missingCwd) setPromptMissingCwd(e.missingCwd);
       agentRunningRef.current = false;
-      closeEvents();
+      // 本次等待失败不代表订阅失效；可恢复启动错误仍由底层重连，保留后续事件和弹窗。
+      if (!(e instanceof EventStreamConnectionError && e.status === "startup_error" && e.retryable)) closeEvents();
       const optimisticKey = optimisticUserMessageKeyRef.current;
       if (optimisticKey) {
         setMessages((prev) => {
@@ -3271,7 +3612,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (fromStash && firstPromptRequestStarted && (e as { accepted?: boolean } | null)?.accepted !== false) throw e;
       return false;
     }
-  }, [addNotice, applyRuntimeSnapshot, beginRuntimeRead, closeEvents, dispatch, displayModel, displayModelFastAvailable, editEntryId, ensureEventsConnected, ensureNewSession, enterMainRun, fastEnabled, loadTools, onPendingNewSessionEvent, onSessionCreatedInBackground, pendingSessionView, toolPreset, customToolNames, isNavigationActive, isNew, navigationKey, newSessionCwd, newSessionModel, pendingControlKind, promoteNewSession, reconcileAgentState, requestScrollPosition, resetStreamDeltas, session, setEdit, translate]);
+  }, [addNotice, applyRuntimeSnapshot, awaitDraftModelSwitch, beginRuntimeRead, closeEvents, currentNewSessionSettings, currentNewSessionToolNames, dispatch, displayModel, displayModelFastAvailable, editEntryId, ensureEventsConnected, ensureNewSession, enterMainRun, fastEnabled, loadTools, onPendingNewSessionEvent, onSessionCreatedInBackground, isNavigationActive, isNew, navigationKey, newSessionCwd, newSessionModel, pendingControlKind, promoteNewSession, reconcileAgentState, requestScrollPosition, resetStreamDeltas, session, setEdit, translate]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
     if (bashRunningRef.current) return false;
@@ -3438,34 +3779,114 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (isNew) {
       if (creationSettingsLocked || modelSwitchPendingRef.current) return;
       const selectedModel = { provider, modelId };
+      const sameModel = displayModel?.provider === provider && displayModel.modelId === modelId;
       const sid = sessionIdRef.current;
-      if (sid) {
-        // 已创建但未发送的会话，以服务端切换成功作为选择器提交条件。
-        modelSwitchPendingRef.current = true;
-        setModelSwitching(true);
-        try {
-          await sendAgentCommand(sid, { type: "set_model", provider, modelId });
-        } catch (e) {
-          console.error("Failed to set model:", e);
-          addNotice({ type: "error", message: `切换模型失败：${e instanceof Error ? e.message : String(e)}` });
-          return;
-        } finally {
-          modelSwitchPendingRef.current = false;
-          setModelSwitching(false);
+      modelSwitchPendingRef.current = true;
+      setModelSwitching(true);
+      // 同一草稿的切模按 cwd 记版本：切走再回来重建的实例可能各自起一次切换，先发起的那次
+      // 晚结算时不能把用户后来选的模型又写回草稿。
+      const switchVersion = newSessionCwd ? beginDraftModelSwitch(newSessionCwd) : null;
+      // 发起时的档位修订号：提交时草稿的修订号对不上，说明期间有人在（很可能是另一个实例里）
+      // 手动改过档，这一次就只提交模型，把用户刚选的那一档留给草稿。
+      const startLevelRevision = settingsLevelRevision(newSessionCwd ? latestPendingNewSessionControl(newSessionCwd) : null)
+        ?? settingsLevelRevision(pendingNewSessionControlRef.current)
+        ?? 0;
+      // 档位是异步查出来的（pin → 这个模型的常用档位 → 旧档位限幅），首条消息和其它创建入口
+      // 必须等这次切换落地，否则会拿着新模型 + 旧档位创建会话。在途任务同时挡住重复点击。
+      const switching = (async (): Promise<DraftModelSelection | null> => {
+        if (sid) {
+          // 已创建但未发送的会话，以服务端切换成功作为选择器提交条件。
+          try {
+            await sendAgentCommand(sid, { type: "set_model", provider, modelId });
+          } catch (e) {
+            console.error("Failed to set model:", e);
+            addNotice({ type: "error", message: `切换模型失败：${e instanceof Error ? e.message : String(e)}` });
+            return null;
+          }
+          if (!isNavigationActive(navigationKey) || sessionIdRef.current !== sid) return null;
         }
-        if (!isNavigationActive(navigationKey) || sessionIdRef.current !== sid) return;
+        newSessionModelOverrideRef.current = selectedModel;
+        // 切模型时档位跟着新模型走（pin → 最近用过的众数 → 旧档位限幅），上一个模型的手动选择不再沿用；
+        // 重选同一个模型（为了应用 models.json 的修改）保持用户刚选的档位。
+        // 已经有运行时的暂存会话由服务端在 set_model 里定档（settings.json 的按模型档位优先），不在这里推算。
+        const selection = await modelSelectionActions.selectNewSessionModel(selectedModel, { preserveLevel: sameModel || Boolean(sid) });
+        // 同一草稿上又起了新的切换：这次的选择已经作废，什么都不提交。
+        if (selection.status === "superseded") return null;
+        // 本实例的选择也被更新的一次取代（例如重选之后又选了别的）。
+        if (newSessionModelOverrideRef.current !== selectedModel) return null;
+        // 解析出的档位：已有运行时（暂存会话）取服务端定下的那一档，没有运行时用本地推荐。
+        let draftLevel: ThinkingLevelOption = thinkingLevelOverrideRef.current ?? recommendedThinkingLevelRef.current ?? "auto";
+        let thinkingLevelSource: ThinkingLevelSource = thinkingLevelOverrideRef.current === null ? "auto" : "manual";
+        if (!sameModel) {
+          if (sid) {
+            const read = beginRuntimeRead();
+            const snapshot = await readAgentSnapshot(sid);
+            if (snapshot?.state && sessionHookMountedRef.current && sessionIdRef.current === sid) {
+              // 快照可能早于用户刚改的档位：这份快照的档位被跳过时不能把它写进草稿，
+              // 否则界面显示旧档位、运行时用的却是新档位。
+              const adoption = applyRuntimeSnapshot(read, snapshot.state);
+              if (adoption.thinking) {
+                draftLevel = parseThinkingLevelOption(snapshot.state.thinkingLevel);
+                thinkingLevelSource = "auto";
+                thinkingLevelOverrideRef.current = null;
+              }
+            }
+          } else if (selection.status === "applied") {
+            thinkingLevelOverrideRef.current = null;
+            draftLevel = selection.preferredThinking ?? "auto";
+            thinkingLevelSource = "auto";
+            recommendedThinkingLevelRef.current = selection.preferredThinking ?? null;
+          }
+          // status 为 "manual"（切模期间用户手动选了档）时保留用户刚选的那一档：模型照样提交，
+          // 否则草稿只留下档位、模型还停在上一个。
+        }
+        // 提交前再核对一次：同一草稿上已有更新的一轮切换时，这次结果作废。
+        if (newSessionCwd && switchVersion !== null && !isLatestDraftModelSwitch(newSessionCwd, switchVersion)) {
+          return null;
+        }
+        let committed: DraftModelSelection = { model: selectedModel, thinkingLevel: draftLevel, thinkingLevelSource };
+        let levelRevisionAtStart = startLevelRevision;
+        const latestControl = newSessionCwd ? latestPendingNewSessionControl(newSessionCwd) : null;
+        if (latestControl && "model" in latestControl && (latestControl.levelRevision ?? 0) !== startLevelRevision) {
+          // 期间有人在另一个实例里手动选了档：状态机会保留那一档，这里交回去的也必须是它，
+          // 否则等待方写回选择器的还是这次的推荐值。选择保留，但要按**目标模型**限幅——
+          // 界面此刻还按切之前的模型给选项，A 支持 max 而 B 最高只到 high 时，不折中就会把
+          // 一个 B 做不到的档位写进草稿和创建请求。
+          const supported = thinkingLevelsRef.current[`${selectedModel.provider}:${selectedModel.modelId}`] ?? null;
+          const picked = latestControl.thinkingLevel;
+          committed = {
+            model: selectedModel,
+            thinkingLevel: picked === "auto" ? picked : clampThinkingLevelToSupported(picked, supported),
+            thinkingLevelSource: latestControl.thinkingLevelSource,
+          };
+          // 修订号取读草稿的这一刻：提交里带的已经是限幅后的值，让 reducer 接受同一份；仍用
+          // 发起时的旧修订号，它会把那次手写的原始值（B 做不到的 max）保留下来。
+          levelRevisionAtStart = latestControl.levelRevision ?? levelRevisionAtStart;
+        }
+        // 模型和档位在同一次草稿事件里提交：只提交模型会留下一段「新模型 + 旧档位」的窗口，
+        // 用户正好在这时切走再回来，重建的组件就会把旧档位套到新模型上。
+        if (newSessionCwd) {
+          onPendingNewSessionEvent(newSessionCwd, { type: "SET_MODEL", ...committed, levelRevisionAtStart });
+        }
+        setPendingModel(selectedModel);
+        return committed;
+      })();
+      // 创建入口只等它落地：档位解析本身出错不该把首条消息一起拒掉。
+      const settled = switching.catch((error: unknown): DraftModelSelection | null => {
+        console.error("[pi-web] 草稿切换模型失败:", error);
+        return null;
+      });
+      draftModelSwitchRef.current = { version: switchVersion ?? 0, task: settled };
+      // 同 cwd 登记的副本给重建出来的实例用：它看不到这边的 ref，只能按 cwd 找到这次切换。
+      if (newSessionCwd && switchVersion !== null) registerDraftModelSwitch(newSessionCwd, switchVersion, settled);
+      try {
+        await settled;
+      } finally {
+        if (draftModelSwitchRef.current?.task === settled) draftModelSwitchRef.current = null;
+        if (newSessionCwd && switchVersion !== null) settleDraftModelSwitch(newSessionCwd, switchVersion);
+        modelSwitchPendingRef.current = false;
+        setModelSwitching(false);
       }
-      newSessionModelOverrideRef.current = selectedModel;
-      if (newSessionCwd) onPendingNewSessionEvent(newSessionCwd, { type: "SET_MODEL", model: selectedModel });
-      const selection = await modelSelectionActions.selectNewSessionModel(
-        selectedModel,
-        thinkingLevelOverrideRef.current === null,
-      );
-      if (!selection.committed || newSessionModelOverrideRef.current !== selectedModel) return;
-      if (thinkingLevelOverrideRef.current === null) {
-        recommendedThinkingLevelRef.current = selection.preferredThinking ?? null;
-      }
-      setPendingModel(selectedModel);
       return;
     }
     const sid = sessionIdRef.current;
@@ -3489,6 +3910,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     };
     try {
       await sendAgentCommand(sid, { type: "set_model", provider, modelId });
+      // 档位由服务端在 set_model 里按「settings.json 的按模型档位 → enabledModels pin →
+      // 最近用过的众数 → 切换前的档位」定下来（rpc-manager 的 applyModelDefaultThinking），
+      // 这里之后的 reload / syncLiveState 读回来的就是它的结果。
       modelSwitchPendingRef.current = false;
       if (midRun) {
         setCurrentModelOverride(null);
@@ -3515,7 +3939,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       modelSwitchPendingRef.current = false;
       setModelSwitching(false);
     }
-  }, [applyRuntimeSnapshot, beginRuntimeRead, readAgentSnapshot, addNotice, creationSettingsLocked, currentModelOverride, isNavigationActive, isNew, loadSession, modelSelectionActions, navigationKey, newSessionCwd, onPendingNewSessionEvent]);
+  }, [applyRuntimeSnapshot, beginRuntimeRead, readAgentSnapshot, addNotice, creationSettingsLocked, currentModelOverride, displayModel, isNavigationActive, isNew, loadSession, modelSelectionActions, navigationKey, newSessionCwd, onPendingNewSessionEvent]);
 
   /**
    * Manual compaction (the Compact button and `/compact`). Never awaited by a
@@ -3552,21 +3976,49 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const dismissCompactError = useCallback(() => setCompactError(null), []);
 
   const loadModels = useCallback(async (signal?: AbortSignal) => {
+    const draftControl = isNew && !sessionIdRef.current ? currentDraftControl() : null;
+    const draftSettings = draftControl && "model" in draftControl ? draftControl : null;
+    // 草稿跟着默认模型、档位又是自动推荐时，每次加载都重新算：默认模型可能已经换人，旧推荐
+    // 属于上一个模型，创建请求会把它连同新默认模型一起发出去（限幅也纠不回归属）。
+    // 草稿自己选了模型或有手动档位时不算，别拿默认模型的推荐覆盖它。
+    const followsDefault = Boolean(draftControl)
+      && !draftSettings?.model
+      && draftSettings?.thinkingLevelSource !== "manual";
+    const recommendation: { model: SelectedModel | null } = { model: null };
     const preferredThinking = await modelSelectionActions.load({
       cwd: newSessionCwd ?? session?.cwd ?? "",
       initializeNewSession: isNew && !sessionIdRef.current,
-      applyPinnedThinking: thinkingLevelOverrideRef.current === null,
+      applyPinnedThinking: !explicitAutoThinkingRef.current
+        && thinkingLevelOverrideRef.current === null
+        && (recommendedThinkingLevelRef.current === null || followsDefault),
+      onPreferredThinking: (model) => { recommendation.model = model; },
       signal,
     });
     // The maps replace the ones loadAllModels merged into: load that list again.
     setAllModelList(null);
     allModelsLoadRef.current = null;
-    if (isNew && !sessionIdRef.current) {
-      if (thinkingLevelOverrideRef.current === null) {
-        recommendedThinkingLevelRef.current = preferredThinking ?? null;
-      }
-    }
-  }, [isNew, modelSelectionActions, newSessionCwd, session?.cwd]);
+    if (!isNew || sessionIdRef.current) return;
+    if (thinkingLevelOverrideRef.current !== null) return;
+    // `undefined` = 这次加载不适用或已被切模型取代，别把它当成"没有推荐"清掉刚切到的推荐；
+    // `null` = 适用但没有推荐值，旧推荐（可能属于上一个默认模型）要一起作废。
+    if (preferredThinking === undefined) return;
+    recommendedThinkingLevelRef.current = preferredThinking;
+    if (!newSessionCwd) return;
+    // 这份推荐会显示在输入框里，就得和创建请求一致：写进草稿，否则创建请求会省掉
+    // thinkingLevel，服务端按 settings 的默认档位开跑——历史推荐与默认档位不同时，
+    // 首条消息用的档位和界面显示的不是一个。用户主动选的 `auto`（manual）不覆盖：那是
+    // "交给服务端定"。
+    const latestDraft = currentDraftControl();
+    const latestSettings = "model" in latestDraft ? latestDraft : null;
+    if (!latestSettings || latestSettings.thinkingLevelSource === "manual") return;
+    // 取推荐期间草稿可能已经切到别的模型：那一档属于它自己，别用默认模型的推荐盖掉。
+    if (latestSettings.model) return;
+    const next = preferredThinking ?? "auto";
+    if (latestSettings.thinkingLevel === next
+      && latestSettings.recommendationModel?.provider === recommendation.model?.provider
+      && latestSettings.recommendationModel?.modelId === recommendation.model?.modelId) return;
+    onPendingNewSessionEvent(newSessionCwd, { type: "SET_THINKING_LEVEL", level: next, source: "auto", recommendationModel: recommendation.model });
+  }, [currentDraftControl, isNew, modelSelectionActions, newSessionCwd, onPendingNewSessionEvent, session?.cwd]);
 
   // pi's /model "all" scope: names and reasoning levels of models outside
   // `enabledModels` join the maps, so a picked unscoped model shows them too.
@@ -3931,8 +4383,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption) => {
     if (creationSettingsLocked) return;
     if (isNew && !sessionIdRef.current) {
+      explicitAutoThinkingRef.current = level === "auto";
       thinkingLevelOverrideRef.current = level === "auto" ? null : level;
-      if (newSessionCwd) onPendingNewSessionEvent(newSessionCwd, { type: "SET_THINKING_LEVEL", level });
+      // 用户自己挑的档位记成 manual：草稿切走再回来仍然算“显式选择”，不会被当成自动推荐。
+      if (newSessionCwd) onPendingNewSessionEvent(newSessionCwd, { type: "SET_THINKING_LEVEL", level, source: "manual" });
       recommendedThinkingLevelRef.current = null;
     }
     if (level === "auto") {
@@ -4031,6 +4485,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const lastAppliedRuntimeSeqRef = useRef(0);
   const lastAppliedQueueSeqRef = useRef(0);
   const lastAppliedThinkingSeqRef = useRef(0);
+  // setStatus/setWidget 包括删除事件都推进版本，旧快照不能把已清理的扩展 UI 带回来。
+  const extensionStatusesRevisionRef = useRef(0);
+  const extensionWidgetsRevisionRef = useRef(0);
+  // 删除键也保留版本，防止在途快照复活；其它键仍由重连补读修正。
+  const extensionStatusKeyRevisionsRef = useRef(new Map<string, number>());
+  const extensionWidgetKeyRevisionsRef = useRef(new Map<string, number>());
   // 已经读到过运行态思考强度的会话：上下文的档位对它们只是回退值。
   const runtimeThinkingLevelSessionRef = useRef<string | null>(null);
   // 最近一次绑定轮询发起时的读取坐标（轮询是串行的，任何时刻最多一个在途请求）。
@@ -4080,25 +4540,42 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [session?.id, updateQueuedMessages]);
 
   const toolSelectionPendingRef = useRef(false);
+  /** 只读菜单每次打开都重读激活名单：运行中扩展、Shadow 开关都会改服务端那边的工具。 */
+  const refreshTools = useCallback(() => {
+    const sid = sessionIdRef.current;
+    if (sid) void loadTools(sid);
+  }, [loadTools]);
   const handleToolPresetChange = useCallback(async (preset: ToolPreset, customNames: string[] | null = null) => {
     // 上一次切换还没落地时连偏好都不能写：这份名单是旧的，写进去会让之后的新会话采用它。
-    if (toolSelectionPendingRef.current) return;
-    setPreferredToolPreset(preset);
-    if (creationSettingsLocked) return;
-    setPreferredCustomTools(customNames);
+    // 运行、手动压缩和 `!` 命令期间服务端会拒绝 set_tools，这时同样不能写偏好，
+    // 否则新会话会沿用一个从没生效过的选择。
+    if (toolSelectionPendingRef.current || agentRunningRef.current || bashRunningRef.current || isCompacting) return;
+    if (creationSettingsLocked) {
+      // 创建设置还锁着：只记下档位偏好，具体名单等解锁后由界面重放。
+      setPreferredToolPreset(preset);
+      return;
+    }
     const toolNames = customNames ?? getToolNamesForPreset(preset);
     const sid = sessionIdRef.current;
     if (!sid) {
-      // 还没有会话：这就是待创建会话要用的那一档，直接显示。
+      // 还没有会话：这就是待创建会话要用的那一档。记进草稿状态（创建入口按它取名单），
+      // 同时写偏好——那是其它新草稿的默认值，不是这一份草稿的事实来源。
+      setPreferredToolPreset(preset);
+      setPreferredCustomTools(customNames);
       setCustomToolNames(customNames);
       setToolSelectionKnown(true);
       setToolPresetState(preset);
+      if (newSessionCwd) onPendingNewSessionEvent(newSessionCwd, { type: "SET_TOOLS", tools: { preset, custom: customNames } });
       return;
     }
     toolSelectionPendingRef.current = true;
     setToolSelectionPending(true);
     try {
       const result = await sendAgentCommand<{ sessionId?: string; recreated?: boolean }>(sid, { type: "set_tools", toolNames });
+      // 服务端接受之后才写浏览器偏好：被拒绝的切换（运行、压缩、还有要移回的消息）
+      // 不能变成之后新会话的默认工具。
+      setPreferredToolPreset(preset);
+      setPreferredCustomTools(customNames);
       if (sessionIdRef.current !== sid) return;
       // 服务端确认之后才改当前会话的档位与勾选：切换可能被拒绝（例如还有待移回的消息），
       // 那时界面必须停在原来的选择上，否则用户以为换了档，模型其实还在用旧工具。
@@ -4126,7 +4603,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       toolSelectionPendingRef.current = false;
       setToolSelectionPending(false);
     }
-  }, [creationSettingsLocked, setToolPresetState, clearSlashCommands, closeEvents, clearAskQuestionnaire, ensureEventsConnected, loadTools, applyRuntimeSnapshot, beginRuntimeRead, addNotice]);
+  }, [creationSettingsLocked, isCompacting, setToolPresetState, clearSlashCommands, closeEvents, clearAskQuestionnaire, ensureEventsConnected, loadTools, applyRuntimeSnapshot, beginRuntimeRead, addNotice, newSessionCwd, onPendingNewSessionEvent]);
 
   // One lease request: it resets the session's idle countdown (renewIdleTimer()). A reply
   // that does not come within SESSION_LEASE_TIMEOUT_MS, or no network, counts as "unanswered".
@@ -4236,7 +4713,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (session) {
       // 已有会话先清掉上一份工具状态：冷会话读不到名单，不能继承上一个会话的档位和差异标注。
       // 新会话不走这里，避免覆盖前面 effect 刚从浏览器偏好恢复的 customToolNames 与 toolSelectionKnown。
-      setActiveBuiltinTools(undefined);
+      setActiveToolNames(undefined);
       setPinnedToolNames(null);
       setCustomToolNames(null);
       setToolSelectionKnown(false);
@@ -4348,7 +4825,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const exiting = noticeState.visible.find((notice) => notice.exiting);
     if (exiting) {
       const t = setTimeout(() => {
-        dispatchNotice({ type: "remove", id: exiting.id, now: Date.now() });
+        dispatchNotice({ type: "remove", id: exiting.id, now: Date.now(), expectedExit: exiting });
       }, NOTICE_EXIT_ANIMATION_MS);
       return () => clearTimeout(t);
     }
@@ -4385,9 +4862,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       error: modelError,
       scopeWarnings: modelScopeWarnings,
       dataDiagnostics: modelDataDiagnostics,
-      thinkingLevel: isNew && thinkingLevel === "auto"
-        ? newSessionDefaultThinkingLevel ?? "auto"
-        : thinkingLevel,
+      // 内部 auto 时显示 settings 的默认档位，但要按当前模型限幅：默认是 max、模型最高只到
+      // high 时不能显示一个它做不到的档位。
+      thinkingLevel: resolveDisplayedThinkingLevel({
+        level: thinkingLevel,
+        fallback: isNew ? newSessionDefaultThinkingLevel : null,
+        supported: modelKey ? (modelThinkingLevels[modelKey] ?? null) : null,
+      }),
       isAutoThinkingSelection: isNew && thinkingLevelOverrideRef.current === null,
       model: displayModel,
       isAutoModelSelection: isNew && newSessionModel === null,
@@ -4420,7 +4901,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     loadingEarlierMessages: historyPage.sid === sessionIdRef.current && historyPage.loading,
     earlierPageFailed: historyPage.sid === sessionIdRef.current && historyPage.failed,
     earlierTurnCount: historyPage.sid === sessionIdRef.current ? historyPage.turnsBefore : 0,
-    missingCwd, isModelScopeActive: modelSelectionState.isScoped, allModelList, loadAllModels, agentRunning, modelState: modelViewState, modelActions: modelViewActions, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames, toolSelectionKnown, toolSelectionPending,
+    missingCwd, isModelScopeActive: modelSelectionState.isScoped, allModelList, loadAllModels, agentRunning, modelState: modelViewState, modelActions: modelViewActions, toolPreset, customToolNames, activeToolNames, pinnedToolNames, toolSelectionKnown, toolSelectionPending,
     externalWriteBlocked, recalledPending, recallError, handleRetryBlockedLoad,
     retryInfo, contextUsage, systemPrompt, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,
@@ -4438,7 +4919,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     blockedRecall,
     handleRecallBlockedQueue,
     handleBuiltinSlashCommand,
-    handleShadowMindToggle, handleToolPresetChange, loadTools, loadSlashCommands, setActiveLeafId, setMessages,
+    handleShadowMindToggle, handleToolPresetChange, loadTools, refreshTools, loadSlashCommands, setActiveLeafId, setMessages,
     handleEditContent,
     cancelEdit: editEntryId ? cancelEdit : undefined,
     addNotice,
@@ -4450,7 +4931,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     missingCwd,
     details, loading, error, sendError, activeLeafId, messages, entryIds, branchTailEntryIds, messageKeys, streamingStore, historyPage,
     agentRunning, allModelList, loadAllModels, modelSelectionState.isScoped, startSideChat,
-    modelViewState, modelViewActions, toolPreset, customToolNames, activeBuiltinTools, pinnedToolNames, toolSelectionKnown, toolSelectionPending,
+    modelViewState, modelViewActions, toolPreset, customToolNames, activeToolNames, pinnedToolNames, toolSelectionKnown, toolSelectionPending,
     externalWriteBlocked, recalledPending, recallError, handleRetryBlockedLoad,
     retryInfo, contextUsage, systemPrompt, shadowMindEnabled, shadowMindAvailable, shadowMindTogglePending, forkingEntryId,
     isCompacting, compactError, compactResult, sessionStats,
@@ -4466,7 +4947,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     blockedRecall,
     handleRecallBlockedQueue,
     handleBuiltinSlashCommand,
-    handleShadowMindToggle, handleToolPresetChange, loadTools, loadSlashCommands, setActiveLeafId, setMessages,
+    handleShadowMindToggle, handleToolPresetChange, loadTools, refreshTools, loadSlashCommands, setActiveLeafId, setMessages,
     dispatch, setAgentRunning, setForkingEntryId,
     bashRunning, pendingBash,
     handleAgentEventRef,
