@@ -231,11 +231,11 @@ export const ToolPresetControl = memo(function ToolPresetControl({ isMobile, too
   const presetTools = toolPreset === "configured"
     ? (configuredTools ?? activeBuiltins)
     : getToolNamesForPreset(toolPreset ?? "default");
-  // 名单未知（刚打开、没有存活运行时）时不假装有选择：勾选留空，chip 用中性名字。
+  // 名单未知时勾选留空，只保留工具图标；读取成功后再显示真实预设名称。
   const selectedTools = toolSelectionKnown ? (customToolNames ?? presetTools) : undefined;
   // chip 与菜单行同一套英文短名（off/configured/read-only/default/full/custom），和旁边的推理级别保持风格一致。
   const toolPresetLabel = !toolSelectionKnown
-    ? t("settings.builtinTools")
+    ? ""
     : customToolNames
       ? t("chat.customToolSelection")
       : t(toolPresetLabelKey(toolPreset ?? "default"));
@@ -334,7 +334,7 @@ export const ToolPresetControl = memo(function ToolPresetControl({ isMobile, too
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
                   </svg>
-                  <span style={{ whiteSpace: "nowrap" }}>{toolPresetLabel}</span>
+                  {toolPresetLabel && <span style={{ whiteSpace: "nowrap" }}>{toolPresetLabel}</span>}
                 </button>
                 {toolDropdownOpen && !disabled && (
                   <div style={{
@@ -775,7 +775,10 @@ export const MobileComposerMenu = memo(function MobileComposerMenu({
   return (
     <div ref={rootRef} style={{ position: "relative", display: "flex", alignItems: "center" }}>
       <button type="button" className="mobile-composer-more is-compact" aria-label={t("chat.moreControls")}
-        aria-expanded={open} onClick={() => setOpen((current) => !current)}>
+        aria-expanded={open} onClick={() => {
+          if (!open) onRefreshTools?.();
+          setOpen((current) => !current);
+        }}>
         <Ellipsis size={17} aria-hidden="true" />{t("chat.mobileMore")}
         {(isStreaming || isCompacting) && (
           <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: "50%", background: isCompacting ? "#ef4444" : "var(--accent)" }} />

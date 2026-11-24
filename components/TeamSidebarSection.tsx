@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import type { Team, TeamMember } from "@/lib/team-types";
 import type { TeamRolePreset } from "@/lib/team-role-presets";
@@ -431,6 +431,16 @@ function RolePresetsModal({
   onChanged: (presets: TeamRolePreset[]) => void;
 }) {
   const { t } = useI18n();
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const titleId = useId();
+  const nameId = useId();
+  const promptId = useId();
+  useEffect(() => {
+    // 原生模态进入顶层，避免移动端侧栏的 transform 把弹窗限制在侧栏内。
+    const dialog = dialogRef.current;
+    dialog?.showModal();
+    return () => { dialog?.close(); };
+  }, []);
   const [presets, setPresets] = useState<TeamRolePreset[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<string | "new">("new");
@@ -606,15 +616,17 @@ function RolePresetsModal({
   };
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      style={{ position: "fixed", inset: 0, zIndex: 1010, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, background: "rgba(0,0,0,0.46)" }}
+    <dialog
+      ref={dialogRef}
+      className="team-role-presets-dialog"
+      aria-labelledby={titleId}
+      onCancel={(event) => { event.stopPropagation(); event.preventDefault(); if (!busy) onClose(); }}
+      onKeyDown={(event) => { if (event.key === "Escape") event.stopPropagation(); }}
       onClick={(e) => { if (e.target === e.currentTarget && !busy) onClose(); }}
     >
-      <div style={{ width: 640, maxWidth: "100%", height: 440, maxHeight: "86vh", border: "1px solid var(--border)", borderRadius: 8, background: "var(--bg)", boxShadow: "0 16px 48px rgba(0,0,0,0.28)", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+      <div className="team-role-presets-panel">
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
-          <h3 style={{ margin: 0, fontSize: 14, color: "var(--text)" }}>{t("teams.presetsTitle")}</h3>
+          <h3 id={titleId} style={{ margin: 0, fontSize: 14, color: "var(--text)" }}>{t("teams.presetsTitle")}</h3>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <button
               type="button"
@@ -626,7 +638,7 @@ function RolePresetsModal({
             </button>
             <button
               type="button"
-              disabled={locked}
+              disabled={busy}
               onClick={onClose}
               aria-label={t("common.cancel")}
               style={{ border: "none", background: "transparent", color: "var(--text-muted)", cursor: "pointer", fontSize: 16, lineHeight: 1, padding: "2px 4px" }}
@@ -636,8 +648,8 @@ function RolePresetsModal({
           </div>
         </div>
 
-        <div style={{ flex: 1, minHeight: 0, display: "grid", gridTemplateColumns: "180px 1fr" }}>
-          <div className="scrollbar-subtle" style={{ borderRight: "1px solid var(--border)", padding: 8, overflowY: "auto", display: "flex", flexDirection: "column", gap: 4 }}>
+        <div className="team-role-presets-body">
+          <div className="team-role-presets-list scrollbar-subtle">
             {loading ? (
               <div style={{ padding: 8, fontSize: 12, color: "var(--text-dim)" }}>...</div>
             ) : presets.length === 0 ? (
@@ -652,6 +664,7 @@ function RolePresetsModal({
                     key={preset.id}
                     type="button"
                     disabled={locked}
+                    aria-pressed={active}
                     onClick={() => selectPreset(preset)}
                     style={{
                       textAlign: "left",
@@ -675,7 +688,7 @@ function RolePresetsModal({
             )}
           </div>
 
-          <form className="scrollbar-subtle" onSubmit={(e) => void handleSave(e)} style={{ padding: 14, display: "flex", flexDirection: "column", gap: 10, minHeight: 0, overflowY: "auto" }}>
+          <form className="team-role-presets-form scrollbar-subtle" onSubmit={(e) => void handleSave(e)}>
             {error && <div style={{ fontSize: 12, color: "#f87171", flexShrink: 0 }}>{error}</div>}
             {conflictServerPreset && (
               <div style={{ padding: 8, borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg-muted, rgba(128,128,128,0.08))", fontSize: 11, color: "var(--text-muted)", display: "flex", flexDirection: "column", gap: 4, flexShrink: 0 }}>
@@ -696,27 +709,29 @@ function RolePresetsModal({
               </div>
             )}
             <div style={{ flexShrink: 0 }}>
-              <label style={LABEL_STYLE}>{t("teams.presetsName")}</label>
+              <label htmlFor={nameId} style={LABEL_STYLE}>{t("teams.presetsName")}</label>
               <input
+                id={nameId}
                 required
                 disabled={locked}
                 value={name}
                 onChange={(e) => { setName(e.target.value); setSavedTip(false); }}
-                style={INPUT_STYLE}
+                style={{ ...INPUT_STYLE, fontSize: "var(--role-preset-field-size, 12px)" }}
                 placeholder="例如：后端开发 / 代码审核"
               />
             </div>
-            <div style={{ flex: "1 0 140px", display: "flex", flexDirection: "column" }}>
-              <label style={LABEL_STYLE}>{t("teams.presetsPrompt")}</label>
+            <div style={{ flex: "1 0 140px", minWidth: 0, display: "flex", flexDirection: "column" }}>
+              <label htmlFor={promptId} style={LABEL_STYLE}>{t("teams.presetsPrompt")}</label>
               <textarea
+                id={promptId}
                 disabled={locked}
                 value={prompt}
                 onChange={(e) => { setPrompt(e.target.value); setSavedTip(false); }}
-                style={{ ...INPUT_STYLE, flex: 1, resize: "none", minHeight: 120 }}
+                style={{ ...INPUT_STYLE, fontSize: "var(--role-preset-field-size, 12px)", flex: 1, resize: "none", minHeight: 120 }}
                 placeholder={t("teams.presetsPromptPlaceholder")}
               />
             </div>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexShrink: 0 }}>
+            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 8, flexShrink: 0 }}>
               <div>
                 {selectedId !== "new" && (
                   <button
@@ -743,7 +758,7 @@ function RolePresetsModal({
           </form>
         </div>
       </div>
-    </div>
+    </dialog>
   );
 }
 

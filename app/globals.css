@@ -3657,23 +3657,28 @@ span.token.table {
   bottom: calc(100% + 6px);
   right: 0;
   z-index: 60;
-  /* 一排就够：按钮直接排进菜单这一行，只有窄屏放不下时才折行。
-     width 用 max-content —— auto 会按「更多」按钮那 60px 的定位父级算可用宽度，每行只排一个。 */
+  /* 两组各占一行，避免 display: contents 与固有宽度折行组合留下空行或挤出关闭按钮。 */
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
   gap: 4px;
   width: max-content;
-  max-width: min(calc(100vw - 16px), 420px);
+  max-width: min(calc(100vw - 48px), 420px);
   padding: 6px;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--bg-panel);
   box-shadow: 0 8px 24px #0003;
 }
-/* 两组只是语义分组，布局上并入菜单那一行。 */
 .mobile-controls-actions, .mobile-controls-preferences {
-  display: contents;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.mobile-controls-actions > *, .mobile-controls-preferences > * {
+  flex-shrink: 0;
 }
 .mobile-controls-actions > button,
 .mobile-controls-actions > div > button,
@@ -4818,4 +4823,68 @@ span.token.table {
   background: color-mix(in srgb, var(--bg) 76%, transparent);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
+}
+
+/* 预设角色使用原生模态顶层，手机上独占可视区域，不受侧栏滑入动画裁切。 */
+.team-role-presets-dialog {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  padding: 0;
+  width: min(640px, calc(100vw - 32px));
+  height: min(440px, calc(var(--app-viewport-height, 100dvh) - 32px));
+  max-width: none;
+  max-height: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  box-shadow: 0 16px 48px #0005;
+  overflow: hidden;
+}
+.team-role-presets-dialog::backdrop { background: #0007; }
+.team-role-presets-panel { display: flex; flex-direction: column; width: 100%; height: 100%; min-height: 0; }
+.team-role-presets-body { display: grid; grid-template-columns: 180px minmax(0, 1fr); flex: 1; min-height: 0; }
+.team-role-presets-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 8px;
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+}
+.team-role-presets-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  min-height: 0;
+  padding: 14px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  overscroll-behavior: contain;
+}
+@media (max-width: 640px) {
+  .team-role-presets-dialog {
+    --role-preset-field-size: 16px;
+    width: 100%;
+    height: var(--app-viewport-height, 100dvh);
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .team-role-presets-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .team-role-presets-list {
+    flex-direction: row;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-inline: contain;
+  }
+  .team-role-presets-list > * { flex: 0 0 auto; max-width: 220px; }
+  .team-role-presets-dialog button { min-height: 44px; min-width: 44px; }
 }

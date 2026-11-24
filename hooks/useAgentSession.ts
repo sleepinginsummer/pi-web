@@ -2979,6 +2979,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // Opening the stream is what resumes an idle-reaped session, so the
         // mount's state read may have found no runtime and no usage to show.
         if (sessionIdRef.current) void refreshContextUsage(sessionIdRef.current);
+        // 冷会话的首屏可能早于 runtime 恢复：连接就绪后补读，预设名称不必等整页刷新。
+        if (!toolSelectionKnown && sessionIdRef.current) void loadTools(sessionIdRef.current);
         break;
       }
       case "agent_start":
@@ -3339,7 +3341,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
     }
-  }, [addNotice, cancelEventStreamGrace, updateQueuedMessages, clearAskQuestionnaire, closeEvents, markPromptLanded, onSessionEnded, opts.chatInputRef, consumeShadowEntry, dispatch, enqueueStreamDelta, enterMainRun, flushStreamDeltas, handleExtensionUiRequest, isNew, loadCompactedSession, loadSession, modelSelectionActions, newSessionCwd, onPendingNewSessionEvent, onSessionListRefresh, onToolEnd, reconcileAgentState, refreshContextUsage, resetStreamDeltas, scheduleContextRefresh, scheduleEventStreamClose, streamingStore]);
+  }, [addNotice, cancelEventStreamGrace, updateQueuedMessages, clearAskQuestionnaire, closeEvents, markPromptLanded, onSessionEnded, opts.chatInputRef, consumeShadowEntry, dispatch, enqueueStreamDelta, enterMainRun, flushStreamDeltas, handleExtensionUiRequest, isNew, toolSelectionKnown, loadTools, loadCompactedSession, loadSession, modelSelectionActions, newSessionCwd, onPendingNewSessionEvent, onSessionListRefresh, onToolEnd, reconcileAgentState, refreshContextUsage, resetStreamDeltas, scheduleContextRefresh, scheduleEventStreamClose, streamingStore]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[], fromStash = false) => {

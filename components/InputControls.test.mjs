@@ -239,6 +239,14 @@ test("shows the configured preset's tools without editing them from the menu", a
   assert.match(source, /\{!locked && followsSettings && \([\s\S]*?chat\.toolsFollowSettingsHint/);
 });
 
+test("unknown tool selection keeps the icon without a placeholder preset name", () => {
+  const html = renderControls(false, { toolPreset: "configured", toolSelectionKnown: false });
+  assert.match(html, /aria-label="Change tool preset"/);
+  assert.doesNotMatch(html, /Built-in tools|>configured<|>default</);
+  const ready = renderControls(false, { toolPreset: "configured", toolSelectionKnown: true });
+  assert.match(ready, />configured<\/span>/);
+});
+
 test("marks a settings-enabled tool this session runs without", async () => {
   const source = await readFile(new URL("./InputControls.tsx", import.meta.url), "utf8");
 

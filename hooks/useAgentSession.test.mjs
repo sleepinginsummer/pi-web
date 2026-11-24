@@ -499,6 +499,11 @@ test("wires persisted Shadow lifecycle entries to the context refresh path", () 
   assert.doesNotMatch(eventSource, /setTimeout\([\s\S]{0,300}loadSession/);
 });
 
+test("冷会话连接就绪后补读工具预设，不必等待刷新", () => {
+  const connected = source.slice(source.indexOf('case "connected":'), source.indexOf('case "agent_start":'));
+  assert.match(connected, /if \(!toolSelectionKnown && sessionIdRef\.current\) void loadTools\(sessionIdRef\.current\);/);
+});
+
 test("refreshes Shadow runtime state after a cold SSE connection becomes ready", () => {
   const connector = source.slice(
     source.indexOf("const connectEvents = useCallback"),

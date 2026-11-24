@@ -133,8 +133,9 @@ test("only completed assistant messages trigger an immediate usage read", () => 
 test("each event stream connection reads usage, since connecting resumes an idle-reaped session", () => {
   const connected = nodes.find((node) => ts.isCaseClause(node) && node.expression.getText(source) === '"connected"');
   const script = new Script(ts.transpileModule(`(() => { switch(event.type) { ${connected.getText(source)} } })()`, { compilerOptions: { target: ts.ScriptTarget.ESNext } }).outputText);
-  for (const [sid, isStreaming] of [["a", false], ["a", true], [null, false]]) {
+  for (const [sid, isStreaming, known] of [["a", false, false], ["a", true, false], [null, false, false], ["a", false, true]]) {
     const reads = [];
+    const toolReads = [];
     script.runInNewContext({
       event: { type: "connected", sessionId: sid ?? "pending", isStreaming },
       sessionIdRef: { current: sid }, sdkAgentActiveRef: { current: false }, agentRunningRef: { current: false },
@@ -143,7 +144,9 @@ test("each event stream connection reads usage, since connecting resumes an idle
       // fork 的 connected 分支还会同步扩展弹窗并采用运行中的会话。
       setExtensionDialog() {}, setExtensionCustomUi() {}, extensionDialogRef: { current: null }, enterMainRun() {},
       refreshContextUsage: (id) => reads.push(id),
+      toolSelectionKnown: known, loadTools: (id) => toolReads.push(id),
     });
     assert.deepEqual(reads, sid ? [sid] : []);
+    assert.deepEqual(toolReads, sid && !known ? [sid] : [], "只补读未知预设，已初始化的新会话不重复查询");
   }
 });
