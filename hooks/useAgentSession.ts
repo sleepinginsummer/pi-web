@@ -665,6 +665,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const branchTailEntryIdsRef = useRef(branchTailEntryIds);
   const messagesRef = useRef(messages);
   const entryIdsRef = useRef(entryIds);
+  // 仅由发送、主运行与流式追加新消息推进，用于区分历史前插分页，防止迟到的首屏校验覆盖新消息。
+  const liveMessageSeqRef = useRef(0);
   // 运行中追加的消息没有 entry id；重读文件时把它们的 key 交给同位置的 entry（lib/message-keys.ts），避免整轮消息重挂载。
   const [messageKeyAliases, setMessageKeyAliases] = useState<ReadonlyMap<string, string>>(() => new Map());
   messagesRef.current = messages;
@@ -1379,6 +1381,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setContextVersion(snapshot.version);
     setSessionTotalActiveMs(snapshot.totalActiveMs ?? 0);
     setActiveLeafId(leafId);
+    viewSnapshotRef.current.leafId = leafId;
     pendingDetachedSubagentIdsRef.current = pendingDetachedSubagentIds(snapshot.messages);
     if (!options.preserveScroll) {
       // 手动压缩定位本次摘要，不能沿用普通加载时的末条消息定位。
@@ -1396,14 +1399,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     branchTailEntryIdsRef.current = snapshot.branchTailEntryIds;
     messagesRef.current = snapshot.messages;
     entryIdsRef.current = snapshot.entryIds;
-    setHistoryPage({
+    const nextPage: HistoryPageState = {
       sid,
       oldestEntryId: snapshot.oldestEntryId,
       hasMore: snapshot.hasMore,
       turnsBefore: snapshot.turnsBefore,
       loading: false,
       failed: false,
-    });
+    };
+    viewSnapshotRef.current.page = nextPage;
+    setHistoryPage(nextPage);
     setCurrentModelOverride((current) => modelSwitchPendingRef.current ? current : null);
     setError(null);
     setBlockedRecall(null);
@@ -1471,24 +1476,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (result.snapshot.entryIds.some((id) => existingIds.has(id))) {
         throw new Error("历史分页返回了重复 entryId，已拒绝前插");
       }
-      setMessages((current) => {
-        const next = [...result.snapshot.messages, ...current];
-        messagesRef.current = next;
-        return next;
-      });
-      setEntryIds((current) => {
-        const next = [...result.snapshot.entryIds, ...current];
-        entryIdsRef.current = next;
-        return next;
-      });
-      setHistoryPage({
+      const previousMessages = messagesRef.current;
+      const previousEntryIds = entryIdsRef.current;
+      const nextMessages = [...result.snapshot.messages, ...previousMessages];
+      const nextEntryIds = [...result.snapshot.entryIds, ...previousEntryIds];
+      const nextPage: HistoryPageState = {
         sid,
         oldestEntryId: result.snapshot.oldestEntryId,
         hasMore: result.snapshot.hasMore,
         turnsBefore: result.snapshot.turnsBefore,
         loading: false,
         failed: false,
-      });
+      };
+      // 同一同步段内原子更新三个 ref，避免 React 延迟执行 state updater 时首屏校验读到半更新窗口。
+      messagesRef.current = nextMessages;
+      entryIdsRef.current = nextEntryIds;
+      viewSnapshotRef.current.page = nextPage;
+      setMessages((current) => (current === previousMessages ? nextMessages : [...result.snapshot.messages, ...current]));
+      setEntryIds((current) => (current === previousEntryIds ? nextEntryIds : [...result.snapshot.entryIds, ...current]));
+      setHistoryPage(nextPage);
       return true;
     } catch (error) {
       const abortedElsewhere = !timedOut && error instanceof DOMException && error.name === "AbortError";
@@ -1599,24 +1605,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
 
       if (prependedEntryIds.length > 0) {
-        setMessages((current) => {
-          const next = [...prependedMessages, ...current];
-          messagesRef.current = next;
-          return next;
-        });
-        setEntryIds((current) => {
-          const next = [...prependedEntryIds, ...current];
-          entryIdsRef.current = next;
-          return next;
-        });
-        setHistoryPage({
+        const previousMessages = messagesRef.current;
+        const previousEntryIds = entryIdsRef.current;
+        const nextMessages = [...prependedMessages, ...previousMessages];
+        const nextEntryIds = [...prependedEntryIds, ...previousEntryIds];
+        const nextPage: HistoryPageState = {
           sid,
           oldestEntryId: before,
           hasMore,
           turnsBefore,
           loading: false,
           failed: failedWhileJumping,
-        });
+        };
+        // 同一同步段内原子更新三个 ref，避免 React 延迟执行 state updater 时首屏校验读到半更新窗口。
+        messagesRef.current = nextMessages;
+        entryIdsRef.current = nextEntryIds;
+        viewSnapshotRef.current.page = nextPage;
+        setMessages((current) => (current === previousMessages ? nextMessages : [...prependedMessages, ...current]));
+        setEntryIds((current) => (current === previousEntryIds ? nextEntryIds : [...prependedEntryIds, ...current]));
+        setHistoryPage(nextPage);
       }
       return found || entryIdsRef.current.includes(targetEntryId);
     } catch (error) {
@@ -1693,7 +1700,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       : null;
     const allowOptimisticMount = optimisticMountLoadSidRef.current === sid;
     if (allowOptimisticMount) optimisticMountLoadSidRef.current = null;
-    let optimisticPainted: { source: "view" | "context"; version: string; leafId: string | null; messages: AgentMessage[] } | null = null;
+    let optimisticPainted: { source: "view" | "context"; version: string; leafId: string | null; liveSeq: number } | null = null;
     if (showLoading && allowOptimisticMount && !options.reloadedAfterRewrite) {
       const savedView = getSessionViewSnapshot(sid);
       if (savedView) {
@@ -1709,12 +1716,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           version: savedView.revision,
         };
         if (commitContextSnapshot(sid, optimisticSnapshot, savedView.leafId)) {
-          optimisticPainted = { source: "view", version: savedView.revision, leafId: savedView.leafId, messages: messagesRef.current };
+          optimisticPainted = { source: "view", version: savedView.revision, leafId: savedView.leafId, liveSeq: liveMessageSeqRef.current };
         }
       } else {
         const cachedContext = peekSessionContextCache(sid);
         if (cachedContext && commitContextSnapshot(sid, cachedContext.snapshot, cachedContext.leafId)) {
-          optimisticPainted = { source: "context", version: cachedContext.snapshot.version, leafId: cachedContext.leafId, messages: messagesRef.current };
+          optimisticPainted = { source: "context", version: cachedContext.snapshot.version, leafId: cachedContext.leafId, liveSeq: liveMessageSeqRef.current };
         }
       }
     }
@@ -1737,8 +1744,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             lastReadContextRef.current = { sid, seq: readSeq, messages: loaded.snapshot.messages, entryIds: loaded.snapshot.entryIds ?? [] };
           }
           if (sessionIdRef.current !== sid) return false;
-          // 乐观首屏后若用户已发送消息或流式写入改变了列表，丢弃迟到的旧校验，避免覆盖新消息。
-          if (optimisticPainted && messagesRef.current !== optimisticPainted.messages) return false;
+          // 乐观首屏后若发生发送、主运行或流式新消息，丢弃迟到的旧校验；历史前插分页不递增该代次，仍继续核对版本。
+          if (optimisticPainted && liveMessageSeqRef.current !== optimisticPainted.liveSeq) return false;
           if (loaded.kind === "missing") {
             if (showLoading) {
               setContextModel(null);
@@ -1764,6 +1771,27 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             return false;
           }
           const saved = options.validateView ? getSessionViewSnapshot(sid) : null;
+          if (
+            optimisticPainted
+            && optimisticPainted.version === loaded.snapshot.version
+            && optimisticPainted.leafId === loaded.leafId
+            && viewSnapshotRef.current.page.sid === sid
+            && entryIdsRef.current.length >= loaded.snapshot.entryIds.length
+          ) {
+            // 校验期间可能已经触发历史前插：版本和活动 leaf 一致时保留当前已扩大的窗口，并同步服务端元数据。
+            const currentPage = viewSnapshotRef.current.page;
+            const wider: SessionContextSnapshot = {
+              ...loaded.snapshot,
+              messages: messagesRef.current,
+              entryIds: entryIdsRef.current,
+              oldestEntryId: currentPage.oldestEntryId,
+              hasMore: currentPage.hasMore,
+              turnsBefore: currentPage.turnsBefore,
+            };
+            if (!commitContextSnapshot(sid, wider, loaded.leafId, { preserveScroll: true })) return null;
+            committedSnapshot = wider;
+            return loaded;
+          }
           if (saved && saved.revision === loaded.snapshot.version && saved.leafId === loaded.leafId
             && saved.entryIds.length >= loaded.snapshot.entryIds.length) {
             // 版本及活动 leaf 均一致才保留已分页的大窗口；其它元数据以服务端为准。
@@ -1774,14 +1802,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             return loaded;
           }
           if (saved) deleteSessionViewSnapshot(sid);
-          if (
-            optimisticPainted?.source === "context"
-            && optimisticPainted.version === loaded.snapshot.version
-            && optimisticPainted.leafId === loaded.leafId
-          ) {
-            committedSnapshot = loaded.snapshot;
-            return loaded;
-          }
           const commitOptions = optimisticPainted ? { ...options, preserveScroll: true } : options;
           if (!commitContextSnapshot(sid, loaded.snapshot, loaded.leafId, commitOptions)) return null;
           committedSnapshot = loaded.snapshot;
@@ -1857,13 +1877,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
       loadSessionDetails(sid);
       if (contextResult.value.cached) {
-        const paintedMessages = messagesRef.current;
+        const liveSeq = liveMessageSeqRef.current;
         void contextLoaderRef.current.run(
           sid,
           (signal) => fetchSessionContext(sid, signal, { skipCache: true }),
           (loaded) => {
             if (loaded.kind !== "loaded") return false;
-            if (messagesRef.current !== paintedMessages) return false;
+            if (liveMessageSeqRef.current !== liveSeq) return false;
             if (loaded.snapshot.version === contextVersionRef.current && loaded.leafId === viewSnapshotRef.current.leafId) return false;
             deleteSessionViewSnapshot(sid);
             const committed = commitContextSnapshot(sid, loaded.snapshot, loaded.leafId, { preserveScroll: true });
@@ -2799,6 +2819,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   /** 本地发送、外部 agent_start 与挂载恢复统一从这里采用主运行。 */
   const enterMainRun = useCallback((phase: AgentPhase): number => {
+    liveMessageSeqRef.current += 1;
     backfillRequestRef.current.controller?.abort();
     backfillRequestRef.current.generation += 1;
     if (!agentRunningRef.current) {
@@ -3177,6 +3198,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           optimisticUserMessageKeyRef.current = null;
           // While the run's own bubble waits, a delivered user message is its prompt.
           if (optimisticKey) markPromptLanded();
+          liveMessageSeqRef.current += 1;
           setMessages((prev) => {
             const last = prev[prev.length - 1];
             if (optimisticKey && last?.role === "user" && userMessageKey(last) === optimisticKey) {
@@ -3191,6 +3213,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         } else if (completed) {
           // pi's showCacheMissNotices (#1265): the wrapper sends them beside the message.
           const notices = Array.isArray(event.transcriptNotices) ? event.transcriptNotices as TranscriptNotice[] : undefined;
+          liveMessageSeqRef.current += 1;
           setMessages((prev) => {
             const next = [...prev, withTranscriptNotices(normalizeAssistantMessage(completed), notices)];
             lastStreamedMessageCountRef.current = next.length;
@@ -3419,6 +3442,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if ((agentRunningRef.current && !isBashCommand) || bashRunningRef.current) return false;
     // 暂存库发送的不是输入框正文：捕获这一刻的草稿，确认后迁移，不能顺带清掉等待期间的新输入。
     const capturedTransfer = fromStash && isNew && newSessionCwd ? captureDraftTransfer(`new:${newSessionCwd}`) : null;
+    liveMessageSeqRef.current += 1;
     setSubmissionError(null);
     const activeCwd = session?.cwd ?? newSessionCwd;
     if (activeCwd) {

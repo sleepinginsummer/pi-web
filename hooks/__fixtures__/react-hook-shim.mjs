@@ -15,8 +15,13 @@ export function useRef(value) { return slot(() => ({ current: value })); }
 export function useState(initial) {
   const instance = current;
   const state = slot(() => {
-    const entry = { value: typeof initial === "function" ? initial() : initial };
+    const entry = { value: typeof initial === "function" ? initial() : initial, queue: [] };
     entry.set = (value) => {
+      if (instance.deferStateUpdaters) {
+        entry.queue.push(value);
+        instance.dirty = true;
+        return;
+      }
       const next = typeof value === "function" ? value(entry.value) : value;
       if (!Object.is(next, entry.value)) { entry.value = next; instance.dirty = true; }
     };
@@ -42,11 +47,18 @@ function effect(fn, deps) {
 }
 export const useEffect = effect;
 export const useLayoutEffect = effect;
-export function renderHook(hook, props) {
-  const instance = { slots: [], index: 0, pending: [], dirty: false, props, result: undefined };
+export function renderHook(hook, props, { deferStateUpdaters = false } = {}) {
+  const instance = { slots: [], index: 0, pending: [], dirty: false, deferStateUpdaters, props, result: undefined };
   const render = () => {
     do {
       instance.dirty = false;
+      for (const entry of instance.slots) {
+        if (!entry?.queue?.length) continue;
+        const pendingUpdates = entry.queue.splice(0);
+        for (const update of pendingUpdates) {
+          entry.value = typeof update === "function" ? update(entry.value) : update;
+        }
+      }
       instance.index = 0;
       instance.pending = [];
       current = instance;

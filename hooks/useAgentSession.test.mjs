@@ -297,8 +297,10 @@ test("历史分页按游标串行前插并拒绝重复 entryId", () => {
   );
   assert.match(paginationSource, /page\.loading/);
   assert.match(paginationSource, /result\.snapshot\.entryIds\.some\(\(id\) => existingIds\.has\(id\)\)/);
-  assert.match(paginationSource, /setMessages\(\(current\) => \{[\s\S]*?\.\.\.result\.snapshot\.messages, \.\.\.current/);
-  assert.match(paginationSource, /setEntryIds\(\(current\) => \{[\s\S]*?\.\.\.result\.snapshot\.entryIds, \.\.\.current/);
+  assert.match(paginationSource, /const nextMessages = \[\.\.\.result\.snapshot\.messages, \.\.\.previousMessages\];/);
+  assert.match(paginationSource, /const nextEntryIds = \[\.\.\.result\.snapshot\.entryIds, \.\.\.previousEntryIds\];/);
+  assert.match(paginationSource, /setMessages\(\(current\) => \(current === previousMessages \? nextMessages : \[\.\.\.result\.snapshot\.messages, \.\.\.current\]\)\);/);
+  assert.match(paginationSource, /setEntryIds\(\(current\) => \(current === previousEntryIds \? nextEntryIds : \[\.\.\.result\.snapshot\.entryIds, \.\.\.current\]\)\);/);
 });
 
 test("refuses a normal send while the hook knows an asynchronous run is active", () => {

@@ -429,3 +429,107 @@ test("预取 v1 后服务端变为 v2，打开会话先复用 v1 再由后台复
     env.teardown();
   }
 });
+
+
+test("恢复缓存后挂起校验期间加载更早消息：版本一致时保留扩大窗口，版本变化时更新到最新视图", async () => {
+  // 场景一：服务端版本未变，分页与校验交错后保留扩大的窗口 [e1, e2, e3, e4]。
+  const envSame = await setup();
+  let sameView;
+  try {
+    envSame.hook.unmount();
+    assert.deepEqual(getSessionViewSnapshot("A")?.entryIds, ["e3", "e4"]);
+    envSame.server.hold.add("full");
+    sameView = renderHook(useAgentSession, forkAgentHookOptions({ session: { id: "A", cwd: "/project", path: "/A.jsonl", name: "A" }, newSessionCwd: null, newSessionDraftKey: null, t: (key) => key }));
+    await settle();
+    sameView.flush();
+    assert.equal(sameView.result.loading, false);
+    assert.deepEqual(sameView.result.entryIds, ["e3", "e4"]);
+
+    const loadedPage = await sameView.result.loadEarlierMessages();
+    assert.equal(loadedPage, true);
+    await settle();
+    sameView.flush();
+    assert.deepEqual(sameView.result.entryIds, ["e1", "e2", "e3", "e4"]);
+    assert.equal(sameView.result.hasEarlierMessages, false);
+
+    await envSame.release("full");
+    await settle();
+    sameView.flush();
+    assert.deepEqual(sameView.result.entryIds, ["e1", "e2", "e3", "e4"], "版本一致时不得把分页扩大的窗口裁回首页");
+    assert.equal(sameView.result.hasEarlierMessages, false);
+  } finally {
+    sameView?.unmount();
+    deleteSessionViewSnapshot("A");
+    resetSessionContextCacheForTests();
+    envSame.teardown();
+  }
+
+  // 场景二：服务端已产生新消息，挂起校验期间加载更早消息后释放校验，视图仍应更新到最新正文。
+  const envChanged = await setup();
+  let changedView;
+  try {
+    envChanged.hook.unmount();
+    assert.deepEqual(getSessionViewSnapshot("A")?.entryIds, ["e3", "e4"]);
+    envChanged.server.entries.push(["c2", custom("Arrived while away")]);
+
+    envChanged.server.hold.add("full");
+    changedView = renderHook(useAgentSession, forkAgentHookOptions({ session: { id: "A", cwd: "/project", path: "/A.jsonl", name: "A" }, newSessionCwd: null, newSessionDraftKey: null, t: (key) => key }));
+    await settle();
+    changedView.flush();
+    assert.equal(changedView.result.loading, false);
+    assert.deepEqual(changedView.result.entryIds, ["e3", "e4"]);
+
+    const loadedPage = await changedView.result.loadEarlierMessages();
+    assert.equal(loadedPage, true);
+    await settle();
+    changedView.flush();
+    assert.deepEqual(changedView.result.entryIds, ["e1", "e2", "e3", "e4"]);
+
+    await envChanged.release("full");
+    await settle();
+    changedView.flush();
+    assert.deepEqual(changedView.result.entryIds, ["e4", "c2"], "分页不中断版本校验，服务端有新版本时应更新视图");
+  } finally {
+    changedView?.unmount();
+    deleteSessionViewSnapshot("A");
+    resetSessionContextCacheForTests();
+    envChanged.teardown();
+  }
+});
+
+
+test("分页与同版本首屏校验连续返回且中间未渲染时，不能丢掉前插历史或导致 entryId 错位", async () => {
+  const env = await setup();
+  let batchedView;
+  try {
+    env.hook.unmount();
+    assert.deepEqual(getSessionViewSnapshot("A")?.entryIds, ["e3", "e4"]);
+
+    env.server.hold.add("full");
+    batchedView = renderHook(
+      useAgentSession,
+      forkAgentHookOptions({ session: { id: "A", cwd: "/project", path: "/A.jsonl", name: "A" }, newSessionCwd: null, newSessionDraftKey: null, t: (key) => key }),
+      { deferStateUpdaters: true },
+    );
+    await settle();
+    batchedView.flush();
+    assert.equal(batchedView.result.loading, false);
+    assert.deepEqual(batchedView.result.entryIds, ["e3", "e4"]);
+
+    // 模拟 React 批处理：分页返回后不 flush（延迟执行函数式 updater），紧接着释放同版本的首屏校验。
+    const loadedPage = await batchedView.result.loadEarlierMessages();
+    assert.equal(loadedPage, true);
+    await env.release("full");
+    await settle();
+    batchedView.flush();
+
+    assert.deepEqual(batchedView.result.entryIds, ["e1", "e2", "e3", "e4"], "同批次内分页与校验连续返回必须保留完整历史");
+    assert.equal(batchedView.result.messages.length, batchedView.result.entryIds.length, "消息与 entryId 长度必须一致");
+    assert.equal(batchedView.result.hasEarlierMessages, false);
+  } finally {
+    batchedView?.unmount();
+    deleteSessionViewSnapshot("A");
+    resetSessionContextCacheForTests();
+    env.teardown();
+  }
+});
