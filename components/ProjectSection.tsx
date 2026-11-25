@@ -6,6 +6,7 @@ import { useLayoutEffect, useMemo, useRef, useState, type DragEvent, type ReactN
 import type { SessionInfo } from "@/lib/types";
 import { buildSessionTree, type SessionTreeNode } from "@/lib/session-tree";
 import { portablePathIdentity } from "@/lib/path-equality";
+import { sidebarProjectPath } from "@/lib/project-groups";
 import { SessionItem } from "./SessionItem";
 import { ProjectMark } from "./ProjectMark";
 import type { SessionPinColor } from "@/lib/sidebar-preference-state";
@@ -20,6 +21,7 @@ interface ProjectSectionProps {
     activity?: ReactNode;
     sessions: SessionInfo[];
     sessionOrder: string[];
+    layoutVersion?: ReadonlySet<string>;
   };
   labels: {
     empty: string;
@@ -32,13 +34,14 @@ interface ProjectSectionProps {
     onRemove: () => void;
     onNewSession: () => void;
   };
+  children?: ReactNode;
   treeProps: SessionTreeSharedProps;
 }
 
 const PROJECT_DRAG_TYPE = "application/x-pi-project";
 
 /** 单个项目目录的条件编排；数据持久化由父层负责。 */
-export function ProjectSection({ project, labels, actions, treeProps }: ProjectSectionProps) {
+export function ProjectSection({ project, labels, actions, treeProps, children }: ProjectSectionProps) {
   const tree = useMemo(() => buildSessionTree(project.sessions, project.sessionOrder), [project.sessionOrder, project.sessions]);
   const handledLocateRevisionRef = useRef(0);
   return (
@@ -51,10 +54,12 @@ export function ProjectSection({ project, labels, actions, treeProps }: ProjectS
               tree={tree}
               treeProps={treeProps}
               handledLocateRevisionRef={handledLocateRevisionRef}
+              layoutVersion={project.layoutVersion}
             />
-          ) : (
+          ) : !children && (
             <div style={{ padding: "5px 10px 7px", color: "var(--text-dim)", fontSize: 11 }}>{labels.empty}</div>
           )}
+          {children}
         </div>
       )}
     </section>
@@ -191,7 +196,7 @@ function groupPinnedSessions(
   const groups = new Map<string, PinnedProjectGroup>();
   for (const node of tree) {
     const project = resolveProject?.(node.session);
-    const path = project?.path ?? "";
+    const path = node.session.isWorktree ? (node.session.projectRoot ?? project?.path ?? "") : (project?.path ?? "");
     // 与下方项目列表共用路径身份；原始路径只用于展示和请求图标。
     const identity = path ? portablePathIdentity(path) : "";
     const existing = groups.get(identity);
@@ -199,7 +204,7 @@ function groupPinnedSessions(
       existing.tree.push(node);
       continue;
     }
-    groups.set(identity, { identity, path, name: project?.name ?? "", tree: [node] });
+    groups.set(identity, { identity, path, name: path && path !== project?.path ? path.replace(/\\/g, "/").split("/").filter(Boolean).pop() ?? path : project?.name ?? "", tree: [node] });
   }
   return [...groups.values()];
 }
@@ -233,9 +238,12 @@ export function PinnedSessionsSection({
     if (!group) return;
     handledGroupLocateRevisionRef.current = request.revision;
     setCollapsedGroups((current) => {
-      if (!current.has(group.identity)) return current;
+      const rootNode = group.tree.find((node) => findSessionAncestorIds([node], request.sessionId) !== null);
+      const checkoutIdentity = rootNode ? portablePathIdentity(sidebarProjectPath(rootNode.session)) : group.identity;
+      if (!current.has(group.identity) && !current.has(checkoutIdentity)) return current;
       const next = new Set(current);
       next.delete(group.identity);
+      next.delete(checkoutIdentity);
       return next;
     });
   }, [groups, treeProps.locateSessionRequest]);
@@ -253,10 +261,10 @@ export function PinnedSessionsSection({
           treeProps={treeProps}
           layoutVersion={collapsedGroups}
           collapsed={collapsedGroups.has(group.identity)}
-          onToggleCollapsed={() => setCollapsedGroups((current) => {
+          onToggleGroup={(identity) => setCollapsedGroups((current) => {
             const next = new Set(current);
-            if (next.has(group.identity)) next.delete(group.identity);
-            else next.add(group.identity);
+            if (next.has(identity)) next.delete(identity);
+            else next.add(identity);
             return next;
           })}
         />
@@ -270,23 +278,44 @@ function PinnedProjectGroupSection({
   treeProps,
   layoutVersion,
   collapsed,
-  onToggleCollapsed,
+  onToggleGroup,
 }: {
   group: PinnedProjectGroup;
   treeProps: SessionTreeSharedProps;
   layoutVersion: ReadonlySet<string>;
   collapsed: boolean;
-  onToggleCollapsed: () => void;
+  onToggleGroup: (identity: string) => void;
 }) {
   // 目录信息只在组头显示，行内继续保留时间、消息数和运行状态。
   const groupTreeProps = useMemo(() => ({ ...treeProps, resolveProject: undefined }), [treeProps]);
   const handledLocateRevisionRef = useRef(0);
+  const { mainTree, worktreeGroups } = useMemo(() => {
+    const mainTree: SessionTreeNode[] = [];
+    const worktrees = new Map<string, PinnedProjectGroup>();
+    for (const node of group.tree) {
+      const path = sidebarProjectPath(node.session);
+      const identity = portablePathIdentity(path);
+      if (!node.session.isWorktree || identity === group.identity) {
+        mainTree.push(node);
+        continue;
+      }
+      const existing = worktrees.get(identity);
+      if (existing) existing.tree.push(node);
+      else worktrees.set(identity, {
+        identity,
+        path,
+        name: path.replace(/\\/g, "/").split("/").filter(Boolean).pop() ?? path,
+        tree: [node],
+      });
+    }
+    return { mainTree, worktreeGroups: [...worktrees.values()] };
+  }, [group]);
   return (
     <div data-pinned-group={group.path || undefined}>
       {group.path !== "" && (
         <button
           type="button"
-          onClick={onToggleCollapsed}
+          onClick={() => onToggleGroup(group.identity)}
           title={group.path}
           aria-expanded={!collapsed}
           style={{
@@ -318,11 +347,21 @@ function PinnedProjectGroupSection({
       {!collapsed && (
         <div style={{ paddingLeft: group.path === "" ? 0 : 16 }}>
           <VirtualizedSessionTree
-            tree={group.tree}
+            tree={mainTree}
             treeProps={groupTreeProps}
             handledLocateRevisionRef={handledLocateRevisionRef}
             layoutVersion={layoutVersion}
           />
+          {worktreeGroups.map((worktree) => (
+            <PinnedProjectGroupSection
+              key={worktree.identity}
+              group={worktree}
+              treeProps={treeProps}
+              layoutVersion={layoutVersion}
+              collapsed={layoutVersion.has(worktree.identity)}
+              onToggleGroup={onToggleGroup}
+            />
+          ))}
         </div>
       )}
     </div>

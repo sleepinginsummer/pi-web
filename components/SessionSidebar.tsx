@@ -15,7 +15,8 @@ import { reconcileSessionPreferenceOrder } from "@/lib/sidebar-preference-state"
 import type { RunningSessionTransitionEvent } from "@/hooks/useRunningSessionTransitions";
 import { loadExplorerOpen, saveExplorerOpen } from "@/lib/file-explorer-state";
 import { loadCollapsedProjects, saveCollapsedProjects } from "@/lib/project-collapse-state";
-import { getProjectActivity, getRecentProjects, resolveSidebarProjectPath, sessionsForProject, sidebarProjectPath } from "@/lib/project-groups";
+import { expandSidebarProject, resolveSidebarProjectMove, groupSidebarProjects, getProjectActivity, getRecentProjects, resolveSidebarProjectPath, sessionsForProject, sidebarProjectPath } from "@/lib/project-groups";
+import { samePortablePath } from "@/lib/path-equality";
 import { commitCustomProjectSelection } from "@/lib/custom-project-selection";
 import { useScrollbarVisibility } from "@/hooks/useScrollbarVisibility";
 import { DirectoryPicker } from "./DirectoryPicker";
@@ -722,7 +723,6 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
     () => (topPinnedSectionIds.size > 0 ? visibleSessions.filter((session) => topPinnedSectionIds.has(session.id)) : []),
     [topPinnedSectionIds, visibleSessions],
   );
-  const recentProjects = getRecentProjects(visibleSessions);
   const selectedProject = resolveSidebarProjectPath(visibleSessions, selectedCwd, {
     projectRoot: projectRootFor(selectedCwd),
     worktrees: worktreeState?.worktrees,
@@ -735,25 +735,32 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
     () => projectActivity.hasActivityOutside(selectedProject),
     [projectActivity, selectedProject],
   );
-  const visibleProjects = getProjectOrder([
+  const visibleProjects = useMemo(() => getProjectOrder([
     ...(selectedProject ? [selectedProject] : []),
-    ...recentProjects,
+    ...getRecentProjects(visibleSessions),
     ...knownProjects,
-  ]);
-
+  ]), [selectedProject, visibleSessions, knownProjects, getProjectOrder]);
+  const projectGroups = useMemo(
+    () => groupSidebarProjects(visibleProjects, visibleSessions, worktreeState, getProjectOrder),
+    [visibleProjects, visibleSessions, worktreeState, getProjectOrder],
+  );
+  const selectedParentProject = projectGroups.find((group) => group.worktrees.some((path) => samePortablePath(path, selectedProject ?? "")))?.path;
   useEffect(() => {
-    if (!locateSessionRequest) return;
+    if (!selectedParentProject) return;
+    setCollapsedProjects((current) => expandSidebarProject([{ path: selectedParentProject, worktrees: [] }], current, selectedParentProject));
+  }, [selectedParentProject]);
+
+  const handledProjectLocateRevisionRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!locateSessionRequest || handledProjectLocateRevisionRef.current === locateSessionRequest.revision) return;
     const targetSession = visibleSessions.find((session) => session.id === locateSessionRequest.sessionId);
     if (!targetSession) return;
     if (topPinnedSectionIds.has(targetSession.id)) return;
     const targetProject = sidebarProjectPath(targetSession);
-    setCollapsedProjects((current) => {
-      if (!current.has(targetProject)) return current;
-      const next = new Set(current);
-      next.delete(targetProject);
-      return next;
-    });
-  }, [locateSessionRequest, topPinnedSectionIds, visibleSessions]);
+    if (!projectGroups.some((group) => samePortablePath(group.path, targetProject) || group.worktrees.some((path) => samePortablePath(path, targetProject)))) return;
+    handledProjectLocateRevisionRef.current = locateSessionRequest.revision;
+    setCollapsedProjects((current) => expandSidebarProject(projectGroups, current, targetProject));
+  }, [locateSessionRequest, topPinnedSectionIds, visibleSessions, projectGroups]);
 
   const handleRemoveProject = useCallback(async () => {
     if (!projectPendingRemoval || projectRemovalBusy) return;
@@ -998,6 +1005,62 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
             const path = sidebarProjectPath(session);
             return { name: projectName(path), path };
           };
+          const renderProject = (project: string, children?: ReactNode) => {
+            const collapsed = collapsedProjects.has(project);
+            const projectSessions = sessionsForProject(visibleSessions, project);
+            const unpinnedProjectSessions = projectSessions.filter((session) => (
+              !topPinnedSectionIds.has(session.id) && !teamMemberSessionIds.has(session.id)
+            ));
+            const active = samePortablePath(project, selectedProject ?? "") || projectGroups.some((group) => samePortablePath(group.path, project) && group.worktrees.some((path) => samePortablePath(path, selectedProject ?? "")));
+            const paths = [project, ...(projectGroups.find((group) => group.path === project)?.worktrees ?? [])];
+            const activity = paths.reduce((total, path) => {
+              const value = projectActivity.get(path);
+              return { running: total.running + (value?.running ?? 0), unread: total.unread + (value?.unread ?? 0) };
+            }, { running: 0, unread: 0 });
+            return (
+              <ProjectSection
+                key={project}
+                project={{
+                  path: project,
+                  name: projectName(project),
+                  active,
+                  collapsed,
+                  isMobile,
+                  activity: showProjectActivity(activity, t),
+                  sessions: unpinnedProjectSessions,
+                  sessionOrder: visibleSessionOrder,
+                  layoutVersion: collapsedProjects,
+                }}
+                labels={{
+                  empty: t("sidebar.noSessions"),
+                  remove: t("sidebar.removeProjectButton", { name: projectName(project) }),
+                  newSession: t("sidebar.newSessionTitle", { path: project }),
+                }}
+                actions={{
+                  onToggleCollapsed: () => {
+                    setCollapsedProjects((current) => {
+                      const next = new Set(current);
+                      if (next.has(project)) next.delete(project);
+                      else next.add(project);
+                      return next;
+                    });
+                  },
+                  onMove: (source, target) => {
+                    const move = resolveSidebarProjectMove(projectGroups, source, target);
+                    if (move) moveProject(move.source, move.target, move.visibleIds);
+                  },
+                  onRemove: () => {
+                    setProjectRemovalError(null);
+                    setProjectPendingRemoval(project);
+                  },
+                  onNewSession: () => handleNewSession(project),
+                }}
+                treeProps={sharedTreeProps}
+              >
+                {children}
+              </ProjectSection>
+            );
+          };
           return (
             <>
               <TeamSidebarSection
@@ -1053,51 +1116,11 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
                   {t("sidebar.projects")}
                 </div>
               )}
-              {visibleProjects.map((project) => {
-                const collapsed = collapsedProjects.has(project);
-                const projectSessions = sessionsForProject(visibleSessions, project);
-                const unpinnedProjectSessions = projectSessions.filter((session) => (
-                  !topPinnedSectionIds.has(session.id) && !teamMemberSessionIds.has(session.id)
-                ));
-                const active = project === selectedProject;
-                return (
-                  <ProjectSection
-                    key={project}
-                    project={{
-                      path: project,
-                      name: projectName(project),
-                      active,
-                      collapsed,
-                      isMobile,
-                      activity: showProjectActivity(projectActivity.get(project), t),
-                      sessions: unpinnedProjectSessions,
-                      sessionOrder: visibleSessionOrder,
-                    }}
-                    labels={{
-                      empty: t("sidebar.noSessions"),
-                      remove: t("sidebar.removeProjectButton", { name: projectName(project) }),
-                      newSession: t("sidebar.newSessionTitle", { path: project }),
-                    }}
-                    actions={{
-                      onToggleCollapsed: () => {
-                        setCollapsedProjects((current) => {
-                          const next = new Set(current);
-                          if (next.has(project)) next.delete(project);
-                          else next.add(project);
-                          return next;
-                        });
-                      },
-                      onMove: (source, target) => moveProject(source, target, visibleProjects),
-                      onRemove: () => {
-                        setProjectRemovalError(null);
-                        setProjectPendingRemoval(project);
-                      },
-                      onNewSession: () => handleNewSession(project),
-                    }}
-                    treeProps={sharedTreeProps}
-                  />
-                );
-              })}
+              {projectGroups.map((group) => renderProject(group.path, group.worktrees.length > 0 ? (
+                <div data-worktree-directories>
+                  {group.worktrees.map((path) => renderProject(path))}
+                </div>
+              ) : undefined))}
             </>
           );
         })()}

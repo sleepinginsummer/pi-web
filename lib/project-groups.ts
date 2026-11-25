@@ -78,3 +78,83 @@ export function sessionsForProject(
 ): SessionInfo[] {
   return sessions.filter((session) => samePortablePath(sidebarProjectPath(session), projectPath));
 }
+
+
+export interface SidebarProjectGroup {
+  path: string;
+  worktrees: string[];
+}
+
+/** 仅组织显示层级；checkout 身份仍用于排序、移除和会话筛选。 */
+export function groupSidebarProjects(
+  projects: readonly string[],
+  sessions: readonly SessionInfo[],
+  checkout?: { projectRoot: string; worktrees: readonly { path: string; isMain: boolean }[] } | null,
+  orderProjects?: (paths: string[]) => string[],
+): SidebarProjectGroup[] {
+  const parents = new Map<string, string>();
+  for (const session of sessions) {
+    if (session.isWorktree && session.projectRoot && !samePortablePath(session.cwd, session.projectRoot)) {
+      parents.set(portablePathIdentity(session.cwd), session.projectRoot);
+    }
+  }
+  // 当前 checkout 的元数据也覆盖尚未发送过消息的 worktree。
+  if (checkout) {
+    for (const worktree of checkout.worktrees) {
+      if (!worktree.isMain && !samePortablePath(worktree.path, checkout.projectRoot)) {
+        parents.set(portablePathIdentity(worktree.path), checkout.projectRoot);
+      }
+    }
+  }
+  const groups = new Map<string, SidebarProjectGroup>();
+  for (const project of projects) {
+    const parent = parents.get(portablePathIdentity(project));
+    const path = parent ?? project;
+    const identity = portablePathIdentity(path);
+    let group = groups.get(identity);
+    if (!group) {
+      group = { path, worktrees: [] };
+      groups.set(identity, group);
+    }
+    if (parent && !group.worktrees.some((item) => samePortablePath(item, project))) group.worktrees.push(project);
+  }
+  if (!orderProjects) return [...groups.values()];
+  // 一级组只读取父目录的顺序，子目录的旧位置不能再抢占父组的位置。
+  return orderProjects([...groups.values()].map((group) => group.path))
+    .map((path) => groups.get(portablePathIdentity(path))!);
+}
+
+
+function findSidebarProjectGroup(groups: readonly SidebarProjectGroup[], path: string) {
+  return groups.find((group) => samePortablePath(group.path, path)
+    || group.worktrees.some((worktree) => samePortablePath(worktree, path)));
+}
+
+/** 父组独立排序；worktree 只在同一父组内排序，避免跨层拖拽改乱目录顺序。 */
+export function resolveSidebarProjectMove(
+  groups: readonly SidebarProjectGroup[], source: string, target: string,
+): { source: string; target: string; visibleIds: string[] } | null {
+  const sourceGroup = findSidebarProjectGroup(groups, source);
+  const targetGroup = findSidebarProjectGroup(groups, target);
+  if (!sourceGroup || !targetGroup) return null;
+  if (samePortablePath(sourceGroup.path, source)) {
+    if (sourceGroup === targetGroup) return null;
+    return { source: sourceGroup.path, target: targetGroup.path, visibleIds: groups.map((group) => group.path) };
+  }
+  if (sourceGroup !== targetGroup) return null;
+  const sourcePath = sourceGroup.worktrees.find((path) => samePortablePath(path, source));
+  const targetPath = sourceGroup.worktrees.find((path) => samePortablePath(path, target));
+  if (!sourcePath || !targetPath || samePortablePath(sourcePath, targetPath)) return null;
+  return { source: sourcePath, target: targetPath, visibleIds: sourceGroup.worktrees };
+}
+
+/** 按路径身份查找实际显示的父组与 checkout，展开两层并保留无关折叠状态。 */
+export function expandSidebarProject(
+  groups: readonly SidebarProjectGroup[], collapsed: Set<string>, projectPath: string,
+): Set<string> {
+  const group = findSidebarProjectGroup(groups, projectPath);
+  if (!group) return collapsed;
+  const paths = [group.path, ...group.worktrees.filter((path) => samePortablePath(path, projectPath))];
+  const next = new Set([...collapsed].filter((key) => !paths.some((path) => samePortablePath(key, path))));
+  return next.size === collapsed.size ? collapsed : next;
+}

@@ -17,7 +17,8 @@ const { act, cleanup, fireEvent, render, screen } = await import("@testing-libra
 const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
 const { PinnedSessionsSection, ProjectSection } = await jiti.import("./ProjectSection.tsx");
 const { I18nProvider } = await jiti.import("@/hooks/useI18n");
-const { sidebarProjectPath } = await jiti.import("@/lib/project-groups");
+const { sidebarProjectPath, groupSidebarProjects, resolveSidebarProjectMove, expandSidebarProject } = await jiti.import("@/lib/project-groups");
+const { emptySidebarPreferences, orderProjectsByPreference, reduceSidebarPreferences } = await jiti.import("@/lib/sidebar-preference-state");
 
 afterEach(cleanup);
 
@@ -64,6 +65,40 @@ function createProps(overrides = {}) {
     },
   };
 }
+
+
+test("worktree 嵌套在原项目下，两层可独立折叠且新建使用子目录动作", () => {
+  const calls = [];
+  function NestedProjects() {
+    const [rootCollapsed, setRootCollapsed] = React.useState(false);
+    const [childCollapsed, setChildCollapsed] = React.useState(false);
+    return React.createElement(ProjectSection, {
+      ...createProps({
+        project: { collapsed: rootCollapsed },
+        actions: { onToggleCollapsed: () => setRootCollapsed((value) => !value) },
+      }),
+    }, React.createElement(ProjectSection, createProps({
+      project: { path: "/repo-worktrees/feature", name: "feature", collapsed: childCollapsed },
+      actions: {
+        onToggleCollapsed: () => setChildCollapsed((value) => !value),
+        onNewSession: () => calls.push("/repo-worktrees/feature"),
+      },
+    })));
+  }
+  render(React.createElement(I18nProvider, null, React.createElement(NestedProjects)));
+  const child = screen.getByTitle("/repo-worktrees/feature");
+  const childSection = child.closest("section");
+  assert.equal(childSection.parentElement.closest("section"), screen.getByTitle("/repo").closest("section"));
+  assert.equal(screen.getAllByText("No sessions").length, 1);
+  fireEvent.click(child);
+  assert.equal(child.getAttribute("aria-expanded"), "false");
+  fireEvent.click(childSection.querySelector('[aria-label="New session"]'));
+  assert.deepEqual(calls, ["/repo-worktrees/feature"]);
+  fireEvent.click(screen.getByTitle("/repo"));
+  assert.equal(screen.queryByTitle("/repo-worktrees/feature"), null);
+  fireEvent.click(screen.getByTitle("/repo"));
+  assert.equal(screen.getByTitle("/repo-worktrees/feature").getAttribute("aria-expanded"), "false");
+});
 
 function renderProject(props) {
   return render(React.createElement(I18nProvider, null, React.createElement(ProjectSection, props)));
@@ -515,7 +550,7 @@ test("置顶分组复用 Windows 路径身份，等价路径合并且切换原�
     title: "Pinned", sessions, sessionOrder, treeProps,
   }));
   const view = render(renderPinned(["windows-a", "windows-b"]));
-  assert.equal(view.container.querySelectorAll("[data-pinned-group]").length, 1);
+  assert.equal(view.container.querySelectorAll("[data-pinned-group]").length, 2);
   const header = screen.getByTitle(sessions[0].cwd);
   assert.equal(header.querySelector("[data-pinned-group-count]").textContent, "2");
   assert.equal(new URL(header.querySelector("img").src).searchParams.get("project"), sessions[0].cwd);
@@ -534,4 +569,100 @@ test("置顶分组复用 Windows 路径身份，等价路径合并且切换原�
   fireEvent.click(reorderedHeader);
   assert.ok(screen.getByText("windows-a"));
   assert.ok(screen.getByText("windows-b"));
+});
+
+
+test("置顶主目录与 worktree 归入同一项目，定位展开两层并保留会话动作", () => {
+  const sessions = [
+    { id: "main-pin", cwd: "/repo", name: "Main pin" },
+    { id: "worktree-pin", cwd: "/repo-worktrees/feature", name: "Worktree pin", isWorktree: true },
+  ].map((session) => ({
+    ...session, projectRoot: "/repo", path: `/sessions/${session.id}.jsonl`,
+    created: "2026-03-01T00:00:00.000Z", modified: "2026-03-01T00:00:00.000Z", messageCount: 1, firstMessage: session.id,
+  }));
+  const selected = [];
+  const treeProps = createProps({ treeProps: {
+    topPinnedSessionIds: new Set(sessions.map((session) => session.id)),
+    resolveProject: (session) => ({ path: sidebarProjectPath(session), name: session.isWorktree ? "feature" : "repo" }),
+    onSelectSession: (session) => selected.push(session.id),
+  } }).treeProps;
+  const renderPinned = (locateSessionRequest) => React.createElement(I18nProvider, null, React.createElement(PinnedSessionsSection, {
+    title: "Pinned", sessions, sessionOrder: ["worktree-pin", "main-pin"], treeProps: { ...treeProps, locateSessionRequest },
+  }));
+  const view = render(renderPinned(null));
+  const root = screen.getByTitle("/repo").closest("[data-pinned-group]");
+  const child = screen.getByTitle("/repo-worktrees/feature");
+  assert.ok(root.contains(child));
+  assert.equal(root.querySelector("[data-pinned-group-count]").textContent, "2");
+  assert.equal(child.querySelector("[data-pinned-group-count]").textContent, "1");
+  fireEvent.click(screen.getByText("Worktree pin"));
+  assert.deepEqual(selected, ["worktree-pin"]);
+  fireEvent.click(child);
+  assert.ok(screen.getByText("Main pin"));
+  assert.equal(screen.queryByText("Worktree pin"), null);
+  fireEvent.click(screen.getByTitle("/repo"));
+  view.rerender(renderPinned({ sessionId: "worktree-pin", revision: 1 }));
+  assert.ok(screen.getByText("Worktree pin"));
+  assert.equal(screen.getByTitle("/repo").getAttribute("aria-expanded"), "true");
+  assert.equal(screen.getByTitle("/repo-worktrees/feature").getAttribute("aria-expanded"), "true");
+});
+
+
+test("项目头拖拽移动整个父组，原先排在前面的 worktree 保持在组内", () => {
+  const sessions = [{ cwd: "/repo-worktrees/feature", projectRoot: "/repo", isWorktree: true }];
+  function Projects() {
+    const [state, setState] = React.useState({ ...emptySidebarPreferences(), projectOrder: [sessions[0].cwd, "/repo", "/other"] });
+    const groups = groupSidebarProjects(state.projectOrder, sessions, null, (paths) => orderProjectsByPreference(paths, state.projectOrder));
+    return React.createElement("div", { "data-project-groups": true }, groups.map((group) => React.createElement(ProjectSection, {
+      ...createProps({
+        project: { path: group.path, name: group.path },
+        actions: { onMove: (source, target) => {
+          const move = resolveSidebarProjectMove(groups, source, target);
+          if (move) setState((current) => reduceSidebarPreferences(current, { type: "move_project", ...move }, false));
+        } },
+      }), key: group.path,
+    }, group.worktrees.map((path) => React.createElement(ProjectSection, {
+      ...createProps({ project: { path, name: path } }), key: path,
+    })))));
+  }
+  const view = render(React.createElement(I18nProvider, null, React.createElement(Projects)));
+  const target = screen.getByTitle("/other").closest('[draggable="true"]');
+  fireEvent.drop(target, { dataTransfer: { getData: () => "/repo" } });
+  const rootNames = [...view.container.querySelector("[data-project-groups]").children]
+    .map((section) => section.querySelector("button[title]").title);
+  assert.deepEqual(rootNames, ["/other", "/repo"]);
+  assert.ok(screen.getByTitle("/repo").closest("section").contains(screen.getByTitle(sessions[0].cwd)));
+});
+
+test("Windows 当前 worktree 收起父组后再次定位，按等价路径展开实际目录", () => {
+  const groups = [{ path: "d:/repo", worktrees: ["d:/repo-worktrees/feature"] }];
+  const target = "D:/REPO-WORKTREES/Feature".replaceAll("/", "\\");
+  function Projects() {
+    const [collapsed, setCollapsed] = React.useState(new Set());
+    const toggle = (path) => setCollapsed((current) => {
+      const next = new Set(current);
+      if (!next.delete(path)) next.add(path);
+      return next;
+    });
+    return React.createElement(React.Fragment, null,
+      React.createElement("button", { onClick: () => setCollapsed((current) => expandSidebarProject(groups, current, target)) }, "Locate worktree"),
+      React.createElement(ProjectSection, createProps({
+        project: { path: groups[0].path, collapsed: collapsed.has(groups[0].path) },
+        actions: { onToggleCollapsed: () => toggle(groups[0].path) },
+      }), React.createElement(ProjectSection, createProps({
+        project: { path: groups[0].worktrees[0], name: "feature", collapsed: collapsed.has(groups[0].worktrees[0]) },
+        actions: { onToggleCollapsed: () => toggle(groups[0].worktrees[0]) },
+      }))),
+    );
+  }
+  render(React.createElement(I18nProvider, null, React.createElement(Projects)));
+  fireEvent.click(screen.getByTitle(groups[0].worktrees[0]));
+  fireEvent.click(screen.getByTitle(groups[0].path));
+  assert.equal(screen.queryByTitle(groups[0].worktrees[0]), null);
+  fireEvent.click(screen.getByText("Locate worktree"));
+  assert.equal(screen.getByTitle(groups[0].path).getAttribute("aria-expanded"), "true");
+  assert.equal(screen.getByTitle(groups[0].worktrees[0]).getAttribute("aria-expanded"), "true");
+  fireEvent.click(screen.getByTitle(groups[0].path));
+  fireEvent.click(screen.getByText("Locate worktree"));
+  assert.equal(screen.getByTitle(groups[0].path).getAttribute("aria-expanded"), "true");
 });

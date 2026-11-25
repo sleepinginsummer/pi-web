@@ -219,7 +219,8 @@ export function rebaseSidebarPreferenceAction(
   action: SidebarPreferenceAction,
 ): SidebarPreferenceAction {
   if (action.type === "move_project") {
-    return { ...action, visibleIds: orderVisibleIdsByStored(action.visibleIds, current.projectOrder) };
+    // 新出现的父组与界面保持同一基线；追加到末尾会反转首次拖拽的移动方向。
+    return { ...action, visibleIds: orderProjectsByPreference(action.visibleIds, current.projectOrder) };
   }
   if (action.type === "move_session") {
     return { ...action, visibleIds: orderVisibleIdsByStored(action.visibleIds, current.sessionOrder) };
