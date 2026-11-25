@@ -118,7 +118,7 @@ test("only completed assistant messages trigger an immediate usage read", () => 
     const reads = [];
     script.runInNewContext({
       event: { type: "message_end", message: { role, content: [] } },
-      agentRunningRef: { current: true }, sessionIdRef: { current: "a" }, optimisticUserMessageKeyRef: { current: null },
+      agentRunningRef: { current: true }, sessionIdRef: { current: "a" }, optimisticUserMessageKeyRef: { current: null }, liveMessageSeqRef: { current: 0 },
       isSystemMessageEvent: (event) => event.message.role === "system",
       flushStreamDeltas() {}, isNew: false, completedDetachedSubagentIds: () => [],
       pendingDetachedSubagentIdsRef: { current: new Set() }, normalizeAssistantMessage: (message) => message,
