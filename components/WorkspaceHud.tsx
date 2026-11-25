@@ -626,7 +626,7 @@ export const WorkspaceHud = memo(function WorkspaceHud({
                       {currentBranch ?? "HEAD"}
                     </span>
                   </div>
-                  {(worktrees.length > 1 || isLinkedWorktree) && (
+                  {(worktrees.length > 0 || isLinkedWorktree) && (
                     <div className="workspace-hud-collapsed-row">
                       <span className="workspace-hud-collapsed-left">
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ color: "var(--accent)" }} aria-hidden="true">

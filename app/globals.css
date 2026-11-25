@@ -2733,6 +2733,8 @@ span.token.table {
   border-color: var(--accent);
 }
 .chat-window {
+  /* 以聊天面板实际宽度判断能否容纳右栏，文件面板和侧聊展开时也能自然回退。 */
+  container: chat-workspace / inline-size;
   --ask-max-height: min(620px, var(--ask-available-height, calc(100dvh - 150px)));
   --ask-gap: 8px;
   --ask-collapsed-height: 44px;
@@ -5209,10 +5211,22 @@ span.token.table {
   pointer-events: none;
 }
 
-.workspace-hud-anchor.is-expanded {
-  width: 316px;
-}
 
+/* 宽屏卡片在两种状态下同宽占位，正文和输入框共享同一可用宽度与中轴。 */
+@container chat-workspace (min-width: 1100px) {
+  .chat-window:has(> .workspace-hud-anchor:not(.is-pill)) > .chat-main-pane,
+  .chat-window:has(> .workspace-hud-anchor:not(.is-pill)) > .chat-scroll-pane .chat-transcript-inset {
+    margin-right: 332px;
+    /* 宽屏时适度靠近卡片；只使用超过正文宽度和安全间距的余量，窄面板不偏移。 */
+    margin-left: clamp(0px, calc(100cqw - 332px - var(--chat-content-max-width, 820px) - 96px), 128px);
+  }
+
+  /* 只缩进滚动容器内的正文，容器本身铺满面板，让原生滚动条留在最右侧。 */
+  .workspace-hud-anchor:not(.is-pill) {
+    width: 300px;
+    max-width: none;
+  }
+}
 .workspace-hud-anchor.is-pill {
   bottom: auto;
   width: auto;

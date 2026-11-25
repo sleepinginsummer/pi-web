@@ -1488,7 +1488,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
       )}
 
       {isEmptyNew ? (
-        <div className="flex flex-1 flex-col items-center justify-center overflow-y-auto px-4 pt-14 pb-8 sm:py-8">
+        <div className="chat-main-pane flex flex-1 flex-col items-center justify-center overflow-y-auto px-4 pt-14 pb-8 sm:py-8">
           <div className="w-full" style={{ maxWidth: "var(--chat-content-max-width, 820px)" }}>
             <div
               style={{
@@ -1524,7 +1524,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
         </div>
       ) : (
       <>
-      <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
+      <div className="chat-scroll-pane relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
         {extensionDialog && extensionDialog.method !== "select" && !askQuestionnaire && (
           <ExtensionDialog key={extensionDialog.id} request={extensionDialog} onRespond={respondToExtensionUi} />
         )}
@@ -1551,7 +1551,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
           className={`min-w-0 flex-1 overflow-x-hidden overflow-y-auto pt-4 [scrollbar-gutter:stable]${askDialogElement ? " chat-scroll-ask-reserve" : ""}`}
           style={{ visibility: pendingScrollRestore ? "hidden" : undefined }}
         >
-          <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px 38px ${isMobile ? CHAT_COLUMN_PADDING : CHAT_MINIMAP_LEFT_PADDING}px` }}>
+          <div className="chat-transcript-inset" style={{ padding: `0 ${CHAT_COLUMN_PADDING}px 38px ${isMobile ? CHAT_COLUMN_PADDING : CHAT_MINIMAP_LEFT_PADDING}px` }}>
             <div ref={messageContentRef} style={{ maxWidth: "var(--chat-content-max-width, 820px)", margin: "0 auto" }}>
             {(() => {
               const { toolResults, visibleRefIndexByMessage, writtenFilesByFinalAssistant } = messageRenderIndex;
@@ -2186,7 +2186,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
         document.body,
       )}
 
-      <div className="relative flex min-h-0 flex-col">
+      <div className="chat-main-pane relative flex min-h-0 flex-col">
         <div
           style={{
             padding: `0 ${CHAT_COLUMN_PADDING}px`,
