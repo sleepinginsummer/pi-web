@@ -220,7 +220,7 @@ test("WorkspaceHud and ComposerContextPill disable branch switching when canSwit
 });
 
 
-test("WorkspaceHud defaults to collapsed on new session even with pre-existing git changes, and renders pill on mobile", () => {
+test("WorkspaceHud defaults to collapsed on new session even with pre-existing git changes, and renders separate toolbar controls on mobile", () => {
   const dirtyGit = {
     branches: {
       isGit: true,
@@ -289,8 +289,14 @@ test("WorkspaceHud defaults to collapsed on new session even with pre-existing g
       }),
     ),
   );
-  assert.match(mobileHtml, /workspace-hud-pill-btn/);
-  assert.match(mobileHtml, /workspace-hud-anchor is-pill/);
+  const mobileDom = new JSDOM(mobileHtml);
+  const toolbar = mobileDom.window.document.querySelector(".workspace-hud-toolbar");
+  assert.ok(toolbar, "移动端工作区在正常布局的顶部工具栏中");
+  assert.equal(toolbar.querySelector(".workspace-hud-toolbar-trigger").textContent.includes("Workspace"), true);
+  assert.equal(toolbar.querySelector(".workspace-hud-toolbar-branch").textContent, "main");
+  assert.equal(toolbar.querySelector(".workspace-hud-toolbar-trigger").textContent.includes("main"), false, "分支显示独立于工作区按钮");
+  assert.equal(mobileDom.window.document.querySelector(".workspace-hud-anchor"), null, "不再显示悬浮胶囊");
+  mobileDom.window.close();
 });
 
 
@@ -647,4 +653,37 @@ test("工作区保留停止的服务器与任务，已暂停或结束条目默�
     sharedScheduled: { ...polling.sharedScheduled, data: { tasks: [{ id: "task-1", sessionId: "sess-idle", enabled: true, nextRunAt: Date.now() + 60000 }] } },
   });
   assert.equal(container.querySelectorAll(".workspace-hud-section:not([data-workspace-mcp])").length, 2);
+});
+
+test("移动端工作区入口一直留在顶栏，展开、关闭和切换会话不混入 Worktree", async (t) => {
+  const branch = "feature/a-very-long-branch-name";
+  const props = {
+    cwd: "/repo", sessionId: "saved", isNewSession: false, isMobile: true,
+    git: { branches: { isGit: true, currentBranch: branch, branches: [branch], canSwitch: false }, status: null, refresh() {} },
+    worktrees: [{ path: "/repo", branch, isMain: true }], artifacts: [],
+    onSwitchBranch: async () => ({ ok: true }), onSelectWorktree() {}, onOpenFileDiff() {},
+    onOpenArtifactFile() {}, onHideArtifact() {}, onDeleteArtifactFile: async () => ({ ok: true }),
+    ...makeStubSharedPolling(),
+  };
+  const { container, render } = await withHudDom(t, props);
+  const trigger = container.querySelector(".workspace-hud-toolbar-trigger");
+  assert.equal(trigger.getAttribute("aria-expanded"), "false");
+  assert.equal(container.querySelector(".workspace-hud-card"), null);
+  assert.equal(container.querySelector(".workspace-hud-toolbar-branch").textContent, branch);
+  assert.doesNotMatch(trigger.textContent, /Worktree/);
+  await React.act(() => trigger.click());
+  assert.equal(trigger.getAttribute("aria-expanded"), "true");
+  assert.equal(trigger.getAttribute("aria-controls"), container.querySelector(".workspace-hud-card").id);
+  assert.equal(container.querySelector(".workspace-hud-mobile-backdrop"), null);
+  const escape = new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+  await React.act(() => document.dispatchEvent(escape));
+  assert.equal(escape.defaultPrevented, true, "关闭工作区不能让 Escape 继续停止会话");
+  assert.equal(container.querySelector(".workspace-hud-card"), null);
+  assert.equal(document.activeElement, trigger);
+  await React.act(() => trigger.click());
+  await render({ ...props, sessionId: "another", isNewSession: false,
+    git: { ...props.git, branches: { ...props.git.branches, currentBranch: "other-branch" } },
+  });
+  assert.equal(container.querySelector(".workspace-hud-toolbar-trigger").getAttribute("aria-expanded"), "false");
+  assert.equal(container.querySelector(".workspace-hud-toolbar-branch").textContent, "other-branch");
 });

@@ -85,6 +85,8 @@ interface Props {
   observerPanel?: { onClose: () => void };
   /** 移动端顶栏「大纲」按钮打开的底部抽屉（桌面轨道不经过这里）。 */
   mobileOutline?: { open: boolean; onClose: () => void };
+  /** 移动端顶栏槽位：复用当前聊天的工作区状态，避免创建第二套轮询。 */
+  mobileWorkspaceTarget?: HTMLElement | null;
   searchTarget?: { sessionId: string; entryId: string; blockIndex?: number } | null;
   onSearchTargetHandled?: (target: { sessionId: string; entryId: string }) => void;
   initialScrollPosition?: ChatReadingPosition | null;
@@ -294,7 +296,7 @@ function LiveProcessDetailsGroup({ hiddenCount, renderAll, renderRecent, t }: { 
   );
 }
 
-export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSession, onDebugSnapshotReaderChange, navigationKey, isNavigationActive, session, observerPanel, mobileOutline, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, newSessionCwd, newSessionWorktrees, pendingNewSessionControl, onPendingNewSessionEvent, notificationController, onAgentEnd, onSessionEnded, onSessionCreated, onSessionCreatedInBackground, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onShadowMindControlChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenSettings, onContextUsageChange, onOpenFile, onFilesUploaded, onOpenSubagent, onOpenServerPreview, onToolEnd, onNewSessionCwdChange, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed, worktreeState, onCreateWorktree, onOpenNewSessionInWorktree, onOpenFileDiff, hudSubagents, onGitBranchChanged }: Props) {
+export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSession, onDebugSnapshotReaderChange, navigationKey, isNavigationActive, session, observerPanel, mobileOutline, mobileWorkspaceTarget, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, newSessionCwd, newSessionWorktrees, pendingNewSessionControl, onPendingNewSessionEvent, notificationController, onAgentEnd, onSessionEnded, onSessionCreated, onSessionCreatedInBackground, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onShadowMindControlChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenSettings, onContextUsageChange, onOpenFile, onFilesUploaded, onOpenSubagent, onOpenServerPreview, onToolEnd, onNewSessionCwdChange, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed, worktreeState, onCreateWorktree, onOpenNewSessionInWorktree, onOpenFileDiff, hudSubagents, onGitBranchChanged }: Props) {
   const [gitRefreshTick, setGitRefreshTick] = useState(0);
   const [hiddenArtifactIds, setHiddenArtifactIds] = useState<ReadonlySet<string>>(() => new Set());
   const [pendingWorktreeConfirm, setPendingWorktreeConfirm] = useState<WorktreeInfo | null>(null);
@@ -1235,6 +1237,40 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
     />
   ) : undefined;
 
+  const workspaceHudElement = !panel && messageCwd ? (
+    <WorkspaceHud
+      cwd={messageCwd}
+      sessionId={session?.id}
+      isNewSession={!session}
+      isMobile={isMobile}
+      git={workspaceGit}
+      worktrees={effectiveWorktrees}
+      artifacts={sessionArtifacts}
+      sessionMutationCount={sessionMutationCount}
+      todoWidget={todoWidget}
+      subagents={hudSubagents}
+      onSwitchBranch={handleWorkspaceSwitchBranch}
+      onSelectWorktree={handleWorkspaceSelectWorktree}
+      onCreateWorktree={canCreateWorktreeHere ? handleWorkspaceCreateWorktree : undefined}
+      onOpenFileDiff={(filePath, fileName) => {
+        if (onOpenFileDiff) {
+          onOpenFileDiff(filePath, fileName);
+        } else {
+          onOpenFile?.(filePath);
+        }
+      }}
+      onOpenArtifactFile={(filePath) => onOpenFile?.(filePath)}
+      onHideArtifact={handleHideArtifact}
+      onDeleteArtifactFile={handleDeleteArtifactFile}
+      onRefreshArtifacts={() => setArtifactRefreshTick((n) => n + 1)}
+      onOpenServerPreview={onOpenServerPreview}
+      onOpenSubagent={onOpenSubagent}
+      sharedDevServers={sharedDevServers}
+      sharedScheduled={sharedScheduled}
+      sharedBackground={sharedBackground}
+    />
+  ) : null;
+
   const chatInputElement = (
     <ChatInput
       ref={chatInputRef}
@@ -1386,39 +1422,9 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
-      {!panel && messageCwd && (
-        <WorkspaceHud
-          cwd={messageCwd}
-          sessionId={session?.id}
-          isNewSession={!session}
-          isMobile={isMobile}
-          git={workspaceGit}
-          worktrees={effectiveWorktrees}
-          artifacts={sessionArtifacts}
-          sessionMutationCount={sessionMutationCount}
-          todoWidget={todoWidget}
-          subagents={hudSubagents}
-          onSwitchBranch={handleWorkspaceSwitchBranch}
-          onSelectWorktree={handleWorkspaceSelectWorktree}
-          onCreateWorktree={canCreateWorktreeHere ? handleWorkspaceCreateWorktree : undefined}
-          onOpenFileDiff={(filePath, fileName) => {
-            if (onOpenFileDiff) {
-              onOpenFileDiff(filePath, fileName);
-            } else {
-              onOpenFile?.(filePath);
-            }
-          }}
-          onOpenArtifactFile={(filePath) => onOpenFile?.(filePath)}
-          onHideArtifact={handleHideArtifact}
-          onDeleteArtifactFile={handleDeleteArtifactFile}
-          onRefreshArtifacts={() => setArtifactRefreshTick((n) => n + 1)}
-          onOpenServerPreview={onOpenServerPreview}
-          onOpenSubagent={onOpenSubagent}
-          sharedDevServers={sharedDevServers}
-          sharedScheduled={sharedScheduled}
-          sharedBackground={sharedBackground}
-        />
-      )}
+      {isMobile
+        ? mobileWorkspaceTarget && workspaceHudElement && createPortal(workspaceHudElement, mobileWorkspaceTarget)
+        : workspaceHudElement}
       {pendingWorktreeConfirm && (
         <div
           className="workspace-hud-modal-backdrop"

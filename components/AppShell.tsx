@@ -117,6 +117,8 @@ export function AppShell() {
   const [observerPanelSessionId, setObserverPanelSessionId] = useState<string | null>(null);
   /** 移动端大纲抽屉：按会话 id 记，切会话自然关闭。 */
   const [mobileOutlineSessionId, setMobileOutlineSessionId] = useState<string | null>(null);
+  // 工作区仍由聊天拥有状态和轮询，只把移动端入口渲染到顶栏槽位。
+  const [mobileWorkspaceTarget, setMobileWorkspaceTarget] = useState<HTMLDivElement | null>(null);
   const [agentStripLocked, setAgentStripLocked] = useState(false);
   useEffect(() => setAgentStripLocked(loadAgentStripLocked()), []);
   const toggleAgentStripLock = useCallback(() => {
@@ -1293,8 +1295,9 @@ export function AppShell() {
         <AppTopBar
           activePanel={activeTopPanel}
           endAction={filePanelToggle}
+          workspaceToolbarRef={setMobileWorkspaceTarget}
           outline={{
-            available: Boolean(selectedSession && selectedSession.messageCount > 0),
+            available: Boolean(selectedSession),
             open: mobileOutlineOpen,
             onToggle: () => setMobileOutlineSessionId(mobileOutlineOpen ? null : selectedSession?.id ?? null),
           }}
@@ -1402,6 +1405,7 @@ export function AppShell() {
                   observerPanel={observerPanelOpen ? {
                     onClose: () => setObserverPanelSessionId(null),
                   } : undefined}
+                  mobileWorkspaceTarget={mobileWorkspaceTarget}
                   mobileOutline={{
                     open: mobileOutlineOpen,
                     onClose: () => setMobileOutlineSessionId(null),

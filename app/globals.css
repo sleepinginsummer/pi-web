@@ -3287,9 +3287,75 @@ span.token.table {
   display: flex;
   align-items: stretch;
   height: 100%;
+  flex: 1 1 auto;
+  min-width: 0;
   margin-inline-start: auto;
 }
 
+/* 工作区入口与大纲共用顶栏；只有分支名缩小、横向滚动，操作按钮始终留在屏内。 */
+.mobile-workspace-slot,
+.workspace-hud-toolbar {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: stretch;
+  min-width: 0;
+  height: 100%;
+}
+.workspace-hud-toolbar-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  padding: 0 6px;
+  color: var(--text);
+  font-size: 11.5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.workspace-hud-toolbar-trigger:hover,
+.workspace-hud-toolbar-trigger[aria-expanded="true"] { background: var(--bg-selected); }
+.workspace-hud-toolbar-git {
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 4px;
+  padding: 0 4px;
+  color: var(--text-muted);
+}
+.workspace-hud-toolbar-git > span { flex-shrink: 0; }
+.workspace-hud-toolbar-branch {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  white-space: nowrap;
+  scrollbar-width: none;
+  font: 11px var(--font-mono);
+  line-height: 28px;
+}
+.workspace-hud-toolbar-branch::-webkit-scrollbar { display: none; }
+.app-top-bar-shell[data-mobile-toolbar="true"] > .app-top-bar { overflow: visible; }
+.workspace-hud-toolbar > .workspace-hud-card {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 8px;
+  width: calc(100vw - 16px);
+  max-height: min(560px, calc(var(--app-viewport-height, 100dvh) - var(--top-bar-height) - 16px));
+  z-index: 50;
+}
+.workspace-hud-toolbar > .workspace-hud-menu { top: calc(100% + 42px); }
+.mobile-top-bar-primary > button { flex-shrink: 0; }
+@media (max-width: 480px) {
+  .workspace-hud-toolbar-trigger-label,
+  .mobile-top-bar-more-label { display: none; }
+  .mobile-top-bar-primary > .mobile-top-bar-more { padding-inline: 0; }
+}
+
+@media (max-width: 360px) {
+  .workspace-hud-toolbar-git > span { display: none; }
+  .workspace-hud-toolbar-git { gap: 0; }
+}
 .mobile-top-bar-more {
   display: flex;
   align-items: center;

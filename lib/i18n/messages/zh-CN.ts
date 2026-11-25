@@ -2237,6 +2237,7 @@ export const zhCNLocale: LocalePlugin = {
     "i18n.attentionNeeded": "Pi 需要你的操作",
     "i18n.extensionInputNeeded": "扩展正在等待你的输入。",
     "workspaceHud.title": "工作区状态",
+    "workspaceHud.button": "工作区",
     "workspaceHud.composerBarLabel": "工作区文件夹、分支与 Worktree",
     "workspaceHud.copy": "复制",
     "workspaceHud.copied": "已复制",

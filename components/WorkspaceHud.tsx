@@ -1,6 +1,6 @@
 "use client";
 
-import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { CountBadge } from "./DevServersShelf";
 import { getFileName, getRelativeFilePath } from "@/lib/file-paths";
 import { stripAnsi } from "@/lib/ansi";
@@ -101,10 +101,9 @@ function worktreeDisplayName(worktree: WorktreeInfo, mainLabel: string): string 
 }
 
 /**
- * 右上角工作区悬浮卡片（Workspace HUD）：
- * - 默认呈“折叠清单”形态：展示项目路径、可直点切换的 Git 分支与 Worktree，各分区默认折叠为单行摘要；
- * - 收起态将 Git 分支与 Worktree 分成两行展示；
- * - 整卡与各分区双层内部滚动，右侧为 ChatMinimap 大纲预留专属跑道，互不遮挡。
+ * 工作区：桌面为右上卡片，移动端通过 ChatWindow portal 复用到顶栏。
+ * - 桌面保留整卡与分区折叠、活动自动展开及内部滚动；
+ * - 移动端只在顶栏显示独立工作区按钮与可横向滚动的 Git 分支，点击才展开面板。
  */
 export const WorkspaceHud = memo(function WorkspaceHud({
   cwd,
@@ -133,8 +132,10 @@ export const WorkspaceHud = memo(function WorkspaceHud({
 }: WorkspaceHudProps) {
   const { t } = useI18n();
   const hudRef = useRef<HTMLDivElement | null>(null);
+  const toolbarButtonRef = useRef<HTMLButtonElement | null>(null);
+  const mobilePanelId = useId();
 
-  // 新会话默认极简收起；已有会话存在产物/变更/编辑/待办时默认展开，手机端始终默认收成右上角药丸
+  // 新会话默认极简收起；手机端入口固定在顶栏，只有用户点击才展开工作区。
   const [collapsed, setCollapsed] = useState<boolean>(() => (
     isNewSession
     || !(
@@ -189,7 +190,10 @@ export const WorkspaceHud = memo(function WorkspaceHud({
       }
     };
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (!pendingDelete && !menuOpen && !openPicker && !(isMobile && mobileOpen)) return;
+      event.preventDefault();
+      event.stopPropagation();
       if (pendingDelete) {
         setPendingDelete(null);
         return;
@@ -204,6 +208,7 @@ export const WorkspaceHud = memo(function WorkspaceHud({
       }
       if (isMobile && mobileOpen) {
         setMobileOpen(false);
+        toolbarButtonRef.current?.focus();
       }
     };
     document.addEventListener("mousedown", onPointerDown);
@@ -419,12 +424,17 @@ export const WorkspaceHud = memo(function WorkspaceHud({
 
   const handleToggleCard = useCallback(() => {
     if (isMobile) {
-      setMobileOpen((v) => !v);
+      if (mobileOpen) {
+        setMenuOpen(false);
+        setOpenPicker(null);
+        toolbarButtonRef.current?.focus();
+      }
+      setMobileOpen((value) => !value);
       return;
     }
     userToggledRef.current = true;
     setCollapsed((v) => !v);
-  }, [isMobile]);
+  }, [isMobile, mobileOpen]);
 
   const handleExpandCollapsedCard = useCallback(() => {
     userToggledRef.current = true;
@@ -571,39 +581,41 @@ export const WorkspaceHud = memo(function WorkspaceHud({
 
   const hasAnyActiveIndicator = activeServers.length > 0 || activeBgCount > 0 || runningSubagents > 0;
 
-  // 窄屏/移动端未展开：渲染右上角紧凑药丸
-  if (isMobile && !mobileOpen) {
-    return (
-      <div ref={hudRef} className="workspace-hud-anchor is-pill">
-        <button
-          type="button"
-          className="workspace-hud-pill-btn"
-          onClick={() => setMobileOpen(true)}
-          aria-label={t("workspaceHud.expandCard")}
-        >
-          <span>{projectName}</span>
-          {isGit && currentBranch && (
-            <span className="workspace-hud-wt-tag">{currentBranch}</span>
-          )}
-          {hasAnyActiveIndicator && <span className="workspace-hud-dot" aria-hidden="true" />}
-        </button>
-      </div>
-    );
-  }
 
   const isExpandedCard = isMobile ? mobileOpen : !collapsed;
 
   return (
     <>
-      {isMobile && mobileOpen && (
-        <div
-          className="workspace-hud-mobile-backdrop"
-          aria-hidden="true"
-          onClick={() => setMobileOpen(false)}
-        />
-      )}
-      <div ref={hudRef} className={`workspace-hud-anchor${isExpandedCard ? " is-expanded" : ""}`}>
-        <aside className="workspace-hud-card" aria-label={t("workspaceHud.title")}>
+      <div ref={hudRef} className={isMobile ? "workspace-hud-toolbar" : `workspace-hud-anchor${isExpandedCard ? " is-expanded" : ""}`}>
+        {isMobile && (
+          <>
+            <button
+              ref={toolbarButtonRef}
+              type="button"
+              className="workspace-hud-toolbar-trigger"
+              aria-expanded={mobileOpen}
+              aria-controls={mobileOpen ? mobilePanelId : undefined}
+              aria-label={t("workspaceHud.button")}
+              title={t(mobileOpen ? "workspaceHud.collapseCard" : "workspaceHud.expandCard")}
+              onClick={handleToggleCard}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M3 9h18M15 9v12" /></svg>
+              <span className="workspace-hud-toolbar-trigger-label">{t("workspaceHud.button")}</span>
+              {hasAnyActiveIndicator && <span className="workspace-hud-dot" aria-hidden="true" />}
+            </button>
+            {isGit && currentBranch && (
+              <div className="workspace-hud-toolbar-git">
+                <span aria-hidden="true">⎇</span>
+                <div className="workspace-hud-toolbar-branch" tabIndex={0} title={currentBranch} aria-label={`${t("workspaceHud.gitBranch")}: ${currentBranch}`}>
+                  {currentBranch}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+        {(!isMobile || mobileOpen) && (
+          <>
+        <aside id={isMobile ? mobilePanelId : undefined} className="workspace-hud-card" aria-label={t("workspaceHud.title")}>
           {/* 顶部标题行 */}
           <div className="workspace-hud-header">
             <button
@@ -1218,6 +1230,8 @@ export const WorkspaceHud = memo(function WorkspaceHud({
               <span>{t("workspaceHud.refreshAll")}</span>
             </button>
           </div>
+        )}
+          </>
         )}
       </div>
 

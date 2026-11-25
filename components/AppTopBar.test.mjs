@@ -29,7 +29,7 @@ const labels = {
 };
 const translate = (key) => labels[key] ?? key;
 
-function renderTopBar(isMobile, outline = { available: false, open: false, onToggle() {} }) {
+function renderTopBar(isMobile, outline = { available: false, open: false, onToggle() {} }, workspaceToolbarRef) {
   return renderToStaticMarkup(
     React.createElement(I18nProvider, null,
       React.createElement(AppTopBar, {
@@ -47,6 +47,7 @@ function renderTopBar(isMobile, outline = { available: false, open: false, onTog
         },
         onTogglePanel() {},
         outline,
+        workspaceToolbarRef,
         session: {
           agentsBadge: null,
           autoNameStatus: { kind: "idle" },
@@ -107,4 +108,14 @@ test("mobile outline button sits right before More and follows availability", ()
   // 没有轮次（新会话）时不出现，避免点开是空的。
   const none = renderTopBar(true, { available: false, open: false, onToggle() {} });
   assert.doesNotMatch(none, /data-mobile-outline-button/);
+});
+
+test("工作区槽位位于移动端顶栏内，与大纲和更多同一行", () => {
+  const html = renderTopBar(true, { available: true, open: false, onToggle() {} }, () => {});
+  const primary = html.slice(html.indexOf('class="mobile-top-bar-primary"'), html.indexOf('class="app-top-bar-end"'));
+  const workspaceAt = primary.indexOf('class="mobile-workspace-slot"');
+  const outlineAt = primary.indexOf("data-mobile-outline-button");
+  assert.ok(workspaceAt > 0 && workspaceAt < outlineAt);
+  assert.match(primary, /class="mobile-top-bar-more"/);
+  assert.doesNotMatch(renderTopBar(false, undefined, () => {}), /mobile-workspace-slot/);
 });

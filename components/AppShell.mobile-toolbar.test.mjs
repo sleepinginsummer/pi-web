@@ -54,3 +54,13 @@ test("places mobile trust warnings below the toolbar", () => {
   assert.match(sidebarSource, /visibilitychange/);
   assert.match(sidebarSource, /\/api\/git\/context\?cwd=/);
 });
+
+test("移动端大纲入口不依赖可能滞后的列表消息数", () => {
+  const outlineProps = appShellSource.match(/outline=\{\{([\s\S]*?)\}\}/)?.[1] ?? "";
+  const availableExpression = outlineProps.match(/available:\s*([^\n]+),/)?.[1];
+  assert.ok(availableExpression, "AppShell 向大纲入口提供可用状态");
+  const available = new Function("selectedSession", `return (${availableExpression});`);
+  assert.equal(available({ id: "saved", messageCount: 0 }), true, "会话已有正文但列表计数未刷新时，仍保留大纲入口");
+  assert.equal(available({ id: "saved", messageCount: 1 }), true);
+  assert.equal(available(null), false, "尚未创建会话时不显示入口");
+});

@@ -21,6 +21,7 @@ type AutoNameStatus = { kind: "idle" | "naming" | "success" } | { kind: "error";
 interface AppTopBarProps {
   activePanel: TopPanel | null;
   endAction: ReactNode;
+  workspaceToolbarRef?: (element: HTMLDivElement | null) => void;
   locale: string;
   navigation: {
     activeLeafId: string | null;
@@ -226,7 +227,7 @@ function SessionTopBarControls({ activePanel, hideAgents = false, hideStats = fa
 }
 
 export function AppTopBar(props: AppTopBarProps) {
-  const { activePanel, endAction, locale, navigation, onOpenToolSettings, onTogglePanel, outline, session, translate, trust } = props;
+  const { activePanel, endAction, locale, navigation, onOpenToolSettings, onTogglePanel, outline, session, translate, trust, workspaceToolbarRef } = props;
   const mobileMenuId = useId();
   const moreButtonRef = useRef<HTMLButtonElement>(null);
   const [mobileToolbarMoreOpen, setMobileToolbarMoreOpen] = useState(false);
@@ -238,7 +239,9 @@ export function AppTopBar(props: AppTopBarProps) {
     const handlePointerDown = (event: PointerEvent) => {
       const toolbar = toolbarShellRef.current;
       const inAddonEditor = event.target instanceof Element && event.target.closest(`[${SYSTEM_PROMPT_ADDON_EDITOR_ATTR}]`);
-      if (toolbar && !inAddonEditor && !event.composedPath().includes(toolbar)) setMobileToolbarMoreOpen(false);
+      // 工作区通过 portal 渲染，React 点击不会沿顶栏组件冒泡，因此在原生捕获阶段互斥关闭菜单。
+      const inWorkspace = event.target instanceof Element && event.target.closest(".mobile-workspace-slot");
+      if (toolbar && !inAddonEditor && (inWorkspace || !event.composedPath().includes(toolbar))) setMobileToolbarMoreOpen(false);
     };
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented || (event.target instanceof Element && event.target.closest("dialog, [aria-modal='true']"))) return;
@@ -286,6 +289,7 @@ export function AppTopBar(props: AppTopBarProps) {
           {navigation.isMobile ? (
             session.show && (
               <div className="mobile-top-bar-primary">
+                {workspaceToolbarRef && <div ref={workspaceToolbarRef} className="mobile-workspace-slot" />}
                 <SessionStatsButton
                   active={activePanel === "session"}
                   contextUsage={session.contextUsage}
@@ -314,11 +318,12 @@ export function AppTopBar(props: AppTopBarProps) {
                   type="button"
                   className="mobile-top-bar-more"
                   aria-expanded={mobileToolbarMoreOpen}
+                  aria-label={translate("chat.mobileMore")}
                   aria-controls={mobileToolbarMoreOpen ? mobileMenuId : undefined}
                   onClick={() => setMobileToolbarMoreOpen((open) => !open)}
                 >
                   <MoreHorizontal size={18} aria-hidden="true" />
-                  {translate("chat.mobileMore")}
+                  <span className="mobile-top-bar-more-label">{translate("chat.mobileMore")}</span>
                 </button>
               </div>
             )

@@ -2237,6 +2237,7 @@ export const enLocale: LocalePlugin = {
     "providerUsage.updated": "Updated {time}",
     "providerUsage.usage": "Usage",
     "workspaceHud.title": "Workspace",
+    "workspaceHud.button": "Workspace",
     "workspaceHud.composerBarLabel": "Workspace folder, branch and worktree",
     "workspaceHud.copy": "Copy",
     "workspaceHud.copied": "Copied",
