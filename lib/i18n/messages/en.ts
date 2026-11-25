@@ -2304,6 +2304,8 @@ export const enLocale: LocalePlugin = {
     "workspaceHud.mcpRetry": "Retry",
     "workspaceHud.mcpNotRegistered": "Not registered",
     "workspaceHud.mcpNotConnected": "Not connected",
+    "workspaceHud.mcpCounts": "{connected} connected / {total} enabled",
+    "workspaceHud.mcpStatusUnavailable": "MCP counts are unavailable",
     "workspaceHud.subagents": "Subagents & Side chats",
     "workspaceHud.done": "Done",
     "workspaceHud.sideChat": "Side chat",

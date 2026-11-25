@@ -46,7 +46,7 @@ test("已启用但未连接时显示数量与未连接状态", async (t) => {
   await respond(requests[0], { sessionId: "session-a", live: true, servers: [
     { name: "docs", scope: "global", state: "not-connected" },
   ] });
-  assert.equal(container.querySelector(".workspace-hud-count").textContent, "1");
+  assert.equal(container.querySelector(".workspace-hud-count").textContent, "0/1");
   await expand();
   assert.match(container.textContent, /docsNot connected/);
   assert.equal(requests.length, 1, "展开菜单只展示只读快照");
@@ -62,10 +62,10 @@ test("MCP 栏目展开显示当前会话连接和各自状态", async (t) => {
     { name: "auth", scope: "global", state: "needs-auth" },
     { name: "broken", scope: "global", state: "failed" },
   ] });
-  assert.equal(container.querySelector(".workspace-hud-count").textContent, "4");
+  assert.equal(container.querySelector(".workspace-hud-count").textContent, "1/4");
   const header = container.querySelector(".workspace-hud-sec-header");
   assert.equal(header.textContent.includes("MCP"), true, "保留 MCP 文字标题");
-  assert.equal(header.getAttribute("aria-label"), "MCP 4");
+  assert.equal(header.getAttribute("aria-label"), "MCP 1/4");
   assert.equal(container.querySelector(".workspace-hud-sec-list"), null);
   await expand();
   assert.equal(container.querySelector("[aria-expanded]").getAttribute("aria-expanded"), "true");
@@ -102,4 +102,31 @@ test("读取失败可重试，已回收会话显示无连接且不重启", async
   await respond(requests[1], { sessionId: "session-a", live: false, servers: [] });
   assert.match(container.textContent, /Session is not running/);
   assert.equal(container.querySelector("[role=alert]"), null);
+});
+
+test("适配器未连接显示 0/1，连接后显示 1/1；空的内置列表不覆盖适配器计数", async (t) => {
+  const { container, requests, render, respond, expand } = await setup(t);
+  await render("adapter");
+  await respond(requests[0], { sessionId: "adapter", live: true, counts: { connected: 0, total: 1 }, servers: [] });
+  const count = () => container.querySelector(".workspace-hud-count").textContent;
+  assert.equal(count(), "0/1");
+  assert.equal(container.querySelector(".workspace-hud-sec-header").title, "0 connected / 1 enabled");
+  await expand();
+  assert.match(container.textContent, /0 connected \/ 1 enabled/);
+  assert.doesNotMatch(container.textContent, /No MCP connections/);
+  assert.equal(requests.length, 1, "展开不触发连接或额外请求");
+  await React.act(() => document.dispatchEvent(new window.Event("visibilitychange")));
+  await respond(requests[1], { sessionId: "adapter", live: true, counts: { connected: 1, total: 1 }, servers: [] });
+  assert.equal(count(), "1/1");
+  assert.match(container.textContent, /1 connected \/ 1 enabled/);
+});
+
+test("适配器未提供计数时显示未知，不误报成 0/0", async (t) => {
+  const { container, requests, render, respond, expand } = await setup(t);
+  await render("adapter");
+  await respond(requests[0], { sessionId: "adapter", live: true, counts: null, servers: [] });
+  assert.equal(container.querySelector(".workspace-hud-count").textContent, "—");
+  await expand();
+  assert.match(container.textContent, /MCP counts are unavailable/);
+  assert.doesNotMatch(container.textContent, /No MCP connections/);
 });

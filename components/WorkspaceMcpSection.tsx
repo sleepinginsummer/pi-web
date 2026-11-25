@@ -29,14 +29,21 @@ export function WorkspaceMcpSection({ sessionId }: { sessionId?: string | null }
   const snapshot = data?.sessionId === sessionId ? data : null;
   const servers = snapshot?.servers ?? [];
   const loading = Boolean(sessionId && !snapshot && !error);
+  // 兼容升级前的只含列表的响应；适配器明确报告未知时保留未知状态。
+  const counts = snapshot?.counts === null ? null : snapshot?.counts ?? {
+    connected: servers.filter((server) => server.state === "ready").length,
+    total: servers.length,
+  };
+  const countLabel = counts ? t("workspaceHud.mcpCounts", { connected: counts.connected, total: counts.total }) : t("workspaceHud.mcpStatusUnavailable");
+  const countText = loading ? "…" : (!counts || (!snapshot && error)) ? "—" : `${counts.connected}/${counts.total}`;
 
   return (
     <div data-workspace-mcp className="workspace-hud-section">
       <button
         type="button"
         className="workspace-hud-sec-header"
-        aria-label={`MCP ${loading ? "…" : servers.length}`}
-        title="MCP"
+        aria-label={`MCP ${countText}`}
+        title={countLabel}
         aria-expanded={open}
         aria-controls={open ? id : undefined}
         onClick={() => setOpen((value) => !value)}
@@ -44,7 +51,7 @@ export function WorkspaceMcpSection({ sessionId }: { sessionId?: string | null }
         <span className="workspace-hud-sec-left">
           <span aria-hidden="true">{open ? "▾" : "▸"}</span>
           <span>MCP</span>
-          <span className="workspace-hud-count">{loading ? "…" : servers.length}</span>
+          <span className="workspace-hud-count">{countText}</span>
         </span>
       </button>
       {open && (
@@ -58,7 +65,7 @@ export function WorkspaceMcpSection({ sessionId }: { sessionId?: string | null }
             <div className="workspace-hud-row-sub" style={{ padding: "8px" }}>{t("workspaceHud.mcpLoading")}</div>
           ) : servers.length === 0 ? (
             <div className="workspace-hud-row-sub" style={{ padding: "8px", whiteSpace: "normal" }}>
-              {t(snapshot && !snapshot.live ? "workspaceHud.mcpInactive" : "workspaceHud.mcpEmpty")}
+              {!counts || counts.total > 0 ? countLabel : t(snapshot && !snapshot.live ? "workspaceHud.mcpInactive" : "workspaceHud.mcpEmpty")}
             </div>
           ) : servers.map((server) => (
             <div key={`${server.scope}:${server.name}`} className="workspace-hud-row" style={{ cursor: "default" }}>

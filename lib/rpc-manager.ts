@@ -109,6 +109,7 @@ import { isSystemPromptAddonExtension, projectEffectiveSystemPromptAddon } from 
 import { findMembershipBySession } from "./teams";
 import { createPiWebBuiltinExtensions, createSubagentCodemodeExtension, createSubagentMcpExtensions } from "./builtin-extensions";
 import type { McpHost, McpMenuServerStatus } from "./mcp-host";
+import { readMcpAdapterCounts, type SessionMcpCounts } from "./session-mcp";
 import type { DebugMcpHost, DebugSessionLifecycle, DebugWrapperSnapshot } from "./debug-types";
 import { mcpPromptPreparation, promptCommandName, type McpCommandCandidate } from "./mcp-command";
 import { createReadOnlyMcpPolicyExtension, createSubagentMcpPolicyExtension } from "./mcp-read-only-policy";
@@ -1185,6 +1186,11 @@ export class AgentSessionWrapper {
   /** 工作区 MCP 菜单只读取本会话 host，不触发注册或连接。 */
   getMcpServerStates(): McpMenuServerStatus[] {
     return this.mcpHost?.menuServerStates?.() ?? this.mcpHost?.serverStates?.() ?? [];
+  }
+
+  /** 第三方适配器持有连接时，计数来自本会话的状态栏；不读取无关的内置 host。 */
+  getMcpServerCounts(): SessionMcpCounts | null | undefined {
+    return readMcpAdapterCounts(this.extensionCommandCandidates(), this.extensionStatuses.get("mcp"));
   }
 
   /** The MCP host's state for the debug panel; null without a host (Chat only, MCP unavailable). */

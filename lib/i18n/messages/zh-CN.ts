@@ -2304,6 +2304,8 @@ export const zhCNLocale: LocalePlugin = {
     "workspaceHud.mcpRetry": "重试",
     "workspaceHud.mcpNotRegistered": "未注册",
     "workspaceHud.mcpNotConnected": "未连接",
+    "workspaceHud.mcpCounts": "已连接 {connected} / 已启用 {total}",
+    "workspaceHud.mcpStatusUnavailable": "暂时无法读取 MCP 数量",
     "workspaceHud.subagents": "子代理 & 侧聊",
     "workspaceHud.done": "已完成",
     "workspaceHud.sideChat": "侧聊",
