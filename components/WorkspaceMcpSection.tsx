@@ -1,7 +1,6 @@
 "use client";
 
 import React, { useId, useState } from "react";
-import { Plug } from "lucide-react";
 import { useI18n } from "@/hooks/useI18n";
 import { usePolledJson } from "@/hooks/usePolledJson";
 import type { SessionMcpServer, SessionMcpSnapshot } from "@/lib/session-mcp";
@@ -43,7 +42,7 @@ export function WorkspaceMcpSection({ sessionId }: { sessionId?: string | null }
       >
         <span className="workspace-hud-sec-left">
           <span aria-hidden="true">{open ? "▾" : "▸"}</span>
-          <Plug size={14} aria-hidden="true" />
+          <span>MCP</span>
           <span className="workspace-hud-count">{loading ? "…" : servers.length}</span>
         </span>
       </button>

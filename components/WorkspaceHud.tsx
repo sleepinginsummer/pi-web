@@ -1,7 +1,6 @@
 "use client";
 
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Package, Server } from "lucide-react";
 import { CountBadge } from "./DevServersShelf";
 import { getFileName, getRelativeFilePath } from "@/lib/file-paths";
 import { stripAnsi } from "@/lib/ansi";
@@ -912,7 +911,7 @@ export const WorkspaceHud = memo(function WorkspaceHud({
                 <button type="button" className="workspace-hud-sec-header" aria-label={`${t("workspaceHud.artifacts")} ${artifacts.length}`} title={t("workspaceHud.artifacts")} aria-expanded={sections.artifacts} onClick={() => toggleSection("artifacts")}>
                   <span className="workspace-hud-sec-left">
                     <span aria-hidden="true">{sections.artifacts ? "▾" : "▸"}</span>
-                    <Package size={14} aria-hidden="true" />
+                    <span>{t("workspaceHud.artifacts")}</span>
                     <span className="workspace-hud-count">{artifacts.length}</span>
                   </span>
                 </button>
@@ -990,7 +989,7 @@ export const WorkspaceHud = memo(function WorkspaceHud({
                 <button type="button" className="workspace-hud-sec-header" aria-label={`${t("workspaceHud.servers")} ${activeServers.length}`} title={t("workspaceHud.servers")} aria-expanded={sections.servers} onClick={() => toggleSection("servers")}>
                   <span className="workspace-hud-sec-left">
                     <span aria-hidden="true">{sections.servers ? "▾" : "▸"}</span>
-                    <Server size={14} aria-hidden="true" />
+                    <span>{t("workspaceHud.servers")}</span>
                     <span className="workspace-hud-count">{activeServers.length}</span>
                   </span>
                 </button>
@@ -1073,6 +1072,7 @@ export const WorkspaceHud = memo(function WorkspaceHud({
                 <button type="button" className="workspace-hud-sec-header" aria-label={`${t("workspaceHud.tasks")} · ${t("workspaceHud.schedCount", { count: pendingSchedCount })} · ${t("workspaceHud.bgCount", { count: activeBgCount })}`} title={t("workspaceHud.tasks")} aria-expanded={sections.tasks} onClick={() => toggleSection("tasks")}>
                   <span className="workspace-hud-sec-left">
                     <span aria-hidden="true">{sections.tasks ? "▾" : "▸"}</span>
+                    <span>{t("workspaceHud.tasks")}</span>
                     {pendingSchedCount > 0 && (
                       <CountBadge count={pendingSchedCount} icon={<><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>} />
                     )}

@@ -52,8 +52,7 @@ test("MCP 栏目展开显示当前会话连接和各自状态", async (t) => {
   ] });
   assert.equal(container.querySelector(".workspace-hud-count").textContent, "4");
   const header = container.querySelector(".workspace-hud-sec-header");
-  assert.ok(header.querySelector("svg"));
-  assert.equal(header.textContent.includes("MCP"), false);
+  assert.equal(header.textContent.includes("MCP"), true, "保留 MCP 文字标题");
   assert.equal(header.getAttribute("aria-label"), "MCP 4");
   assert.equal(container.querySelector(".workspace-hud-sec-list"), null);
   await expand();

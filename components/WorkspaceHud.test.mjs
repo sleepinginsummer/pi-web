@@ -110,9 +110,10 @@ test("WorkspaceHud renders folded sections with dedicated Servers row and no Con
   const document = dom.window.document;
   for (const label of ["Session artifacts", "Servers", "Background & Scheduled"]) {
     const header = document.querySelector(`button[title="${label}"]`);
-    assert.ok(header?.querySelector("svg"), `${label} 使用图标`);
-    assert.equal(header.textContent.includes(label), false, "入口不再显示文字标题");
-    assert.ok(header.getAttribute("aria-label").includes(label), "图标入口保留读屏名称");
+    assert.ok(header, `${label} 入口存在`);
+    assert.equal(header.textContent.includes(label), true, "栏目保留文字标题");
+    assert.ok(header.getAttribute("aria-label").includes(label), "入口保留读屏名称");
+    assert.equal(header.querySelector(".workspace-hud-row-sub"), null, "标题右侧不显示文件名、端口或状态摘要");
   }
   const taskCounts = [...document.querySelectorAll('button[title="Background & Scheduled"] .dev-servers-count')];
   assert.deepEqual(taskCounts.map((badge) => badge.textContent), ["1"]);
