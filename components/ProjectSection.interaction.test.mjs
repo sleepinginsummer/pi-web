@@ -13,10 +13,11 @@ Object.defineProperties(globalThis, {
   Node: { configurable: true, value: dom.window.Node },
 });
 
-const { cleanup, fireEvent, render, screen } = await import("@testing-library/react");
+const { act, cleanup, fireEvent, render, screen } = await import("@testing-library/react");
 const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
 const { PinnedSessionsSection, ProjectSection } = await jiti.import("./ProjectSection.tsx");
 const { I18nProvider } = await jiti.import("@/hooks/useI18n");
+const { sidebarProjectPath } = await jiti.import("@/lib/project-groups");
 
 afterEach(cleanup);
 
@@ -238,7 +239,7 @@ test("侧栏项目图标加载成功后替换文件夹，加载失败时保留�
   assert.ok(second.container.querySelector('[data-project-folder-icon="closed"]'));
 });
 
-test("PinnedSessionsSection 按置顶顺序渲染会话并在元数据行展示项目目录", () => {
+test("PinnedSessionsSection 按项目合并分组，组头展示目录名和会话数", () => {
   const s1 = {
     path: "/sessions/1.jsonl",
     id: "s1",
@@ -259,9 +260,19 @@ test("PinnedSessionsSection 按置顶顺序渲染会话并在元数据行展示�
     messageCount: 3,
     firstMessage: "Second",
   };
+  const s3 = {
+    path: "/sessions/3.jsonl",
+    id: "s3",
+    cwd: "/work/pi-web",
+    name: "Third Pinned",
+    created: "2026-03-01T00:02:00.000Z",
+    modified: "2026-03-01T00:02:00.000Z",
+    messageCount: 1,
+    firstMessage: "Third",
+  };
   const props = createProps({
     treeProps: {
-      topPinnedSessionIds: new Set(["s2", "s1"]),
+      topPinnedSessionIds: new Set(["s2", "s1", "s3"]),
       onToggleTopPinned() {},
       resolveProject: (session) => ({ name: session.cwd.split("/").pop(), path: session.cwd }),
     },
@@ -271,16 +282,26 @@ test("PinnedSessionsSection 按置顶顺序渲染会话并在元数据行展示�
     null,
     React.createElement(PinnedSessionsSection, {
       title: "Pinned",
-      sessions: [s1, s2],
-      sessionOrder: ["s2", "s1"],
+      sessions: [s1, s2, s3],
+      sessionOrder: ["s2", "s1", "s3"],
       treeProps: props.treeProps,
     }),
   ));
 
   assert.ok(container.querySelector("[data-pinned-sessions-section]"));
   assert.ok(screen.getByText("Pinned"));
-  const projects = [...container.querySelectorAll("[data-session-project]")].map((el) => el.textContent);
-  assert.deepEqual(projects, ["KeyRouter", "pi-web"]);
+
+  // 组顺序跟随置顶顺序里首次出现的项目；同目录会话合并成一组。
+  const groups = [...container.querySelectorAll("[data-pinned-group]")].map((el) => el.getAttribute("data-pinned-group"));
+  assert.deepEqual(groups, ["/work/KeyRouter", "/work/pi-web"]);
+  const names = [...container.querySelectorAll("[data-pinned-group-name]")].map((el) => el.textContent);
+  assert.deepEqual(names, ["KeyRouter", "pi-web"]);
+  const counts = [...container.querySelectorAll("[data-pinned-group-count]")].map((el) => el.textContent);
+  assert.deepEqual(counts, ["1", "2"]);
+
+  // 目录信息只由组头给出，行内不再重复项目名。
+  assert.deepEqual([...container.querySelectorAll("[data-session-project]")], []);
+  assert.deepEqual([...container.querySelectorAll("[data-session-row] div[title]")].map((el) => el.textContent), ["Second Pinned", "First Pinned", "Third Pinned"]);
 });
 
 
@@ -339,4 +360,178 @@ test("PinnedSessionsSection 中独立置顶的子代理作为独立根节点，�
   fireEvent.click(screen.getByTitle("Collapse forks"));
   assert.ok(screen.getByText("Pinned Subagent"));
   assert.equal(screen.queryByText("Nested Subagent"), null);
+  assert.equal(screen.getByTitle("/work/pi-web").querySelector("[data-pinned-group-count]").textContent, "2");
+});
+
+
+test("置顶分组按项目根目录合并，折叠互相独立且保留选择与拖拽动作", () => {
+  const sessions = [
+    { id: "main", cwd: "/work/pi-web", projectRoot: "/work/pi-web", name: "Main pin" },
+    { id: "branch", cwd: "/work/pi-web-worktrees/fix", projectRoot: "/work/pi-web", name: "Worktree pin" },
+    { id: "blog", cwd: "/work/blog", projectRoot: "/work/blog", name: "Blog pin" },
+  ].map((session) => ({ ...session, path: `/sessions/${session.id}.jsonl`, created: "2026-03-01T00:00:00.000Z", modified: "2026-03-01T00:00:00.000Z", messageCount: 2, firstMessage: session.name }));
+  const selected = [];
+  const moves = [];
+  const treeProps = createProps({ treeProps: {
+    topPinnedSessionIds: new Set(sessions.map((session) => session.id)),
+    resolveProject: (session) => ({ path: session.projectRoot, name: session.projectRoot.split("/").pop() }),
+    onSelectSession: (session) => selected.push(session.id),
+    onMoveSession: (...args) => moves.push(args),
+  } }).treeProps;
+  const { container } = render(React.createElement(I18nProvider, null, React.createElement(PinnedSessionsSection, {
+    title: "Pinned", sessions, sessionOrder: ["branch", "blog", "main"], treeProps,
+  })));
+  assert.deepEqual([...container.querySelectorAll("[data-pinned-group-count]")].map((node) => node.textContent), ["2", "1"]);
+  assert.equal(container.querySelectorAll("[data-session-project-mark]").length, 2);
+  assert.deepEqual([...container.querySelectorAll("[data-session-row] div[title]")].map((node) => node.textContent), ["Worktree pin", "Main pin", "Blog pin"]);
+  fireEvent.click(screen.getByText("Worktree pin"));
+  assert.deepEqual(selected, ["branch"]);
+  const target = screen.getByText("Main pin").closest("[data-session-row]").parentElement;
+  fireEvent.drop(target, { dataTransfer: { getData: () => "branch" } });
+  assert.deepEqual(moves, [["branch", "main"]]);
+  const header = screen.getByTitle("/work/pi-web");
+  fireEvent.click(header);
+  assert.equal(header.getAttribute("aria-expanded"), "false");
+  assert.equal(screen.queryByText("Worktree pin"), null);
+  assert.ok(screen.getByText("Blog pin"));
+  fireEvent.click(header);
+  assert.equal(header.getAttribute("aria-expanded"), "true");
+  assert.ok(screen.getByText("Worktree pin"));
+});
+
+test("通知定位展开置顶项目组，同一定位不覆盖之后的手动折叠", () => {
+  const session = { id: "target", cwd: "/work/target", path: "/sessions/target.jsonl", name: "Target pin", created: "2026-03-01T00:00:00.000Z", modified: "2026-03-01T00:00:00.000Z", messageCount: 1, firstMessage: "Target" };
+  const treeProps = createProps({ treeProps: {
+    topPinnedSessionIds: new Set([session.id]),
+    resolveProject: () => ({ path: session.cwd, name: "target" }),
+  } }).treeProps;
+  const renderPinned = (request) => React.createElement(I18nProvider, null, React.createElement(PinnedSessionsSection, {
+    title: "Pinned", sessions: [session], sessionOrder: [session.id], treeProps: { ...treeProps, locateSessionRequest: request },
+  }));
+  const view = render(renderPinned(null));
+  fireEvent.click(screen.getByTitle(session.cwd));
+  assert.equal(screen.queryByText(session.name), null);
+  view.rerender(renderPinned({ sessionId: session.id, revision: 1 }));
+  assert.ok(screen.getByText(session.name));
+  fireEvent.click(screen.getByTitle(session.cwd));
+  view.rerender(renderPinned({ sessionId: session.id, revision: 1 }));
+  assert.equal(screen.queryByText(session.name), null);
+  view.rerender(renderPinned({ sessionId: session.id, revision: 2 }));
+  assert.ok(screen.getByText(session.name));
+});
+
+
+test("收起前一个置顶组后，后一个组立即更新虚拟列表位置", () => {
+  const originalResizeObserver = globalThis.ResizeObserver;
+  const originalRect = dom.window.HTMLElement.prototype.getBoundingClientRect;
+  globalThis.ResizeObserver = class { observe() {} disconnect() {} };
+  dom.window.HTMLElement.prototype.getBoundingClientRect = function () {
+    const group = this.closest("[data-pinned-group]");
+    let top = 0;
+    if (group) {
+      const firstExpanded = document.querySelector('[data-pinned-group="/a"] button')?.getAttribute("aria-expanded") === "true";
+      top = group.getAttribute("data-pinned-group") === "/a" ? 30 : (firstExpanded ? 40 * 54 : 0) + 60;
+    }
+    return { top, bottom: top + 200, height: 200, left: 0, right: 300, width: 300, x: 0, y: top, toJSON() {} };
+  };
+  try {
+    const sessions = Array.from({ length: 50 }, (_, index) => ({
+      id: `layout-${index}`, cwd: index < 40 ? "/a" : "/b", path: `/sessions/layout-${index}.jsonl`, name: `Layout ${index}`,
+      created: "2026-03-01T00:00:00.000Z", modified: "2026-03-01T00:00:00.000Z", messageCount: 1, firstMessage: "Layout",
+    }));
+    const treeProps = createProps({ treeProps: {
+      topPinnedSessionIds: new Set(sessions.map((session) => session.id)),
+      resolveProject: (session) => ({ path: session.cwd, name: session.cwd }),
+    } }).treeProps;
+    render(React.createElement(I18nProvider, null, React.createElement("div", { "data-session-scroll": true }, React.createElement(PinnedSessionsSection, {
+      title: "Pinned", sessions, sessionOrder: sessions.map((session) => session.id), treeProps,
+    }))));
+    assert.equal(screen.queryByText("Layout 40"), null);
+    fireEvent.click(screen.getByTitle("/a"));
+    assert.ok(screen.getByText("Layout 40"));
+  } finally {
+    globalThis.ResizeObserver = originalResizeObserver;
+    dom.window.HTMLElement.prototype.getBoundingClientRect = originalRect;
+  }
+});
+
+
+test("顶部置顶区收起后，下方项目列表通过高度监听补出可见会话", () => {
+  const originalResizeObserver = globalThis.ResizeObserver;
+  const originalRect = dom.window.HTMLElement.prototype.getBoundingClientRect;
+  const observers = new Set();
+  globalThis.ResizeObserver = class {
+    targets = new Set();
+    constructor(callback) { this.callback = callback; observers.add(this); }
+    observe(target) { this.targets.add(target); }
+    disconnect() { observers.delete(this); }
+  };
+  dom.window.HTMLElement.prototype.getBoundingClientRect = function () {
+    const isLower = !this.hasAttribute("data-session-scroll") && !this.closest("[data-pinned-sessions-section]");
+    const expanded = document.querySelector("[data-pinned-group] button")?.getAttribute("aria-expanded") === "true";
+    const top = isLower && expanded ? 1000 : 0;
+    return { top, bottom: top + 200, height: 200, left: 0, right: 300, width: 300, x: 0, y: top, toJSON() {} };
+  };
+  try {
+    const pinned = { id: "above", cwd: "/above", path: "/sessions/above.jsonl", name: "Above pin", created: "2026-03-01T00:00:00.000Z", modified: "2026-03-01T00:00:00.000Z", messageCount: 1, firstMessage: "Above" };
+    const lower = { ...pinned, id: "below", cwd: "/below", name: "Below session" };
+    const treeProps = createProps({ treeProps: {
+      topPinnedSessionIds: new Set([pinned.id]),
+      resolveProject: () => ({ path: pinned.cwd, name: "above" }),
+    } }).treeProps;
+    const { container } = render(React.createElement(I18nProvider, null, React.createElement("div", { "data-session-scroll": true },
+      React.createElement(PinnedSessionsSection, { title: "Pinned", sessions: [pinned], sessionOrder: [pinned.id], treeProps }),
+      React.createElement(ProjectSection, createProps({ project: { path: lower.cwd, sessions: [lower], sessionOrder: [lower.id] } })),
+    )));
+    assert.equal(screen.queryByText(lower.name), null);
+    fireEvent.click(screen.getByTitle(pinned.cwd));
+    act(() => {
+      const pinnedSection = container.querySelector("[data-pinned-sessions-section]");
+      for (const observer of observers) {
+        if (observer.targets.has(pinnedSection)) observer.callback();
+      }
+    });
+    assert.ok(screen.getByText(lower.name));
+  } finally {
+    globalThis.ResizeObserver = originalResizeObserver;
+    dom.window.HTMLElement.prototype.getBoundingClientRect = originalRect;
+  }
+});
+
+
+test("置顶分组复用 Windows 路径身份，等价路径合并且切换原始写法后保留折叠状态", () => {
+  const sessions = [
+    { id: "windows-a", cwd: "D:\\Repo-Worktrees\\Feature" },
+    { id: "windows-b", cwd: "d:/repo-worktrees/feature" },
+  ].map((session) => ({
+    ...session, projectRoot: "D:\\Repo", isWorktree: true, path: `/sessions/${session.id}.jsonl`, name: session.id,
+    created: "2026-03-01T00:00:00.000Z", modified: "2026-03-01T00:00:00.000Z", messageCount: 1, firstMessage: session.id,
+  }));
+  const treeProps = createProps({ treeProps: {
+    topPinnedSessionIds: new Set(sessions.map((session) => session.id)),
+    resolveProject: (session) => ({ path: sidebarProjectPath(session), name: "Feature" }),
+  } }).treeProps;
+  const renderPinned = (sessionOrder) => React.createElement(I18nProvider, null, React.createElement(PinnedSessionsSection, {
+    title: "Pinned", sessions, sessionOrder, treeProps,
+  }));
+  const view = render(renderPinned(["windows-a", "windows-b"]));
+  assert.equal(view.container.querySelectorAll("[data-pinned-group]").length, 1);
+  const header = screen.getByTitle(sessions[0].cwd);
+  assert.equal(header.querySelector("[data-pinned-group-count]").textContent, "2");
+  assert.equal(new URL(header.querySelector("img").src).searchParams.get("project"), sessions[0].cwd);
+  fireEvent.click(header);
+  assert.equal(screen.queryByText("windows-a"), null);
+  assert.equal(screen.queryByText("windows-b"), null);
+
+  // 调换置顶顺序会改变组头保留的原始路径，但不能改变分组身份或重置折叠状态。
+  view.rerender(renderPinned(["windows-b", "windows-a"]));
+  const reorderedHeader = screen.getByTitle(sessions[1].cwd);
+  assert.equal(reorderedHeader, header);
+  assert.equal(reorderedHeader.getAttribute("aria-expanded"), "false");
+  assert.equal(reorderedHeader.querySelector("[data-pinned-group-count]").textContent, "2");
+  assert.equal(new URL(reorderedHeader.querySelector("img").src).searchParams.get("project"), sessions[1].cwd);
+  assert.equal(screen.queryByText("windows-a"), null);
+  fireEvent.click(reorderedHeader);
+  assert.ok(screen.getByText("windows-a"));
+  assert.ok(screen.getByText("windows-b"));
 });

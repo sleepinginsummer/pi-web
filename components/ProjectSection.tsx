@@ -1,11 +1,13 @@
 "use client";
 
-import { Folder, FolderOpen } from "lucide-react";
+import { ChevronRight, Folder, FolderOpen } from "lucide-react";
 import type { BackgroundActivityMap } from "@/hooks/useRunningSessions";
 import { useLayoutEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
 import type { SessionInfo } from "@/lib/types";
 import { buildSessionTree, type SessionTreeNode } from "@/lib/session-tree";
+import { portablePathIdentity } from "@/lib/path-equality";
 import { SessionItem } from "./SessionItem";
+import { ProjectMark } from "./ProjectMark";
 import type { SessionPinColor } from "@/lib/sidebar-preference-state";
 
 interface ProjectSectionProps {
@@ -173,7 +175,36 @@ function ProjectHeader({
   );
 }
 
-/** 侧边栏顶部独立置顶区：跨项目展示置顶会话，复用同一会话树与虚拟列表。 */
+/** 置顶区的一个项目分组，子代理继续跟随所属的根会话。 */
+interface PinnedProjectGroup {
+  identity: string;
+  path: string;
+  name: string;
+  tree: SessionTreeNode[];
+}
+
+/** 先按置顶顺序构建会话树，再合并同项目的根节点，保留组序、组内顺序与子代理层级。 */
+function groupPinnedSessions(
+  tree: SessionTreeNode[],
+  resolveProject?: (session: SessionInfo) => { name: string; path: string },
+): PinnedProjectGroup[] {
+  const groups = new Map<string, PinnedProjectGroup>();
+  for (const node of tree) {
+    const project = resolveProject?.(node.session);
+    const path = project?.path ?? "";
+    // 与下方项目列表共用路径身份；原始路径只用于展示和请求图标。
+    const identity = path ? portablePathIdentity(path) : "";
+    const existing = groups.get(identity);
+    if (existing) {
+      existing.tree.push(node);
+      continue;
+    }
+    groups.set(identity, { identity, path, name: project?.name ?? "", tree: [node] });
+  }
+  return [...groups.values()];
+}
+
+/** 顶部置顶会话按项目分组；不改变下方项目区的外观和折叠状态。 */
 export function PinnedSessionsSection({
   title,
   sessions,
@@ -185,27 +216,118 @@ export function PinnedSessionsSection({
   sessionOrder: string[];
   treeProps: SessionTreeSharedProps;
 }) {
-  const tree = useMemo(
-    () => buildSessionTree(sessions, sessionOrder, { independentRootIds: treeProps.topPinnedSessionIds }),
-    [sessionOrder, sessions, treeProps.topPinnedSessionIds],
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
+  const handledGroupLocateRevisionRef = useRef(0);
+  const groups = useMemo(
+    () => groupPinnedSessions(
+      buildSessionTree(sessions, sessionOrder, { independentRootIds: treeProps.topPinnedSessionIds }),
+      treeProps.resolveProject,
+    ),
+    [sessions, sessionOrder, treeProps.resolveProject, treeProps.topPinnedSessionIds],
   );
-  const handledLocateRevisionRef = useRef(0);
-  if (tree.length === 0) return null;
+
+  useLayoutEffect(() => {
+    const request = treeProps.locateSessionRequest;
+    if (!request || handledGroupLocateRevisionRef.current === request.revision) return;
+    const group = groups.find((candidate) => findSessionAncestorIds(candidate.tree, request.sessionId) !== null);
+    if (!group) return;
+    handledGroupLocateRevisionRef.current = request.revision;
+    setCollapsedGroups((current) => {
+      if (!current.has(group.identity)) return current;
+      const next = new Set(current);
+      next.delete(group.identity);
+      return next;
+    });
+  }, [groups, treeProps.locateSessionRequest]);
+
+  if (groups.length === 0) return null;
   return (
     <section data-pinned-sessions-section style={{ padding: "6px 6px 8px" }}>
       <div style={{ padding: "4px 8px 4px 10px", fontSize: 11, fontWeight: 500, color: "var(--text-dim)", userSelect: "none" }}>
         {title}
       </div>
-      <VirtualizedSessionTree
-        tree={tree}
-        treeProps={treeProps}
-        handledLocateRevisionRef={handledLocateRevisionRef}
-      />
+      {groups.map((group) => (
+        <PinnedProjectGroupSection
+          key={group.identity}
+          group={group}
+          treeProps={treeProps}
+          layoutVersion={collapsedGroups}
+          collapsed={collapsedGroups.has(group.identity)}
+          onToggleCollapsed={() => setCollapsedGroups((current) => {
+            const next = new Set(current);
+            if (next.has(group.identity)) next.delete(group.identity);
+            else next.add(group.identity);
+            return next;
+          })}
+        />
+      ))}
     </section>
   );
 }
 
-
+function PinnedProjectGroupSection({
+  group,
+  treeProps,
+  layoutVersion,
+  collapsed,
+  onToggleCollapsed,
+}: {
+  group: PinnedProjectGroup;
+  treeProps: SessionTreeSharedProps;
+  layoutVersion: ReadonlySet<string>;
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
+}) {
+  // 目录信息只在组头显示，行内继续保留时间、消息数和运行状态。
+  const groupTreeProps = useMemo(() => ({ ...treeProps, resolveProject: undefined }), [treeProps]);
+  const handledLocateRevisionRef = useRef(0);
+  return (
+    <div data-pinned-group={group.path || undefined}>
+      {group.path !== "" && (
+        <button
+          type="button"
+          onClick={onToggleCollapsed}
+          title={group.path}
+          aria-expanded={!collapsed}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 7,
+            width: "100%",
+            height: 30,
+            padding: "0 6px",
+            border: 0,
+            borderRadius: 6,
+            background: "transparent",
+            color: "var(--text-muted)",
+            cursor: "pointer",
+            textAlign: "left",
+          }}
+        >
+          <ChevronRight
+            size={12}
+            strokeWidth={2.2}
+            aria-hidden="true"
+            style={{ flexShrink: 0, transform: collapsed ? "none" : "rotate(90deg)", transition: "transform 120ms ease" }}
+          />
+          <ProjectMark path={group.path} name={group.name} size={16} />
+          <span data-pinned-group-name style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12, fontWeight: 600 }}>{group.name}</span>
+          <span data-pinned-group-count style={{ flexShrink: 0, color: "var(--text-dim)", fontSize: 11, fontWeight: 500 }}>{group.tree.length}</span>
+        </button>
+      )}
+      {!collapsed && (
+        <div style={{ paddingLeft: group.path === "" ? 0 : 16 }}>
+          <VirtualizedSessionTree
+            tree={group.tree}
+            treeProps={groupTreeProps}
+            handledLocateRevisionRef={handledLocateRevisionRef}
+            layoutVersion={layoutVersion}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
 
 export interface SessionTreeSharedProps {
   selectedSessionId: string | null;
@@ -268,10 +390,13 @@ function VirtualizedSessionTree({
   tree,
   treeProps,
   handledLocateRevisionRef,
+  layoutVersion,
 }: {
   tree: SessionTreeNode[];
   treeProps: SessionTreeSharedProps;
   handledLocateRevisionRef: { current: number };
+  /** 置顶组折叠会改变后续组的位置，需要重新计算它们的可见范围。 */
+  layoutVersion?: ReadonlySet<string>;
 }) {
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => new Set());
   const rows = useMemo(() => flattenSessionTree(tree, collapsedIds), [collapsedIds, tree]);
@@ -294,11 +419,14 @@ function VirtualizedSessionTree({
     scroll.addEventListener("scroll", update, { passive: true });
     const resizeObserver = new ResizeObserver(update);
     resizeObserver.observe(scroll);
+    // 顶部组的高度变化也会移动下方项目列表；一并监听，避免需要滚动才补出可见行。
+    const pinnedSection = scroll.querySelector<HTMLElement>("[data-pinned-sessions-section]");
+    if (pinnedSection) resizeObserver.observe(pinnedSection);
     return () => {
       scroll.removeEventListener("scroll", update);
       resizeObserver.disconnect();
     };
-  }, [rows, treeProps.selectedSessionId]);
+  }, [rows, treeProps.selectedSessionId, layoutVersion]);
 
   const mountedRows = useMemo(() => {
     const visible = rows.slice(range.start, range.end).map((row, offset) => ({ row, index: range.start + offset }));
