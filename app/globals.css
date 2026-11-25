@@ -3488,7 +3488,8 @@ span.token.table {
 /* Dev servers: the bottom bar entry, its list, and the right-panel viewer. */
 .extension-status-bar.has-only-leading:not(:has(.dev-servers-shelf)) { display: none !important; }
 .dev-servers-shelf { display: flex; flex: 0 0 auto; align-items: center; gap: 2px; }
-.dev-servers-trigger .dev-servers-count {
+.dev-servers-trigger .dev-servers-count,
+.workspace-hud-sec-left .dev-servers-count {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -5452,6 +5453,11 @@ span.token.table {
   border-bottom: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
 }
 
+/* 没有后续栏目时省去分隔线，避免与卡片底边形成双线。 */
+.workspace-hud-env:last-child {
+  border-bottom: none;
+}
+
 .workspace-hud-env-row {
   display: flex;
   align-items: center;
@@ -5595,6 +5601,14 @@ span.token.table {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* 待办未完成用黄色提示，全部完成后转为绿色；沿用随主题变化的现有色值。 */
+.workspace-hud-row-sub.workspace-hud-todo-progress {
+  color: var(--ansi-yellow);
+}
+
+.workspace-hud-row-sub.workspace-hud-todo-progress.is-complete {
+  color: var(--ansi-green);
 }
 
 .workspace-hud-row-sub {

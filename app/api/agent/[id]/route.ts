@@ -15,6 +15,7 @@ import {
 import { cwdMissingBody, missingCwdFromBody } from "@/lib/missing-cwd";
 import { readObserverEnabled, readObserverHistory, readObserverState } from "@/lib/session-observer-protocol";
 import { EXTENSION_REPORTED_CODE } from "@/lib/agent-client";
+import { readSessionMcpSnapshot } from "@/lib/session-mcp";
 
 /**
  * 会话列表只依赖会话文件中的持久化数据。查询类命令不需要淘汰缓存，
@@ -210,6 +211,12 @@ export async function GET(
   const { id } = await params;
 
   try {
+    // 菜单轮询只读取已存在的连接，不运行完整状态投影，也不重启已回收的会话。
+    if (new URL(req.url).searchParams.get("view") === "mcp") {
+      return NextResponse.json(readSessionMcpSnapshot(id, getRpcSession(id)), {
+        headers: { "Cache-Control": "no-store" },
+      });
+    }
     // Status reads leave out the system prompt, most of the reply (agentStatusUrl()).
     const includeSystemPrompt = new URL(req.url).searchParams.get("systemPrompt") !== "0";
     const snapshot = await getRpcSessionSnapshot(id, { includeSystemPrompt });

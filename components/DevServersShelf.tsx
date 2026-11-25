@@ -31,7 +31,7 @@ const iconProps = {
 };
 
 /** 入口上的「图标 + 数量」，服务器和任务共用同一套样式。 */
-function CountBadge({ count, icon }: { count: number; icon: ReactNode }) {
+export function CountBadge({ count, icon }: { count: number; icon: ReactNode }) {
   return (
     <span className="dev-servers-count" aria-hidden="true">
       <svg {...iconProps} width={9} height={9}>{icon}</svg>

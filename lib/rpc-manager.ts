@@ -108,7 +108,7 @@ import { SubmitGuard, createSubmitGuardExtension } from "./submit-guard";
 import { isSystemPromptAddonExtension, projectEffectiveSystemPromptAddon } from "./system-prompt-addon";
 import { findMembershipBySession } from "./teams";
 import { createPiWebBuiltinExtensions, createSubagentCodemodeExtension, createSubagentMcpExtensions } from "./builtin-extensions";
-import type { McpHost } from "./mcp-host";
+import type { McpHost, McpHostServerStatus } from "./mcp-host";
 import type { DebugMcpHost, DebugSessionLifecycle, DebugWrapperSnapshot } from "./debug-types";
 import { mcpPromptPreparation, promptCommandName, type McpCommandCandidate } from "./mcp-command";
 import { createReadOnlyMcpPolicyExtension, createSubagentMcpPolicyExtension } from "./mcp-read-only-policy";
@@ -253,7 +253,7 @@ type StartupModelPreferences = {
 };
 
 // `debugSnapshot` is optional: a host built before a hot reload lacks it.
-type WrapperMcpHost = Pick<McpHost, "prepareForPrompt" | "dispose"> & Partial<Pick<McpHost, "debugSnapshot">>;
+type WrapperMcpHost = Pick<McpHost, "prepareForPrompt" | "dispose"> & Partial<Pick<McpHost, "debugSnapshot" | "serverStates">>;
 
 type AgentSessionWrapperOptions = {
   persistedSessionFile?: boolean;
@@ -1180,6 +1180,11 @@ export class AgentSessionWrapper {
         ? { type: this.lastCommandType, at: this.lastCommandAt }
         : null,
     };
+  }
+
+  /** 工作区 MCP 菜单只读取本会话 host，不触发注册或连接。 */
+  getMcpServerStates(): McpHostServerStatus[] {
+    return this.mcpHost?.serverStates?.() ?? [];
   }
 
   /** The MCP host's state for the debug panel; null without a host (Chat only, MCP unavailable). */

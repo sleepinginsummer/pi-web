@@ -101,11 +101,25 @@ test("WorkspaceHud renders folded sections with dedicated Servers row and no Con
   assert.match(html, /-15/);
   assert.match(html, /Changed files/);
   assert.match(html, /Session artifacts/);
-  assert.match(html, /spec\.md/);
+  assert.doesNotMatch(html, /spec\.md/);
   assert.match(html, /Servers/);
   assert.match(html, /Background &amp; Scheduled/);
   assert.match(html, /Todo list/);
   assert.match(html, /1\/2/);
+  const dom = new JSDOM(html);
+  const document = dom.window.document;
+  for (const label of ["Session artifacts", "Servers", "Background & Scheduled"]) {
+    const header = document.querySelector(`button[title="${label}"]`);
+    assert.ok(header?.querySelector("svg"), `${label} 使用图标`);
+    assert.equal(header.textContent.includes(label), false, "入口不再显示文字标题");
+    assert.ok(header.getAttribute("aria-label").includes(label), "图标入口保留读屏名称");
+  }
+  const taskCounts = [...document.querySelectorAll('button[title="Background & Scheduled"] .dev-servers-count')];
+  assert.deepEqual(taskCounts.map((badge) => badge.textContent), ["1"]);
+  const progress = document.querySelector(".workspace-hud-todo-progress");
+  assert.equal(progress.textContent, "50%");
+  assert.equal(progress.classList.contains("is-complete"), false);
+  dom.window.close();
   // 确认不包含已移除的上下文与终端区块
   assert.doesNotMatch(html, /上下文与用量/);
   assert.doesNotMatch(html, /网页终端/);
@@ -582,7 +596,7 @@ test("工作区隐藏空栏目和空闲服务任务，活动变化后同步显�
   };
   const { container, render } = await withHudDom(t, props);
   await React.act(async () => container.querySelector(".workspace-hud-title-btn").click());
-  assert.equal(container.querySelectorAll(".workspace-hud-section").length, 0);
+  assert.equal(container.querySelectorAll(".workspace-hud-section:not([data-workspace-mcp])").length, 0);
 
   const activeProps = {
     ...props,
@@ -593,14 +607,27 @@ test("工作区隐藏空栏目和空闲服务任务，活动变化后同步显�
     sharedBackground: { ...polling.sharedBackground, data: { commands: [{ id: "cmd-1", sessionId: "sess-idle", status: "running" }] } },
   };
   await render(activeProps);
-  assert.equal(container.querySelectorAll(".workspace-hud-section").length, 5);
+  assert.equal(container.querySelectorAll(".workspace-hud-section:not([data-workspace-mcp])").length, 5);
+  assert.equal(container.querySelector(".workspace-hud-todo-progress").textContent, "0%");
+  assert.equal(container.querySelector(".workspace-hud-todo-progress").classList.contains("is-complete"), false);
+  await render({
+    ...activeProps,
+    todoWidget: { key: "rpiv-todos", lines: ["Todos (1/1)", "└─ ✓ 已完成"] },
+    sharedScheduled: { ...polling.sharedScheduled, data: { enabled: true, tasks: [
+      { id: "pending", sessionId: "sess-idle", enabled: true, nextRunAt: Date.now() + 60000 },
+      { id: "paused", sessionId: "sess-idle", enabled: false, nextRunAt: Date.now() + 60000 },
+    ] } },
+  });
+  assert.equal(container.querySelector(".workspace-hud-todo-progress.is-complete").textContent, "100%");
+  const badges = container.querySelectorAll('button[title="Background & Scheduled"] .dev-servers-count');
+  assert.deepEqual([...badges].map((badge) => badge.textContent), ["1", "1"], "定时任务与命令分别计数，暂停任务不计入");
   await render(props);
-  assert.equal(container.querySelectorAll(".workspace-hud-section").length, 0);
+  assert.equal(container.querySelectorAll(".workspace-hud-section:not([data-workspace-mcp])").length, 0);
 
   // 待触发的定时任务即使没有运行中的命令，也须保留任务入口。
   await render({
     ...props,
     sharedScheduled: { ...polling.sharedScheduled, data: { tasks: [{ id: "task-1", sessionId: "sess-idle", enabled: true, nextRunAt: Date.now() + 60000 }] } },
   });
-  assert.equal(container.querySelectorAll(".workspace-hud-section").length, 1);
+  assert.equal(container.querySelectorAll(".workspace-hud-section:not([data-workspace-mcp])").length, 1);
 });

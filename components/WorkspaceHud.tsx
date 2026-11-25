@@ -1,6 +1,8 @@
 "use client";
 
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Package, Server } from "lucide-react";
+import { CountBadge } from "./DevServersShelf";
 import { getFileName, getRelativeFilePath } from "@/lib/file-paths";
 import { stripAnsi } from "@/lib/ansi";
 import { isDevServerActive, useDevServers } from "@/hooks/useDevServers";
@@ -10,6 +12,7 @@ import { useI18n } from "@/hooks/useI18n";
 import type { WorkspaceGitState } from "@/hooks/useWorkspaceGit";
 import type { SessionArtifact } from "@/lib/session-artifacts";
 import type { ExtensionWidgetItem, SessionInfo, WorktreeInfo } from "@/lib/types";
+import { WorkspaceMcpSection } from "./WorkspaceMcpSection";
 
 export interface ParsedTodoLine {
   text: string;
@@ -906,14 +909,11 @@ export const WorkspaceHud = memo(function WorkspaceHud({
 
               {/* ③ 本会话产物（支持预览与二次确认删除） */}
               {hasArtifacts && <div className="workspace-hud-section">
-                <button type="button" className="workspace-hud-sec-header" onClick={() => toggleSection("artifacts")}>
+                <button type="button" className="workspace-hud-sec-header" aria-label={`${t("workspaceHud.artifacts")} ${artifacts.length}`} title={t("workspaceHud.artifacts")} aria-expanded={sections.artifacts} onClick={() => toggleSection("artifacts")}>
                   <span className="workspace-hud-sec-left">
                     <span aria-hidden="true">{sections.artifacts ? "▾" : "▸"}</span>
-                    <span>{t("workspaceHud.artifacts")}</span>
+                    <Package size={14} aria-hidden="true" />
                     <span className="workspace-hud-count">{artifacts.length}</span>
-                  </span>
-                  <span className="workspace-hud-row-sub" style={{ maxWidth: 130 }}>
-                    {artifacts[0]?.name ?? t("workspaceHud.empty")}
                   </span>
                 </button>
                 {sections.artifacts && (
@@ -987,21 +987,11 @@ export const WorkspaceHud = memo(function WorkspaceHud({
 
               {/* ④ 服务器（单独一行） */}
               {activeServers.length > 0 && <div className="workspace-hud-section">
-                <button type="button" className="workspace-hud-sec-header" onClick={() => toggleSection("servers")}>
+                <button type="button" className="workspace-hud-sec-header" aria-label={`${t("workspaceHud.servers")} ${activeServers.length}`} title={t("workspaceHud.servers")} aria-expanded={sections.servers} onClick={() => toggleSection("servers")}>
                   <span className="workspace-hud-sec-left">
                     <span aria-hidden="true">{sections.servers ? "▾" : "▸"}</span>
-                    <span>{t("workspaceHud.servers")}</span>
-                    <span className="workspace-hud-count">
-                      {activeServers.length}/{totalServerEntries}
-                    </span>
-                  </span>
-                  <span className="workspace-hud-row-sub" style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
-                    {activeServers.length > 0 && <span className="workspace-hud-dot" aria-hidden="true" />}
-                    {activeServers.length > 0
-                      ? activeServers[0]?.port
-                        ? `${activeServers.length} · :${activeServers[0].port}`
-                        : t("workspaceHud.runningCount", { count: activeServers.length })
-                      : t("workspaceHud.idle")}
+                    <Server size={14} aria-hidden="true" />
+                    <span className="workspace-hud-count">{activeServers.length}</span>
                   </span>
                 </button>
                 {sections.servers && (
@@ -1080,20 +1070,15 @@ export const WorkspaceHud = memo(function WorkspaceHud({
 
               {/* ⑤ 后台命令 & 定时任务 */}
               {(activeBgCount > 0 || pendingSchedCount > 0) && <div className="workspace-hud-section">
-                <button type="button" className="workspace-hud-sec-header" onClick={() => toggleSection("tasks")}>
+                <button type="button" className="workspace-hud-sec-header" aria-label={`${t("workspaceHud.tasks")} · ${t("workspaceHud.schedCount", { count: pendingSchedCount })} · ${t("workspaceHud.bgCount", { count: activeBgCount })}`} title={t("workspaceHud.tasks")} aria-expanded={sections.tasks} onClick={() => toggleSection("tasks")}>
                   <span className="workspace-hud-sec-left">
                     <span aria-hidden="true">{sections.tasks ? "▾" : "▸"}</span>
-                    <span>{t("workspaceHud.tasks")}</span>
-                    <span className="workspace-hud-count">{totalTaskEntries}</span>
-                  </span>
-                  <span className="workspace-hud-row-sub" style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
-                    {activeBgCount > 0 && <span className="workspace-hud-dot" aria-hidden="true" />}
-                    {activeBgCount > 0 || pendingSchedCount > 0
-                      ? [
-                          activeBgCount > 0 ? t("workspaceHud.bgCount", { count: activeBgCount }) : "",
-                          pendingSchedCount > 0 ? t("workspaceHud.schedCount", { count: pendingSchedCount }) : "",
-                        ].filter(Boolean).join(" · ")
-                      : t("workspaceHud.idle")}
+                    {pendingSchedCount > 0 && (
+                      <CountBadge count={pendingSchedCount} icon={<><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>} />
+                    )}
+                    {activeBgCount > 0 && (
+                      <CountBadge count={activeBgCount} icon={<path d="M5 7l5 5-5 5M12 17h7" />} />
+                    )}
                   </span>
                 </button>
                 {sections.tasks && (
@@ -1154,6 +1139,7 @@ export const WorkspaceHud = memo(function WorkspaceHud({
                 )}
               </div>}
 
+              <WorkspaceMcpSection key={sessionId ?? "new"} sessionId={sessionId} />
               {/* ⑥ Todo 列表 */}
               {hasTodos && <div className="workspace-hud-section">
                 <button type="button" className="workspace-hud-sec-header" onClick={() => toggleSection("todos")}>
@@ -1164,7 +1150,7 @@ export const WorkspaceHud = memo(function WorkspaceHud({
                       {todos.length > 0 ? `${completedTodos}/${todos.length}` : "0"}
                     </span>
                   </span>
-                  <span className="workspace-hud-row-sub">
+                  <span className={`workspace-hud-row-sub workspace-hud-todo-progress${completedTodos === todos.length ? " is-complete" : ""}`}>
                     {todos.length > 0 ? `${Math.round((completedTodos / todos.length) * 100)}%` : t("workspaceHud.empty")}
                   </span>
                 </button>

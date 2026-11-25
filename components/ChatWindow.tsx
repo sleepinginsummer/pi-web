@@ -2228,24 +2228,24 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
           {askDialogElement}
           {chatInputElement}
         </div>
-        <ExtensionStatusBar
-          isMobile={isMobile}
-          statuses={extensionStatuses}
-          widgets={displayExtensionWidgets}
-          onCommand={handleSend}
-          commandsDisabled={sessionBusy}
-          leading={(
-            <DevServersShelf
-              cwd={messageCwd}
-              sessionId={session?.id}
-              onOpenPreview={onOpenServerPreview}
-              sharedDevServers={panel ? undefined : sharedDevServers}
-              sharedScheduled={panel ? undefined : sharedScheduled}
-              sharedBackground={panel ? undefined : sharedBackground}
-            />
-          )}
-        />
       </div>
+      <ExtensionStatusBar
+        isMobile={isMobile}
+        statuses={extensionStatuses}
+        widgets={displayExtensionWidgets}
+        onCommand={handleSend}
+        commandsDisabled={sessionBusy}
+        leading={(
+          <DevServersShelf
+            cwd={messageCwd}
+            sessionId={session?.id}
+            onOpenPreview={onOpenServerPreview}
+            sharedDevServers={panel ? undefined : sharedDevServers}
+            sharedScheduled={panel ? undefined : sharedScheduled}
+            sharedBackground={panel ? undefined : sharedBackground}
+          />
+        )}
+      />
       </>
       )}
     </div>
