@@ -50,7 +50,7 @@ import type { AppUpdateResponse } from "@/lib/api-types";
 import { selectPendingNewSession, type PendingNewSessionControl, type PendingNewSessionEvent } from "@/lib/pending-new-session";
 import type { ShadowSessionControl } from "@/lib/shadow-session-control";
 import type { SessionListRefreshRequest } from "@/lib/session-list-refresh-coordinator";
-import { findChatScrollAnchor, type ChatReadingPosition } from "@/lib/chat-scroll-position";
+import { findChatScrollAnchor, findChatScrollRestoreTarget, type ChatReadingPosition } from "@/lib/chat-scroll-position";
 import type { SettingsSection } from "@/lib/settings-navigation";
 import { getTranscriptNotices, summarizeCacheMisses } from "@/lib/transcript-notices";
 import type { TranscriptNotice } from "@/lib/transcript-notices";
@@ -659,7 +659,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
     const candidates = Array.from(content.children).flatMap((element) => {
       if (!(element instanceof HTMLElement) || !element.dataset.entryId || element.offsetHeight === 0) return [];
       const rect = element.getBoundingClientRect();
-      return [{ entryId: element.dataset.entryId, top: rect.top, bottom: rect.bottom }];
+      return [{ entryId: element.dataset.entryId, part: element.dataset.scrollPart, top: rect.top, bottom: rect.bottom }];
     });
     const anchor = findChatScrollAnchor(candidates, viewportTop);
     if (!anchor) return;
@@ -743,9 +743,12 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
     const position = pendingScrollRestore;
     const content = messageContentRef.current;
     if (!position || !content || searchTarget || restoreAnchorReadyFor !== position) return;
-    const element = Array.from(content.children).find((candidate) => (
-      candidate instanceof HTMLElement && candidate.dataset.entryId === position.anchorEntryId
-    ));
+    // 一条消息可能拆成多个并列正文节点，entryId 相同但折叠后的片段位置不同。
+    const element = findChatScrollRestoreTarget(Array.from(content.children).flatMap((candidate) => (
+      candidate instanceof HTMLElement && candidate.dataset.entryId
+        ? [{ entryId: candidate.dataset.entryId, part: candidate.dataset.scrollPart, element: candidate }]
+        : []
+    )), position)?.element;
     if (element instanceof HTMLElement) {
       scrollToElement(element, position.anchorOffset);
       setPendingScrollRestore(null);
@@ -1649,7 +1652,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                 const noticeLines = notices.length > 0 ? <TranscriptNoticeLines key={`${keyPrefix}-notices-${messageKey}`} notices={notices} /> : null;
                 if (idx === lastAnchorIdx && (!isVisible || currentRefIdx === undefined)) {
                   return (
-                    <div key={`${keyPrefix}-${messageKey}`} data-entry-id={entryIds[idx]} data-answer={options.finalAnswer ? "1" : undefined} ref={(el) => {
+                    <div key={`${keyPrefix}-${messageKey}`} data-entry-id={entryIds[idx]} data-scroll-part={keyPrefix} data-answer={options.finalAnswer ? "1" : undefined} ref={(el) => {
                       (lastUserMsgRef as { current: HTMLDivElement | null }).current = el;
                       if (idx === lastRenderedMessageIdx) lastRenderedMessageRef.current = el;
                     }}>
@@ -1661,7 +1664,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                 // 有无提示都保持同一结构，重读后新出现的提示行不会让消息重挂载。
                 if (!isVisible || currentRefIdx === undefined) return <Fragment key={`${keyPrefix}-${messageKey}`}>{view}{noticeLines}</Fragment>;
                 return (
-                  <div key={`${keyPrefix}-${messageKey}`} data-entry-id={entryIds[idx]} data-answer={options.finalAnswer ? "1" : undefined} ref={options.attachRef === false ? undefined : (el) => {
+                  <div key={`${keyPrefix}-${messageKey}`} data-entry-id={entryIds[idx]} data-scroll-part={keyPrefix} data-answer={options.finalAnswer ? "1" : undefined} ref={options.attachRef === false ? undefined : (el) => {
                     attachVisibleRef(idx, currentRefIdx)(el);
                     if (idx === lastRenderedMessageIdx) lastRenderedMessageRef.current = el;
                   }}>

@@ -34,13 +34,14 @@ mkdirSync(join(project, "src"));
 writeFileSync(join(project, "src", "layout-example.ts"), "export const layoutExample = true;\n");
 mkdirSync(sessionDir, { recursive: true });
 const timestamp = "2026-08-23T00:00:00.000Z";
-const LONG = "e2e-long-session";
-const BRANCH = "e2e-branch-session";
-const RICH = "e2e-rich-session";
-const COMPACTED = "e2e-compacted-session";
-const APPEND = "e2e-external-append-session";
-const CODE_BACKGROUND = "e2e-code-background";
-const SIDE = "e2e-side-session";
+// 与真实会话一致使用 UUID，避免产物等接口按会话 ID 契约拒绝测试夹具。
+const LONG = "00000000-0000-4000-8000-000000000001";
+const BRANCH = "00000000-0000-4000-8000-000000000002";
+const RICH = "00000000-0000-4000-8000-000000000003";
+const COMPACTED = "00000000-0000-4000-8000-000000000004";
+const APPEND = "00000000-0000-4000-8000-000000000005";
+const CODE_BACKGROUND = "00000000-0000-4000-8000-000000000006";
+const SIDE = "00000000-0000-4000-8000-000000000007";
 const text = (i) => `E2E message ${String(i).padStart(4, "0")}`;
 const ids = (start, end) => Array.from({ length: end - start }, (_, i) => `e${start + i}`);
 
@@ -616,6 +617,9 @@ try {
         await page.evaluate((id) => globalThis.__piSessionViewCache?.delete(id), LONG);
         const pendingHistory = page.waitForRequest((request) => request.url().includes(`/api/sessions/${LONG}/context?`) && new URL(request.url()).searchParams.has("before"));
         await page.locator(`[title="${text(0)}"]`).click();
+        // 前面的阅读位置测试可能留下末尾锚点；显式滚到顶部，确保本用例确实发起被闸住的旧页请求。
+        await page.locator('[data-entry-id="e4999"]:not([data-message-role])').waitFor({ state: "attached" });
+        await chatScroll.evaluate((element) => { element.scrollTop = 0; });
         await pendingHistory;
         await page.getByRole("button", { name: "Branches", exact: true }).click();
         await page.getByText("E2E alternate history branch", { exact: true }).click();

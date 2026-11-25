@@ -149,6 +149,8 @@ export function useChatScrollFollow({
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const lastUserMsgRef = useRef<HTMLDivElement | null>(null);
   const initialScrollDoneRef = useRef(deferInitialScroll);
+  // 已有阅读锚点由 ChatWindow 恢复；首次上下文的默认末尾指令不能随后覆盖它。
+  const preserveRestoredPositionRef = useRef(deferInitialScroll);
   // 首屏定位前容器停在顶部，顶部哨兵此时可见；调用方据此推迟历史加载，
   // 否则它记录的“距顶部距离”会在前插后把已经滚到末尾的视图拉回顶部。
   const [initialScrollSettled, setInitialScrollSettled] = useState(deferInitialScroll);
@@ -257,6 +259,9 @@ export function useChatScrollFollow({
           handledPositionGenerationRef.current = positionRequest.generation;
           initialScrollDoneRef.current = true;
           setInitialScrollSettled(true);
+          const preserveRestoredPosition = preserveRestoredPositionRef.current && positionRequest.position === "initial";
+          preserveRestoredPositionRef.current = false;
+          if (preserveRestoredPosition) return;
           // 指定 entry 的定位由 ChatWindow 的阅读锚点恢复负责，先挂载目标虚拟窗口。
           if (typeof positionRequest.position === "object") return;
           if (positionRequest.position === "user") {

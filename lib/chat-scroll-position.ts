@@ -10,11 +10,14 @@ export type ChatReadingPosition =
       atBottom: false;
       anchorEntryId: string;
       anchorOffset: number;
+      /** 同一消息拆成多个正文片段时，用片段标识区分恢复目标。 */
+      anchorPart?: string;
       oldestEntryId: string | null;
     };
 
 export interface ChatScrollAnchorCandidate {
   entryId: string;
+  part?: string;
   top: number;
   bottom: number;
 }
@@ -78,7 +81,7 @@ export function getDistanceToBottom(
 export function findChatScrollAnchor(
   candidates: ChatScrollAnchorCandidate[],
   viewportTop: number,
-): Pick<Extract<ChatReadingPosition, { atBottom: false }>, "anchorEntryId" | "anchorOffset"> | null {
+): Pick<Extract<ChatReadingPosition, { atBottom: false }>, "anchorEntryId" | "anchorOffset" | "anchorPart"> | null {
   let candidate = candidates[0];
   for (const item of candidates) {
     if (item.top > viewportTop) break;
@@ -88,5 +91,16 @@ export function findChatScrollAnchor(
   return {
     anchorEntryId: candidate.entryId,
     anchorOffset: candidate.top - viewportTop,
+    ...(candidate.part ? { anchorPart: candidate.part } : {}),
   };
+}
+
+/** 优先恢复同一消息的同一正文片段；旧位置或片段已移除时仍按消息恢复。 */
+export function findChatScrollRestoreTarget<T extends Pick<ChatScrollAnchorCandidate, "entryId" | "part">>(
+  candidates: T[],
+  position: { anchorEntryId: string; anchorPart?: string },
+): T | undefined {
+  const matching = candidates.filter((candidate) => candidate.entryId === position.anchorEntryId);
+  return (position.anchorPart ? matching.find((candidate) => candidate.part === position.anchorPart) : undefined)
+    ?? matching[0];
 }
