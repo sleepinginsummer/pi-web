@@ -380,6 +380,8 @@ export interface SessionInfo {
   path: string;
   id: string;
   cwd: string;
+  /** 团队重建会话在提交凭据落盘后才贡献文件访问根。 */
+  requiresTeamRebuildCommit?: boolean;
   name?: string;
   created: string;
   modified: string;

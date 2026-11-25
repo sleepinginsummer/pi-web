@@ -24,32 +24,41 @@ function sameFileIdentity(a: BigIntStats, b: BigIntStats): boolean {
 }
 
 function readProjectIcon(projectRoot: string, projectRoots: Set<string>, candidate: string): Buffer | undefined {
-  const iconPath = realpathSync.native(join(projectRoot, candidate));
-  if (!isPathWithinRoots(iconPath, projectRoots)) return undefined;
+  // 同一目录内的无关写入也会改变时间戳。仅这种校验失败允许再完整尝试一次。
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const iconPath = realpathSync.native(join(projectRoot, candidate));
+    if (!isPathWithinRoots(iconPath, projectRoots)) return undefined;
 
-  // 校验描述符与授权路径在打开前后的身份。逐级核对目录也覆盖没有描述符路径查询的系统。
-  const directories: Array<{ path: string; stats: BigIntStats }> = [];
-  for (let path = dirname(iconPath); ; path = dirname(path)) {
-    const stats = lstatSync(path, { bigint: true });
-    if (!stats.isDirectory()) return undefined;
-    directories.push({ path, stats });
-    if (dirname(path) === path) break;
+    // 校验描述符与授权路径在打开前后的身份。逐级核对目录也覆盖没有描述符路径查询的系统。
+    const directories: Array<{ path: string; stats: BigIntStats }> = [];
+    for (let path = dirname(iconPath); ; path = dirname(path)) {
+      const stats = lstatSync(path, { bigint: true });
+      if (!stats.isDirectory()) return undefined;
+      directories.push({ path, stats });
+      if (dirname(path) === path) break;
+    }
+    const expected = lstatSync(iconPath, { bigint: true });
+    if (!expected.isFile()) return undefined;
+
+    let retry = false;
+    const bytes = readRegularFileBytes(iconPath, ICON_MAX_BYTES, {
+      openFlags: ICON_OPEN_FLAGS,
+      authorizeOpenedFile: (fd) => {
+        if (!sameFileIdentity(expected, fstatSync(fd, { bigint: true }))) return false;
+        if (process.platform === "linux" && readlinkSync(`/proc/self/fd/${fd}`) !== iconPath) return false;
+        let timestampsChanged = false;
+        for (const { path, stats } of directories) {
+          const current = lstatSync(path, { bigint: true });
+          if (!current.isDirectory() || !sameFileIdentity(stats, current)) return false;
+          timestampsChanged ||= stats.ctimeNs !== current.ctimeNs || stats.mtimeNs !== current.mtimeNs;
+        }
+        retry = timestampsChanged;
+        return !timestampsChanged;
+      },
+    });
+    if (!retry) return bytes;
   }
-  const expected = lstatSync(iconPath, { bigint: true });
-  if (!expected.isFile()) return undefined;
-
-  return readRegularFileBytes(iconPath, ICON_MAX_BYTES, {
-    openFlags: ICON_OPEN_FLAGS,
-    authorizeOpenedFile: (fd) => {
-      if (!sameFileIdentity(expected, fstatSync(fd, { bigint: true }))) return false;
-      if (process.platform === "linux" && readlinkSync(`/proc/self/fd/${fd}`) !== iconPath) return false;
-      return directories.every(({ path, stats }) => {
-        const current = lstatSync(path, { bigint: true });
-        return current.isDirectory() && sameFileIdentity(stats, current)
-          && stats.ctimeNs === current.ctimeNs && stats.mtimeNs === current.mtimeNs;
-      });
-    },
-  });
+  return undefined;
 }
 
 export async function GET(request: NextRequest) {

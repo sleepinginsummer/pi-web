@@ -31,6 +31,7 @@ const MEMBER_NAME_PATTERN = /^[\p{L}\p{N}_-]{1,32}$/u;
 interface StoreFile {
   version: 1;
   teams: Team[];
+  committedRebuildSessions?: string[];
 }
 
 export function getTeamsPath(agentDir = getAgentDir()): string {
@@ -75,45 +76,64 @@ function normalizeTeam(team: Team): Team {
   };
 }
 
-function readTeams(path: string, recoverOnCorrupt = false): Team[] {
-  if (!existsSync(path)) return [];
+function readTeamStore(path: string, recoverOnCorrupt = false): StoreFile {
+  const empty: StoreFile = { version: 1, teams: [] };
+  if (!existsSync(path)) return empty;
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<StoreFile>;
     if (!Array.isArray(parsed?.teams)) throw new Error("teams is not an array");
-    return parsed.teams.filter(isTeam).map(normalizeTeam);
+    const committedRebuildSessions = Array.isArray(parsed.committedRebuildSessions)
+      ? parsed.committedRebuildSessions.filter((id) => typeof id === "string")
+      : undefined;
+    return { version: 1, teams: parsed.teams.filter(isTeam).map(normalizeTeam), committedRebuildSessions };
   } catch (error) {
     // 只读路径绝不写盘，避免在锁外覆盖另一进程刚写好的数据；仅持锁修改路径确认仍损坏时才另存并重置。
     if (!recoverOnCorrupt) {
       console.warn("[pi-web] 团队存储无法读取:", error instanceof Error ? error.message : error);
-      return [];
+      return empty;
     }
     console.warn("[pi-web] 团队存储无法读取，另存后从空开始:", error instanceof Error ? error.message : error);
     try {
       writePrivateFileAtomicSync(`${path}.corrupt-${Date.now()}`, readFileSync(path, "utf8"));
-      writePrivateFileAtomicSync(path, JSON.stringify({ version: 1, teams: [] }, null, 2));
+      writePrivateFileAtomicSync(path, JSON.stringify(empty, null, 2));
     } catch (backupError) {
       console.warn("[pi-web] 团队存储备份失败:", backupError instanceof Error ? backupError.message : backupError);
     }
-    return [];
+    return empty;
   }
 }
 
-function writeTeams(path: string, teams: Team[]): void {
+function readTeams(path: string): Team[] {
+  return readTeamStore(path).teams;
+}
+
+export function readCommittedTeamRebuildSessions(path = getTeamsPath()): Set<string> {
+  return new Set(readTeamStore(path).committedRebuildSessions);
+}
+
+function writeTeams(path: string, store: StoreFile): void {
   mkdirSync(dirname(path), { recursive: true });
-  writePrivateFileAtomicSync(path, JSON.stringify({ version: 1, teams } satisfies StoreFile, null, 2));
+  writePrivateFileAtomicSync(path, JSON.stringify(store, null, 2));
 }
 
 async function mutate<T>(
   operation: (teams: Team[]) => {
     teams: Team[];
     result: T;
+    rebuiltLeaderSessionId?: string;
     aroundWrite?: (commitTeams: () => void) => void | Promise<void>;
   },
   path: string,
 ): Promise<T> {
   return withPrivateFileLock(path, async () => {
-    const { teams, result, aroundWrite } = operation(readTeams(path, true));
-    const commitTeams = () => writeTeams(path, teams);
+    const previous = readTeamStore(path, true);
+    const { teams, result, aroundWrite, rebuiltLeaderSessionId } = operation(previous.teams);
+    // 与团队同一次落盘。之后 leader 转为普通会话时仍能凭原提交授权。
+    let committedRebuildSessions = previous.committedRebuildSessions;
+    if (rebuiltLeaderSessionId && !committedRebuildSessions?.includes(rebuiltLeaderSessionId)) {
+      committedRebuildSessions = [...(committedRebuildSessions ?? []), rebuiltLeaderSessionId];
+    }
+    const commitTeams = () => writeTeams(path, { ...previous, teams, committedRebuildSessions });
     if (aroundWrite) {
       await aroundWrite(commitTeams);
     } else {
@@ -134,6 +154,7 @@ async function mutateTeam<T>(
   operation: (team: Team, now: number) => {
     team: Team;
     result: T;
+    rebuiltLeaderSessionId?: string;
     aroundWrite?: (commitTeams: () => void) => void | Promise<void>;
   },
   path: string,
@@ -144,10 +165,10 @@ async function mutateTeam<T>(
     if (index < 0) throw new Error(`团队 ${teamId} 不存在`);
     // 团队编辑用这个版本核对成员基线，同毫秒的连续操作也必须让旧编辑失效。
     const ts = Math.max(now ?? Date.now(), teams[index].updatedAt + 1);
-    const { team, result, aroundWrite } = operation(teams[index], ts);
+    const { team, result, aroundWrite, rebuiltLeaderSessionId } = operation(teams[index], ts);
     const next = [...teams];
     next[index] = { ...team, updatedAt: ts };
-    return { teams: next, result, aroundWrite };
+    return { teams: next, result, aroundWrite, rebuiltLeaderSessionId };
   }, path);
 }
 
@@ -304,6 +325,7 @@ export async function rebuildTeam(
     return {
       team,
       result: team,
+      rebuiltLeaderSessionId: team.members[0].sessionId,
       ...(options ? { aroundWrite: (commitTeams: () => void) => options.aroundSave(previous, commitTeams) } : {}),
     };
   }, path);

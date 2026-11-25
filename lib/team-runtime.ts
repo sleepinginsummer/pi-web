@@ -226,17 +226,24 @@ export interface CreateMemberSessionInput {
   thinkingLevel?: ThinkingLevel;
 }
 
-/** 准备一个空会话，调用方决定何时发布，避免事务等待期间被会话列表发现。 */
-function prepareTeamMemberSession(input: CreateMemberSessionInput) {
-  const cwd = input.cwd.trim();
+function assertTeamWorkingDirectory(cwd: string): void {
   if (!cwd) throw new Error("工作目录不能为空");
   const cwdStats = statSync(cwd, { throwIfNoEntry: false });
   if (!cwdStats) throw new Error(`工作目录不存在: ${cwd}`);
   if (!cwdStats.isDirectory()) throw new Error(`工作目录必须是目录: ${cwd}`);
+}
+
+/** 准备会话参数，调用方决定何时发布。 */
+function prepareTeamMemberSession(input: CreateMemberSessionInput) {
+  const cwd = input.cwd.trim();
+  assertTeamWorkingDirectory(cwd);
   return { ...input, cwd, sessionId: uuidv7() };
 }
 
-function publishTeamMemberSession(input: ReturnType<typeof prepareTeamMemberSession>): string {
+function publishTeamMemberSession(
+  input: ReturnType<typeof prepareTeamMemberSession>,
+  requiresTeamRebuildCommit = false,
+): string {
   const sessionManager = SessionManager.create(input.cwd, undefined, { id: input.sessionId });
   if (input.model) {
     sessionManager.appendModelChange(input.model.provider, input.model.modelId);
@@ -254,7 +261,8 @@ function publishTeamMemberSession(input: ReturnType<typeof prepareTeamMemberSess
   const sessionFile = sessionManager.getSessionFile();
   const header = sessionManager.getHeader();
   if (!sessionFile || !header) throw new Error("无法创建成员会话文件");
-  const lines = [header, ...sessionManager.getEntries()].map((entry) => JSON.stringify(entry));
+  const fileHeader = requiresTeamRebuildCommit ? { ...header, requiresTeamRebuildCommit: true } : header;
+  const lines = [fileHeader, ...sessionManager.getEntries()].map((entry) => JSON.stringify(entry));
   writePrivateFileCreateAtomicSync(sessionFile, `${lines.join("\n")}\n`);
   invalidateSessionListCache();
   return sessionFile;
@@ -357,11 +365,12 @@ export async function rebuildTeamWithCleanup(
     }, undefined, {
       aroundSave: async (current, commitTeams) => {
         await withSessionSystemPromptAddonLocks(current.members.map((member) => member.sessionId), () => {
+          assertTeamWorkingDirectory(created.cwd);
           const rollbacks: Array<() => void> = [];
           try {
             for (const member of current.members) rollbacks.push(cleanupTeamRoleSystemPromptAddon(member.sessionId));
             // 会话目录也是文件访问授权来源，版本和输入通过锁内校验后才发布。
-            const sessionFile = publishTeamMemberSession(created);
+            const sessionFile = publishTeamMemberSession(created, true);
             rollbacks.push(() => cleanupOrphanSessionFile(sessionFile));
             commitTeams();
             committed = true;

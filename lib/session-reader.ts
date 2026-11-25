@@ -260,6 +260,7 @@ function mapScannedSession(
     path: scanned.path,
     id: scanned.id,
     cwd: scanned.cwd,
+    ...(scanned.requiresTeamRebuildCommit ? { requiresTeamRebuildCommit: true } : {}),
     name: scanned.name,
     created: scanned.created.toISOString(),
     modified: scanned.modified.toISOString(),

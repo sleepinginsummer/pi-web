@@ -98,3 +98,39 @@ test("打开的文件与已校验的图标身份不一致时拒绝读取", async
     syncBuiltinESMExports();
   }
 });
+
+test("祖先目录的无关写入只触发一次完整复查", async (t) => {
+  for (const writes of [1, 2]) {
+    const ancestor = createProject("timestamp-" + writes, false);
+    const project = path.join(ancestor, "project");
+    fs.mkdirSync(project);
+    allowFileRoot(project);
+    const icon = path.join(project, "favicon.svg");
+    fs.writeFileSync(icon, svg);
+    const expected = fs.lstatSync(icon, { bigint: true });
+    const realFstat = fs.fstatSync;
+    let attempts = 0;
+    t.mock.method(fs, "fstatSync", (fd, options) => {
+      const stats = realFstat(fd, options);
+      if (stats.dev === expected.dev && stats.ino === expected.ino) {
+        attempts += 1;
+        if (attempts <= writes) {
+          fs.mkdirSync(path.join(ancestor, "unrelated-" + attempts));
+          fs.utimesSync(ancestor, 100 + attempts, 100 + attempts);
+        }
+      }
+      return stats;
+    });
+    syncBuiltinESMExports();
+    try {
+      const { GET: getIconDuringWrite } = await jiti.import("./route.ts");
+      const response = await requestIcon(project, getIconDuringWrite);
+      assert.equal(attempts, 2);
+      assert.equal(response.status, writes === 1 ? 200 : 204);
+      if (writes === 1) assert.equal(await response.text(), svg);
+    } finally {
+      t.mock.restoreAll();
+      syncBuiltinESMExports();
+    }
+  }
+});

@@ -23,6 +23,7 @@ export interface ScannedSessionInfo {
 	path: string;
 	id: string;
 	cwd: string;
+	requiresTeamRebuildCommit?: boolean;
 	name?: string;
 	created: Date;
 	modified: Date;
@@ -73,7 +74,7 @@ function isRecord(value: unknown): value is RawEntry {
 
 // Bump on any change to what foldEntry() counts: a resumed scan adds to totals
 // counted under the rules its prefix was scanned with.
-const INDEX_FORMAT_VERSION = 1;
+const INDEX_FORMAT_VERSION = 2;
 /** A trailing throttle: a run's rescans rewrite the index once per window. */
 const INDEX_PERSIST_DELAY_MS = 5_000;
 const RESUME_SAMPLE_BYTES = 512;
@@ -164,6 +165,7 @@ async function deferredSessionInfo(
 		path: filePath,
 		id: header.id,
 		cwd: header.cwd,
+		...(header.requiresTeamRebuildCommit === true ? { requiresTeamRebuildCommit: true } : {}),
 		created,
 		modified: new Date(fingerprint.mtimeMs),
 		messageCount: 0,
@@ -207,6 +209,7 @@ function activityTimeOf(entry: RawEntry): number | undefined {
 interface SessionHeader {
 	id: string;
 	cwd: string;
+	requiresTeamRebuildCommit?: boolean;
 	created: Date;
 	parentSessionPath?: string;
 	/** NaN unless the header's timestamp is a string. */
@@ -226,6 +229,7 @@ function readHeader(entry: RawEntry, head: Buffer | undefined): SessionHeader {
 	return {
 		id: entry.id as string,
 		cwd: typeof entry.cwd === "string" ? entry.cwd : "",
+		requiresTeamRebuildCommit: entry.requiresTeamRebuildCommit === true,
 		created: new Date(entry.timestamp as string),
 		parentSessionPath: typeof entry.parentSession === "string" ? entry.parentSession : undefined,
 		time: typeof entry.timestamp === "string" ? new Date(entry.timestamp).getTime() : NaN,
@@ -391,6 +395,7 @@ async function scanSessionFile(
 			header = {
 				id: info.id,
 				cwd: info.cwd,
+				requiresTeamRebuildCommit: info.requiresTeamRebuildCommit,
 				created: new Date(info.created.getTime()),
 				parentSessionPath: info.parentSessionPath,
 				time: info.created.getTime(),
@@ -427,7 +432,7 @@ async function scanSessionFile(
 		// read lines with readline; a resume point is kept only when it changed nothing.
 		if (!scan || (scan.rest.length > 0 && !parseLines(scan.rest, null))) return null;
 		if (!header) return null;
-		const { id, cwd, created, parentSessionPath, time, head } = header;
+		const { id, cwd, requiresTeamRebuildCommit, created, parentSessionPath, time, head } = header;
 
 		const modified =
 			typeof totals.lastActivityTime === "number" && totals.lastActivityTime > 0
@@ -441,6 +446,7 @@ async function scanSessionFile(
 				path: filePath,
 				id,
 				cwd,
+				...(requiresTeamRebuildCommit ? { requiresTeamRebuildCommit: true } : {}),
 				name: totals.name,
 				parentSessionPath,
 				created,
@@ -575,6 +581,7 @@ function loadPersistedIndex(): void {
 					path: pathKey,
 					id: info.id,
 					cwd: info.cwd,
+					...(info.requiresTeamRebuildCommit === true ? { requiresTeamRebuildCommit: true } : {}),
 					name: info.name,
 					parentSessionPath: info.parentSessionPath,
 					firstMessage: info.firstMessage,
