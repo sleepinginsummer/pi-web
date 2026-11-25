@@ -44,7 +44,6 @@ import { useCompletionEffects } from "@/hooks/useCompletionEffects";
 import notificationStyles from "./CompletionNotificationPrompt.module.css";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import { useScrollbarVisibility } from "@/hooks/useScrollbarVisibility";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { DebugClientSession } from "@/lib/debug-types";
 import type { AppUpdateResponse } from "@/lib/api-types";
@@ -345,7 +344,6 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
     positionRequest: scrollPositionRequest,
     deferInitialScroll: Boolean(pendingScrollRestore),
   });
-  useScrollbarVisibility(scrollContainerRef);
   useEffect(() => {
     const scopeKey = session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : null);
     if (!scopeKey) return;
@@ -1550,7 +1548,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
         <div
           ref={scrollContainerRef}
           data-chat-scroll-container
-          className={`scrollbar-subtle min-w-0 flex-1 overflow-x-hidden overflow-y-auto pt-4 [scrollbar-gutter:stable]${askDialogElement ? " chat-scroll-ask-reserve" : ""}`}
+          className={`min-w-0 flex-1 overflow-x-hidden overflow-y-auto pt-4 [scrollbar-gutter:stable]${askDialogElement ? " chat-scroll-ask-reserve" : ""}`}
           style={{ visibility: pendingScrollRestore ? "hidden" : undefined }}
         >
           <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px 38px ${isMobile ? CHAT_COLUMN_PADDING : CHAT_MINIMAP_LEFT_PADDING}px` }}>

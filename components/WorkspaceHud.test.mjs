@@ -85,6 +85,11 @@ test("WorkspaceHud renders folded sections with dedicated Servers row and no Con
         onOpenArtifactFile() {},
         onHideArtifact() {},
         onDeleteArtifactFile: async () => ({ ok: true }),
+        ...makeStubSharedPolling([{ id: "srv-active", name: "web", status: "running" }]),
+        sharedBackground: {
+          ...makeStubSharedPolling().sharedBackground,
+          data: { commands: [{ id: "cmd-active", sessionId: "00000000-0000-0000-0000-000000000001", status: "running" }] },
+        },
       }),
     ),
   );
@@ -555,4 +560,47 @@ test("new session auto-expands when a nested edit succeeds inside a failed codem
   });
   assert.ok(container.querySelector(".workspace-hud-anchor.is-expanded"));
   assert.equal(container.querySelector(".workspace-hud-collapsed"), null);
+});
+
+
+test("工作区隐藏空栏目和空闲服务任务，活动变化后同步显示或隐藏", async (t) => {
+  const polling = makeStubSharedPolling([{ id: "srv-1", name: "web", status: "stopped" }]);
+  polling.sharedDevServers.data.configs = [{ name: "web", port: 3000 }];
+  polling.sharedBackground.data.commands = [{ id: "cmd-1", sessionId: "sess-idle", status: "exited" }];
+  const props = {
+    cwd: "/repo", sessionId: "sess-idle", isNewSession: false,
+    git: {
+      branches: { isGit: true, currentBranch: "main", branches: ["main"] },
+      status: { isGitRepository: true, files: [], additions: 0, deletions: 0 },
+      refresh() {},
+    },
+    worktrees: [], artifacts: [],
+    onSwitchBranch: async () => ({ ok: true }), onSelectWorktree() {},
+    onOpenFileDiff() {}, onOpenArtifactFile() {}, onHideArtifact() {},
+    onDeleteArtifactFile: async () => ({ ok: true }),
+    ...polling,
+  };
+  const { container, render } = await withHudDom(t, props);
+  await React.act(async () => container.querySelector(".workspace-hud-title-btn").click());
+  assert.equal(container.querySelectorAll(".workspace-hud-section").length, 0);
+
+  const activeProps = {
+    ...props,
+    git: { ...props.git, status: { ...props.git.status, files: [{ filePath: "/repo/a.ts", code: "M" }] } },
+    artifacts: [{ id: "doc", kind: "doc", name: "spec.md", path: "/repo/spec.md" }],
+    todoWidget: { key: "rpiv-todos", lines: ["Todos (0/1)", "└─ ○ 待处理"] },
+    sharedDevServers: { ...polling.sharedDevServers, data: { servers: [{ id: "srv-1", name: "web", status: "running" }], configs: [] } },
+    sharedBackground: { ...polling.sharedBackground, data: { commands: [{ id: "cmd-1", sessionId: "sess-idle", status: "running" }] } },
+  };
+  await render(activeProps);
+  assert.equal(container.querySelectorAll(".workspace-hud-section").length, 5);
+  await render(props);
+  assert.equal(container.querySelectorAll(".workspace-hud-section").length, 0);
+
+  // 待触发的定时任务即使没有运行中的命令，也须保留任务入口。
+  await render({
+    ...props,
+    sharedScheduled: { ...polling.sharedScheduled, data: { tasks: [{ id: "task-1", sessionId: "sess-idle", enabled: true, nextRunAt: Date.now() + 60000 }] } },
+  });
+  assert.equal(container.querySelectorAll(".workspace-hud-section").length, 1);
 });

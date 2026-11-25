@@ -847,8 +847,8 @@ export const WorkspaceHud = memo(function WorkspaceHud({
                 )}
               </div>
 
-              {/* ② 变更文件（仅 Git 仓库显示） */}
-              {isGit && (
+              {/* 空栏目不占位；服务器和任务仅在有活动服务、运行命令或待触发任务时显示。 */}
+              {isGit && changedFiles.length > 0 && (
                 <div className="workspace-hud-section">
                   <button type="button" className="workspace-hud-sec-header" onClick={() => toggleSection("changes")}>
                     <span className="workspace-hud-sec-left">
@@ -905,7 +905,7 @@ export const WorkspaceHud = memo(function WorkspaceHud({
               )}
 
               {/* ③ 本会话产物（支持预览与二次确认删除） */}
-              <div className="workspace-hud-section">
+              {hasArtifacts && <div className="workspace-hud-section">
                 <button type="button" className="workspace-hud-sec-header" onClick={() => toggleSection("artifacts")}>
                   <span className="workspace-hud-sec-left">
                     <span aria-hidden="true">{sections.artifacts ? "▾" : "▸"}</span>
@@ -983,10 +983,10 @@ export const WorkspaceHud = memo(function WorkspaceHud({
                     )}
                   </div>
                 )}
-              </div>
+              </div>}
 
               {/* ④ 服务器（单独一行） */}
-              <div className="workspace-hud-section">
+              {activeServers.length > 0 && <div className="workspace-hud-section">
                 <button type="button" className="workspace-hud-sec-header" onClick={() => toggleSection("servers")}>
                   <span className="workspace-hud-sec-left">
                     <span aria-hidden="true">{sections.servers ? "▾" : "▸"}</span>
@@ -1076,10 +1076,10 @@ export const WorkspaceHud = memo(function WorkspaceHud({
                     )}
                   </div>
                 )}
-              </div>
+              </div>}
 
               {/* ⑤ 后台命令 & 定时任务 */}
-              <div className="workspace-hud-section">
+              {(activeBgCount > 0 || pendingSchedCount > 0) && <div className="workspace-hud-section">
                 <button type="button" className="workspace-hud-sec-header" onClick={() => toggleSection("tasks")}>
                   <span className="workspace-hud-sec-left">
                     <span aria-hidden="true">{sections.tasks ? "▾" : "▸"}</span>
@@ -1152,10 +1152,10 @@ export const WorkspaceHud = memo(function WorkspaceHud({
                     )}
                   </div>
                 )}
-              </div>
+              </div>}
 
               {/* ⑥ Todo 列表 */}
-              <div className="workspace-hud-section">
+              {hasTodos && <div className="workspace-hud-section">
                 <button type="button" className="workspace-hud-sec-header" onClick={() => toggleSection("todos")}>
                   <span className="workspace-hud-sec-left">
                     <span aria-hidden="true">{sections.todos ? "▾" : "▸"}</span>
@@ -1196,7 +1196,7 @@ export const WorkspaceHud = memo(function WorkspaceHud({
                     )}
                   </div>
                 )}
-              </div>
+              </div>}
 
               {/* ⑦ 子代理 & 侧聊（可在 ··· 菜单中开关） */}
               {showSubagentsSection && subagents.length > 0 && (

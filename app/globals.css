@@ -3478,7 +3478,8 @@ span.token.table {
   transform: none;
 }
 .extension-widget-key { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.extension-widget-panels { position: absolute; right: 12px; bottom: 42px; z-index: 4; max-width: min(520px, calc(100vw - 24px)); }
+/* 底栏弹框须高于悬浮输入工具条（z-index: 12），避免文件夹胶囊遮住正文。 */
+.extension-widget-panels { position: absolute; right: 12px; bottom: 42px; z-index: 20; max-width: min(520px, calc(100vw - 24px)); }
 .extension-widget-panel { border: 1px solid var(--border); border-radius: 8px; background: var(--bg-panel); box-shadow: 0 8px 24px rgba(0,0,0,.18); }
 .extension-widget-panel-heading { padding: 5px 9px; border-bottom: 1px solid var(--border); color: var(--text-dim); font: 11px var(--font-mono); }
 .extension-widget-content { max-height: 260px; overflow: auto; margin: 0; padding: 8px 9px; color: var(--text-muted); font: 12px/1.5 var(--font-mono); white-space: pre-wrap; word-break: break-word; }
@@ -3713,7 +3714,7 @@ span.token.table {
   .extension-status-bar .dev-servers-trigger > .extension-widget-placement { display: none; }
   .extension-status-bar .extension-widget-panels {
     inset: auto 8px 49px;
-    z-index: 10;
+    z-index: 20;
     max-width: none;
     max-height: none;
     overflow: visible;
@@ -4168,6 +4169,12 @@ span.token.table {
 .composer-card:focus-within {
   border-color: color-mix(in srgb, var(--accent) 55%, var(--border)) !important;
   box-shadow: 0 2px 14px color-mix(in srgb, var(--accent) 10%, transparent) !important;
+}
+
+.composer-top-utils {
+  padding: 1px 4px;
+  border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+  border-radius: 999px;
 }
 
 .composer-top-utils > button,
@@ -5016,6 +5023,9 @@ span.token.table {
   gap: 2px;
   max-height: 210px;
   overflow-y: auto;
+  /* 预留滚动条槽，并为 macOS 浮层滚动条留出间距，避免遮住右侧操作。 */
+  scrollbar-gutter: stable;
+  padding-inline-end: 10px;
   overscroll-behavior: contain;
   scrollbar-width: thin;
 }
