@@ -393,6 +393,11 @@ export interface McpHostServerStatus {
   conflict?: string;
 }
 
+/** 菜单同时展示启用配置与连接状态，未建立连接不代表没有启用。 */
+export type McpMenuServerStatus = Pick<McpHostServerStatus, "name" | "scope"> & {
+  state: McpHostServerState | "not-connected";
+};
+
 /** Which entry a status is about (`lib/mcp-status.ts`), with the `mcpConfigKey()` of the entry as its file holds it. */
 type StatusTarget = McpStatusEntry & { configKey: string };
 
@@ -777,6 +782,25 @@ class HostInstance {
       });
     }
     return states.sort((a, b) => a.name.localeCompare(b.name) || a.scope.localeCompare(b.scope));
+  }
+
+  /** 只读配置与现有状态：不调用 sync，也不注册、重连或重置空闲计时器。 */
+  menuServerStates(): McpMenuServerStatus[] {
+    if (!this.ctx || !this.active || this.disposed) return [];
+    const loaded = this.options.internals.loadMcpConfig({
+      agentDir: this.options.agentDir,
+      cwd: this.ctx.cwd,
+      projectTrusted: this.options.mayReadProjectConfig(this.ctx.cwd),
+    });
+    const states = new Map<string, McpMenuServerStatus>();
+    for (const { name, scope, state } of this.serverStates()) states.set(`${scope}\0${name}`, { name, scope, state });
+    for (const entry of loaded.servers) {
+      if (entry.config.enabled === false) continue;
+      const scope = entry.scope === "project" || entry.override !== undefined ? "project" : "global";
+      const key = `${scope}\0${entry.name}`;
+      if (!states.has(key)) states.set(key, { name: entry.name, scope, state: "not-connected" });
+    }
+    return [...states.values()].sort((a, b) => a.name.localeCompare(b.name) || a.scope.localeCompare(b.scope));
   }
 
   /**
@@ -1244,6 +1268,10 @@ export class McpHost {
 
   serverStates(): McpHostServerStatus[] {
     return this.current?.serverStates() ?? [];
+  }
+
+  menuServerStates(): McpMenuServerStatus[] {
+    return this.current?.menuServerStates() ?? [];
   }
 
   /** The current load's state for the debug panel; null before the extension factory ran. */

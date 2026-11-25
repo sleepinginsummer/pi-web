@@ -243,13 +243,13 @@ export function DevServersShelf({
   if (!data && !scheduled.data && !background.data) return null;
   if (!showServers && !showTasks) return null;
 
-  // 已结束的（服务器已停止/正常退出、一次性任务已触发、命令已退出）收进折叠区，不占面板正文；
+  // 已结束的（服务器已停止/正常退出、任务已暂停或触发结束、命令已退出）收进折叠区，不占面板正文；
   // 启动失败的服务器留在正文，否则要展开折叠才看得到问题。
   const activeServers = servers.filter(isDevServerActive);
   const bodyServers = servers.filter((server) => server.status !== "stopped" && server.status !== "exited");
   const finishedServers = servers.filter((server) => server.status === "stopped" || server.status === "exited");
-  const openTasks = tasks.filter((task) => task.nextRunAt !== null);
-  const finishedTasks = tasks.filter((task) => task.nextRunAt === null);
+  const openTasks = tasks.filter(isScheduledTaskPending);
+  const finishedTasks = tasks.filter((task) => !isScheduledTaskPending(task));
   const openCommands = commands.filter((command) => command.status === "running" || command.status === "stopping");
   const finishedCommands = commands.filter((command) => command.status !== "running" && command.status !== "stopping");
   const finishedCount = finishedTasks.length + finishedCommands.length;
@@ -485,7 +485,7 @@ export function DevServersShelf({
             {background.actionError && <p role="alert" className="dev-server-error">{background.actionError}</p>}
             {finishedCount > 0 && (
               <details className="finished-tasks">
-                <summary className="extension-widget-panel-heading">{t("tasks.finishedSection", { count: finishedCount })}</summary>
+                <summary className="extension-widget-panel-heading">{t("tasks.inactiveSection", { count: finishedCount })}</summary>
                 {finishedTasks.length > 0 && (
                   <>
                     <div className="dev-server-subheading">{t("tasks.title")}</div>

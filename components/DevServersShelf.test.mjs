@@ -221,6 +221,12 @@ test("暂停的任务不进徽标计数，和读屏数字一致", () => {
   assert.deepEqual(countBadges(render(data, { tasks: [pending] })), [1]);
   assert.deepEqual(countBadges(render(data, { tasks: [paused] })), [], "暂停的任务不计入“待触发”");
   assert.deepEqual(countBadges(render(data, { tasks: [paused, pending] })), [1]);
+  const panel = render(data, { tasks: [paused, pending], open: "tasks" });
+  const folded = panel.indexOf('<details class="finished-tasks">');
+  assert.ok(folded > 0, "暂停任务归入默认关闭的分组");
+  assert.ok(panel.indexOf('aria-label="tasks.runNow pending"') < folded, "待触发任务仍在正文");
+  assert.ok(panel.indexOf('aria-label="tasks.runNow paused"') > folded, "暂停任务不与待触发任务混排");
+  assert.match(panel, /tasks\.inactiveSection/);
   // 徽标数和读屏用的都是 pendingTaskCount，源码里不再用 openTasks 计数。
   assert.match(source, /\{pendingTaskCount > 0 && \(\n\s*<CountBadge count=\{pendingTaskCount\}/);
 });

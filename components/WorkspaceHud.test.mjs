@@ -578,7 +578,7 @@ test("new session auto-expands when a nested edit succeeds inside a failed codem
 });
 
 
-test("工作区隐藏空栏目和空闲服务任务，活动变化后同步显示或隐藏", async (t) => {
+test("工作区保留停止的服务器与任务，已暂停或结束条目默认折叠", async (t) => {
   const polling = makeStubSharedPolling([{ id: "srv-1", name: "web", status: "stopped" }]);
   polling.sharedDevServers.data.configs = [{ name: "web", port: 3000 }];
   polling.sharedBackground.data.commands = [{ id: "cmd-1", sessionId: "sess-idle", status: "exited" }];
@@ -597,7 +597,19 @@ test("工作区隐藏空栏目和空闲服务任务，活动变化后同步显�
   };
   const { container, render } = await withHudDom(t, props);
   await React.act(async () => container.querySelector(".workspace-hud-title-btn").click());
-  assert.equal(container.querySelectorAll(".workspace-hud-section:not([data-workspace-mcp])").length, 0);
+  assert.equal(container.querySelectorAll(".workspace-hud-section:not([data-workspace-mcp])").length, 2);
+  await React.act(async () => {
+    container.querySelector('button[title="Servers"]').click();
+    container.querySelector('button[title="Background & Scheduled"]').click();
+  });
+  const serverDetails = container.querySelector('[data-workspace-finished="servers"]');
+  const taskDetails = container.querySelector('[data-workspace-finished="tasks"]');
+  assert.ok(serverDetails && taskDetails, "只有停止记录时也能展开栏目查看历史");
+  assert.equal(serverDetails.open, false);
+  assert.equal(taskDetails.open, false);
+  assert.equal(serverDetails.querySelectorAll(".workspace-hud-row").length, 1, "已停止服务器只出现一次，不与启动配置重复");
+  assert.ok([...serverDetails.querySelectorAll("button")].some((button) => button.textContent === "Start"), "仍可重新启动已停止服务器");
+  assert.ok([...taskDetails.querySelectorAll("button")].some((button) => button.textContent === "Dismiss"), "仍可移除已结束命令");
 
   const activeProps = {
     ...props,
@@ -616,19 +628,23 @@ test("工作区隐藏空栏目和空闲服务任务，活动变化后同步显�
     todoWidget: { key: "rpiv-todos", lines: ["Todos (1/1)", "└─ ✓ 已完成"] },
     sharedScheduled: { ...polling.sharedScheduled, data: { enabled: true, tasks: [
       { id: "pending", sessionId: "sess-idle", enabled: true, nextRunAt: Date.now() + 60000 },
-      { id: "paused", sessionId: "sess-idle", enabled: false, nextRunAt: Date.now() + 60000 },
+      { id: "paused", name: "paused-task", sessionId: "sess-idle", enabled: false, nextRunAt: Date.now() + 60000 },
     ] } },
   });
   assert.equal(container.querySelector(".workspace-hud-todo-progress.is-complete").textContent, "100%");
   const badges = container.querySelectorAll('button[title="Background & Scheduled"] .dev-servers-count');
   assert.deepEqual([...badges].map((badge) => badge.textContent), ["1", "1"], "定时任务与命令分别计数，暂停任务不计入");
+  const pausedGroup = container.querySelector('[data-workspace-finished="tasks"]');
+  assert.equal(pausedGroup.open, false);
+  assert.match(pausedGroup.textContent, /paused-task/);
+  assert.ok([...pausedGroup.querySelectorAll("button")].some((button) => button.textContent === "Resume"), "暂停任务保留恢复按钮");
   await render(props);
-  assert.equal(container.querySelectorAll(".workspace-hud-section:not([data-workspace-mcp])").length, 0);
+  assert.equal(container.querySelectorAll(".workspace-hud-section:not([data-workspace-mcp])").length, 2);
 
   // 待触发的定时任务即使没有运行中的命令，也须保留任务入口。
   await render({
     ...props,
     sharedScheduled: { ...polling.sharedScheduled, data: { tasks: [{ id: "task-1", sessionId: "sess-idle", enabled: true, nextRunAt: Date.now() + 60000 }] } },
   });
-  assert.equal(container.querySelectorAll(".workspace-hud-section:not([data-workspace-mcp])").length, 1);
+  assert.equal(container.querySelectorAll(".workspace-hud-section:not([data-workspace-mcp])").length, 2);
 });

@@ -240,11 +240,13 @@ export const WorkspaceHud = memo(function WorkspaceHud({
     () => (devServers.data?.servers ?? []).filter((sv) => isDevServerActive(sv)),
     [devServers.data?.servers],
   );
-  const stoppedConfigNames = useMemo(() => {
-    const runningNames = new Set(activeServers.map((s) => s.name));
-    return (devServers.data?.configs ?? []).filter((cfg) => !runningNames.has(cfg.name));
-  }, [activeServers, devServers.data?.configs]);
-  const totalServerEntries = activeServers.length + stoppedConfigNames.length;
+  const finishedServers = (devServers.data?.servers ?? []).filter((server) => server.status === "stopped" || server.status === "exited");
+  // 启动失败仍留在正文，避免把需要处理的问题藏入已结束区域。
+  const bodyServers = (devServers.data?.servers ?? []).filter((server) => server.status !== "stopped" && server.status !== "exited");
+  const idleServerConfigs = useMemo(() => {
+    const knownNames = new Set((devServers.data?.servers ?? []).map((server) => server.name));
+    return (devServers.data?.configs ?? []).filter((config) => !knownNames.has(config.name));
+  }, [devServers.data?.servers, devServers.data?.configs]);
 
   // 后台命令 & 定时任务（按当前会话筛选，与 DevServersShelf 口径一致）
   const sessionBgCommands = useMemo(() => {
@@ -268,6 +270,11 @@ export const WorkspaceHud = memo(function WorkspaceHud({
     [sessionScheduledTasks],
   );
   const totalTaskEntries = sessionBgCommands.length + sessionScheduledTasks.length;
+  const activeCommands = sessionBgCommands.filter((command) => command.status === "running" || command.status === "stopping");
+  const finishedCommands = sessionBgCommands.filter((command) => command.status !== "running" && command.status !== "stopping");
+  const pendingTasks = sessionScheduledTasks.filter(isScheduledTaskPending);
+  const inactiveTasks = sessionScheduledTasks.filter((task) => !isScheduledTaskPending(task));
+  const inactiveTaskCount = finishedCommands.length + inactiveTasks.length;
 
   // Todo 列表
   const todos = useMemo(() => parseTodoWidgetLines(todoWidget), [todoWidget]);
@@ -512,6 +519,54 @@ export const WorkspaceHud = memo(function WorkspaceHud({
     // 真实文件已删除，仅由服务端存在性状态过滤，不写入持久化隐藏集合（以免重新生成同名文件时仍被隐藏）
     setPendingDelete(null);
     git.refresh();
+  };
+
+  const renderServerRow = (server: (typeof activeServers)[number]) => {
+    const active = isDevServerActive(server);
+    const canStart = !active && !activeServers.some((current) => current.name === server.name) && devServers.data?.configs.some((config) => config.name === server.name);
+    return (
+      <div key={server.id} className="workspace-hud-row" onClick={() => onOpenServerPreview?.(server.id, server.name)}>
+        <div className="workspace-hud-row-main">
+          {active && <span className="workspace-hud-dot" aria-hidden="true" />}
+          <span className="workspace-hud-row-title">{server.name}{server.port ? <span className="workspace-hud-row-sub"> :{server.port}</span> : null}</span>
+        </div>
+        <div style={{ display: "inline-flex", gap: 4, flexShrink: 0 }}>
+          {onOpenServerPreview && <button type="button" className={`workspace-hud-mini-btn${active ? " is-primary" : ""}`} onClick={(event) => { event.stopPropagation(); onOpenServerPreview(server.id, server.name); }}>{t("workspaceHud.preview")}</button>}
+          {active && server.managed && <button type="button" disabled={devServers.pending.has(server.id)} className="workspace-hud-mini-btn is-danger" onClick={(event) => { event.stopPropagation(); void devServers.stop(server.id); }}>{t("workspaceHud.stop")}</button>}
+          {canStart && <button type="button" disabled={devServers.pending.has(`start:${server.name}`)} className="workspace-hud-mini-btn" onClick={(event) => { event.stopPropagation(); void devServers.start(server.name); }}>{t("workspaceHud.start")}</button>}
+        </div>
+      </div>
+    );
+  };
+
+  const renderCommandRow = (command: (typeof sessionBgCommands)[number]) => {
+    const running = command.status === "running" || command.status === "stopping";
+    return (
+      <div key={command.id} className="workspace-hud-row" title={command.command}>
+        <div className="workspace-hud-row-main">
+          {running && <span className="workspace-hud-dot" aria-hidden="true" />}
+          <span className="workspace-hud-row-title" style={{ fontFamily: "var(--font-mono)", fontSize: 11.5 }}>{command.label ?? command.command}</span>
+        </div>
+        <button type="button" disabled={background.pending.has(command.id)} className={`workspace-hud-mini-btn${running ? " is-danger" : ""}`} onClick={() => void background.act(command.id, running ? "stop" : "dismiss")}>
+          {running ? t("workspaceHud.stop") : t("workspaceHud.dismiss")}
+        </button>
+      </div>
+    );
+  };
+
+  const renderScheduledRow = (task: (typeof sessionScheduledTasks)[number]) => {
+    const pending = isScheduledTaskPending(task);
+    return (
+      <div key={task.id} className="workspace-hud-row" title={task.prompt}>
+        <div className="workspace-hud-row-main"><span className="workspace-hud-row-title">{task.name}</span></div>
+        <div style={{ display: "inline-flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
+          {task.nextRunAt !== null && <span className="workspace-hud-row-sub">{formatNextRun(task.nextRunAt)}</span>}
+          <button type="button" disabled={scheduled.pending.has(task.id)} className="workspace-hud-mini-btn" onClick={() => void scheduled.act(task.id, pending ? "pause" : "resume")}>
+            {pending ? t("workspaceHud.pause") : t("workspaceHud.resume")}
+          </button>
+        </div>
+      </div>
+    );
   };
 
   const hasAnyActiveIndicator = activeServers.length > 0 || activeBgCount > 0 || runningSubagents > 0;
@@ -849,7 +904,7 @@ export const WorkspaceHud = memo(function WorkspaceHud({
                 )}
               </div>
 
-              {/* 空栏目不占位；服务器和任务仅在有活动服务、运行命令或待触发任务时显示。 */}
+              {/* 空栏目不占位；停止记录保留在默认关闭的分组中，便于查看和恢复。 */}
               {isGit && changedFiles.length > 0 && (
                 <div className="workspace-hud-section">
                   <button type="button" className="workspace-hud-sec-header" onClick={() => toggleSection("changes")}>
@@ -985,7 +1040,7 @@ export const WorkspaceHud = memo(function WorkspaceHud({
               </div>}
 
               {/* ④ 服务器（单独一行） */}
-              {activeServers.length > 0 && <div className="workspace-hud-section">
+              {bodyServers.length + finishedServers.length > 0 && <div className="workspace-hud-section">
                 <button type="button" className="workspace-hud-sec-header" aria-label={`${t("workspaceHud.servers")} ${activeServers.length}`} title={t("workspaceHud.servers")} aria-expanded={sections.servers} onClick={() => toggleSection("servers")}>
                   <span className="workspace-hud-sec-left">
                     <span aria-hidden="true">{sections.servers ? "▾" : "▸"}</span>
@@ -995,80 +1050,27 @@ export const WorkspaceHud = memo(function WorkspaceHud({
                 </button>
                 {sections.servers && (
                   <div className="workspace-hud-sec-list">
-                    {totalServerEntries === 0 ? (
-                      <div className="workspace-hud-row-sub" style={{ padding: "8px", textAlign: "center" }}>
-                        {t("workspaceHud.noServers")}
+                    {bodyServers.map(renderServerRow)}
+                    {idleServerConfigs.map((config) => (
+                      <div key={config.name} className="workspace-hud-row">
+                        <div className="workspace-hud-row-main">
+                          <span className="workspace-hud-row-title" style={{ color: "var(--text-muted)" }}>{config.name}{config.port ? <span className="workspace-hud-row-sub"> :{config.port}</span> : null}</span>
+                        </div>
+                        <button type="button" disabled={devServers.pending.has(`start:${config.name}`)} className="workspace-hud-mini-btn" onClick={() => void devServers.start(config.name)}>{t("workspaceHud.start")}</button>
                       </div>
-                    ) : (
-                      <>
-                        {activeServers.map((sv) => (
-                          <div
-                            key={sv.id}
-                            className="workspace-hud-row"
-                            onClick={() => onOpenServerPreview?.(sv.id, sv.name)}
-                          >
-                            <div className="workspace-hud-row-main">
-                              <span className="workspace-hud-dot" aria-hidden="true" />
-                              <span className="workspace-hud-row-title">
-                                {sv.name}
-                                {sv.port ? <span className="workspace-hud-row-sub"> :{sv.port}</span> : null}
-                              </span>
-                            </div>
-                            <div style={{ display: "inline-flex", gap: 4, flexShrink: 0 }}>
-                              {onOpenServerPreview && (
-                                <button
-                                  type="button"
-                                  className="workspace-hud-mini-btn is-primary"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    onOpenServerPreview(sv.id, sv.name);
-                                  }}
-                                >
-                                  {t("workspaceHud.preview")}
-                                </button>
-                              )}
-                              {sv.managed && (
-                                <button
-                                  type="button"
-                                  disabled={devServers.pending.has(sv.id)}
-                                  className="workspace-hud-mini-btn is-danger"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    void devServers.stop(sv.id);
-                                  }}
-                                >
-                                  {t("workspaceHud.stop")}
-                                </button>
-                              )}
-                            </div>
-                          </div>
-                        ))}
-                        {stoppedConfigNames.map((cfg) => (
-                          <div key={cfg.name} className="workspace-hud-row">
-                            <div className="workspace-hud-row-main">
-                              <span className="workspace-hud-row-title" style={{ color: "var(--text-muted)" }}>
-                                {cfg.name}
-                                {cfg.port ? <span className="workspace-hud-row-sub"> :{cfg.port}</span> : null}
-                              </span>
-                            </div>
-                            <button
-                              type="button"
-                              disabled={devServers.pending.has(`start:${cfg.name}`)}
-                              className="workspace-hud-mini-btn"
-                              onClick={() => void devServers.start(cfg.name)}
-                            >
-                              {t("workspaceHud.start")}
-                            </button>
-                          </div>
-                        ))}
-                      </>
+                    ))}
+                    {finishedServers.length > 0 && (
+                      <details className="finished-tasks" data-workspace-finished="servers">
+                        <summary className="workspace-hud-row-sub" style={{ padding: "6px 7px" }}>{t("servers.finishedSection", { count: finishedServers.length })}</summary>
+                        {finishedServers.map(renderServerRow)}
+                      </details>
                     )}
                   </div>
                 )}
               </div>}
 
               {/* ⑤ 后台命令 & 定时任务 */}
-              {(activeBgCount > 0 || pendingSchedCount > 0) && <div className="workspace-hud-section">
+              {(totalTaskEntries > 0) && <div className="workspace-hud-section">
                 <button type="button" className="workspace-hud-sec-header" aria-label={`${t("workspaceHud.tasks")} · ${t("workspaceHud.schedCount", { count: pendingSchedCount })} · ${t("workspaceHud.bgCount", { count: activeBgCount })}`} title={t("workspaceHud.tasks")} aria-expanded={sections.tasks} onClick={() => toggleSection("tasks")}>
                   <span className="workspace-hud-sec-left">
                     <span aria-hidden="true">{sections.tasks ? "▾" : "▸"}</span>
@@ -1083,57 +1085,14 @@ export const WorkspaceHud = memo(function WorkspaceHud({
                 </button>
                 {sections.tasks && (
                   <div className="workspace-hud-sec-list">
-                    {totalTaskEntries === 0 ? (
-                      <div className="workspace-hud-row-sub" style={{ padding: "8px", textAlign: "center" }}>
-                        {t("workspaceHud.noTasks")}
-                      </div>
-                    ) : (
-                      <>
-                        {sessionBgCommands.map((cmd) => {
-                          const running = cmd.status === "running" || cmd.status === "stopping";
-                          return (
-                            <div key={cmd.id} className="workspace-hud-row" title={cmd.command}>
-                              <div className="workspace-hud-row-main">
-                                {running && <span className="workspace-hud-dot" aria-hidden="true" />}
-                                <span className="workspace-hud-row-title" style={{ fontFamily: "var(--font-mono)", fontSize: 11.5 }}>
-                                  {cmd.label ?? cmd.command}
-                                </span>
-                              </div>
-                              <button
-                                type="button"
-                                disabled={background.pending.has(cmd.id)}
-                                className={`workspace-hud-mini-btn${running ? " is-danger" : ""}`}
-                                onClick={() => void background.act(cmd.id, running ? "stop" : "dismiss")}
-                              >
-                                {running ? t("workspaceHud.stop") : t("workspaceHud.dismiss")}
-                              </button>
-                            </div>
-                          );
-                        })}
-                        {sessionScheduledTasks.map((task) => {
-                          const pending = isScheduledTaskPending(task);
-                          return (
-                            <div key={task.id} className="workspace-hud-row" title={task.prompt}>
-                              <div className="workspace-hud-row-main">
-                                <span className="workspace-hud-row-title">{task.name}</span>
-                              </div>
-                              <div style={{ display: "inline-flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
-                                {task.nextRunAt && (
-                                  <span className="workspace-hud-row-sub">{formatNextRun(task.nextRunAt)}</span>
-                                )}
-                                <button
-                                  type="button"
-                                  disabled={scheduled.pending.has(task.id)}
-                                  className="workspace-hud-mini-btn"
-                                  onClick={() => void scheduled.act(task.id, pending ? "pause" : "resume")}
-                                >
-                                  {pending ? t("workspaceHud.pause") : t("workspaceHud.resume")}
-                                </button>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </>
+                    {activeCommands.map(renderCommandRow)}
+                    {pendingTasks.map(renderScheduledRow)}
+                    {inactiveTaskCount > 0 && (
+                      <details className="finished-tasks" data-workspace-finished="tasks">
+                        <summary className="workspace-hud-row-sub" style={{ padding: "6px 7px" }}>{t("tasks.inactiveSection", { count: inactiveTaskCount })}</summary>
+                        {finishedCommands.map(renderCommandRow)}
+                        {inactiveTasks.map(renderScheduledRow)}
+                      </details>
                     )}
                   </div>
                 )}

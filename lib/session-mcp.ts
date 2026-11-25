@@ -1,7 +1,7 @@
-import type { McpHostServerStatus } from "./mcp-host";
+import type { McpMenuServerStatus } from "./mcp-host";
 
 /** 当前会话的 MCP 展示信息，不携带配置、凭据或传输日志。 */
-export type SessionMcpServer = Pick<McpHostServerStatus, "name" | "scope" | "state">;
+export type SessionMcpServer = McpMenuServerStatus;
 
 export interface SessionMcpSnapshot {
   sessionId: string;
@@ -12,7 +12,7 @@ export interface SessionMcpSnapshot {
 /** 只读存活实例，不为查看菜单重启会话或连接 MCP。旧 HMR 实例没有读取方法时返回空列表。 */
 export function readSessionMcpSnapshot(sessionId: string, session: {
   isAlive(): boolean;
-  getMcpServerStates?: () => McpHostServerStatus[];
+  getMcpServerStates?: () => McpMenuServerStatus[];
 } | undefined): SessionMcpSnapshot {
   const live = session?.isAlive() === true;
   const servers = live ? session?.getMcpServerStates?.() ?? [] : [];

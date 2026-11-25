@@ -40,6 +40,18 @@ async function setup(t) {
   return { container, requests, render, respond, expand };
 }
 
+test("已启用但未连接时显示数量与未连接状态", async (t) => {
+  const { container, requests, render, respond, expand } = await setup(t);
+  await render("session-a");
+  await respond(requests[0], { sessionId: "session-a", live: true, servers: [
+    { name: "docs", scope: "global", state: "not-connected" },
+  ] });
+  assert.equal(container.querySelector(".workspace-hud-count").textContent, "1");
+  await expand();
+  assert.match(container.textContent, /docsNot connected/);
+  assert.equal(requests.length, 1, "展开菜单只展示只读快照");
+});
+
 test("MCP 栏目展开显示当前会话连接和各自状态", async (t) => {
   const { container, requests, render, respond, expand } = await setup(t);
   await render("session-a");

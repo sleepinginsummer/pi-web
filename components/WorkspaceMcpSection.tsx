@@ -6,6 +6,7 @@ import { usePolledJson } from "@/hooks/usePolledJson";
 import type { SessionMcpServer, SessionMcpSnapshot } from "@/lib/session-mcp";
 
 const STATE_KEYS: Record<SessionMcpServer["state"], string> = {
+  "not-connected": "workspaceHud.mcpNotConnected",
   ready: "mcp.session.state.connected",
   connecting: "mcp.session.state.connecting",
   failed: "mcp.session.state.failed",
