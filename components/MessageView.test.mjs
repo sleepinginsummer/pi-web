@@ -287,16 +287,16 @@ test("renders subagents as standard tool calls with only an extra side-panel but
   assert.doesNotMatch(ordinaryHtml, /View sub-agent work in side panel/);
 });
 
-test("a tool card shows the run time pi recorded, else the timestamps' difference, never a tiny one", () => {
+test("工具时间显示开始时刻与 SDK 耗时，短操作不隐藏，缺失信息不猜测", () => {
   const block = { type: "toolCall", toolCallId: "call-duration-1", toolName: "bash", arguments: { command: "make" } };
   const message = { role: "assistant", provider: "anthropic", model: "claude-test", content: [block], timestamp: 1_000_000, durationMs: 4_000 };
   const header = (result) => renderMessage(message, { toolResults: new Map([[block.toolCallId, result]]) });
   const result = { role: "toolResult", toolCallId: block.toolCallId, toolName: "bash", content: [], isError: false };
   // pi 1.1 records the execution itself; the timestamps would count the model's 4 s of generation too.
-  assert.match(header({ ...result, timestamp: 1_006_400, durationMs: 2_400 }), />2\.4s</);
-  // A result saved before pi recorded durations falls back to the timestamps.
-  assert.match(header({ ...result, timestamp: 1_006_400 }), />6\.4s</);
-  assert.doesNotMatch(header({ ...result, timestamp: 1_006_400, durationMs: 40 }), />\d+\.\ds</);
+  assert.match(header({ ...result, timestamp: 1_006_400, durationMs: 2_400 }), / · 2\.4s</);
+  // 旧结果没有执行计时时，不拿模型请求的时间冒充工具耗时。
+  assert.match(header({ ...result, timestamp: 1_006_400 }), /—<\/time> · —</);
+  assert.match(header({ ...result, timestamp: 1_006_400, durationMs: 40 }), / · 0\.0s</);
 
   assert.equal(formatToolDuration(400), "0.4s");
   assert.equal(formatToolDuration(59_940), "59.9s");
@@ -814,7 +814,7 @@ test("expands a codemode call into its script, its calls, and the output without
   // The newest 20 of 25 calls are listed; the 5 oldest are folded.
   assert.doesNotMatch(text, /"file-5"/);
   assert.match(text, /"file-6"/);
-  assert.match(text, /bash\{"path":"file-23"\}1\.5s/);
+  assert.match(text, /bash\{"path":"file-23"\}— · 1\.5s/);
   assert.match(text, /exit code 2/);
   assert.match(html, /aria-label="Failed"/);
   assert.match(text, /Model calls: \$0\.01/);
@@ -972,16 +972,16 @@ test("collapses a displayed custom message from its header alone", () => {
   );
 });
 
-test("a tool card shows the run time pi recorded, else the timestamps' difference, never a tiny one", () => {
+test("工具时间显示开始时刻与 SDK 耗时，短操作不隐藏，缺失信息不猜测", () => {
   const block = { type: "toolCall", toolCallId: "call-duration-1", toolName: "bash", arguments: { command: "make" } };
   const message = { role: "assistant", provider: "anthropic", model: "claude-test", content: [block], timestamp: 1_000_000, durationMs: 4_000 };
   const header = (result) => renderMessage(message, { toolResults: new Map([[block.toolCallId, result]]) });
   const result = { role: "toolResult", toolCallId: block.toolCallId, toolName: "bash", content: [], isError: false };
   // pi 1.1 records the execution itself; the timestamps would count the model's 4 s of generation too.
-  assert.match(header({ ...result, timestamp: 1_006_400, durationMs: 2_400 }), />2\.4s</);
-  // A result saved before pi recorded durations falls back to the timestamps.
-  assert.match(header({ ...result, timestamp: 1_006_400 }), />6\.4s</);
-  assert.doesNotMatch(header({ ...result, timestamp: 1_006_400, durationMs: 40 }), />\d+\.\ds</);
+  assert.match(header({ ...result, timestamp: 1_006_400, durationMs: 2_400 }), / · 2\.4s</);
+  // 旧结果没有执行计时时，不拿模型请求的时间冒充工具耗时。
+  assert.match(header({ ...result, timestamp: 1_006_400 }), /—<\/time> · —</);
+  assert.match(header({ ...result, timestamp: 1_006_400, durationMs: 40 }), / · 0\.0s</);
 
   assert.equal(formatToolDuration(400), "0.4s");
   assert.equal(formatToolDuration(59_940), "59.9s");

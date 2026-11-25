@@ -22,6 +22,7 @@ function normalizeToolCallBlock(block: unknown, includeStreamingRawInput = false
       : (typeof block.arguments === "object" && block.arguments !== null && !Array.isArray(block.arguments)
         ? block.arguments as Record<string, unknown>
         : {}),
+    ...(typeof block.startedAt === "number" ? { startedAt: block.startedAt } : {}),
   };
   const rawInput = includeStreamingRawInput ? streamingRawInput(block) : undefined;
   return rawInput === undefined ? normalized : { ...normalized, rawInput };

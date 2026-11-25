@@ -1,3 +1,4 @@
+import type { ToolTimingInfo } from "./tool-timing";
 // Types mirrored from pi-mono coding-agent session-manager
 
 export interface SessionHeader {
@@ -46,6 +47,8 @@ export interface ToolCallContent {
   toolCallId: string;
   toolName: string;
   input: Record<string, unknown>;
+  /** 工具卡首次出现的服务端时间。 */
+  startedAt?: number;
   /** Client-only buffer for streamed tool input. Never persisted to session files. */
   rawInput?: string;
   /** 历史大参数仅返回预览，展开工具调用时读取完整 JSON。 */
@@ -104,6 +107,9 @@ export interface ToolResultMessage {
   timestamp?: number;
   /** How long the tool ran, measured by pi with a monotonic clock (pi 1.1); absent for older results. */
   durationMs?: number;
+  toolTiming?: ToolTimingInfo;
+  /** 仅浏览器中的实时输出，不能当作已完成结果。 */
+  isPartial?: boolean;
   usage?: AgentUsage;
 }
 
@@ -128,6 +134,9 @@ export interface BashExecutionMessage {
   originalOutputBytes?: number;
   excludeFromContext?: boolean;
   timestamp?: number;
+  toolTiming?: ToolTimingInfo;
+  /** 页面内尚未完成的手动命令；历史消息一律不带此标记。 */
+  isPartial?: boolean;
 }
 
 export type AgentMessage = UserMessage | AssistantMessage | ToolResultMessage | CustomMessage | BashExecutionMessage;

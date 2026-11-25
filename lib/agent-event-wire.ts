@@ -24,8 +24,8 @@ type JsonToolCallDeltaEvent = Extract<JsonAssistantMessageEvent, { type: "toolca
 
 export type ClientAssistantMessageEvent =
   | Exclude<JsonAssistantMessageEvent, { type: "toolcall_start" | "toolcall_delta" }>
-  | (JsonToolCallStartEvent & { id?: string; toolName?: string })
-  | (JsonToolCallDeltaEvent & { id?: string; toolName?: string });
+  | (JsonToolCallStartEvent & { id?: string; toolName?: string; startedAt?: number; elapsedMs?: number })
+  | (JsonToolCallDeltaEvent & { id?: string; toolName?: string; startedAt?: number; elapsedMs?: number });
 
 export type ClientMessageUpdateEvent = Omit<JsonMessageUpdateEvent, "assistantMessageEvent"> & {
   assistantMessageEvent: ClientAssistantMessageEvent;
@@ -117,6 +117,7 @@ function toClientToolExecutionEvent(event: AgentEventLike): AgentEventLike | nul
     // pi's measured run time: a card shows it before the result message, which
     // a parallel batch sends only once its last call ends.
     ...(!nested && typeof event.durationMs === "number" ? { durationMs: event.durationMs } : {}),
+    ...(typeof event.startedAt === "number" ? { startedAt: event.startedAt } : {}),
     ...(nested ? { parentToolCallId: event.parentToolCallId } : {}),
   };
 }

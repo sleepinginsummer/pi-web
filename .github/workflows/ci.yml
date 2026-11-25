@@ -39,8 +39,8 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: node --experimental-strip-types --test e2e/html-preview-auth.test.mjs
-      - name: 验证移动端菜单与角色预设弹窗
-        run: node --experimental-strip-types --test e2e/mobile-controls-menu.test.mjs e2e/team-role-presets.test.mjs
+      - name: 验证移动端布局与工具计时
+        run: node --experimental-strip-types --test e2e/mobile-controls-menu.test.mjs e2e/team-role-presets.test.mjs e2e/tool-timing-layout.test.mjs
         env:
           NODE_ENV: development
       - run: npm run build

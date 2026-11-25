@@ -2,10 +2,10 @@
 
 import { useState } from "react";
 import { useI18n } from "@/hooks/useI18n";
+import { ToolTiming } from "./ToolTiming";
 import {
   codemodeTotalCost,
   formatCodemodeCost,
-  formatCodemodeDuration,
   type CodemodeCallStatus,
   type CodemodeCallView,
 } from "@/lib/codemode-view";
@@ -27,7 +27,6 @@ const STATUS_STYLE: Record<CodemodeCallStatus, { icon: string; color: string }> 
 function CallRow({ call }: { call: CodemodeCallView }) {
   const { t } = useI18n();
   const status = STATUS_STYLE[call.status];
-  const duration = formatCodemodeDuration(call.durationMs);
   return (
     <li style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
       <div style={{ display: "flex", alignItems: "baseline", gap: 6, minWidth: 0 }}>
@@ -39,15 +38,13 @@ function CallRow({ call }: { call: CodemodeCallView }) {
         >
           {status.icon}
         </span>
-        <span style={{ color: "var(--text-muted)", fontWeight: 600, flexShrink: 0 }}>{call.name}</span>
+        <span title={call.name} style={{ color: "var(--text-muted)", fontWeight: 600, minWidth: 0, maxWidth: "40%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{call.name}</span>
         {call.args && (
           <span style={{ color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
             {call.args}
           </span>
         )}
-        {duration && (
-          <span style={{ color: "var(--text-dim)", flexShrink: 0, marginLeft: "auto", fontVariantNumeric: "tabular-nums" }}>{duration}</span>
-        )}
+        <ToolTiming startedAt={call.startedAt} durationMs={call.durationMs} elapsedMs={call.elapsedMs} running={call.status === "running"} />
         {call.cost !== undefined && (
           <span style={{ color: "var(--text-dim)", flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>{formatCodemodeCost(call.cost)}</span>
         )}
@@ -102,7 +99,7 @@ export function CodemodeCallList({ calls, omitted, isError }: {
       )}
       <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 3, minWidth: 0 }}>
         {shown.map((call, index) => (
-          <CallRow key={call.id || `${hidden + index}`} call={call} />
+          <CallRow key={`${omitted + hidden + index}`} call={call} />
         ))}
       </ul>
       {totalCost !== null && (

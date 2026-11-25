@@ -1,11 +1,7 @@
-/**
- * The time a tool card shows before its result message arrives, as pi's TUI: `Elapsed` while the
- * call runs, counted from when its start reached the page, then pi's measured time once it ends.
- * Client-safe.
- */
+/** 工具卡片的实时计时：开始时间使用墙上时钟，耗时使用本地单调时钟；供客户端使用。 */
 
-/** A running call's start on the page's clock, or the time pi measured once it ended. */
-export type ToolClock = { startedAt: number } | { durationMs: number };
+/** startedAt 是页面的单调时钟坐标，wallStartedAt 是显示用的实际开始时刻。 */
+export type ToolClock = ({ startedAt: number } | { durationMs: number }) & { wallStartedAt?: number };
 
 export type ToolClocks = ReadonlyMap<string, ToolClock>;
 
@@ -17,6 +13,7 @@ interface ToolExecutionEventLike {
   parentToolCallId?: unknown;
   elapsedMs?: unknown;
   durationMs?: unknown;
+  startedAt?: unknown;
 }
 
 function nonNegative(value: unknown): number | undefined {
@@ -24,11 +21,8 @@ function nonNegative(value: unknown): number | undefined {
 }
 
 /**
- * The clocks after a tool event. A start counts from `now`, or from `now - elapsedMs` when the
- * server replays the start of a call already running (a reload, a reconnect); a call that has a
- * clock keeps it. An end keeps pi's `durationMs`, or drops the clock without one (a call refused
- * before it ran). Calls a tool made itself (a codemode script's) have none. Returns `clocks` itself
- * when nothing changes.
+ * 参数出现或工具开始时建立时钟，重放用 elapsedMs 还原；重复开始不重置。
+ * 结束保留服务端展示耗时；嵌套调用由父 codemode 的快照独立计时。
  */
 export function applyToolClockEvent(clocks: ToolClocks, event: ToolExecutionEventLike, now: number): ToolClocks {
   const id = event.toolCallId;
@@ -36,14 +30,15 @@ export function applyToolClockEvent(clocks: ToolClocks, event: ToolExecutionEven
   if (event.type === "tool_execution_start") {
     if (clocks.has(id)) return clocks;
     const next = new Map(clocks);
-    next.set(id, { startedAt: now - (nonNegative(event.elapsedMs) ?? 0) });
+    next.set(id, { startedAt: now - (nonNegative(event.elapsedMs) ?? 0),
+      wallStartedAt: nonNegative(event.startedAt) ?? Date.now() - (nonNegative(event.elapsedMs) ?? 0) });
     return next;
   }
   if (event.type === "tool_execution_end") {
     const durationMs = nonNegative(event.durationMs);
     if (durationMs === undefined) return withoutToolClock(clocks, id);
     const next = new Map(clocks);
-    next.set(id, { durationMs });
+    next.set(id, { durationMs, wallStartedAt: nonNegative(event.startedAt) ?? clocks.get(id)?.wallStartedAt });
     return next;
   }
   return clocks;
@@ -69,4 +64,21 @@ export function endedToolClocks(clocks: ToolClocks): ToolClocks {
 /** A clock's time at `now`: the run so far, or pi's measured time. */
 export function toolClockMs(clock: ToolClock, now: number): number {
   return "durationMs" in clock ? clock.durationMs : Math.max(0, now - clock.startedAt);
+}
+
+/** 参数刚开始流入时卡片已经可见，不能等真正 execute 才建立时钟。 */
+export function applyToolAppearanceEvent(clocks: ToolClocks, event: { type: string; id?: string; startedAt?: number; elapsedMs?: number }, now: number): ToolClocks {
+  if (!event.type.startsWith("toolcall_") || !event.id) return clocks;
+  return applyToolClockEvent(clocks, { type: "tool_execution_start", toolCallId: event.id, startedAt: event.startedAt, elapsedMs: event.elapsedMs }, now);
+}
+
+/** 权威运行态已空闲时冻结遗漏结束事件的计时器，避免停止后仍继续增长。 */
+export function settleToolClocks(clocks: ToolClocks, now: number): ToolClocks {
+  let next: Map<string, ToolClock> | undefined;
+  for (const [id, clock] of clocks) {
+    if (!("startedAt" in clock)) continue;
+    next ??= new Map(clocks);
+    next.set(id, { durationMs: toolClockMs(clock, now), wallStartedAt: clock.wallStartedAt });
+  }
+  return next ?? clocks;
 }

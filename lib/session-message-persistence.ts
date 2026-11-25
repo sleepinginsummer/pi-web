@@ -1,4 +1,5 @@
 import type { SessionManager } from "@earendil-works/pi-coding-agent";
+import { installSessionToolTimings } from "./session-tool-timing";
 
 type PersistedAppends = Pick<SessionManager, "appendMessage" | "appendCustomEntry" | "appendCustomMessageEntry">;
 
@@ -16,9 +17,10 @@ function snapshot<T>(value: T): T {
  * 每个新建或重开的可写 manager 只在交给 AgentSession 前安装一次。
  */
 export function isolateSessionEntryPersistence(manager: PersistedAppends): void {
+  const timings = installSessionToolTimings(manager);
   const appendMessage = manager.appendMessage.bind(manager);
   manager.appendMessage = (message) => appendMessage(
-    message.role === "toolResult" ? snapshot(message) : message,
+    message.role === "toolResult" ? snapshot(timings.message(message, true)) : timings.message(message, true),
   );
 
   const appendCustomEntry = manager.appendCustomEntry.bind(manager);

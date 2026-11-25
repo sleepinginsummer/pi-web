@@ -1842,6 +1842,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                   excludeFromContext: pendingBash.excludeFromContext,
                   // Its own card: a later command's does not open because this one was opened.
                   timestamp: pendingBash.startedAt,
+                  isPartial: !pendingBash.result,
                 } as BashExecutionMessage}
                 sessionId={session?.id ?? sessionIdRef.current ?? undefined}
               />

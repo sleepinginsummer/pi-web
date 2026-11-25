@@ -77,7 +77,7 @@ import { copyText } from "@/lib/clipboard";
 import type { SettingsSection } from "@/lib/settings-navigation";
 import { NOTICE_VISIBLE_MS, noticeReducer, type NoticeType } from "@/lib/notice-state";
 import { withTranscriptNotices, type TranscriptNotice } from "@/lib/transcript-notices";
-import { applyToolClockEvent, endedToolClocks, NO_TOOL_CLOCKS, withoutToolClock, type ToolClocks } from "@/lib/tool-clock";
+import { applyToolClockEvent, applyToolAppearanceEvent, endedToolClocks, NO_TOOL_CLOCKS, withoutToolClock, settleToolClocks, type ToolClocks } from "@/lib/tool-clock";
 import {
   fetchRuntimeState,
   fetchSessionContext,
@@ -696,6 +696,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [bashRunning, setBashRunning] = useState(false);
   const [pendingBash, setPendingBash] = useState<PendingBash | null>(null);
   const [toolClocks, setToolClocks] = useState<ToolClocks>(NO_TOOL_CLOCKS);
+  useEffect(() => {
+    if (!agentRunning) setToolClocks((clocks) => settleToolClocks(clocks, performance.now()));
+  }, [agentRunning]);
   const endedSessionRef = useRef<string | null>(null);
   const { modelState: modelSelectionState, modelActions: modelSelectionActions } = useModelSelection();
   const missingCwd = promptMissingCwd ?? modelSelectionState.missingCwd;
@@ -2985,6 +2988,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       case "agent_start":
         markPromptLanded();
+        setToolClocks(NO_TOOL_CLOCKS);
         cancelEventStreamGrace();
         // 新一轮运行开始：重置流式消息计数（message_end 的 updater 会重新累计）。
         lastStreamedMessageCountRef.current = 0;
@@ -3069,6 +3073,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const needsPhaseReset = streamingStore.getState().streamingMessage === null;
         const assistantMessageEvent = event.assistantMessageEvent as ClientAssistantMessageEvent | undefined;
         if (assistantMessageEvent) {
+          if ((assistantMessageEvent.type === "toolcall_start" || assistantMessageEvent.type === "toolcall_delta") && assistantMessageEvent.id) {
+            setToolClocks((clocks) => applyToolAppearanceEvent(clocks, assistantMessageEvent, performance.now()));
+          }
           enqueueStreamDelta(assistantMessageEvent);
         } else if (msg) {
           // Compatibility with older servers that sent a cumulative partial.
@@ -3195,6 +3202,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               toolName: name,
               content,
               timestamp: Date.now(),
+              isPartial: true,
               isError: partialResult?.isError,
               details: partialResult?.details,
             });

@@ -15,7 +15,10 @@ import { useMessageActionsReveal } from "./useMessageActionsReveal";
 import { formatMessageTime as formatTime, getMessageImages, getMessageText, MessageImage } from "./MessageContentPrimitives";
 import { getAssistantErrorMessage, getThinkingPreview, hasAssistantAnswer, isAssistantAborted, isAssistantTruncated, isDisplayableAssistantBlock, isHiddenCustomMessage, splitThinkingPieces } from "@/lib/message-display";
 import { formatTurnDuration } from "@/lib/turn-duration";
-import { toolClockMs, type ToolClock, type ToolClocks } from "@/lib/tool-clock";
+import { type ToolClock, type ToolClocks } from "@/lib/tool-clock";
+import { ToolTiming } from "./ToolTiming";
+import type { ToolTimingInfo } from "@/lib/tool-timing";
+export { formatToolDuration } from "@/lib/tool-timing";
 import { editPreviewFile } from "@/lib/edit-preview";
 import { diffGapLabel, parseUnifiedPatch, unifiedDiffLines, type SplitDiffCell, type SplitDiffFile, type SplitDiffGap, type UnifiedDiffLine } from "@/lib/patch";
 import { isApplyPatchToolName, isEditToolName, isWriteToolName } from "@/lib/tool-names";
@@ -627,19 +630,15 @@ function AssistantMessageView({
     return secs > 0 ? secs : undefined;
   }, [messageDurationMs, message.timestamp, prevTimestamp]);
 
-  // Tool call durations in milliseconds: the execution time pi records on each result since 1.1,
-  // as the pi CLI's "Took" shows it. An older result only has timestamps, the result's minus this
-  // message's (when its request started), which counts the model's generation too.
+  // SDK 的已完成耗时仅作历史回退；实时进度不能拿部分输出的 timestamp 推算结束时间。
   const toolCallDurations = useMemo<Map<string, number>>(() => {
     const map = new Map<string, number>();
-    if (!toolResults) return map;
-    for (const [callId, result] of toolResults) {
-      const ms = recordedDurationMs(result.durationMs)
-        ?? (result.timestamp && message.timestamp ? result.timestamp - message.timestamp : undefined);
-      if (ms !== undefined && ms >= TOOL_DURATION_MIN_MS) map.set(callId, ms);
+    for (const [callId, result] of toolResults ?? []) {
+      const ms = recordedDurationMs(result.toolTiming?.durationMs) ?? recordedDurationMs(result.durationMs);
+      if (ms !== undefined) map.set(callId, ms);
     }
     return map;
-  }, [toolResults, message.timestamp]);
+  }, [toolResults]);
 
   const textContent = allBlocks
     .filter((b): b is TextContent => b.type === "text")
@@ -1057,43 +1056,12 @@ function recordedDurationMs(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
-/** Below this a tool card shows no time: it would read 0.0s on every quick read or search. */
-const TOOL_DURATION_MIN_MS = 100;
-
-/** A tool's run time as the pi CLI's "Took" writes it: 2.4s, then 3m 5s, then 1h 2m 5s. */
-export function formatToolDuration(ms: number): string {
-  const seconds = ms / 1000;
-  if (seconds < 60) return `${seconds.toFixed(1)}s`;
-  const totalSeconds = Math.floor(seconds);
-  const minutes = Math.floor(totalSeconds / 60);
-  const remainder = totalSeconds % 60;
-  if (minutes < 60) return `${minutes}m ${remainder}s`;
-  return `${Math.floor(minutes / 60)}h ${minutes % 60}m ${remainder}s`;
-}
-
-/**
- * A card's time before its result message: the run so far, redrawn each second as pi's TUI
- * redraws its `Elapsed`, then pi's measured time once the call ends. Its own state, so a tick
- * re-renders only this span.
- */
-function ToolClockTime({ clock }: { clock: ToolClock }) {
-  const running = "startedAt" in clock;
-  const [now, setNow] = useState(() => performance.now());
-  useEffect(() => {
-    if (!running) return;
-    const timer = window.setInterval(() => setNow(performance.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, [running]);
-  const ms = toolClockMs(clock, now);
-  if (ms < TOOL_DURATION_MIN_MS) return null;
-  return <span style={{ fontSize: 11, color: "var(--text-dim)", flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>{formatToolDuration(ms)}</span>;
-}
 
 // `resultFooter` is drawn under the result, so only while the card is expanded:
 // what it offers acts on the result the reader is looking at.
 // `notRun`: the message ended aborted or in an error, so pi ran none of its
 // calls and no result will come (pi-agent-core's agent loop).
-function ToolCallBlock({ block, result, notRun, duration, clock, onOpenSubagent, resultFooter }: { block: ToolCallContent; result?: ToolResultMessage; notRun?: boolean; duration?: number; clock?: ToolClock; onOpenSubagent?: (sessionId: string, label: string) => void; resultFooter?: ReactNode }) {
+function ToolCallBlock({ block, result, notRun, duration, clock, onOpenSubagent, resultFooter, timing, timingRunning }: { block: ToolCallContent; result?: ToolResultMessage; notRun?: boolean; duration?: number; clock?: ToolClock; onOpenSubagent?: (sessionId: string, label: string) => void; resultFooter?: ReactNode; timing?: ToolTimingInfo; timingRunning?: boolean }) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(() => isToolCallExpanded(block.toolCallId));
   const cardRef = useRef<HTMLDivElement>(null);
@@ -1207,8 +1175,8 @@ function ToolCallBlock({ block, result, notRun, duration, clock, onOpenSubagent,
           }}
         >
           <span
-            title={mcpLabel ? block.toolName : undefined}
-            style={{ color: isError ? "#f87171" : "#16a34a", fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 11, flexShrink: 0 }}
+            title={block.toolName}
+            style={{ color: isError ? "#f87171" : "#16a34a", fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 11, flexShrink: 1, minWidth: 0, maxWidth: "40%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
           >
             {mcpLabel ? (
               <>
@@ -1227,12 +1195,13 @@ function ToolCallBlock({ block, result, notRun, duration, clock, onOpenSubagent,
               {codemodeCallCount === 1 ? t("codemode.callCountOne") : t("codemode.callCount", { count: codemodeCallCount })}
             </span>
           )}
-          {duration !== undefined ? (
-            <span style={{ fontSize: 11, color: "var(--text-dim)", flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>{formatToolDuration(duration)}</span>
-          ) : clock && (
-            // Keyed by the start: a reconnect's replayed start gives a new one, and a stale tick would count from it.
-            <ToolClockTime key={"startedAt" in clock ? clock.startedAt : "ended"} clock={clock} />
-          )}
+          <ToolTiming
+            clock={clock}
+            startedAt={timing?.startedAt ?? result?.toolTiming?.startedAt ?? block.startedAt
+              ?? (result?.durationMs !== undefined && result.timestamp !== undefined ? result.timestamp - result.durationMs : undefined)}
+            durationMs={timing?.durationMs ?? result?.toolTiming?.durationMs ?? duration}
+            running={timingRunning ?? (!notRun && (clock ? "startedAt" in clock : isStreamingInput || result?.isPartial === true))}
+          />
           <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--text-dim)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, transform: expanded ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}>
             <polyline points="2 3.5 5 6.5 8 3.5" />
           </svg>
@@ -2050,7 +2019,7 @@ function BashExecutionView({ message, sessionId }: { message: BashExecutionMessa
   const [loadingFull, setLoadingFull] = useState(false);
   const [fullError, setFullError] = useState<string | null>(null);
 
-  const isPending = !message.output && message.exitCode === undefined && !message.cancelled;
+  const isPending = message.isPartial === true;
   const isError = message.cancelled || (message.exitCode !== undefined && message.exitCode !== 0);
   const fullOutputUrl = sessionId && message.fullOutputPath
     ? `/api/agent/${encodeURIComponent(sessionId)}/bash-output?path=${encodeURIComponent(message.fullOutputPath)}`
@@ -2143,7 +2112,9 @@ function BashExecutionView({ message, sessionId }: { message: BashExecutionMessa
 
   return (
     <div style={{ margin: "6px 0" }}>
-      <ToolCallBlock block={block} result={result} resultFooter={fullOutputFooter} />
+      <ToolCallBlock block={block} result={result} resultFooter={fullOutputFooter}
+        timing={message.toolTiming ?? (isPending && message.timestamp !== undefined ? { startedAt: message.timestamp } : undefined)}
+        timingRunning={isPending} />
     </div>
   );
 }

@@ -14,6 +14,8 @@ export interface CodemodeCallView {
   args: string;
   status: CodemodeCallStatus;
   durationMs?: number;
+  startedAt?: number;
+  elapsedMs?: number;
   error?: string;
   /** Cost in USD of a `models.*` call. */
   cost?: number;
@@ -53,6 +55,8 @@ function toCall(value: unknown): CodemodeCallView | null {
     args: typeof value.args === "string" ? value.args : "",
     status,
     ...(durationMs !== undefined ? { durationMs } : {}),
+    ...(typeof value.startedAt === "number" ? { startedAt: value.startedAt } : {}),
+    ...(typeof value.elapsedMs === "number" ? { elapsedMs: value.elapsedMs } : {}),
     ...(typeof value.error === "string" && value.error ? { error: value.error } : {}),
     ...(cost !== undefined && cost > 0 ? { cost } : {}),
   };

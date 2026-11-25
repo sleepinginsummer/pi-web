@@ -1,3 +1,4 @@
+import type { ToolTimingInfo } from "./tool-timing";
 import type {
   AgentSessionEvent,
   CustomMessageEntry as PiCustomMessage,
@@ -20,6 +21,7 @@ export interface BashResultLike {
   cancelled?: boolean;
   truncated?: boolean;
   fullOutputPath?: string;
+  toolTiming?: ToolTimingInfo;
 }
 
 export interface ContextUsage {

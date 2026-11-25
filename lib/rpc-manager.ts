@@ -20,6 +20,7 @@ import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
 import { cacheSessionPath, catalogFirstMessage, getLatestModelChange, invalidateSessionListCache, invalidateSessionPathCache, resolveSessionPath } from "./session-reader";
 import { SessionDiskInspector, type SessionDiskFreshness, type SessionSelfAuthoredRewrite } from "./session-disk-freshness";
 import { isolateSessionEntryPersistence } from "./session-message-persistence";
+import { sessionToolTimings } from "./session-tool-timing";
 import { installSessionCompactionWriteGuard, withSessionReloadWriteGuard } from "./session-reload-write-guard";
 import { canRunWithExternalSessionChange } from "./session-write-policy";
 import { isShadowMindSource, restoreShadowSessionSettingSafely, ShadowSessionSetting } from "./shadow-session-setting";
@@ -1186,6 +1187,7 @@ export class AgentSessionWrapper {
     this.startedAt = Date.now();
     if (SESSION_OBSERVER_FEATURE_ENABLED && typeof this.inner.sessionManager?.getEntries === "function") void this.sessionObserver;
     this.unsubscribe = this.inner.subscribe((event: AgentEvent) => {
+      event = sessionToolTimings(this.inner.sessionManager)?.observe(event) ?? event;
       this.lastEventType = typeof event.type === "string" ? event.type : null;
       this.lastEventAt = Date.now();
       if (event.type === "queue_update") {
@@ -2445,9 +2447,9 @@ export class AgentSessionWrapper {
     const now = performance.now();
     for (const [toolCallId, { start, update, startedAt }] of this.activeToolEvents) {
       if (!this.activeAskToolStarts.has(toolCallId)) {
-        listener({ ...start, elapsedMs: Math.max(0, Math.round(now - startedAt)) });
+        listener({ ...start, elapsedMs: Math.max(0, Math.round(Number(start.elapsedMs ?? 0) + now - startedAt)) });
       }
-      if (update) listener(update);
+      if (update) listener(sessionToolTimings(this.inner.sessionManager)?.observe(update) ?? update);
     }
     for (const event of this.startupNotices ?? []) listener(event);
     return () => {
@@ -3280,9 +3282,9 @@ export class AgentSessionWrapper {
         for (const event of this.pendingUiRequests.values()) this.emit(event);
         for (const [toolCallId, { start, update, startedAt }] of this.activeToolEvents) {
           if (!this.activeAskToolStarts.has(toolCallId)) {
-            this.emit({ ...start, elapsedMs: Math.max(0, Math.round(performance.now() - startedAt)) });
+            this.emit({ ...start, elapsedMs: Math.max(0, Math.round(Number(start.elapsedMs ?? 0) + performance.now() - startedAt)) });
           }
-          if (update) this.emit(update);
+          if (update) this.emit(sessionToolTimings(this.inner.sessionManager)?.observe(update) ?? update);
         }
         return null;
       }
@@ -3311,6 +3313,9 @@ export class AgentSessionWrapper {
         // pi counts a command as running only once executeBash starts; the hook comes first.
         this.userBashPending = true;
         const liveOutput = this.createBashOutputSnapshots(bashCommand);
+        const timings = sessionToolTimings(this.inner.sessionManager);
+        const shellClock = timings?.beginShell(bashCommand);
+        let shellSucceeded = false;
         notifyRunningChange();
         try {
           // pi's TUI and RPC mode ask `user_bash` handlers first: one may run the
@@ -3341,8 +3346,10 @@ export class AgentSessionWrapper {
             });
           }
           this.persistPendingSession();
-          return result;
+          shellSucceeded = true;
+          return shellClock && timings ? { ...result, toolTiming: timings.finishShell(shellClock) } : result;
         } finally {
+          if (shellClock && timings) { timings.finishShell(shellClock); if (!shellSucceeded) timings.discardShell(shellClock); }
           this.userBashPending = false;
           liveOutput.stop();
           // A run that ended while the command went on reports its end now (isRunning() held it).

@@ -28,6 +28,7 @@ function setup() {
     setRetryInfo: (value) => { banner.current = value; },
     markPromptLanded() {}, cancelEventStreamGrace() {}, setAgentRunning() {}, setAgentPhase() {}, dispatch() {},
     // fork 的 agent_start/agent_end 分支使用的状态与回调。
+    setToolClocks() {}, NO_TOOL_CLOCKS: new Map(),
     lastStreamedMessageCountRef: { current: 0 }, lastRunAbortedRef: { current: false },
     enterMainRun() {}, flushStreamDeltas() {}, invalidateSessionContext() {}, loadSession: async () => {},
     scheduleEventStreamClose() {}, requestScrollPosition() {},

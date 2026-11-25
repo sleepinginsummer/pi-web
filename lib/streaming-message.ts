@@ -91,6 +91,7 @@ function applyDelta(
           return {
             ...current,
             toolCallId: event.id ?? current.toolCallId,
+            ...(event.startedAt === undefined ? {} : { startedAt: event.startedAt }),
             toolName: event.toolName ?? current.toolName,
             // Same snapshot leak as text_start: the deltas rebuild rawInput.
             rawInput: "",
@@ -102,6 +103,7 @@ function applyDelta(
           toolCallId: event.id ?? "",
           toolName: event.toolName,
           input: {},
+          ...(event.startedAt === undefined ? {} : { startedAt: event.startedAt }),
           rawInput: "",
         };
       });
@@ -122,6 +124,8 @@ function applyDelta(
         toolCallId: event.toolCall.id,
         toolName: event.toolCall.name,
         input: event.toolCall.arguments,
+        ...((event.toolCall as { startedAt?: number }).startedAt === undefined ? {}
+          : { startedAt: (event.toolCall as { startedAt?: number }).startedAt }),
       }));
     default:
       return state;
