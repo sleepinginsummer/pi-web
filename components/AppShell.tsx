@@ -506,6 +506,13 @@ export function AppShell() {
     setSearchTarget((current) => current === target ? null : current);
   }, []);
   const { runningSessionIds, awaitingInputSessionIds, startingSessions, subagentsActiveSessionIds, backgroundActivity, sessionListVersion, getCompletionSummary, readAt, getUnreadMarkTime } = useRunningSessions();
+  const hudSubagents = useMemo(() => (
+    activeSessionFamily?.subagents.map((sub) => ({
+      session: sub,
+      running: runningSessionIds.has(sub.id),
+      isSide: sub.relation?.kind === "side",
+    })) ?? []
+  ), [activeSessionFamily?.subagents, runningSessionIds]);
   const runningSessionTransitions = useRunningSessionTransitions(runningSessionIds, selectedSession?.id ?? null, subagentsActiveSessionIds);
   // The debug panel's reader of the chat's own state: kept in a ref, so registering renders
   // nothing, and read only by the open panel (DebugPanel), never on AppShell's renders.
@@ -626,7 +633,7 @@ export function AppShell() {
     return () => controller.abort();
   }, [beginInitialCwd, initialNavigation]);
   const worktreeCwd = selectedSession?.cwd ?? newSessionCwd ?? activeCwd;
-  const { snapshot: worktreeState } = useWorktreeState(worktreeCwd);
+  const { snapshot: worktreeState, create: createWorktree } = useWorktreeState(worktreeCwd);
 
   const handleCwdChange = useCallback((cwd: string | null, projectRoot?: string | null, projectKey?: string | null) => {
     setActiveCwd(cwd);
@@ -1438,6 +1445,15 @@ export function AppShell() {
                   quoteSelectionEnabled={quoteSelectionEnabled}
                   initialPrompt={pendingQuotePrompt && pendingQuotePrompt.sessionId === selectedSession?.id ? pendingQuotePrompt.text : undefined}
                   onInitialPromptConsumed={handleInitialQuotePromptConsumed}
+                  worktreeState={worktreeState && worktreeCwd && worktreeState.forCwd === worktreeCwd ? worktreeState : null}
+                  onCreateWorktree={worktreeState && worktreeCwd && worktreeState.forCwd === worktreeCwd ? createWorktree : undefined}
+                  onOpenNewSessionInWorktree={(targetCwd) => handleNewSession(`wt-${Date.now()}`, targetCwd)}
+                  onOpenFileDiff={(filePath, fileName) => handleOpenFile(filePath, fileName, { sourceSessionId: selectedSession?.id ?? null, modeHint: "diff" })}
+                  hudSubagents={hudSubagents}
+                  onGitBranchChanged={() => {
+                    handleExplorerRefresh();
+                    setRefreshKey((k) => k + 1);
+                  }}
                 />
           ) : initialCwdStatus === "validating" ? (
             <div

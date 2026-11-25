@@ -4,7 +4,7 @@ import { isHiddenRelation, SIDE_BOUNDARY_MESSAGE_TYPE } from "@/lib/session-fami
 import Image from "next/image";
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage, WorktreeInfo } from "@/lib/types";
+import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage, WorktreeInfo, WorktreeState } from "@/lib/types";
 import { normalizeCustomPanelLines, parseAnsiLine } from "@/lib/ansi";
 import { stripAnsi } from "@/lib/ansi";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
@@ -26,6 +26,14 @@ import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ChatScrollFollowButton } from "./ChatScrollFollowButton";
 import { ExtensionStatusBar } from "./ExtensionStatusBar";
 import { DevServersShelf } from "./DevServersShelf";
+import { ComposerContextPill } from "./ComposerContextPill";
+import { WorkspaceHud, type WorkspaceHudSubagentItem } from "./WorkspaceHud";
+import { useWorkspaceGit } from "@/hooks/useWorkspaceGit";
+import { useDevServers } from "@/hooks/useDevServers";
+import { useScheduledTasks } from "@/hooks/useScheduledTasks";
+import { useBackgroundCommands } from "@/hooks/useBackgroundCommands";
+import { collectSessionArtifacts, countSessionFileMutations, loadHiddenArtifactIds, saveHiddenArtifactIds, type SessionArtifact } from "@/lib/session-artifacts";
+import { TODO_WIDGET_KEY } from "@/lib/todo-widget";
 import { useI18n } from "@/hooks/useI18n";
 import { useAgentSession } from "@/hooks/useAgentSession";
 import { useChatScrollFollow } from "@/hooks/useChatScrollFollow";
@@ -122,11 +130,21 @@ interface Props {
   quoteSelectionEnabled?: boolean;
   initialPrompt?: string;
   onInitialPromptConsumed?: (sessionId: string, prompt: string) => void;
+  /** 当前项目的完整 worktree 快照（用于右上角工作区浮卡与输入框毛玻璃胶囊）。 */
+  worktreeState?: WorktreeState | null;
+  onCreateWorktree?: (branch: string) => Promise<WorktreeInfo>;
+  /** 在已有会话中点击其他 Worktree 确认后，于目标目录开启空白新会话。 */
+  onOpenNewSessionInWorktree?: (cwd: string) => void;
+  /** 在右侧 FileViewer 中以 Diff 模式打开变更文件。 */
+  onOpenFileDiff?: (filePath: string, fileName: string) => void;
+  /** 当前会话家族的子代理与侧聊，用于工作区浮卡展示。 */
+  hudSubagents?: WorkspaceHudSubagentItem[];
+  onGitBranchChanged?: () => void;
 }
 
 const CHAT_MINIMAP_WIDTH = 36;
 const CHAT_COLUMN_PADDING = 16;
-const CHAT_INPUT_RIGHT_PADDING = CHAT_COLUMN_PADDING + CHAT_MINIMAP_WIDTH;
+const CHAT_MINIMAP_LEFT_PADDING = CHAT_COLUMN_PADDING + CHAT_MINIMAP_WIDTH;
 
 function NewSessionUpdateLink({ label }: { label: (version: string) => string }) {
   const [update, setUpdate] = useState<AppUpdateResponse | null>(null);
@@ -252,7 +270,14 @@ function LiveProcessDetailsGroup({ hiddenCount, renderAll, renderRecent, t }: { 
   );
 }
 
-export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSession, onDebugSnapshotReaderChange, navigationKey, isNavigationActive, session, observerPanel, mobileOutline, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, newSessionCwd, newSessionWorktrees, pendingNewSessionControl, onPendingNewSessionEvent, notificationController, onAgentEnd, onSessionEnded, onSessionCreated, onSessionCreatedInBackground, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onShadowMindControlChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenSettings, onContextUsageChange, onOpenFile, onFilesUploaded, onOpenSubagent, onOpenServerPreview, onToolEnd, onNewSessionCwdChange, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed }: Props) {
+export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSession, onDebugSnapshotReaderChange, navigationKey, isNavigationActive, session, observerPanel, mobileOutline, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, newSessionCwd, newSessionWorktrees, pendingNewSessionControl, onPendingNewSessionEvent, notificationController, onAgentEnd, onSessionEnded, onSessionCreated, onSessionCreatedInBackground, onSessionListRefresh, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onShadowMindControlChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenSettings, onContextUsageChange, onOpenFile, onFilesUploaded, onOpenSubagent, onOpenServerPreview, onToolEnd, onNewSessionCwdChange, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed, worktreeState, onCreateWorktree, onOpenNewSessionInWorktree, onOpenFileDiff, hudSubagents, onGitBranchChanged }: Props) {
+  const [gitRefreshTick, setGitRefreshTick] = useState(0);
+  const [hiddenArtifactIds, setHiddenArtifactIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [pendingWorktreeConfirm, setPendingWorktreeConfirm] = useState<WorktreeInfo | null>(null);
+  const handleChatToolEnd = useCallback((toolName: string) => {
+    setGitRefreshTick((n) => n + 1);
+    onToolEnd?.(toolName);
+  }, [onToolEnd]);
   const { t } = useI18n();
   const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio, holdAudio } = useAudio();
   const {
@@ -291,7 +316,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
     handleBuiltinSlashCommand,
     handleShadowMindToggle, handleToolPresetChange, loadSlashCommands,
   } = useAgentSession({
-    navigationKey, isNavigationActive, session, newSessionCwd, pendingNewSessionControl, onPendingNewSessionEvent, onSessionCreated, onSessionCreatedInBackground, onSessionListRefresh, onSessionForked, onSessionEnded, onToolEnd,
+    navigationKey, isNavigationActive, session, newSessionCwd, pendingNewSessionControl, onPendingNewSessionEvent, onSessionCreated, onSessionCreatedInBackground, onSessionListRefresh, onSessionForked, onSessionEnded, onToolEnd: handleChatToolEnd,
     onSideSession, onDebugSnapshotReaderChange, t, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onToolsLoaderChange, onSessionStatsPanelOpen, onOpenSettings,
   });
   const isStreaming = useStreamingSelector(streamingStore, selectIsStreaming);
@@ -1031,12 +1056,158 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
   }, [renderWindowKey]);
 
   const isEmptyNew = isNew && messages.length === 0 && !isStreaming && !sessionBusy;
-  // 新会话引导区：π Pi Web 正下方显示当前文件夹名
-  const newSessionFolderName = (() => {
-    if (!newSessionCwd) return null;
-    return newSessionCwd.split(/[\\/]/).filter(Boolean).pop() ?? newSessionCwd;
-  })();
+  const matchedWorktreeState = worktreeState && messageCwd && worktreeState.forCwd === messageCwd
+    ? worktreeState
+    : null;
+  const effectiveWorktrees = useMemo(() => {
+    if (matchedWorktreeState && matchedWorktreeState.worktrees.length > 0) {
+      return matchedWorktreeState.worktrees;
+    }
+    if (!session && messageCwd && newSessionWorktrees.some((wt) => wt.path === messageCwd)) {
+      return newSessionWorktrees;
+    }
+    return [];
+  }, [matchedWorktreeState, messageCwd, newSessionWorktrees, session]);
+  const workspaceGit = useWorkspaceGit(panel ? null : messageCwd, gitRefreshTick);
+  // 浮卡与底栏共用同一批轮询状态，避免重复请求，操作结果两处实时同步
+  const sharedDevServers = useDevServers(panel ? null : messageCwd);
+  const sharedScheduled = useScheduledTasks(panel ? null : messageCwd);
+  const sharedBackground = useBackgroundCommands(panel ? null : messageCwd);
 
+  const todoWidget = useMemo(
+    () => displayExtensionWidgets.find((widget) => widget.key === TODO_WIDGET_KEY),
+    [displayExtensionWidgets],
+  );
+  const [serverArtifacts, setServerArtifacts] = useState<SessionArtifact[] | null>(null);
+  const [artifactRefreshTick, setArtifactRefreshTick] = useState(0);
+  const liveSessionArtifacts = useMemo(
+    () => (panel ? [] : collectSessionArtifacts(messages, messageRenderIndex.toolResults, messageCwd)),
+    [messageCwd, messageRenderIndex.toolResults, messages, panel],
+  );
+  const sessionMutationCount = useMemo(
+    () => (panel ? 0 : countSessionFileMutations(messages, messageRenderIndex.toolResults)),
+    [messageRenderIndex.toolResults, messages, panel],
+  );
+  // 仅在会话内真正出现新产物或产物更新时变更签名，避免普通只读工具结束触发产物存在性遍历
+  const liveArtifactSignature = useMemo(
+    () => liveSessionArtifacts.map((item) => `${item.id}@${item.version ?? 0}@${item.timestamp ?? 0}`).join("|"),
+    [liveSessionArtifacts],
+  );
+  const sessionArtifacts = useMemo(() => {
+    const source = serverArtifacts ?? liveSessionArtifacts;
+    return source.filter((item) => !hiddenArtifactIds.has(item.id) && !hiddenArtifactIds.has(item.path));
+  }, [hiddenArtifactIds, liveSessionArtifacts, serverArtifacts]);
+
+  // 切换/重开会话时恢复该会话手动隐藏的产物集合，并重置确认框与服务端产物缓存
+  useEffect(() => {
+    setPendingWorktreeConfirm(null);
+    setServerArtifacts(null);
+    setHiddenArtifactIds(loadHiddenArtifactIds(session?.id));
+  }, [session?.id, newSessionCwd]);
+
+  // 由服务端按当前活动分支返回完整产物列表（含尚未翻页加载的早期产物，并自动排除已删除本地文件）
+  // 触发条件与通用工具结束事件解耦：仅在切换会话、产物签名变化或用户显式刷新时拉取
+  useEffect(() => {
+    if (panel || !session?.id) {
+      setServerArtifacts(null);
+      return;
+    }
+    const controller = new AbortController();
+    fetch(`/api/sessions/${encodeURIComponent(session.id)}/artifacts`, {
+      signal: controller.signal,
+      cache: "no-store",
+    })
+      .then(async (res) => {
+        if (!res.ok) return null;
+        return res.json() as Promise<{ artifacts?: SessionArtifact[] }>;
+      })
+      .then((data) => {
+        if (controller.signal.aborted || !Array.isArray(data?.artifacts)) return;
+        setServerArtifacts(data.artifacts);
+      })
+      .catch(() => {
+        // 查询失败时回退到当前已加载消息页的产物列表，不阻塞界面
+      });
+    return () => controller.abort();
+  }, [artifactRefreshTick, liveArtifactSignature, panel, session?.id]);
+
+  const handleWorkspaceSwitchBranch = useCallback(async (branch: string) => {
+    const result = await workspaceGit.switchBranch(branch);
+    if (result.ok) {
+      onGitBranchChanged?.();
+    }
+    return result;
+  }, [onGitBranchChanged, workspaceGit]);
+
+  const handleWorkspaceSelectWorktree = useCallback((worktree: WorktreeInfo) => {
+    if (!session) {
+      onNewSessionCwdChange?.(worktree.path);
+      return;
+    }
+    setPendingWorktreeConfirm(worktree);
+  }, [onNewSessionCwdChange, session]);
+
+  const handleWorkspaceCreateWorktree = useCallback(async (branch: string) => {
+    if (!onCreateWorktree || !matchedWorktreeState) return;
+    const startNavKey = navigationKey;
+    const created = await onCreateWorktree(branch);
+    // 创建期间如果用户已切到其他项目或会话，忽略旧导航的后续动作
+    if (!isNavigationActive(startNavKey)) return;
+    if (!session) {
+      onNewSessionCwdChange?.(created.path);
+    } else {
+      setPendingWorktreeConfirm(created);
+    }
+  }, [isNavigationActive, matchedWorktreeState, navigationKey, onCreateWorktree, onNewSessionCwdChange, session]);
+
+  const handleHideArtifact = useCallback((artifactId: string) => {
+    setHiddenArtifactIds((prev) => {
+      const next = new Set(prev);
+      next.add(artifactId);
+      saveHiddenArtifactIds(session?.id, next);
+      return next;
+    });
+  }, [session?.id]);
+
+  const handleDeleteArtifactFile = useCallback(async (artifact: SessionArtifact) => {
+    if (!session?.id) return { ok: false, error: t("workspaceHud.deleteFailed") };
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/artifacts/delete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filePath: artifact.path }),
+      });
+      const data = await response.json().catch(() => ({})) as { deleted?: boolean; trashed?: boolean; error?: string };
+      if (!response.ok || !data.deleted) {
+        return { ok: false, error: data.error ?? `HTTP ${response.status}` };
+      }
+      // 删除本地文件后仅更新存在性列表，不写入持久化隐藏集合，避免日后同路径重新生成时被误隐藏
+      setServerArtifacts((prev) => (
+        prev
+          ? prev.filter((item) => item.kind === "web" || item.path !== artifact.path)
+          : prev
+      ));
+      setArtifactRefreshTick((n) => n + 1);
+      onFilesUploaded?.();
+      return { ok: true, trashed: data.trashed === true };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }, [onFilesUploaded, session?.id, t]);
+
+  const canCreateWorktreeHere = Boolean(onCreateWorktree && matchedWorktreeState);
+  const composerLeadingToolbar = !panel && messageCwd ? (
+    <ComposerContextPill
+      cwd={messageCwd}
+      isNewSession={!session}
+      git={workspaceGit}
+      worktrees={effectiveWorktrees}
+      onSwitchBranch={handleWorkspaceSwitchBranch}
+      onSelectWorktree={handleWorkspaceSelectWorktree}
+      onCreateWorktree={canCreateWorktreeHere ? handleWorkspaceCreateWorktree : undefined}
+      compact={isMobile}
+    />
+  ) : undefined;
 
   const chatInputElement = (
     <ChatInput
@@ -1094,6 +1265,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
       newSessionWorktrees={!session ? newSessionWorktrees : undefined}
       newSessionCwd={!session ? newSessionCwd : undefined}
       onNewSessionCwdChange={onNewSessionCwdChange}
+      leadingTopToolbar={composerLeadingToolbar}
     />
   );
 
@@ -1188,6 +1360,87 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
+      {!panel && messageCwd && (
+        <WorkspaceHud
+          cwd={messageCwd}
+          sessionId={session?.id}
+          isNewSession={!session}
+          isMobile={isMobile}
+          git={workspaceGit}
+          worktrees={effectiveWorktrees}
+          artifacts={sessionArtifacts}
+          sessionMutationCount={sessionMutationCount}
+          todoWidget={todoWidget}
+          subagents={hudSubagents}
+          onSwitchBranch={handleWorkspaceSwitchBranch}
+          onSelectWorktree={handleWorkspaceSelectWorktree}
+          onCreateWorktree={canCreateWorktreeHere ? handleWorkspaceCreateWorktree : undefined}
+          onOpenFileDiff={(filePath, fileName) => {
+            if (onOpenFileDiff) {
+              onOpenFileDiff(filePath, fileName);
+            } else {
+              onOpenFile?.(filePath);
+            }
+          }}
+          onOpenArtifactFile={(filePath) => onOpenFile?.(filePath)}
+          onHideArtifact={handleHideArtifact}
+          onDeleteArtifactFile={handleDeleteArtifactFile}
+          onRefreshArtifacts={() => setArtifactRefreshTick((n) => n + 1)}
+          onOpenServerPreview={onOpenServerPreview}
+          onOpenSubagent={onOpenSubagent}
+          sharedDevServers={sharedDevServers}
+          sharedScheduled={sharedScheduled}
+          sharedBackground={sharedBackground}
+        />
+      )}
+      {pendingWorktreeConfirm && (
+        <div
+          className="workspace-hud-modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("workspaceHud.openNewSessionTitle")}
+          onClick={(event) => {
+            if (event.target === event.currentTarget) setPendingWorktreeConfirm(null);
+          }}
+        >
+          <div className="workspace-hud-modal">
+            <div style={{ fontSize: 14.5, fontWeight: 600, color: "var(--text)" }}>
+              {t("workspaceHud.openNewSessionTitle")}
+            </div>
+            <div style={{ fontSize: 12.5, color: "var(--text-muted)", lineHeight: 1.55 }}>
+              {t("workspaceHud.openNewSessionDesc", {
+                current: getFileName(messageCwd ?? ""),
+              })}
+            </div>
+            <div className="workspace-hud-modal-path">
+              {pendingWorktreeConfirm.path}
+              {pendingWorktreeConfirm.branch ? `  (⎇ ${pendingWorktreeConfirm.branch})` : ""}
+            </div>
+            <div className="workspace-hud-modal-actions">
+              <button
+                type="button"
+                className="workspace-hud-mini-btn"
+                style={{ padding: "5px 11px", fontSize: 12 }}
+                onClick={() => setPendingWorktreeConfirm(null)}
+              >
+                {t("workspaceHud.stayCurrentSession")}
+              </button>
+              <button
+                type="button"
+                className="workspace-hud-mini-btn is-primary"
+                style={{ padding: "5px 12px", fontSize: 12, fontWeight: 500 }}
+                onClick={() => {
+                  const targetPath = pendingWorktreeConfirm.path;
+                  setPendingWorktreeConfirm(null);
+                  onOpenNewSessionInWorktree?.(targetPath);
+                }}
+              >
+                {t("workspaceHud.openNewSessionConfirm")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {showNotificationPrompt && (
         <aside className={notificationStyles.prompt} role="dialog" aria-labelledby="completion-notification-title">
           <div className={notificationStyles.copy}>
@@ -1237,17 +1490,17 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
       )}
 
       {isEmptyNew ? (
-        <div className="flex flex-1 flex-col items-center justify-center overflow-y-auto px-4 py-8">
+        <div className="flex flex-1 flex-col items-center justify-center overflow-y-auto px-4 pt-14 pb-8 sm:py-8">
           <div className="w-full" style={{ maxWidth: "var(--chat-content-max-width, 820px)" }}>
             <div
-              className="mb-3"
               style={{
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "space-between",
                 gap: 12,
-                marginLeft: 16,
-                marginRight: 52,
+                marginLeft: isMobile ? 16 : CHAT_MINIMAP_LEFT_PADDING,
+                marginRight: 16,
+                marginBottom: 46,
                 fontFamily: "var(--font-mono)",
               }}
             >
@@ -1257,35 +1510,6 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                   <span style={{ fontSize: 22, color: "var(--text)", fontWeight: 700, letterSpacing: 0, flexShrink: 0, whiteSpace: "nowrap" }}>Pi Web</span>
                   <NewSessionUpdateLink label={(version) => t("appUpdate.releaseNotes", { version })} />
                 </div>
-                {newSessionFolderName && (
-                  <div style={{ display: "flex", alignItems: "center", gap: 5, minWidth: 0, overflow: "hidden" }}>
-                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-                    </svg>
-                    <span
-                      title={newSessionCwd ?? undefined}
-                      style={{
-                        fontSize: 12,
-                        color: "var(--text-muted)",
-                        letterSpacing: "-0.01em",
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                        minWidth: 0,
-                      }}
-                    >
-                      {newSessionFolderName}
-                    </span>
-                  </div>
-                )}
-              </div>
-              <div className="new-session-versions">
-                <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                  web <span style={{ color: "var(--text)" }}>v{process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0"}</span>
-                </span>
-                <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                  pi <span style={{ color: "var(--text)" }}>v{process.env.NEXT_PUBLIC_PI_VERSION ?? "0.0.0"}</span>
-                </span>
               </div>
             </div>
             <NoticeShelf
@@ -1329,7 +1553,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
           className={`scrollbar-subtle min-w-0 flex-1 overflow-x-hidden overflow-y-auto pt-4 [scrollbar-gutter:stable]${askDialogElement ? " chat-scroll-ask-reserve" : ""}`}
           style={{ visibility: pendingScrollRestore ? "hidden" : undefined }}
         >
-          <div style={{ padding: `0 ${isMobile ? CHAT_COLUMN_PADDING : CHAT_INPUT_RIGHT_PADDING}px 38px ${CHAT_COLUMN_PADDING}px` }}>
+          <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px 38px ${isMobile ? CHAT_COLUMN_PADDING : CHAT_MINIMAP_LEFT_PADDING}px` }}>
             <div ref={messageContentRef} style={{ maxWidth: "var(--chat-content-max-width, 820px)", margin: "0 auto" }}>
             {(() => {
               const { toolResults, visibleRefIndexByMessage, writtenFilesByFinalAssistant } = messageRenderIndex;
@@ -1968,7 +2192,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
         <div
           style={{
             padding: `0 ${CHAT_COLUMN_PADDING}px`,
-            paddingRight: isMobile ? CHAT_COLUMN_PADDING : CHAT_INPUT_RIGHT_PADDING,
+            paddingLeft: isMobile ? CHAT_COLUMN_PADDING : CHAT_MINIMAP_LEFT_PADDING,
           }}
         >
           <div style={{ maxWidth: "var(--chat-content-max-width, 820px)", margin: "0 auto" }}>
@@ -1987,7 +2211,16 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
           widgets={displayExtensionWidgets}
           onCommand={handleSend}
           commandsDisabled={sessionBusy}
-          leading={<DevServersShelf cwd={messageCwd} sessionId={session?.id} onOpenPreview={onOpenServerPreview} />}
+          leading={(
+            <DevServersShelf
+              cwd={messageCwd}
+              sessionId={session?.id}
+              onOpenPreview={onOpenServerPreview}
+              sharedDevServers={panel ? undefined : sharedDevServers}
+              sharedScheduled={panel ? undefined : sharedScheduled}
+              sharedBackground={panel ? undefined : sharedBackground}
+            />
+          )}
         />
       </div>
       </>

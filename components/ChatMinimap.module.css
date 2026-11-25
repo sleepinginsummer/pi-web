@@ -1,9 +1,9 @@
-/* 方案 A：大纲胶囊轨道悬浮在主会话滚动条左侧，展开为独立圆角浮卡 */
+/* 方案 A：大纲胶囊轨道悬浮在主会话左侧，展开为独立圆角浮卡，右侧完整留给工作区卡片 */
 .rail {
   position: absolute;
   top: 0;
   bottom: 0;
-  right: 16px;
+  left: 16px;
   width: 34px;
   z-index: 25;
   display: flex;
@@ -97,7 +97,7 @@
   position: absolute;
   top: 12px;
   bottom: 12px;
-  right: 38px;
+  left: 38px;
   z-index: 100;
   width: 312px;
   max-width: calc(100vw - 96px);
@@ -119,7 +119,7 @@
   position: absolute;
   top: 0;
   bottom: 0;
-  right: -12px;
+  left: -12px;
   width: 12px;
 }
 
@@ -508,6 +508,7 @@
   position: relative;
   top: auto;
   bottom: auto;
+  left: auto;
   right: auto;
   width: 100%;
   max-width: none;

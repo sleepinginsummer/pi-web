@@ -459,9 +459,11 @@ test("renders the worktree selector only for a new session", () => {
       }),
     ),
   );
-  assert.match(html, /选择 worktree/);
-  assert.match(html, /sleepinginsummer\/main/);
+  assert.match(html, /composer-context-pill/);
+  assert.match(html, /Select worktree/);
+  assert.match(html, /Switch Git branch/);
   assert.match(html, /feature\/test/);
+  assert.match(html, /repo-wt/);
   assert.doesNotMatch(html, /主分支/);
 });
 

@@ -33,6 +33,7 @@ import { useOptimisticInputSubmission, type OptimisticInputSnapshot } from "@/ho
 import { prependSubmittedInput } from "@/lib/optimistic-input-submission";
 import { ModelPicker, type ModelPickerOption } from "./ModelPicker";
 import { ComposerStopButton, ComposerTopUtilities, FastModeControl, InputControls, MobileComposerMenu, ThinkingControl } from "./InputControls";
+import { ComposerContextPill } from "./ComposerContextPill";
 import { ContextUsageIndicator, type ContextUsageSnapshot } from "./ContextUsageIndicator";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import { MessageStash } from "./MessageStash";
@@ -119,6 +120,8 @@ interface Props {
   onNewSessionCwdChange?: (cwd: string) => void;
   /** Files picked with the attach button, handled like files dropped onto the chat. Without it the button takes images only. */
   onAttachFiles?: (files: File[]) => void;
+  /** 输入框正上方左侧毛玻璃上下文条（文件夹 + 分支 + Worktree），与右侧 ComposerTopUtilities 同排。 */
+  leadingTopToolbar?: React.ReactNode;
 }
 
 export interface ChatInputHandle {
@@ -529,6 +532,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   newSessionCwd,
   onNewSessionCwdChange,
   onAttachFiles,
+  leadingTopToolbar,
   compact = false,
 }: Props, ref) {
   const { t } = useI18n();
@@ -1891,7 +1895,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     || showImageUnsupportedWarning
     || extensionsInitializing
     || imageAttachmentError
-    || (newSessionWorktrees && newSessionWorktrees.length > 0)
     || ((queuedMessages?.steering.length ?? 0) + (queuedMessages?.followUp.length ?? 0)) > 0
     || compactResultText
     || compactError
@@ -1910,7 +1913,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         minWidth: 0,
         background: "transparent",
         padding: compact ? 0 : "0 16px 8px",
-        paddingRight: compact ? 0 : isMobile ? 16 : 52, // desktop: 16px base + 36px for ChatMinimap alignment
+        paddingLeft: compact ? 0 : isMobile ? 16 : 52, // desktop: 16px base + 36px for left ChatMinimap alignment
       }}
     >
       {/* Hidden file input — 视觉隐藏而非 display:none：安卓 WebView/部分浏览器对 display:none 的 file input 用 JS click() 不会弹出选择器。
@@ -1997,23 +2000,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               ×
             </button>
           </div>
-        )}
-        {newSessionWorktrees && newSessionWorktrees.length > 0 && (
-          <label style={{ display: "flex", alignItems: "center", gap: 7, margin: "0 0 6px 4px", color: "var(--text-muted)", fontSize: 11 }}>
-            <span aria-hidden="true">⌘</span>
-            <select
-              aria-label="选择 worktree"
-              value={newSessionCwd ?? cwd ?? ""}
-              onChange={(event) => onNewSessionCwdChange?.(event.target.value)}
-              style={{ minWidth: 0, maxWidth: "100%", border: 0, outline: 0, background: "transparent", color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 11, cursor: "pointer" }}
-            >
-              {newSessionWorktrees.map((worktree) => (
-                <option key={worktree.path} value={worktree.path}>
-                  {worktree.upstreamDisplayBranch ?? worktree.upstreamBranch ?? worktree.branch ?? worktree.path}
-                </option>
-              ))}
-            </select>
-          </label>
         )}
         {/* Queued steering / follow-up messages (delivered by pi on upcoming turns) */}
         {((queuedMessages?.steering.length ?? 0) + (queuedMessages?.followUp.length ?? 0)) > 0 && (
@@ -2159,8 +2145,52 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             </button>
           </div>
         )}
-        {/* 输入框上方同一排：左侧悬浮粘贴图片（多图自动向上换行），右侧固定工具条（贴着输入框右上角，互不冲突） */}
-        {(!compact || attachedImages.length > 0) && (
+        {/* 插入/粘贴的图片放在毛玻璃工具栏正上方，多图自动向上换行，绝不挤压下方左右毛玻璃胶囊 */}
+        {attachedImages.length > 0 && (
+          <div
+            className="composer-images-row"
+            style={{
+              display: "flex",
+              gap: 8,
+              flexWrap: "wrap",
+              alignItems: "flex-end",
+              padding: compact ? "4px 0 6px" : "4px 2px 6px",
+            }}
+          >
+            {/* 同图可从多条队列恢复，base64 预览 URL 不唯一，必须区分各附件位置。 */}
+            {attachedImages.map((img, i) => (
+              <div key={`${i}:${img.previewUrl}`} style={{ position: "relative", flexShrink: 0 }}>
+                <ImagePreview src={img.previewUrl}>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={img.previewUrl}
+                    alt=""
+                    style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 8, border: "1px solid var(--border)", display: "block" }}
+                  />
+                </ImagePreview>
+                <button
+                  type="button"
+                  aria-label={t("chat.removeImage")}
+                  onClick={() => removeImage(i)}
+                  style={{
+                    position: "absolute", top: -5, right: -5,
+                    width: 18, height: 18, borderRadius: "50%",
+                    background: "var(--bg)", border: "1px solid var(--border)",
+                    boxShadow: "0 1px 3px rgba(0,0,0,0.14)",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    cursor: "pointer", padding: 0, color: "var(--text-muted)",
+                  }}
+                >
+                  <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+                    <line x1="1" y1="1" x2="7" y2="7" /><line x1="7" y1="1" x2="1" y2="7" />
+                  </svg>
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        {/* 输入框正上方同一排：左侧毛玻璃文件夹+分支+Worktree 胶囊，右侧毛玻璃工具条，中间通透 */}
+        {!compact && (
           <div
             className={floatTopToolbar ? "composer-top-row composer-top-row--floating" : "composer-top-row"}
             style={{
@@ -2168,41 +2198,22 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               alignItems: "flex-end",
               justifyContent: "space-between",
               gap: 10,
-              marginBottom: compact ? 6 : 5,
-              padding: compact ? 0 : "0 2px",
+              marginBottom: 5,
+              padding: "0 2px",
             }}
           >
-            <div style={{ flex: "1 1 auto", minWidth: 0, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end", paddingTop: attachedImages.length > 0 ? 4 : 0 }}>
-              {/* 同图可从多条队列恢复，base64 预览 URL 不唯一，必须区分各附件位置。 */}
-              {attachedImages.map((img, i) => (
-                <div key={`${i}:${img.previewUrl}`} style={{ position: "relative", flexShrink: 0 }}>
-                  <ImagePreview src={img.previewUrl}>
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={img.previewUrl}
-                      alt=""
-                      style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 8, border: "1px solid var(--border)", display: "block" }}
-                    />
-                  </ImagePreview>
-                  <button
-                    type="button"
-                    aria-label={t("chat.removeImage")}
-                    onClick={() => removeImage(i)}
-                    style={{
-                      position: "absolute", top: -5, right: -5,
-                      width: 18, height: 18, borderRadius: "50%",
-                      background: "var(--bg)", border: "1px solid var(--border)",
-                      boxShadow: "0 1px 3px rgba(0,0,0,0.14)",
-                      display: "flex", alignItems: "center", justifyContent: "center",
-                      cursor: "pointer", padding: 0, color: "var(--text-muted)",
-                    }}
-                  >
-                    <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
-                      <line x1="1" y1="1" x2="7" y2="7" /><line x1="7" y1="1" x2="1" y2="7" />
-                    </svg>
-                  </button>
-                </div>
-              ))}
+            <div className="composer-top-leading" style={{ flex: "0 1 auto", minWidth: 0, display: "flex", alignItems: "center" }}>
+              {leadingTopToolbar ?? (
+                newSessionWorktrees && newSessionWorktrees.length > 0 ? (
+                  <ComposerContextPill
+                    cwd={newSessionCwd ?? cwd}
+                    isNewSession
+                    worktrees={newSessionWorktrees}
+                    onSelectWorktree={(wt) => onNewSessionCwdChange?.(wt.path)}
+                    compact={isMobile}
+                  />
+                ) : null
+              )}
             </div>
             {!compact && !isMobile && (
               <ComposerTopUtilities

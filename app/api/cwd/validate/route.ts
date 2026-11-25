@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { statSync, type Stats } from "fs";
 import { homedir } from "os";
 import { isAbsolute, resolve } from "path";
-import { allowFileRoot } from "@/lib/file-access";
+import { allowFileRoot, allowGitMutationRoot } from "@/lib/file-access";
 import { projectIdentityKey } from "@/lib/project-identity";
 import { resolveProject } from "@/lib/worktree";
 
@@ -36,6 +36,7 @@ export async function POST(req: Request) {
     }
 
     allowFileRoot(normalizedCwd);
+    allowGitMutationRoot(normalizedCwd);
     const project = await resolveProject(normalizedCwd);
     return NextResponse.json({
       success: true,

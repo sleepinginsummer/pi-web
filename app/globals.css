@@ -4825,6 +4825,14 @@ span.token.table {
   -webkit-backdrop-filter: blur(8px);
 }
 
+.composer-top-row--floating > .composer-top-leading {
+  position: absolute;
+  left: 2px;
+  bottom: 5px;
+  pointer-events: auto;
+  max-width: calc(100% - 156px);
+}
+
 /* 预设角色使用原生模态顶层，手机上独占可视区域，不受侧栏滑入动画裁切。 */
 .team-role-presets-dialog {
   position: fixed;
@@ -4887,4 +4895,848 @@ span.token.table {
   }
   .team-role-presets-list > * { flex: 0 0 auto; max-width: 220px; }
   .team-role-presets-dialog button { min-height: 44px; min-width: 44px; }
+}
+
+
+/* =========================================================
+   输入框左上角毛玻璃上下文胶囊（文件夹 + 分支 + Worktree）
+   ========================================================= */
+.composer-context-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 1px 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg) 76%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  max-width: 100%;
+  min-width: 0;
+}
+
+.composer-context-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 7px;
+  border-radius: 999px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  min-width: 0;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.composer-context-item:hover,
+.composer-context-item.is-open {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.composer-context-item.is-wt {
+  color: var(--accent);
+}
+
+.composer-context-label {
+  color: var(--text);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 130px;
+}
+
+.composer-context-mono {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 150px;
+}
+
+.composer-context-caret {
+  font-size: 10px;
+  opacity: 0.72;
+  flex-shrink: 0;
+}
+
+.composer-context-sep {
+  width: 1px;
+  height: 12px;
+  background: var(--border);
+  flex-shrink: 0;
+}
+
+.composer-context-menu-wrap {
+  position: relative;
+  min-width: 0;
+}
+
+.composer-context-popover {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  min-width: 256px;
+  max-width: min(340px, 86vw);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.16);
+  padding: 6px;
+  z-index: 95;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.composer-context-pop-header {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  padding: 4px 8px 3px;
+}
+
+.composer-context-pop-error {
+  font-size: 11.5px;
+  color: #dc2626;
+  background: color-mix(in srgb, #dc2626 10%, transparent);
+  padding: 5px 8px;
+  border-radius: 8px;
+  word-break: break-word;
+}
+
+.composer-context-pop-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 210px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.composer-context-pop-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.composer-context-pop-row:hover {
+  background: var(--bg-hover);
+}
+
+.composer-context-pop-row.is-current {
+  background: var(--bg-panel);
+  font-weight: 500;
+}
+
+.composer-context-pop-row-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+
+.composer-context-pop-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-context-pop-tag {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--bg-selected);
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 110px;
+}
+
+.composer-context-pop-row-sub {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.composer-context-pop-row-sub.is-accent {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.composer-context-pop-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.composer-context-pop-toggle:hover {
+  background: var(--bg-hover);
+}
+
+.composer-context-switch {
+  width: 28px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--bg-selected);
+  position: relative;
+  flex-shrink: 0;
+  transition: background 140ms ease;
+}
+
+.composer-context-switch.is-on {
+  background: var(--accent);
+}
+
+.composer-context-switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 140ms ease;
+}
+
+.composer-context-switch.is-on::after {
+  transform: translateX(12px);
+}
+
+.composer-context-create-box {
+  display: flex;
+  gap: 6px;
+  padding: 4px 4px 2px;
+}
+
+.composer-context-create-input {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  outline: none;
+}
+
+.composer-context-create-input:focus {
+  border-color: var(--accent);
+}
+
+.composer-context-create-btn {
+  padding: 5px 10px;
+  border-radius: 8px;
+  border: none;
+  background: var(--accent);
+  color: var(--accent-contrast, #fff);
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.composer-context-create-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.composer-context-pop-sep {
+  height: 1px;
+  background: var(--border);
+  opacity: 0.6;
+  margin: 2px 4px;
+}
+
+/* =========================================================
+   右上角工作区悬浮卡片（WorkspaceHud）
+   大纲已移至左侧，工作区卡片可直接贴近聊天区右侧边缘
+   ========================================================= */
+.workspace-hud-anchor {
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  right: 16px;
+  /* 低于 ChatMinimap .rail (z-index: 25)，确保展开大纲浮卡时不被工作区卡片压住 */
+  z-index: 22;
+  width: 268px;
+  max-width: calc(100% - 32px);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  pointer-events: none;
+}
+
+.workspace-hud-anchor.is-expanded {
+  width: 316px;
+}
+
+.workspace-hud-anchor.is-pill {
+  bottom: auto;
+  width: auto;
+}
+
+.workspace-hud-mobile-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 45;
+  background: color-mix(in srgb, #000 32%, transparent);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+}
+
+/* 与 hooks/useIsMobile.ts 的 640px 移动断点保持一致，手机端展开为全宽弹卡并适配胶囊宽度 */
+@media (max-width: 640px) {
+  .workspace-hud-anchor {
+    top: 10px;
+    bottom: auto;
+    right: 12px;
+    max-width: calc(100% - 24px);
+  }
+
+  .workspace-hud-anchor.is-expanded {
+    top: 10px;
+    bottom: 10px;
+    left: 12px;
+    right: 12px;
+    width: auto;
+    max-width: none;
+    z-index: 50;
+  }
+
+  .workspace-hud-pill-btn {
+    max-width: min(240px, calc(100vw - 24px));
+  }
+
+  .workspace-hud-pill-btn > span:first-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .composer-top-row--floating > .composer-top-leading {
+    max-width: calc(100% - 108px);
+  }
+
+  .composer-context-item {
+    padding: 0 5px;
+    font-size: 11.5px;
+    gap: 4px;
+  }
+
+  .composer-context-label,
+  .composer-context-mono {
+    max-width: 72px;
+  }
+
+  .composer-context-popover {
+    max-width: calc(100vw - 28px);
+  }
+}
+
+.workspace-hud-pill-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 11px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg) 90%, transparent);
+  border: 1px solid var(--border);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.workspace-hud-pill-btn:hover {
+  background: var(--bg);
+}
+
+.workspace-hud-card {
+  width: 100%;
+  background: color-mix(in srgb, var(--bg) 93%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 15px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.05), 0 12px 30px rgba(0, 0, 0, 0.09);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  /* 锚点已锁定 top/bottom 边界，100% 即聊天区剩余可用高度，展开多个分区也不会被裁切 */
+  max-height: 100%;
+  pointer-events: auto;
+}
+
+.workspace-hud-header {
+  padding: 10px 12px 7px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.workspace-hud-title-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.workspace-hud-project {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-hud-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  position: relative;
+  flex-shrink: 0;
+}
+
+.workspace-hud-icon-btn {
+  width: 25px;
+  height: 25px;
+  border-radius: 7px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 120ms, color 120ms;
+}
+
+.workspace-hud-icon-btn:hover,
+.workspace-hud-icon-btn.is-active {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.workspace-hud-menu {
+  position: absolute;
+  top: 42px;
+  right: 10px;
+  width: 210px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.16);
+  padding: 6px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  pointer-events: auto;
+}
+
+.workspace-hud-collapsed {
+  padding: 2px 8px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  cursor: pointer;
+}
+
+.workspace-hud-collapsed-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 7px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.workspace-hud-collapsed-row:hover {
+  background: var(--bg-hover);
+}
+
+.workspace-hud-collapsed-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.workspace-hud-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  border-top: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
+  padding: 4px 0 6px;
+}
+
+.workspace-hud-env {
+  padding: 6px 12px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
+}
+
+.workspace-hud-env-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.workspace-hud-path {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  min-width: 0;
+}
+
+.workspace-hud-path span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-hud-trigger {
+  width: calc(100% + 12px);
+  margin: 0 -6px;
+  padding: 4px 6px;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  text-align: left;
+  color: var(--text);
+  cursor: pointer;
+  transition: background 120ms;
+}
+
+.workspace-hud-trigger:hover,
+.workspace-hud-trigger.is-open {
+  background: var(--bg-hover);
+}
+
+.workspace-hud-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 5px;
+  border-radius: 9px;
+  background: var(--bg-panel);
+  max-height: 180px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.workspace-hud-section {
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+
+.workspace-hud-section:last-child {
+  border-bottom: none;
+}
+
+.workspace-hud-sec-header {
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.workspace-hud-sec-header:hover {
+  background: var(--bg-subtle);
+  color: var(--text);
+}
+
+.workspace-hud-sec-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.workspace-hud-count {
+  font-weight: 500;
+  font-size: 11px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--bg-subtle);
+  color: var(--text-dim);
+}
+
+.workspace-hud-sec-list {
+  padding: 0 6px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 196px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.workspace-hud-row {
+  padding: 5px 7px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.workspace-hud-row:hover {
+  background: var(--bg-hover);
+}
+
+.workspace-hud-row-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+
+.workspace-hud-row-title {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-hud-row-sub {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.workspace-hud-mini-btn {
+  padding: 2px 7px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.workspace-hud-mini-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.workspace-hud-mini-btn.is-primary {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+  border-color: transparent;
+}
+
+.workspace-hud-mini-btn.is-danger:hover {
+  background: color-mix(in srgb, #dc2626 14%, transparent);
+  color: #dc2626;
+  border-color: transparent;
+}
+
+.workspace-hud-del-btn {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms, background 120ms, color 120ms;
+}
+
+.workspace-hud-row:hover .workspace-hud-del-btn,
+.workspace-hud-del-btn:focus-visible {
+  opacity: 1;
+}
+
+.workspace-hud-del-btn:hover {
+  background: color-mix(in srgb, #dc2626 14%, transparent);
+  color: #dc2626;
+}
+
+.workspace-hud-wt-tag {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 136px;
+}
+
+.workspace-hud-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #16a34a;
+  flex-shrink: 0;
+  display: inline-block;
+}
+
+.workspace-hud-git-code {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.workspace-hud-git-M { background: color-mix(in srgb, #d97706 16%, transparent); color: #b45309; }
+.workspace-hud-git-A, .workspace-hud-git-U { background: color-mix(in srgb, #16a34a 15%, transparent); color: #15803d; }
+.workspace-hud-git-D { background: color-mix(in srgb, #dc2626 15%, transparent); color: #dc2626; }
+.workspace-hud-git-R, .workspace-hud-git-C { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+
+.workspace-hud-diff {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.workspace-hud-diff-add { color: #15803d; }
+.workspace-hud-diff-del { color: #dc2626; }
+html.dark .workspace-hud-diff-add, [data-theme="dark"] .workspace-hud-diff-add { color: #4ade80; }
+html.dark .workspace-hud-diff-del, [data-theme="dark"] .workspace-hud-diff-del { color: #f87171; }
+
+.workspace-hud-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.38);
+  backdrop-filter: blur(3px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 120;
+  padding: 16px;
+}
+
+.workspace-hud-modal {
+  width: 100%;
+  max-width: 400px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.22);
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.workspace-hud-modal-path {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 10px;
+  word-break: break-all;
+}
+
+.workspace-hud-modal-warn {
+  font-size: 12px;
+  color: #b45309;
+  background: color-mix(in srgb, #f59e0b 14%, transparent);
+  border-radius: 8px;
+  padding: 7px 10px;
+}
+
+.workspace-hud-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 2px;
 }

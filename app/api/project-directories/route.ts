@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { allowFileRoot } from "@/lib/file-access";
+import { allowFileRoot, allowGitMutationRoot } from "@/lib/file-access";
 import { removeSidebarPreferenceIds } from "@/lib/sidebar-preferences";
 import {
   addProjectDirectory,
@@ -21,6 +21,7 @@ export async function POST(request: Request) {
     const body = await request.json() as { cwd?: unknown };
     const cwd = normalizeProjectDirectory(body.cwd);
     allowFileRoot(cwd);
+    allowGitMutationRoot(cwd);
     return NextResponse.json({ projects: await addProjectDirectory(cwd), cwd });
   } catch (error) {
     console.error("保存 Pi Web 项目目录失败", error);

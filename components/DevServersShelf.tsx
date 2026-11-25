@@ -185,19 +185,28 @@ export function DevServersShelf({
   cwd,
   sessionId,
   onOpenPreview,
+  sharedDevServers,
+  sharedScheduled,
+  sharedBackground,
 }: {
   cwd: string | null | undefined;
   sessionId?: string | null;
   onOpenPreview?: (serverId: string, label: string) => void;
+  sharedDevServers?: ReturnType<typeof useDevServers>;
+  sharedScheduled?: ReturnType<typeof useScheduledTasks>;
+  sharedBackground?: ReturnType<typeof useBackgroundCommands>;
 }) {
   const { t } = useI18n();
   const idPrefix = useId();
   const rootRef = useRef<HTMLDivElement>(null);
   // 两个入口共用一组浮层位置，所以一次只展开一个面板。
   const [open, setOpen] = useState<ShelfSection | null>(null);
-  const { data, error, pending, start, stop, dismiss } = useDevServers(cwd);
-  const scheduled = useScheduledTasks(cwd);
-  const background = useBackgroundCommands(cwd);
+  const localDevServers = useDevServers(sharedDevServers ? null : cwd);
+  const localScheduled = useScheduledTasks(sharedScheduled ? null : cwd);
+  const localBackground = useBackgroundCommands(sharedBackground ? null : cwd);
+  const { data, error, pending, start, stop, dismiss } = sharedDevServers ?? localDevServers;
+  const scheduled = sharedScheduled ?? localScheduled;
+  const background = sharedBackground ?? localBackground;
 
   useEffect(() => {
     if (!open) return;

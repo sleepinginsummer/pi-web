@@ -38,7 +38,7 @@ interface Props {
   /** ChatWindow's getTurnAnchors() over `messages`: the minimap groups and reads refs as it renders. */
   turnAnchors: readonly boolean[];
   /**
-   * `rail`（默认）是桌面右侧的胶囊轨道；`sheet` 把同一份浮层摊成底部抽屉，
+   * `rail`（默认）是桌面左侧的胶囊轨道；`sheet` 把同一份浮层摊成底部抽屉，
    * 供移动端顶栏按钮打开——手机上不渲染轨道，宽度也不够放浮卡。
    */
   variant?: "rail" | "sheet";

@@ -3,7 +3,7 @@ import test from "node:test";
 import { createJiti } from "jiti";
 
 const jiti = createJiti(import.meta.url);
-const { appendCreatedWorktree, parseWorktreeState } = await jiti.import("./useWorktreeState.ts");
+const { appendCreatedWorktree, parseWorktreeState, selectMatchedWorktreeState } = await jiti.import("./useWorktreeState.ts");
 const {
   WorktreeMutationError,
   createWorktreeRequest,
@@ -66,4 +66,19 @@ test("removeWorktreeRequest 保留脏目录确认信号", async () => {
     )),
     (error) => error instanceof WorktreeMutationError && error.dirty === true,
   );
+});
+
+
+test("selectMatchedWorktreeState 切换项目后屏蔽上一项目的旧快照", () => {
+  const snapshot = {
+    forCwd: "/project-a",
+    projectRoot: "/project-a",
+    isGit: true,
+    isTopLevel: true,
+    currentWorktreePath: "/project-a",
+    worktrees: [{ path: "/project-a", branch: "main", isMain: true }],
+  };
+  assert.equal(selectMatchedWorktreeState(snapshot, "/project-a"), snapshot);
+  assert.equal(selectMatchedWorktreeState(snapshot, "/project-b"), null);
+  assert.equal(selectMatchedWorktreeState(snapshot, null), null);
 });

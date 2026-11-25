@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { WorktreeInfo, WorktreeState } from "@/lib/types";
 import { createWorktreeRequest, removeWorktreeRequest, WorktreeMutationError } from "../lib/worktree-client";
 
@@ -35,6 +35,14 @@ export function appendCreatedWorktree(
   };
 }
 
+/** 仅在快照的 forCwd 与当前目录严格匹配时返回快照，避免跨项目残留旧工作树。 */
+export function selectMatchedWorktreeState(
+  snapshot: WorktreeState | null,
+  cwd: string | null,
+): WorktreeState | null {
+  return snapshot && cwd && snapshot.forCwd === cwd ? snapshot : null;
+}
+
 /**
  * 当前活动项目 worktree 数据的唯一客户端状态源。
  * cwd 变化或显式 refresh 时重新读取；会话列表刷新不会触发 Git 子进程。
@@ -42,21 +50,31 @@ export function appendCreatedWorktree(
 export function useWorktreeState(cwd: string | null) {
   const [snapshot, setSnapshot] = useState<WorktreeState | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const cwdRef = useRef(cwd);
+  cwdRef.current = cwd;
 
+  // 切换项目目录后在新快照返回前不暴露上一项目的旧 worktree 快照
+  const matchedSnapshot = selectMatchedWorktreeState(snapshot, cwd);
 
   const create = useCallback(async (branch: string): Promise<WorktreeInfo> => {
-    if (!snapshot) throw new WorktreeMutationError("worktree state is unavailable");
-    const created = await createWorktreeRequest(snapshot.projectRoot, branch);
-    setSnapshot((previous) => appendCreatedWorktree(previous, created));
-    setRefreshKey((key) => key + 1);
+    if (!matchedSnapshot || !cwd) throw new WorktreeMutationError("worktree state is unavailable");
+    const requestCwd = cwd;
+    const created = await createWorktreeRequest(matchedSnapshot.projectRoot, branch);
+    if (cwdRef.current === requestCwd) {
+      setSnapshot((previous) => appendCreatedWorktree(previous, created));
+      setRefreshKey((key) => key + 1);
+    }
     return created;
-  }, [snapshot]);
+  }, [cwd, matchedSnapshot]);
 
   const remove = useCallback(async (path: string, force: boolean): Promise<void> => {
-    if (!snapshot) throw new WorktreeMutationError("worktree state is unavailable");
-    await removeWorktreeRequest(snapshot.projectRoot, path, force);
-    setRefreshKey((key) => key + 1);
-  }, [snapshot]);
+    if (!matchedSnapshot || !cwd) throw new WorktreeMutationError("worktree state is unavailable");
+    const requestCwd = cwd;
+    await removeWorktreeRequest(matchedSnapshot.projectRoot, path, force);
+    if (cwdRef.current === requestCwd) {
+      setRefreshKey((key) => key + 1);
+    }
+  }, [cwd, matchedSnapshot]);
 
   useEffect(() => {
     if (!cwd) {
@@ -69,16 +87,20 @@ export function useWorktreeState(cwd: string | null) {
       .then(async (response) => {
         const data = await response.json() as WorktreeResponse;
         if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
-        setSnapshot(parseWorktreeState(cwd, data));
+        if (cwdRef.current === cwd) {
+          setSnapshot(parseWorktreeState(cwd, data));
+        }
       })
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
         console.error("加载 worktree 失败", { cwd, error });
-        setSnapshot(null);
+        if (cwdRef.current === cwd) {
+          setSnapshot(null);
+        }
       });
 
     return () => controller.abort();
   }, [cwd, refreshKey]);
 
-  return { snapshot, create, remove };
+  return { snapshot: matchedSnapshot, create, remove };
 }

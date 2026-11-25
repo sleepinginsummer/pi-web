@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { existsSync } from "fs";
 import { addWorktree, findCurrentWorktreePath, listWorktrees, removeWorktree, resolveProject, WorktreeBranchInUseError, worktreeRemovalRequiresForce } from "@/lib/worktree";
-import { allowFileRoot, getAllowedFileRoots, isExistingFilePathAllowed, isFilePathAllowed } from "@/lib/file-access";
+import { allowFileRoot, allowGitMutationRoot, getAllowedFileRoots, getAllowedGitMutationRoots, isExistingFilePathAllowed, isFilePathAllowed } from "@/lib/file-access";
 import { projectIdentityKey } from "@/lib/project-identity";
 
 /** Same gate as /api/files: only session cwds / project roots / explicitly
@@ -72,6 +72,9 @@ export async function POST(req: Request) {
     }
 
     const result = await addWorktree(body.cwd, body.branch);
+    if (isExistingFilePathAllowed(body.cwd, await getAllowedGitMutationRoots())) {
+      allowGitMutationRoot(result.path);
+    }
     return NextResponse.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

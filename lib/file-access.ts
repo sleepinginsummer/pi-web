@@ -1,9 +1,14 @@
-import { getAdditionalAllowedRoots, normalizeSlashes } from "./allowed-roots";
+import {
+  getAdditionalAllowedRoots,
+  getAdditionalGitMutationRoots,
+  normalizeSlashes,
+} from "./allowed-roots";
 import { isExistingPathWithinRoots, isPathWithinRoots } from "./path-security";
+import { readProjectDirectories } from "./project-directories";
 import { listAllSessions } from "./session-reader";
 import { hasTeamRebuildSessionCommit, persistTeamRebuildSessionCommit } from "./team-rebuild-session-commit";
 import { readCommittedTeamRebuildSessions } from "./teams";
-export { allowFileRoot, normalizeSlashes } from "./allowed-roots";
+export { allowFileRoot, allowGitMutationRoot, normalizeSlashes } from "./allowed-roots";
 export { isWindowsAbsolutePath } from "./paths";
 
 // Short-TTL cache for the allowed-roots set. Without this, every file list/read
@@ -12,6 +17,7 @@ export { isWindowsAbsolutePath } from "./paths";
 // survives Next.js hot-reload.
 declare global {
   var __piAllowedRootsCache: { roots: Set<string>; expiresAt: number } | undefined;
+  var __piGitMutationRootsCache: { roots: Set<string>; expiresAt: number } | undefined;
 }
 
 const ALLOWED_ROOTS_TTL_MS = 5_000;
@@ -40,6 +46,40 @@ export async function getAllowedFileRoots(): Promise<Set<string>> {
   for (const root of getAdditionalAllowedRoots()) roots.add(root);
 
   globalThis.__piAllowedRootsCache = { roots, expiresAt: now + ALLOWED_ROOTS_TTL_MS };
+  return roots;
+}
+
+
+/**
+ * 仅返回获准执行 Git 工作树写操作（如切分支）的根目录集合。
+ * 与文件浏览白名单严格隔离：
+ * - 不包含由会话子目录反推出来的 s.projectRoot；
+ * - 不包含仅因浏览工作树列表（GET /api/worktrees）或文件审批加入的浏览根目录。
+ */
+export async function getAllowedGitMutationRoots(): Promise<Set<string>> {
+  const now = Date.now();
+  const cached = globalThis.__piGitMutationRootsCache;
+  if (cached && cached.expiresAt > now) return cached.roots;
+
+  const sessions = await listAllSessions();
+  const roots = new Set<string>();
+  let committedRebuilds: Set<string> | undefined;
+  for (const s of sessions) {
+    if (s.requiresTeamRebuildCommit && !hasTeamRebuildSessionCommit(s.id)) {
+      committedRebuilds ??= readCommittedTeamRebuildSessions();
+      if (!committedRebuilds.has(s.id)) continue;
+      persistTeamRebuildSessionCommit(s.id);
+    }
+    if (s.cwd) roots.add(normalizeSlashes(s.cwd));
+  }
+
+  for (const projectDir of readProjectDirectories()) {
+    roots.add(normalizeSlashes(projectDir));
+  }
+
+  for (const root of getAdditionalGitMutationRoots()) roots.add(root);
+
+  globalThis.__piGitMutationRootsCache = { roots, expiresAt: now + ALLOWED_ROOTS_TTL_MS };
   return roots;
 }
 

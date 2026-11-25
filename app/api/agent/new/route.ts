@@ -4,7 +4,7 @@ import type { AgentRuntimeState } from "@/lib/agent-state";
 import { isThinkingLevel, type ThinkingLevel } from "@/lib/thinking-levels";
 import { existsSync, realpathSync } from "fs";
 import { randomUUID } from "crypto";
-import { allowFileRoot } from "@/lib/file-access";
+import { allowFileRoot, allowGitMutationRoot } from "@/lib/file-access";
 import { invalidateSessionListCache, readSessionHeader, resolveSessionPath } from "@/lib/session-reader";
 import { getRpcSession, startRpcSession } from "@/lib/rpc-manager";
 import { getNewSessionOperationRegistry } from "@/lib/new-session-operation-registry";
@@ -154,6 +154,7 @@ export async function POST(req: Request) {
       if (typeof message !== "string") throw new Error("message is required for submit-first-prompt");
       const { session } = await resolveMaterializationSession("finalize-existing", requestedSessionId, cwd, startOptions);
       allowFileRoot(cwd);
+      allowGitMutationRoot(cwd);
       session.submitFirstPrompt({
         message,
         ...(Array.isArray(images) && images.length > 0
@@ -192,6 +193,7 @@ export async function POST(req: Request) {
       const sessionId = await registry.getOrCreate(requestedOperationId, cwd, async () => {
         const created = await resolveMaterializationSession(operation, requestedSessionId, cwd, startOptions);
         allowFileRoot(cwd);
+      allowGitMutationRoot(cwd);
         invalidateSessionListCache();
         console.info("[pi-web] 新会话 runtime 已创建，等待前端接管初始化", { sessionId: created.realSessionId, cwd });
         return created.realSessionId;
@@ -218,6 +220,7 @@ export async function POST(req: Request) {
     // 再通过 finalize-existing 应用 Shadow 预设和等待完整状态，避免循环等待。
     if (operation === "create" && promptCommand.type === "ensure_session") {
       allowFileRoot(cwd);
+      allowGitMutationRoot(cwd);
       invalidateSessionListCache();
       console.info("[pi-web] 新会话 runtime 已创建，等待前端接管初始化", { sessionId: realSessionId, cwd });
       return NextResponse.json({
@@ -237,6 +240,7 @@ export async function POST(req: Request) {
     // in sync so the new cwd is immediately readable via /api/files. Without this,
     // a file request under a brand-new cwd would 403 for up to the cache TTL.
     allowFileRoot(cwd);
+      allowGitMutationRoot(cwd);
     invalidateSessionListCache();
 
     // 会话默认关闭 Shadow，由 wrapper 绑定后恢复，这里无需等待；只有显式打开才下发。
