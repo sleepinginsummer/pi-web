@@ -86,7 +86,7 @@ test("会话列表加载后不抢占首屏资源预取全部历史上下文", ()
   assert.doesNotMatch(source, /import \{[^}]*prefetchSessionContext/);
 });
 test("项目列表只负责编排领域数据与 ProjectSection", () => {
-  assert.match(source, /visibleProjects\.map\(\(project\) =>/);
+  assert.ok(/projectGroups\.map\(\(group\) => renderProject\(group\.path/.test(source), "项目列表应按父组编排 ProjectSection");
   assert.match(source, /const projectSessions = sessionsForProject\(visibleSessions, project\)/);
   assert.match(source, /<ProjectSection/);
   assert.match(source, /useSidebarNavigation\(allSessions, !loading && !error\)/);
@@ -107,7 +107,7 @@ test("reopens the custom directory picker at the last successful path", () => {
 
 test("shows running and unread activity at project scope", () => {
   assert.match(source, /const projectActivity = useMemo/);
-  assert.match(source, /showProjectActivity\(projectActivity\.get\(project\), t\)/);
+  assert.ok(/showProjectActivity\(activity, t\)/.test(source), "父项目应展示汇总后的运行和未读统计");
   assert.match(source, /hasOtherWorkspaceActivity/);
 });
 
@@ -115,7 +115,7 @@ test("shows running and unread activity at project scope", () => {
 test("通知跳转会展开目标项目并让会话树执行一次定位", () => {
   assert.match(appShellSource, /locateSessionRequest=\{notificationSessionLocateRequest/);
   assert.match(source, /const targetProject = sidebarProjectPath\(targetSession\)/);
-  assert.match(source, /next\.delete\(targetProject\)/);
+  assert.ok(/expandSidebarProject\(projectGroups, current, targetProject\)/.test(source), "定位应按路径身份展开实际父组与 checkout");
   assert.match(projectSectionSource, /handledLocateRevisionRef\.current === request\.revision/);
   assert.match(projectSectionSource, /scroll\.scrollTo\(\{ top, behavior: "auto" \}\)/);
 });
