@@ -268,7 +268,7 @@ New sessions and the files tab ("the files tab" here is the files section below 
 
 ## Streamed chunks re-render only the reply
 
-- `lib/streaming-message.ts` 的 `StreamingStore` 保存流式消息，`useAgentSession` 返回稳定 store；`useFrameBatchedStreamDispatch` 继续按浏览器帧合并增量。`ChatWindow` 只通过 `useStreamingSelector` 订阅是否流式、有无内容和可见块数，`components/StreamingReply.tsx` 单独订阅完整消息。普通正文增量不重渲窗口或输入框；块增删时仍更新 fork 的运行中过程折叠窗口。
+- `lib/streaming-message.ts` 的 `StreamingStore` 保存流式消息，`useAgentSession` 返回稳定 store；`useFrameBatchedStreamDispatch` 继续按浏览器帧合并增量。`ChatWindow` 只通过 `useStreamingSelector` 订阅是否流式、有无内容和可折叠的过程块数，`components/StreamingReply.tsx` 单独订阅完整消息。普通正文增量不重渲窗口或输入框；过程块数量变化时更新运行中预览。预览始终保留正文与图片，只折叠最新三项之前的思考、工具调用等过程内容。
 - store 同步通知订阅者，使 `message_end` 的 flush、追加完成消息、清空回复仍同批提交。会话身份变化重置帧队列，原有 run id 校验继续拒绝过期事件。`ChatInput` 和 `ChatMinimap` 保持 memo；minimap 通过稳定 getter 在测量时读取流式消息，滚动跟随继续使用 fork 的 `useChatScrollFollow`。
 - `components/ChatWindow.streaming.test.mjs` 执行真实 hook、窗口与输入框，用 React Profiler 验证 30 个增量至少产生 30 次回复提交（测试冻结独立的滚动/时钟计时器，只统计 SSE 引起的更新），而窗口和输入框均不新增渲染，同时核对 DOM 正文、顺序、flush 和会话切换。文本块稳定 key 下必须直接渲染当前 `block.text`，state 只保存按需加载的完整正文。
 

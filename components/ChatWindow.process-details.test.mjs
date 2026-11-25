@@ -36,18 +36,18 @@ test("过程详情一律默认折叠，只有列表末尾这一轮折叠时先�
   assert.doesNotMatch(source, /defaultExpanded=\{!/);
 });
 
-test("运行中的处理过程只挂载最近三项并可按需展开", () => {
+test("运行中只预览最近三项过程内容并可按需展开", () => {
   assert.match(source, /const LIVE_PROCESS_ITEM_LIMIT = 3/);
   assert.match(source, /buildRecentItemWindow\([\s\S]*?LIVE_PROCESS_ITEM_LIMIT/);
   assert.match(source, /expanded \? renderAll\(\) : renderRecent\(\)/);
-  assert.match(source, /visibleBlockOffset=\{options\.visibleBlockOffset\}/);
+  assert.match(source, /hiddenProcessBlockCount=\{options\.hiddenProcessBlockCount\}/);
 });
 
 
 test("正文段落把一轮的过程详情切成多段，各自折叠、各自计数", () => {
   // 长对话里连着几十步工具调用会被中间几段正文分隔开：整轮做成一个折叠组会把正文埋掉，
   // 所以每段过程详情自带条数和耗时，并各自保留一条可点击的折叠竖条。
-  assert.match(source, /const isExposedBodyBlock = \(block: \{ type: string; text\?: string \}\) => \(/);
+  assert.match(source, /const isBody = isAssistantBodyBlock\(blocks\[cursor\]\)/);
   assert.match(source, /const flushBucket = \(\) => \{/);
   assert.match(source, /kind: "body"/);
   assert.match(source, /messageCount=\{seg\.messageCount\}/);

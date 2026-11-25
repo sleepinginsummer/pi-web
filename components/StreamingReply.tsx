@@ -9,7 +9,7 @@ import type { ToolResultMessage } from "@/lib/types";
 
 /** 只让当前回复订阅正文；滚动跟随仍由 fork 的 useChatScrollFollow 管理。 */
 export const StreamingReply = memo(function StreamingReply({
-  store, messageRef, toolResults, toolClocks, modelNames, cwd, sessionId, onOpenFile, onOpenSubagent, visibleBlockOffset = 0,
+  store, messageRef, toolResults, toolClocks, modelNames, cwd, sessionId, onOpenFile, onOpenSubagent, hiddenProcessBlockCount = 0,
 }: {
   store: StreamingStore;
   messageRef: RefObject<HTMLDivElement | null>;
@@ -20,7 +20,7 @@ export const StreamingReply = memo(function StreamingReply({
   sessionId?: string;
   onOpenFile?: (filePath: string, page?: number) => void;
   onOpenSubagent?: (sessionId: string, label: string) => void;
-  visibleBlockOffset?: number;
+  hiddenProcessBlockCount?: number;
 }) {
   const message = useStreamingSelector(store, selectStreamingMessage);
   if (!message) return null;
@@ -36,7 +36,7 @@ export const StreamingReply = memo(function StreamingReply({
         sessionId={sessionId}
         onOpenFile={onOpenFile}
         onOpenSubagent={onOpenSubagent}
-        visibleBlockOffset={visibleBlockOffset}
+        hiddenProcessBlockCount={hiddenProcessBlockCount}
       />
     </div>
   );

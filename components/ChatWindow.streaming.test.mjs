@@ -70,10 +70,23 @@ after(async () => { cleanup(); globalThis.fetch = originalFetch; delete globalTh
 
 const assistant = (text) => ({ role: "assistant", content: [{ type: "text", text }], provider: "fixture", model: "fixture", timestamp: 1 });
 
+function renderChatWindow() {
+  return render(React.createElement(I18nProvider, null, React.createElement(ChatWindow, {
+    session: null,
+    navigationKey: 1,
+    newSessionCwd: "/fixture",
+    newSessionWorktrees: [],
+    pendingNewSessionControl: { kind: "staged", model: null, thinkingLevel: "auto", shadowMindEnabled: false },
+    onPendingNewSessionEvent() {},
+    isNavigationActive: () => true,
+    notificationController: { notificationEnabled: false, notifySession() {} },
+  })));
+}
+
 test("正文增量只提交回复：真实 ChatWindow/useAgentSession 与 ChatInput 不按 chunk 重渲", { timeout: 10_000 }, async () => {
   // 隔离滚动校正和回复时钟的独立更新，只计量 SSE 增量导致的渲染。
   mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
-  const view = render(React.createElement(I18nProvider, null, React.createElement(ChatWindow, { session: null, navigationKey: 1, newSessionCwd: "/fixture", newSessionWorktrees: [], pendingNewSessionControl: { kind: "staged", model: null, thinkingLevel: "auto", shadowMindEnabled: false }, onPendingNewSessionEvent() {}, isNavigationActive: () => true, notificationController: { notificationEnabled: false, notifySession() {} } })));
+  const view = renderChatWindow();
   const probe = globalThis.__streamRenderProbe;
   assert.ok(probe.mountLoad instanceof Promise, "必须等待真实挂载加载任务，而非只清空一次 act");
   let mountLoaded = false;
@@ -135,6 +148,52 @@ test("正文增量只提交回复：真实 ChatWindow/useAgentSession 与 ChatIn
   view.unmount();
 });
 
+test("运行中保留正文与图片，只折叠较早的过程块", { timeout: 10_000 }, async () => {
+  mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  const view = renderChatWindow();
+  const probe = globalThis.__streamRenderProbe;
+  await act(async () => {
+    completeMountResponses();
+    await probe.mountLoad;
+  });
+
+  const imageUrl = "https://example.com/progress.png";
+  await act(async () => {
+    probe.handleEvent({ type: "agent_start" });
+    probe.handleEvent({ type: "message_end", message: { role: "user", content: [{ type: "text", text: "Check progress" }], timestamp: 1 } });
+    probe.handleEvent({ type: "message_end", message: {
+      ...assistant(""),
+      content: [
+        { type: "thinking", thinking: "Earlier completed thought" },
+        { type: "text", text: "First visible update" },
+        { type: "image", source: { type: "url", url: imageUrl } },
+        { type: "toolCall", id: "old-tool", name: "bash", arguments: { command: "echo older-tool" } },
+      ],
+      stopReason: "toolUse",
+    } });
+    probe.handleEvent({ type: "message_start", message: {
+      ...assistant(""),
+      content: [
+        { type: "thinking", thinking: "Earlier streamed thought" },
+        { type: "text", text: "Second visible update" },
+        ...["One", "Two", "Three"].map((name) => ({ type: "thinking", thinking: `Recent thought ${name}` })),
+      ],
+    } });
+  });
+
+  assert.match(view.container.textContent, /First visible update.*Second visible update.*Recent thought One.*Recent thought Two.*Recent thought Three/s);
+  assert.ok(view.container.querySelector(`img[src="${imageUrl}"]`));
+  assert.doesNotMatch(view.container.textContent, /Earlier completed thought|Earlier streamed thought|older-tool/);
+  const toggle = view.getByRole("button", { name: "3 earlier process items" });
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+
+  await act(async () => { toggle.click(); });
+  assert.match(view.container.textContent, /Earlier completed thought.*First visible update.*older-tool.*Earlier streamed thought.*Second visible update/s);
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+  await act(async () => { toggle.click(); });
+  assert.match(view.container.textContent, /First visible update.*Second visible update/s);
+  assert.doesNotMatch(view.container.textContent, /Earlier completed thought|Earlier streamed thought|older-tool/);
+});
 test("按帧增量保持顺序，message_end 前同步 flush，切换会话丢弃旧帧", async () => {
   const store = createStreamingStore();
   let controls;

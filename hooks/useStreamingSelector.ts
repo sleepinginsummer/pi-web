@@ -2,7 +2,7 @@
 
 import { useLayoutEffect, useRef, useState } from "react";
 import type { StreamingState, StreamingStore } from "@/lib/streaming-message";
-import { getDisplayableAssistantBlocks } from "@/lib/message-display";
+import { isAssistantBodyBlock, isDisplayableAssistantBlock } from "@/lib/message-display";
 
 /**
  * 只订阅展示所需的值。select 必须保持稳定；普通 state 更新保留 React 批处理，
@@ -28,7 +28,8 @@ export function useStreamingSelector<T>(store: StreamingStore, select: (state: S
 export const selectIsStreaming = (state: StreamingState) => state.isStreaming;
 export const selectHasStreamingContent = (state: StreamingState) => Boolean(state.streamingMessage?.content.length);
 export const selectStreamingMessage = (state: StreamingState) => state.streamingMessage;
-// fork 的运行中过程窗口按块计数，只在块增删时重排历史，正文增量不参与父组件渲染。
-export const selectStreamingBlockCount = (state: StreamingState) => state.isStreaming && state.streamingMessage
-  ? getDisplayableAssistantBlocks(state.streamingMessage, { isStreaming: true }).length
+// 正文增量不触发父组件重渲，只有可折叠过程项的数量变化才重排预览。
+const streamingOptions = { isStreaming: true };
+export const selectStreamingProcessBlockCount = (state: StreamingState) => state.isStreaming && state.streamingMessage
+  ? state.streamingMessage.content.filter((block) => !isAssistantBodyBlock(block) && isDisplayableAssistantBlock(block, streamingOptions)).length
   : 0;

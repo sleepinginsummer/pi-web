@@ -13,7 +13,7 @@ import { CustomMessageView } from "./CustomMessageView";
 import { CopyActionIcon, MessageActions, createForkAction, type MessageAction } from "./MessageActions";
 import { useMessageActionsReveal } from "./useMessageActionsReveal";
 import { formatMessageTime as formatTime, getMessageImages, getMessageText, MessageImage } from "./MessageContentPrimitives";
-import { getAssistantErrorMessage, getThinkingPreview, hasAssistantAnswer, isAssistantAborted, isAssistantTruncated, isDisplayableAssistantBlock, isHiddenCustomMessage, splitThinkingPieces } from "@/lib/message-display";
+import { getAssistantErrorMessage, getThinkingPreview, hasAssistantAnswer, isAssistantAborted, isAssistantBodyBlock, isAssistantTruncated, isDisplayableAssistantBlock, isHiddenCustomMessage, splitThinkingPieces } from "@/lib/message-display";
 import { formatTurnDuration } from "@/lib/turn-duration";
 import { type ToolClock, type ToolClocks } from "@/lib/tool-clock";
 import { ToolTiming } from "./ToolTiming";
@@ -231,6 +231,7 @@ interface Props {
   writtenFiles?: WrittenFile[];
   visibleBlockOffset?: number;
   visibleBlockLimit?: number;
+  hiddenProcessBlockCount?: number;
   /** 本轮总耗时；没有过程详情的最终答复在用量行显示。 */
   turnDurationMs?: number;
   /** Running tool calls' clocks, for the cards still waiting for their result message. */
@@ -255,14 +256,14 @@ function haveSameRelevantToolEntries<T>(
   return true;
 }
 
-export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, toolClocks, modelNames, cwd, onOpenFile, onOpenSubagent, entryId, searchBlockIndex, onFork, forking, onEditContent, onCancelEdit, isEditing, showTimestamp, prevTimestamp, sessionId, writtenFiles, visibleBlockOffset, visibleBlockLimit, turnDurationMs, onCompact, isCompacting, compactError, markAnswerHeadings }: Props) {
+export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, toolClocks, modelNames, cwd, onOpenFile, onOpenSubagent, entryId, searchBlockIndex, onFork, forking, onEditContent, onCancelEdit, isEditing, showTimestamp, prevTimestamp, sessionId, writtenFiles, visibleBlockOffset, visibleBlockLimit, hiddenProcessBlockCount, turnDurationMs, onCompact, isCompacting, compactError, markAnswerHeadings }: Props) {
   // display:false 的自定义消息只给模型看，pi TUI 不渲染（#1043）。
   if (isHiddenCustomMessage(message)) return null;
   if (message.role === "user") {
     return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} onEditContent={onEditContent} onCancelEdit={onCancelEdit} isEditing={isEditing} />;
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} toolClocks={toolClocks} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} onOpenSubagent={onOpenSubagent} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} searchBlockIndex={searchBlockIndex} onFork={onFork} forking={forking} writtenFiles={writtenFiles} visibleBlockOffset={visibleBlockOffset} visibleBlockLimit={visibleBlockLimit} turnDurationMs={turnDurationMs} onCompact={onCompact} isCompacting={isCompacting} compactError={compactError} markAnswerHeadings={markAnswerHeadings} />;
+    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} toolClocks={toolClocks} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} onOpenSubagent={onOpenSubagent} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} searchBlockIndex={searchBlockIndex} onFork={onFork} forking={forking} writtenFiles={writtenFiles} visibleBlockOffset={visibleBlockOffset} visibleBlockLimit={visibleBlockLimit} hiddenProcessBlockCount={hiddenProcessBlockCount} turnDurationMs={turnDurationMs} onCompact={onCompact} isCompacting={isCompacting} compactError={compactError} markAnswerHeadings={markAnswerHeadings} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
@@ -301,6 +302,7 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     && prev.writtenFiles === next.writtenFiles
     && prev.visibleBlockOffset === next.visibleBlockOffset
     && prev.visibleBlockLimit === next.visibleBlockLimit
+    && prev.hiddenProcessBlockCount === next.hiddenProcessBlockCount
     && prev.onCompact === next.onCompact
     && prev.isCompacting === next.isCompacting
     && prev.compactError === next.compactError
@@ -539,6 +541,7 @@ function AssistantMessageView({
   writtenFiles,
   visibleBlockOffset = 0,
   visibleBlockLimit,
+  hiddenProcessBlockCount = 0,
   turnDurationMs,
   onCompact,
   isCompacting,
@@ -563,6 +566,7 @@ function AssistantMessageView({
   writtenFiles?: WrittenFile[];
   visibleBlockOffset?: number;
   visibleBlockLimit?: number;
+  hiddenProcessBlockCount?: number;
   turnDurationMs?: number;
   onCompact?: () => void;
   isCompacting?: boolean;
@@ -576,7 +580,14 @@ function AssistantMessageView({
     .filter(({ block }) => isDisplayableAssistantBlock(block, { isStreaming }));
   const sliceStart = Math.max(0, visibleBlockOffset);
   const sliceEnd = visibleBlockLimit !== undefined ? sliceStart + Math.max(0, visibleBlockLimit) : undefined;
-  const blockItems = allBlockItems.slice(sliceStart, sliceEnd);
+  const slicedBlockItems = allBlockItems.slice(sliceStart, sliceEnd);
+  let remainingHidden = hiddenProcessBlockCount;
+  // 只跳过较早的过程块，保留正文所在的位置和原始块索引。
+  const blockItems = remainingHidden === 0 ? slicedBlockItems : slicedBlockItems.filter(({ block }) => {
+    if (remainingHidden === 0 || isAssistantBodyBlock(block)) return true;
+    remainingHidden -= 1;
+    return false;
+  });
   const allBlocks = allBlockItems.map(({ block }) => block);
   const blocks = blockItems.map(({ block }) => block);
   const providerError = getAssistantErrorMessage(message, { isStreaming });

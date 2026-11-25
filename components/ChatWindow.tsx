@@ -8,7 +8,7 @@ import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecuti
 import { normalizeCustomPanelLines, parseAnsiLine } from "@/lib/ansi";
 import { stripAnsi } from "@/lib/ansi";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
-import { collapsesProcessDetails, countToolCallBlocks, hasAssistantAnswer, hasAssistantFinalAnswer, getDisplayableAssistantBlocks, isHiddenCustomMessage, getTurnAnchors, hasTurnRef, LIVE_OUTPUT_PREVIEW_LINES, liveOutputPreview } from "@/lib/message-display";
+import { collapsesProcessDetails, countToolCallBlocks, hasAssistantAnswer, hasAssistantFinalAnswer, getDisplayableAssistantBlocks, isAssistantBodyBlock, isHiddenCustomMessage, getTurnAnchors, hasTurnRef, LIVE_OUTPUT_PREVIEW_LINES, liveOutputPreview } from "@/lib/message-display";
 import { EXTENSION_DIALOG_BASE_WIDTH, fitExtensionDialogWidth } from "@/lib/extension-dialog-fit";
 import { windowOffsetForGroup } from "@/lib/render-window-offset";
 import { getTurnDurationMs } from "@/lib/turn-duration";
@@ -18,7 +18,7 @@ import { buildAtMentionText } from "@/lib/file-fuzzy";
 import { resolveUploadTarget } from "@/lib/upload-target-client";
 import { MessageView } from "./MessageView";
 import { StreamingReply } from "./StreamingReply";
-import { selectHasStreamingContent, selectIsStreaming, selectStreamingBlockCount, useStreamingSelector } from "@/hooks/useStreamingSelector";
+import { selectHasStreamingContent, selectIsStreaming, selectStreamingProcessBlockCount, useStreamingSelector } from "@/hooks/useStreamingSelector";
 import { MarkdownBody } from "./MarkdownBody";
 import { AskInputFlyout } from "./AskInputFlyout";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
@@ -296,7 +296,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
   });
   const isStreaming = useStreamingSelector(streamingStore, selectIsStreaming);
   const hasStreamingContent = useStreamingSelector(streamingStore, selectHasStreamingContent);
-  const streamingItemCount = useStreamingSelector(streamingStore, selectStreamingBlockCount);
+  const streamingProcessBlockCount = useStreamingSelector(streamingStore, selectStreamingProcessBlockCount);
   const getStreamingMessage = useCallback(() => streamingStore.getState().streamingMessage, [streamingStore]);
   const displayExtensionWidgets = useMemo(
     () => withTodoWidget(extensionWidgets, todos),
@@ -1349,7 +1349,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                 if (idx === lastAnchorIdx) { (lastUserMsgRef as { current: HTMLDivElement | null }).current = el; }
               };
 
-              const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; writtenFiles?: WrittenFile[]; visibleBlockOffset?: number; visibleBlockLimit?: number; recoverTruncation?: boolean; turnDurationMs?: number; withNotices?: boolean; finalAnswer?: boolean } = {}): ReactNode => {
+              const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; writtenFiles?: WrittenFile[]; visibleBlockOffset?: number; visibleBlockLimit?: number; hiddenProcessBlockCount?: number; recoverTruncation?: boolean; turnDurationMs?: number; withNotices?: boolean; finalAnswer?: boolean } = {}): ReactNode => {
                 const msg = options.messageOverride ?? messages[idx];
                 if (msg.role === "custom" && msg.customType === SIDE_BOUNDARY_MESSAGE_TYPE) return <SideChatDivider key="side-chat-divider" />;
                 if (isHiddenCustomMessage(msg)) return null;
@@ -1391,6 +1391,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                     writtenFiles={options.writtenFiles}
                     visibleBlockOffset={options.visibleBlockOffset}
                     visibleBlockLimit={options.visibleBlockLimit}
+                    hiddenProcessBlockCount={options.hiddenProcessBlockCount}
                     turnDurationMs={options.turnDurationMs}
                     onCompact={options.recoverTruncation ? handleCompact : undefined}
                     isCompacting={options.recoverTruncation ? isCompacting : undefined}
@@ -1430,7 +1431,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                 lastAnchorIndex: lastAnchorIdx,
               });
 
-              const renderStreamingMessage = (visibleBlockOffset = 0): ReactNode => {
+              const renderStreamingMessage = (hiddenProcessBlockCount = 0): ReactNode => {
                 if (!isStreaming || !hasStreamingContent) return null;
                 return (
                   <StreamingReply
@@ -1443,7 +1444,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                     sessionId={session?.id ?? sessionIdRef.current ?? undefined}
                     onOpenFile={onOpenFile}
                     onOpenSubagent={onOpenSubagent}
-                    visibleBlockOffset={visibleBlockOffset}
+                    hiddenProcessBlockCount={hiddenProcessBlockCount}
                   />
                 );
               };
@@ -1455,18 +1456,21 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                 const nodes: ReactNode[] = [];
                 if (isLiveTail) {
                   if (hasAnchor) nodes.push(renderMessage(start));
-                  const sources: Array<{ index: number; itemCount: number }> = [];
+                  // 正文和图片留在原位，预览名额只分给可折叠的过程内容。
+                  const sources: Array<{ index: number; processBlockCount: number; hasBody: boolean }> = [];
                   for (let index = processStart; index < end; index++) {
                     const message = messages[index];
                     if (message.role === "assistant") {
-                      const itemCount = getDisplayableAssistantBlocks(message as AssistantMessage).length;
-                      if (itemCount > 0) sources.push({ index, itemCount });
-                    } else if (message.role === "custom" || message.role === "bashExecution") {
-                      sources.push({ index, itemCount: 1 });
+                      const blocks = getDisplayableAssistantBlocks(message);
+                      if (blocks.length === 0) continue;
+                      const processBlockCount = blocks.filter((block) => !isAssistantBodyBlock(block)).length;
+                      sources.push({ index, processBlockCount, hasBody: blocks.length > processBlockCount });
+                    } else if (message.role === "bashExecution" || (message.role === "custom" && !isHiddenCustomMessage(message))) {
+                      sources.push({ index, processBlockCount: 1, hasBody: false });
                     }
                   }
                   const recentWindow = buildRecentItemWindow(
-                    [...sources.map((source) => source.itemCount), streamingItemCount],
+                    [...sources.map((source) => source.processBlockCount), streamingProcessBlockCount],
                     LIVE_PROCESS_ITEM_LIMIT,
                   );
                   const renderAll = () => (
@@ -1478,13 +1482,12 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                   const renderRecent = () => (
                     <>
                       {sources.map((source, sourceIndex) => {
-                        const visibleBlockOffset = recentWindow.visibleOffsets[sourceIndex];
-                        if (visibleBlockOffset >= source.itemCount) return null;
-                        const message = messages[source.index];
+                        const hiddenProcessBlockCount = recentWindow.visibleOffsets[sourceIndex];
+                        if (!source.hasBody && hiddenProcessBlockCount >= source.processBlockCount) return null;
                         return renderMessage(source.index, {
                           attachRef: false,
                           keyPrefix: "live-process",
-                          visibleBlockOffset: message.role === "assistant" ? visibleBlockOffset : undefined,
+                          hiddenProcessBlockCount,
                         });
                       })}
                       {renderStreamingMessage(recentWindow.visibleOffsets[sources.length] ?? 0)}
@@ -1545,10 +1548,6 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                       withNotices: boolean;
                     };
 
-                const isExposedBodyBlock = (block: { type: string; text?: string }) => (
-                  block.type === "image" || (block.type === "text" && (block.text ?? "").trim().length > 0)
-                );
-
                 const segments: TurnSegment[] = [];
                 let bucketDescriptors: ProcessDescriptor[] = [];
                 let bucketMessageCount = 0;
@@ -1607,9 +1606,9 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                   // 只折思考与工具调用，非空正文与图片永远按原时间顺序直接露出。
                   let cursor = 0;
                   while (cursor < blocks.length) {
-                    const isBody = isExposedBodyBlock(blocks[cursor]);
+                    const isBody = isAssistantBodyBlock(blocks[cursor]);
                     let nextCursor = cursor + 1;
-                    while (nextCursor < blocks.length && isExposedBodyBlock(blocks[nextCursor]) === isBody) {
+                    while (nextCursor < blocks.length && isAssistantBodyBlock(blocks[nextCursor]) === isBody) {
                       nextCursor += 1;
                     }
                     const isFullMessageSlice = cursor === 0 && nextCursor === blocks.length;

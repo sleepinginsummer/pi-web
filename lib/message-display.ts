@@ -253,7 +253,7 @@ export function hasAssistantFinalAnswer(message: AssistantMessage): boolean {
   ));
 }
 
-function isFinalAnswerBlock(block: AssistantContentBlock): boolean {
+export function isAssistantBodyBlock(block: AssistantContentBlock): boolean {
   return block.type === "text" || block.type === "image";
 }
 
@@ -262,7 +262,7 @@ export function splitFinalAssistantBlocks(
   options: DisplayOptions = {},
 ): { answerBlocks: AssistantContentBlock[]; processBlocks: AssistantContentBlock[] } {
   const blocks = getDisplayableAssistantBlocks(message, options);
-  const lastProcessIndex = blocks.findLastIndex((block) => !isFinalAnswerBlock(block));
+  const lastProcessIndex = blocks.findLastIndex((block) => !isAssistantBodyBlock(block));
   if (lastProcessIndex === -1) {
     return { answerBlocks: blocks, processBlocks: [] };
   }
