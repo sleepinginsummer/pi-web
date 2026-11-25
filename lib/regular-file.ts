@@ -32,10 +32,16 @@ export function readRegularFileText(path: string, maxBytes?: number): string | u
   return readRegularFileBytes(path, maxBytes)?.toString("utf8");
 }
 
-export function readRegularFileBytes(path: string, maxBytes?: number): Buffer | undefined {
+interface RegularFileReadOptions {
+  openFlags?: number;
+  /** 在读取字节之前，核对即将读取的同一个描述符。 */
+  authorizeOpenedFile?: (fd: number) => boolean;
+}
+
+export function readRegularFileBytes(path: string, maxBytes?: number, options?: RegularFileReadOptions): Buffer | undefined {
   let fd: number;
   try {
-    fd = openSync(path, OPEN_FLAGS);
+    fd = openSync(path, OPEN_FLAGS | (options?.openFlags ?? 0));
   } catch (error) {
     if (isMissing(error)) return undefined;
     throw error;
@@ -43,6 +49,7 @@ export function readRegularFileBytes(path: string, maxBytes?: number): Buffer | 
   try {
     const stats = fstatSync(fd);
     if (!stats.isFile()) throw new Error(`${path} is not a regular file`);
+    if (options?.authorizeOpenedFile && !options.authorizeOpenedFile(fd)) return undefined;
     if (maxBytes === undefined) return readFileSync(fd);
     if (stats.size > maxBytes) throw new Error(`${path} is larger than ${maxBytes} bytes`);
     // One byte past the limit: a file still growing past it is refused rather than cut short.

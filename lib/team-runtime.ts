@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, unlinkSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, statSync, unlinkSync } from "node:fs";
+import { uuidv7 } from "@earendil-works/pi-ai";
 import { createAgentSessionServices, getAgentDir, SessionManager } from "@earendil-works/pi-coding-agent";
 import { findDeferredStartupModel } from "./deferred-provider-models";
 import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
@@ -226,17 +226,18 @@ export interface CreateMemberSessionInput {
   thinkingLevel?: ThinkingLevel;
 }
 
-/**
- * 为团队成员落盘一个独立的 pi 会话文件（空对话，已写入模型/思考强度/归属标记）。
- * 之后无论是用户点击打开，还是被 team_send 唤醒，都按普通会话加载并恢复这里的模型和思考强度。
- */
-export function createTeamMemberSessionFile(input: CreateMemberSessionInput): { sessionId: string; sessionFile: string } {
+/** 准备一个空会话，调用方决定何时发布，避免事务等待期间被会话列表发现。 */
+function prepareTeamMemberSession(input: CreateMemberSessionInput) {
   const cwd = input.cwd.trim();
   if (!cwd) throw new Error("工作目录不能为空");
-  if (!existsSync(cwd)) throw new Error(`工作目录不存在: ${cwd}`);
-  allowFileRoot(cwd);
+  const cwdStats = statSync(cwd, { throwIfNoEntry: false });
+  if (!cwdStats) throw new Error(`工作目录不存在: ${cwd}`);
+  if (!cwdStats.isDirectory()) throw new Error(`工作目录必须是目录: ${cwd}`);
+  return { ...input, cwd, sessionId: uuidv7() };
+}
 
-  const sessionManager = SessionManager.create(cwd, undefined);
+function publishTeamMemberSession(input: ReturnType<typeof prepareTeamMemberSession>): string {
+  const sessionManager = SessionManager.create(input.cwd, undefined, { id: input.sessionId });
   if (input.model) {
     sessionManager.appendModelChange(input.model.provider, input.model.modelId);
   }
@@ -253,11 +254,17 @@ export function createTeamMemberSessionFile(input: CreateMemberSessionInput): { 
   const sessionFile = sessionManager.getSessionFile();
   const header = sessionManager.getHeader();
   if (!sessionFile || !header) throw new Error("无法创建成员会话文件");
-  mkdirSync(dirname(sessionFile), { recursive: true });
   const lines = [header, ...sessionManager.getEntries()].map((entry) => JSON.stringify(entry));
   writePrivateFileCreateAtomicSync(sessionFile, `${lines.join("\n")}\n`);
   invalidateSessionListCache();
-  return { sessionId: sessionManager.getSessionId(), sessionFile };
+  return sessionFile;
+}
+
+export function createTeamMemberSessionFile(input: CreateMemberSessionInput): { sessionId: string; sessionFile: string } {
+  const session = prepareTeamMemberSession(input);
+  const sessionFile = publishTeamMemberSession(session);
+  allowFileRoot(session.cwd);
+  return { sessionId: session.sessionId, sessionFile };
 }
 
 export interface ProvisionTeamInput {
@@ -331,7 +338,7 @@ export async function rebuildTeamWithCleanup(
   const inherited = leader ? await readSessionModelConfig(leader.sessionId, leader.cwd) : {};
   const leaderName = input.leaderName?.trim() || "leader";
   const leaderTitle = input.leaderTitle?.trim() ?? leader?.title ?? "Leader";
-  const created = createTeamMemberSessionFile({
+  const created = prepareTeamMemberSession({
     cwd: input.cwd,
     displayName: `${input.name.trim()} · ${leaderName}`,
     teamId,
@@ -339,30 +346,35 @@ export async function rebuildTeamWithCleanup(
     model: input.model ?? inherited.model,
     thinkingLevel: input.thinkingLevel ?? inherited.thinkingLevel,
   });
+  let committed = false;
   try {
     initMemberRolePromptAddon(created.sessionId, input.leaderPrompt);
     return await rebuildTeam(teamId, {
       name: input.name,
       prompt: input.prompt,
       expectedUpdatedAt: input.expectedUpdatedAt,
-      leader: { sessionId: created.sessionId, name: leaderName, title: leaderTitle, prompt: input.leaderPrompt, cwd: input.cwd.trim() },
+      leader: { sessionId: created.sessionId, name: leaderName, title: leaderTitle, prompt: input.leaderPrompt, cwd: created.cwd },
     }, undefined, {
       aroundSave: async (current, commitTeams) => {
         await withSessionSystemPromptAddonLocks(current.members.map((member) => member.sessionId), () => {
           const rollbacks: Array<() => void> = [];
           try {
             for (const member of current.members) rollbacks.push(cleanupTeamRoleSystemPromptAddon(member.sessionId));
+            // 会话目录也是文件访问授权来源，版本和输入通过锁内校验后才发布。
+            const sessionFile = publishTeamMemberSession(created);
+            rollbacks.push(() => cleanupOrphanSessionFile(sessionFile));
             commitTeams();
+            committed = true;
           } catch (error) {
             for (const rollback of rollbacks.reverse()) rollback();
             throw error;
           }
+          allowFileRoot(created.cwd);
         });
       },
     });
   } catch (error) {
-    removeSessionSystemPromptAddon(created.sessionId);
-    cleanupOrphanSessionFile(created.sessionFile);
+    if (!committed) removeSessionSystemPromptAddon(created.sessionId);
     throw error;
   }
 }
