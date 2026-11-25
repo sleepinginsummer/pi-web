@@ -34,7 +34,7 @@ const SESSION_CONTEXT_CACHE_MAX_BYTES = 32 * 1024 * 1024;
 const SESSION_CONTEXT_CACHE_TTL_MS = 60_000;
 const PREFETCH_CONCURRENCY = 4;
 type LoadedContextResult = Extract<SessionContextResult, { kind: "loaded" }>;
-type CachedContext = { result: LoadedContextResult; createdAt: number; lastAccessedAt: number; bytes: number };
+type CachedContext = { result: LoadedContextResult; createdAt: number; lastAccessedAt: number; bytes: number; prefetched?: boolean };
 const sessionContextCache = new Map<string, CachedContext>();
 const sessionContextInflight = new Map<string, Promise<SessionContextResult>>();
 const sessionContextGenerations = new Map<string, number>();
@@ -133,7 +133,13 @@ function drainPrefetchQueue(): void {
     activePrefetches += 1;
     const controller = new AbortController();
     activePrefetchControllers.set(sid, controller);
-    void fetchSessionContext(sid, controller.signal, { tail: 50 }).catch(() => {
+    void fetchSessionContext(sid, controller.signal, { tail: 50 }).then((result) => {
+      if (result.kind !== "loaded") return;
+      const entry = sessionContextCache.get(sid);
+      if (entry && entry.result.snapshot.version === result.snapshot.version) {
+        entry.prefetched = true;
+      }
+    }).catch(() => {
       sessionContextCache.delete(sid);
     }).finally(() => {
       activePrefetchControllers.delete(sid);
@@ -184,10 +190,22 @@ export function invalidateSessionContext(sid: string): void {
 
 
 
+/** 读取尚未过期的首屏上下文缓存（不触发网络），供切回会话时乐观先画。 */
+export function peekSessionContextCache(sid: string): LoadedContextResult | null {
+  const cached = sessionContextCache.get(sid);
+  if (!cached) return null;
+  if (Date.now() - cached.createdAt >= SESSION_CONTEXT_CACHE_TTL_MS) {
+    sessionContextCache.delete(sid);
+    return null;
+  }
+  cached.lastAccessedAt = Date.now();
+  return cached.result;
+}
+
 export async function fetchSessionContext(
   sid: string,
   signal: AbortSignal,
-  options: { leafId?: string | null; before?: string; deferThinking?: boolean; deferMedia?: boolean; skipCache?: boolean; tail?: number } = {},
+  options: { leafId?: string | null; before?: string; deferThinking?: boolean; deferMedia?: boolean; skipCache?: boolean; tail?: number; reuseFreshMs?: number } = {},
 ): Promise<SessionContextResult> {
   const params = new URLSearchParams();
   if (options.leafId) params.set("leafId", options.leafId);
@@ -204,6 +222,24 @@ export async function fetchSessionContext(
       return cached.result;
     }
     sessionContextCache.delete(sid);
+  }
+  // 切换会话时若刚通过悬停/按下预取过（在途或数秒内刚落盘），消费并复用这次预取，避免发重复请求；
+  // 普通浏览留下的旧缓存不走这里，必须继续向服务端带 ETag 核对。
+  if (cacheable && options.skipCache && options.reuseFreshMs && options.reuseFreshMs > 0) {
+    if (activePrefetchControllers.has(sid)) {
+      const inflight = sessionContextInflight.get(sid);
+      if (inflight) {
+        return waitForConsumer(inflight, signal).finally(() => {
+          const entry = sessionContextCache.get(sid);
+          if (entry) entry.prefetched = false;
+        });
+      }
+    }
+    if (knownCached?.prefetched && Date.now() - knownCached.createdAt <= options.reuseFreshMs) {
+      knownCached.prefetched = false;
+      knownCached.lastAccessedAt = Date.now();
+      return { ...knownCached.result, cached: true };
+    }
   }
   const request = async (): Promise<SessionContextResult> => {
     const generation = sessionContextGenerations.get(sid) ?? 0;

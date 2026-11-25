@@ -1623,7 +1623,7 @@ test("the external-write error path keeps the queued messages reachable", () => 
   // 状态请求失败不重置运行状态：否则旧预读超时会清掉建连补读或 compaction_start 刚设好的压缩状态。
   const earlyFailure = source.slice(
     source.indexOf("Failed to load early session runtime state"),
-    source.indexOf("if (showLoading) setLoading(true);"),
+    source.indexOf("if (showLoading && !optimisticPainted) setLoading(true);"),
   );
   assert.doesNotMatch(earlyFailure, /applyRuntimeState\(undefined\)/);
   // 错误的队列更新与取回后的补查都要写进错误页读的那一份。

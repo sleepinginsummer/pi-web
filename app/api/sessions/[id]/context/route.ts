@@ -3,7 +3,7 @@ import { buildSessionContext, openSessionManager, readSessionHeader, resolveSess
 import { liveSessionBrowseVersion, readSessionBrowseSnapshot, sessionVersionEtag } from "@/lib/session-browse-snapshot";
 import { computeSessionTotalActiveMs } from "@/lib/session-timing";
 import { getRpcSession } from "@/lib/rpc-manager";
-import { readIndexedContextPage, readIndexedSessionDetails } from "@/lib/session-content-index";
+import { getSessionContentIndex, readIndexedContextPage } from "@/lib/session-content-index";
 import { sessionExternalWritePayload } from "@/lib/session-external-write";
 import { attachTranscriptNotices, readSessionTranscriptNotices, readShowCacheMissNotices } from "@/lib/transcript-notices-server";
 import type { SessionEntry } from "@/lib/types";
@@ -62,8 +62,9 @@ export async function GET(
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
     const readStartedAt = performance.now();
-    const indexedMetadata = filePath ? await readIndexedSessionDetails(filePath) : null;
-    let version = live?.version ?? indexedMetadata!.version;
+    // 同一请求里只取一次内容索引，ETag 304 校验和后续尾页读取共用，避免重复 stat。
+    const indexedFile = filePath ? await getSessionContentIndex(filePath) : null;
+    let version = live?.version ?? indexedFile!.version;
     const cacheStatus = live?.cacheStatus ?? "index";
     const resolveMs = live?.resolveMs ?? readStartedAt - requestStartedAt;
     let readMs = live?.readMs ?? performance.now() - readStartedAt;
@@ -85,7 +86,7 @@ export async function GET(
     }
 
     const indexed = filePath
-      ? await readIndexedContextPage(filePath, { leafId, before, tail })
+      ? await readIndexedContextPage(filePath, { leafId, before, tail }, indexedFile ?? undefined)
       : null;
     if (indexed) version = indexed.version;
     readMs = live?.readMs ?? performance.now() - readStartedAt;

@@ -1,13 +1,14 @@
 "use client";
 
 import { ArrowUpToLine, Pin as PinIcon } from "lucide-react";
-import { useCallback, useState, type CSSProperties, type MouseEvent, type ReactNode, type RefObject } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type MouseEvent, type PointerEvent, type ReactNode, type RefObject } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import { formatRelativeTime } from "@/lib/i18n/format";
 import { useSessionItemMutations, type SessionDeleteMode, type SessionDeleteStep } from "@/hooks/useSessionItemMutations";
 import { useSwipeActions } from "@/hooks/useSwipeActions";
 import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
 import { isPlainActivation, sessionDeepLink } from "@/lib/session-links";
+import { prefetchSessionContext } from "@/lib/session-load-client";
 import { DEFAULT_SESSION_PIN_COLOR, SESSION_PIN_COLOR_IDS, SESSION_PIN_COLORS, type SessionPinColor } from "@/lib/sidebar-preference-state";
 import { parseSkillMessage } from "@/lib/skill-block";
 import type { SessionInfo } from "@/lib/types";
@@ -491,6 +492,36 @@ export function SessionItem({ session, status, mobile, actions, tree = {}, proje
     openInNewTab();
   }, [isMobile, mutations.confirmDelete, mutations.renaming, openInNewTab, session.transient]);
 
+  const prefetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelPrefetchTimer = useCallback(() => {
+    if (prefetchTimerRef.current !== null) {
+      clearTimeout(prefetchTimerRef.current);
+      prefetchTimerRef.current = null;
+    }
+  }, []);
+  useEffect(() => cancelPrefetchTimer, [cancelPrefetchTimer]);
+
+  const canPrefetch = !isSelected && !session.transient && !mutations.confirmDelete && !mutations.renaming;
+  const handleRowPointerDown = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    swipe.pointerHandlers.onPointerDown?.(event);
+    if (!canPrefetch || (event.pointerType === "mouse" && event.button !== 0)) return;
+    cancelPrefetchTimer();
+    prefetchSessionContext(session.id);
+  }, [canPrefetch, cancelPrefetchTimer, session.id, swipe.pointerHandlers]);
+  const handleRowMouseEnter = useCallback(() => {
+    if (isMobile) return;
+    setHovered(true);
+    if (!canPrefetch) return;
+    cancelPrefetchTimer();
+    prefetchTimerRef.current = setTimeout(() => {
+      prefetchTimerRef.current = null;
+      prefetchSessionContext(session.id);
+    }, 100);
+  }, [canPrefetch, cancelPrefetchTimer, isMobile, session.id]);
+  const handleRowMouseLeave = useCallback(() => {
+    if (!isMobile) setHovered(false);
+    cancelPrefetchTimer();
+  }, [cancelPrefetchTimer, isMobile]);
   const stopAndToggleTopPin = onToggleTopPinned
     ? (event: MouseEvent<HTMLButtonElement>) => {
       event.stopPropagation();
@@ -518,11 +549,12 @@ export function SessionItem({ session, status, mobile, actions, tree = {}, proje
       <div
         data-session-row
         {...swipe.pointerHandlers}
+        onPointerDown={handleRowPointerDown}
         onClick={handleRowClick}
         onAuxClick={handleRowAuxClick}
         onContextMenu={isMobile || mutations.confirmDelete || mutations.renaming ? undefined : handleContextMenu}
-        onMouseEnter={() => { if (!isMobile) setHovered(true); }}
-        onMouseLeave={() => { if (!isMobile) setHovered(false); }}
+        onMouseEnter={handleRowMouseEnter}
+        onMouseLeave={handleRowMouseLeave}
         style={{ width: "100%", height: ITEM_HEIGHT, boxSizing: "border-box", display: "flex", position: "relative", zIndex: 1, alignItems: "center", paddingLeft: depth > 0 ? depth * 12 + 14 : 14, paddingRight: isPinned ? 32 : 8, cursor: mutations.confirmDelete || mutations.renaming ? "default" : "pointer", background: mutations.confirmDelete ? "rgba(239,68,68,0.06)" : isSelected ? "var(--bg-selected)" : hovered ? "var(--bg-hover)" : isMobile ? "var(--bg-panel)" : "transparent", borderLeft: mutations.confirmDelete ? "2px solid #ef4444" : isSelected ? "2px solid var(--accent)" : "2px solid transparent", transform: isMobile ? `translateX(${swipe.offset}px)` : "none", transition: swipe.dragging ? "none" : "background 0.1s, transform 0.18s ease-out", touchAction: isMobile ? "pan-y" : "auto", willChange: isMobile ? "transform" : "auto", opacity: mutations.deleting ? 0.5 : 1, gap: 6, overflow: "hidden" }}
       >
         {isPinned && <button type="button" data-session-pin-marker title={t("sidebar.pinColor")} aria-label={t("sidebar.pinColor")} aria-expanded={showPinColorPicker} onClick={(event) => { event.stopPropagation(); setPinColorPickerOpen((open) => !open); }} style={{ position: "absolute", top: 0, right: 0, width: 24, height: 16, display: "flex", alignItems: "center", justifyContent: "center", padding: 0, border: "none", background: pinColorStyle.background, borderBottomLeftRadius: 5, color: pinColorStyle.foreground, boxShadow: "0 1px 2px rgba(0,0,0,0.24)", cursor: "pointer", zIndex: 3 }}><PinIcon size={12} strokeWidth={2.4} aria-hidden="true" style={{ transform: "rotate(45deg)" }} /></button>}

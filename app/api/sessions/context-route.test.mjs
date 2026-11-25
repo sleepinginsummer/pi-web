@@ -19,7 +19,8 @@ const { buildSessionContext } = await jiti.import("@/lib/session-reader");
 test("context route parses ?tail and ?before, excluding the boundary on paging", () => {
   assert.match(routeSrc, /const tail = Number\.isFinite\(rawTail\) && rawTail > 0 \? Math\.min\(rawTail, 1000\) : 50/);
   assert.match(routeSrc, /const before = url\.searchParams\.get\("before"\)/);
-  assert.match(routeSrc, /readIndexedContextPage\(filePath, \{ leafId, before, tail \}\)/);
+  assert.match(routeSrc, /readIndexedContextPage\(filePath, \{ leafId, before, tail \}, indexedFile \?\? undefined\)/);
+  assert.doesNotMatch(routeSrc, /readIndexedSessionDetails\(/);
   assert.match(routeSrc, /const activeLeafId = leafId \?\? live\?\.leafId \?\? indexed!\.leafId/);
   assert.match(routeSrc, /buildSessionContext\(entries, contextLeafId, \{/);
   assert.match(routeSrc, /excludeLeaf: Boolean\(before && live\)/);

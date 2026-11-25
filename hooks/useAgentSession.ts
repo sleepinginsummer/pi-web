@@ -85,6 +85,7 @@ import {
   type SessionContextSnapshot,
   type SessionDetails,
   invalidateSessionContext,
+  peekSessionContextCache,
 } from "@/lib/session-load-client";
 import { backfillFirstPage, mergeOlderPage, sameSessionView } from "@/lib/first-page-backfill";
 import { LatestContextLoader } from "@/lib/latest-context-loader";
@@ -647,6 +648,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [contextVersion, setContextVersion] = useState<string | null>(null);
   const [detailsState, setDetailsState] = useState<{ sid: string; value: SessionDetails } | null>(null);
   const [loading, setLoading] = useState(!isNew);
+  // 仅挂载切换会话时标记允许乐观先画本地缓存与复用刚完成的悬停预取，重试/取回队列不走此路径。
+  const optimisticMountLoadSidRef = useRef<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // 外部写入把 /context 挡在外面时，队列里只存在服务器内存中的消息：错误页据此给出取回入口。
   const [blockedRecall, setBlockedRecall] = useState<QueuedMessages | null>(null);
@@ -1688,7 +1691,34 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           return null;
         })
       : null;
-    if (showLoading) setLoading(true);
+    const allowOptimisticMount = optimisticMountLoadSidRef.current === sid;
+    if (allowOptimisticMount) optimisticMountLoadSidRef.current = null;
+    let optimisticPainted: { source: "view" | "context"; version: string; leafId: string | null; messages: AgentMessage[] } | null = null;
+    if (showLoading && allowOptimisticMount && !options.reloadedAfterRewrite) {
+      const savedView = getSessionViewSnapshot(sid);
+      if (savedView) {
+        const optimisticSnapshot: SessionContextSnapshot = {
+          messages: savedView.messages,
+          entryIds: savedView.entryIds,
+          oldestEntryId: savedView.oldestEntryId,
+          hasMore: savedView.hasMore,
+          turnsBefore: savedView.turnsBefore,
+          thinkingLevel: savedView.thinkingLevel,
+          model: savedView.model,
+          totalActiveMs: savedView.totalActiveMs,
+          version: savedView.revision,
+        };
+        if (commitContextSnapshot(sid, optimisticSnapshot, savedView.leafId)) {
+          optimisticPainted = { source: "view", version: savedView.revision, leafId: savedView.leafId, messages: messagesRef.current };
+        }
+      } else {
+        const cachedContext = peekSessionContextCache(sid);
+        if (cachedContext && commitContextSnapshot(sid, cachedContext.snapshot, cachedContext.leafId)) {
+          optimisticPainted = { source: "context", version: cachedContext.snapshot.version, leafId: cachedContext.leafId, messages: messagesRef.current };
+        }
+      }
+    }
+    if (showLoading && !optimisticPainted) setLoading(true);
     try {
       const readSeq = ++sessionReadSeqRef.current;
       // 实际提交进界面的那一份：恢复的更大窗口可能是它，而不是服务端这一页。
@@ -1700,12 +1730,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // 补页再撞一次视图变化就停在那一页上（首次打开走 validateView，刷新路径没有）。
         (signal) => fetchSessionContext(sid, signal, {
           skipCache: options.validateView || options.reloadedAfterRewrite === true,
+          reuseFreshMs: allowOptimisticMount && !options.reloadedAfterRewrite ? 5_000 : undefined,
         }),
         (loaded) => {
           if (loaded.kind !== "missing" && (lastReadContextRef.current?.seq ?? 0) < readSeq) {
             lastReadContextRef.current = { sid, seq: readSeq, messages: loaded.snapshot.messages, entryIds: loaded.snapshot.entryIds ?? [] };
           }
           if (sessionIdRef.current !== sid) return false;
+          // 乐观首屏后若用户已发送消息或流式写入改变了列表，丢弃迟到的旧校验，避免覆盖新消息。
+          if (optimisticPainted && messagesRef.current !== optimisticPainted.messages) return false;
           if (loaded.kind === "missing") {
             if (showLoading) {
               setContextModel(null);
@@ -1741,7 +1774,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             return loaded;
           }
           if (saved) deleteSessionViewSnapshot(sid);
-          if (!commitContextSnapshot(sid, loaded.snapshot, loaded.leafId, options)) return null;
+          if (
+            optimisticPainted?.source === "context"
+            && optimisticPainted.version === loaded.snapshot.version
+            && optimisticPainted.leafId === loaded.leafId
+          ) {
+            committedSnapshot = loaded.snapshot;
+            return loaded;
+          }
+          const commitOptions = optimisticPainted ? { ...options, preserveScroll: true } : options;
+          if (!commitContextSnapshot(sid, loaded.snapshot, loaded.leafId, commitOptions)) return null;
           committedSnapshot = loaded.snapshot;
           return loaded;
       });
@@ -1815,11 +1857,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
       loadSessionDetails(sid);
       if (contextResult.value.cached) {
+        const paintedMessages = messagesRef.current;
         void contextLoaderRef.current.run(
           sid,
           (signal) => fetchSessionContext(sid, signal, { skipCache: true }),
           (loaded) => {
-            if (loaded.kind !== "loaded" || loaded.snapshot.version === contextVersionRef.current) return false;
+            if (loaded.kind !== "loaded") return false;
+            if (messagesRef.current !== paintedMessages) return false;
+            if (loaded.snapshot.version === contextVersionRef.current && loaded.leafId === viewSnapshotRef.current.leafId) return false;
+            deleteSessionViewSnapshot(sid);
             const committed = commitContextSnapshot(sid, loaded.snapshot, loaded.leafId, { preserveScroll: true });
             if (committed) loadSessionDetails(sid);
             return committed;
@@ -3357,7 +3403,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     backfillRequestRef.current.controller?.abort();
     backfillRequestRef.current.generation += 1;
     const requestSessionId = sessionIdRef.current ?? session?.id ?? null;
-    if (requestSessionId) invalidateSessionContext(requestSessionId);
+    if (requestSessionId) {
+      invalidateSessionContext(requestSessionId);
+      // 取消正在进行的后台上下文校验，防止迟到响应覆盖刚发出的乐观气泡或新消息。
+      contextLoaderRef.current.cancel(requestSessionId);
+    }
     const trimmedMessage = message.trim();
     if (!trimmedMessage && !images?.length) return false;
     // UI 状态可能晚于异步扩展启动的 agent_start；此时不可吞掉用户输入。
@@ -4729,6 +4779,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setToolSelectionKnown(false);
       sessionIdRef.current = session.id;
       void connectEvents(session.id);
+      optimisticMountLoadSidRef.current = session.id;
       // 先向服务端验证版本和活动 leaf，不能把旧窗口直接显示在另一个分支上。
       loadSession(session.id, true, true, { validateView: true }).then(({ agentState, runtimeRead }) => {
         restoreRuntimeFromLoad(session.id, agentState, runtimeRead);

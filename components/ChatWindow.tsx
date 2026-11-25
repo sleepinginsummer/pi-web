@@ -145,20 +145,45 @@ const CHAT_MINIMAP_WIDTH = 36;
 const CHAT_COLUMN_PADDING = 16;
 const CHAT_MINIMAP_LEFT_PADDING = CHAT_COLUMN_PADDING + CHAT_MINIMAP_WIDTH;
 
-function NewSessionUpdateLink({ label }: { label: (version: string) => string }) {
-  const [update, setUpdate] = useState<AppUpdateResponse | null>(null);
+const APP_UPDATE_CACHE_TTL_MS = 5 * 60_000;
+let cachedAppUpdate: { value: AppUpdateResponse | null; fetchedAt: number } | null = null;
+let inflightAppUpdate: Promise<AppUpdateResponse | null> | null = null;
 
-  useEffect(() => {
-    const controller = new AbortController();
-    void fetch("/api/app-update", { signal: controller.signal })
+function readCachedAppUpdate(): Promise<AppUpdateResponse | null> {
+  if (cachedAppUpdate && Date.now() - cachedAppUpdate.fetchedAt < APP_UPDATE_CACHE_TTL_MS) {
+    return Promise.resolve(cachedAppUpdate.value);
+  }
+  if (!inflightAppUpdate) {
+    inflightAppUpdate = fetch("/api/app-update")
       .then(async (response) => response.ok ? response.json() as Promise<AppUpdateResponse> : null)
       .then((result) => {
-        if (result?.updateAvailable && result.latestVersion && result.releaseUrl) setUpdate(result);
+        cachedAppUpdate = { value: result, fetchedAt: Date.now() };
+        return result;
       })
-      .catch(() => {
-        // 版本检查是非关键网络请求，失败不能影响新会话输入。
+      .catch(() => null)
+      .finally(() => {
+        inflightAppUpdate = null;
       });
-    return () => controller.abort();
+  }
+  return inflightAppUpdate;
+}
+
+function NewSessionUpdateLink({ label }: { label: (version: string) => string }) {
+  const [update, setUpdate] = useState<AppUpdateResponse | null>(() => {
+    if (cachedAppUpdate && Date.now() - cachedAppUpdate.fetchedAt < APP_UPDATE_CACHE_TTL_MS) {
+      const value = cachedAppUpdate.value;
+      return value?.updateAvailable && value.latestVersion && value.releaseUrl ? value : null;
+    }
+    return null;
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    void readCachedAppUpdate().then((result) => {
+      if (cancelled) return;
+      if (result?.updateAvailable && result.latestVersion && result.releaseUrl) setUpdate(result);
+    });
+    return () => { cancelled = true; };
   }, []);
 
   if (!update) return null;

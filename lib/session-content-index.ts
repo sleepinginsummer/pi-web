@@ -562,8 +562,9 @@ export interface IndexedContextPage {
 export async function readIndexedContextPage(
   filePath: string,
   options: { leafId?: string; before?: string; tail: number },
+  preloadedIndex?: PersistedSessionContentIndex,
 ): Promise<IndexedContextPage> {
-  const index = await getSessionContentIndex(filePath);
+  const index = preloadedIndex ?? await getSessionContentIndex(filePath);
   const byId = new Map(index.records.map((record) => [record.id, record]));
   const activeLeafId = options.leafId ?? index.leafId;
   let current = byId.get(options.before ?? activeLeafId ?? "");

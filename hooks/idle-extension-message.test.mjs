@@ -12,6 +12,7 @@ const jiti = createJiti(import.meta.url, { tsconfigPaths: true, alias: { react: 
 const { renderHook } = await import(pathToFileURL(shimPath).href);
 const { useAgentSession } = await jiti.import("./useAgentSession.ts");
 const { deleteSessionViewSnapshot, getSessionViewSnapshot } = await jiti.import("@/lib/session-view-cache");
+const { prefetchSessionContext, resetSessionContextCacheForTests } = await jiti.import("@/lib/session-load-client");
 
 globalThis.document ??= Object.assign(new EventTarget(), { visibilityState: "visible" });
 globalThis.window ??= new EventTarget();
@@ -294,8 +295,8 @@ test("the cached view survives a session switch after an idle message", async ()
     again = renderHook(useAgentSession, forkAgentHookOptions({ session: { id: "A", cwd: "/project", path: "/A.jsonl", name: "A" }, newSessionCwd: null, newSessionDraftKey: null, t: (key) => key }));
     await settle();
     again.flush();
-    assert.equal(again.result.loading, true);
-    assert.deepEqual(again.result.entryIds, []);
+    assert.equal(again.result.loading, false);
+    assert.deepEqual(again.result.entryIds, ["e3", "e4", "c1"]);
   } finally {
     again?.unmount();
     mock.timers.reset();
@@ -346,6 +347,85 @@ test("a `!` command's record a tail read finds first waits for the command's rea
     assert.deepEqual(env.hook.result.entryIds, ["b1", "c1"], "the command's read shows both once");
     assert.equal(env.server.reads.tail, 2, "and the read came again after it");
   } finally {
+    env.teardown();
+  }
+});
+
+
+test("恢复缓存后挂起校验期间发送消息，释放旧响应不能覆盖刚发出的消息", async () => {
+  const env = await setup();
+  let again;
+  try {
+    env.hook.unmount();
+    assert.deepEqual(getSessionViewSnapshot("A")?.entryIds, ["e3", "e4"]);
+    // 挂起切回后的后台 /context 校验，让用户先看到缓存正文并立即发送消息。
+    env.server.hold.add("full");
+    again = renderHook(useAgentSession, forkAgentHookOptions({ session: { id: "A", cwd: "/project", path: "/A.jsonl", name: "A" }, newSessionCwd: null, newSessionDraftKey: null, t: (key) => key }));
+    await settle();
+    again.flush();
+    assert.equal(again.result.loading, false);
+    assert.deepEqual(again.result.entryIds, ["e3", "e4"]);
+
+    await env.connect();
+    const sent = await again.result.handleSend("hello while validating");
+    assert.equal(sent, true);
+    await settle();
+    again.flush();
+    assert.ok(
+      again.result.messages.some((message) => message.role === "user" && message.content === "hello while validating"),
+      "发送后的乐观气泡应立即显示",
+    );
+
+    // 释放早先挂起的旧 /context 校验响应，不得把新消息覆盖回旧快照。
+    await env.release("full");
+    await settle();
+    again.flush();
+    assert.ok(
+      again.result.messages.some((message) => message.role === "user" && message.content === "hello while validating"),
+      "迟到的旧校验响应不得覆盖刚发出的消息",
+    );
+  } finally {
+    again?.unmount();
+    deleteSessionViewSnapshot("A");
+    resetSessionContextCacheForTests();
+    env.teardown();
+  }
+});
+
+test("预取 v1 后服务端变为 v2，打开会话先复用 v1 再由后台复验更新到 v2", async () => {
+  const env = await setup();
+  let opened;
+  try {
+    env.hook.unmount();
+    deleteSessionViewSnapshot("A");
+    resetSessionContextCacheForTests();
+
+    // 1. 悬停/按下触发预取，拿到 v1（e3, e4）。
+    prefetchSessionContext("A");
+    await settle();
+    const readsAfterPrefetch = env.server.reads.full;
+    assert.equal(readsAfterPrefetch, 2);
+
+    // 2. 预取完成后、用户真正点击前，服务端产生了新消息 v2（e4, c2）。
+    env.server.entries.push(["c2", custom("Arrived after prefetch")]);
+
+    // 3. 打开会话：挂起后台复验，先确认界面秒出预取的 v1；再放行复验，确认自动更新到 v2。
+    env.server.hold.add("full");
+    opened = renderHook(useAgentSession, forkAgentHookOptions({ session: { id: "A", cwd: "/project", path: "/A.jsonl", name: "A" }, newSessionCwd: null, newSessionDraftKey: null, t: (key) => key }));
+    await settle();
+    opened.flush();
+    assert.equal(opened.result.loading, false);
+    assert.deepEqual(opened.result.entryIds, ["e3", "e4"], "首屏先复用已完成的预取结果");
+    assert.equal(env.server.held.filter((item) => item.kind === "full").length, 1, "后台应立即发起带 ETag 的复验请求");
+
+    await env.release("full");
+    await settle();
+    opened.flush();
+    assert.deepEqual(opened.result.entryIds, ["e4", "c2"], "后台复验返回 v2 后应自动更新到最新正文");
+  } finally {
+    opened?.unmount();
+    deleteSessionViewSnapshot("A");
+    resetSessionContextCacheForTests();
     env.teardown();
   }
 });
