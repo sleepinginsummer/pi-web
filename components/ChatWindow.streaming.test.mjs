@@ -40,7 +40,7 @@ globalThis.fetch = async (url) => {
 const { render, cleanup } = await import("@testing-library/react");
 const actual = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
 const hookSource = (await readFile(new URL("../hooks/useAgentSession.ts", import.meta.url), "utf8"))
-  .replace("handleAgentEventRef.current = handleAgentEvent;", "handleAgentEventRef.current = handleAgentEvent; globalThis.__streamRenderProbe.handleEvent = handleAgentEvent;");
+  .replace("handleAgentEventRef.current = handleAgentEvent;", "handleAgentEventRef.current = handleAgentEvent; globalThis.__streamRenderProbe.handleEvent = handleAgentEvent; globalThis.__streamRenderProbe.setBashRunning = setBashRunning;");
 const mountLoadStatement = "void retryModelLoad(loadModels, controller.signal, delay);";
 assert.ok(hookSource.includes(mountLoadStatement), "挂载加载探针必须命中真实加载任务");
 const instrumentedHookSource = hookSource.replace(mountLoadStatement, "globalThis.__streamRenderProbe.mountLoad = retryModelLoad(loadModels, controller.signal, delay);");
@@ -48,6 +48,7 @@ const { useAgentSession } = actual.evalModule(instrumentedHookSource, { filename
 const { ChatInput } = await actual.import("./ChatInput.tsx");
 const { StreamingReply } = await actual.import("./StreamingReply.tsx");
 const { I18nProvider } = await actual.import("../hooks/useI18n.tsx");
+const { SIDE_BOUNDARY_MESSAGE_TYPE } = await actual.import("../lib/session-family.ts");
 const { createStreamingStore } = await actual.import("../lib/streaming-message.ts");
 const { useStreamingSelector, selectStreamingMessage } = await actual.import("../hooks/useStreamingSelector.ts");
 const { useFrameBatchedStreamDispatch } = await actual.import("../hooks/useFrameBatchedStreamDispatch.ts");
@@ -194,6 +195,48 @@ test("运行中保留正文与图片，只折叠较早的过程块", { timeout: 
   assert.match(view.container.textContent, /First visible update.*Second visible update/s);
   assert.doesNotMatch(view.container.textContent, /Earlier completed thought|Earlier streamed thought|older-tool/);
 });
+
+test("执行 ! 时侧聊分隔线留在原位且不占过程预览名额", { timeout: 10_000 }, async () => {
+  mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  const view = renderChatWindow();
+  const probe = globalThis.__streamRenderProbe;
+  const inherited = [
+    { role: "user", content: [{ type: "text", text: "Original prompt" }], timestamp: 1 },
+    { ...assistant("Inherited answer"), stopReason: "stop" },
+    { role: "custom", customType: SIDE_BOUNDARY_MESSAGE_TYPE, display: false, content: "Boundary marker" },
+  ];
+  await act(async () => {
+    completeMountResponses();
+    await probe.mountLoad;
+    probe.result.setMessages(inherited);
+  });
+  assert.ok(view.getByRole("separator"));
+
+  await act(async () => { probe.setBashRunning(true); });
+  assert.equal(probe.result.bashRunning, true);
+  assert.equal(probe.result.agentRunning, false);
+  assert.equal(view.queryAllByRole("separator").length, 1);
+
+  // 接着验证三项配额用满时，分隔线仍在继承正文与侧聊命令之间。
+  await act(async () => {
+    probe.result.setMessages([
+      ...inherited,
+      { role: "custom", customType: "internal", display: false, content: "Hidden extension message" },
+      ...["first", "second", "third"].map((name) => ({
+        role: "bashExecution",
+        command: "echo " + name,
+        output: name,
+        exitCode: 0,
+        timestamp: 2,
+        cancelled: false,
+        truncated: false,
+      })),
+    ]);
+  });
+  assert.match(view.container.textContent, /Inherited answer.*Side chat starts here.*echo first.*echo second.*echo third/s);
+  assert.doesNotMatch(view.container.textContent, /earlier process items|Hidden extension message/);
+});
+
 test("按帧增量保持顺序，message_end 前同步 flush，切换会话丢弃旧帧", async () => {
   const store = createStreamingStore();
   let controls;

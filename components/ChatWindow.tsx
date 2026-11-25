@@ -1456,17 +1456,19 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                 const nodes: ReactNode[] = [];
                 if (isLiveTail) {
                   if (hasAnchor) nodes.push(renderMessage(start));
-                  // 正文和图片留在原位，预览名额只分给可折叠的过程内容。
-                  const sources: Array<{ index: number; processBlockCount: number; hasBody: boolean }> = [];
+                  // 正文、图片和侧聊分隔线留在原位，预览名额只分给可折叠的过程内容。
+                  const sources: Array<{ index: number; processBlockCount: number; keepVisible: boolean }> = [];
                   for (let index = processStart; index < end; index++) {
                     const message = messages[index];
                     if (message.role === "assistant") {
                       const blocks = getDisplayableAssistantBlocks(message);
                       if (blocks.length === 0) continue;
                       const processBlockCount = blocks.filter((block) => !isAssistantBodyBlock(block)).length;
-                      sources.push({ index, processBlockCount, hasBody: blocks.length > processBlockCount });
+                      sources.push({ index, processBlockCount, keepVisible: blocks.length > processBlockCount });
+                    } else if (message.role === "custom" && message.customType === SIDE_BOUNDARY_MESSAGE_TYPE) {
+                      sources.push({ index, processBlockCount: 0, keepVisible: true });
                     } else if (message.role === "bashExecution" || (message.role === "custom" && !isHiddenCustomMessage(message))) {
-                      sources.push({ index, processBlockCount: 1, hasBody: false });
+                      sources.push({ index, processBlockCount: 1, keepVisible: false });
                     }
                   }
                   const recentWindow = buildRecentItemWindow(
@@ -1483,7 +1485,7 @@ export const ChatWindow = memo(function ChatWindow({ panel = false, onSideSessio
                     <>
                       {sources.map((source, sourceIndex) => {
                         const hiddenProcessBlockCount = recentWindow.visibleOffsets[sourceIndex];
-                        if (!source.hasBody && hiddenProcessBlockCount >= source.processBlockCount) return null;
+                        if (!source.keepVisible && hiddenProcessBlockCount >= source.processBlockCount) return null;
                         return renderMessage(source.index, {
                           attachRef: false,
                           keyPrefix: "live-process",
