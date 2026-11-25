@@ -2,6 +2,8 @@
 
 import React, { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "@/hooks/useI18n";
+import { ModelBrandIcon, useModelBrandIconsRegistry, useResolvedModelBrandIcon } from "./ModelBrandIcon";
+import { resolveModelBrandIcon } from "@/lib/model-brand-icon";
 
 export interface ModelPickerOption {
   provider: string;
@@ -216,12 +218,28 @@ export const ModelPicker = memo(function ModelPicker({
     }
     return Array.from(optionsByProvider, ([provider, options]) => ({ provider, options }));
   }, [filteredOptions]);
-  const currentModelName = useMemo(() => {
+  const currentOption = useMemo(() => {
     if (!value) return null;
     return modelOptions.find((option) => (
       option.modelId === value.modelId && option.provider === value.provider
-    ))?.name ?? value.modelId;
+    )) ?? null;
   }, [value, modelOptions]);
+  const currentModelName = currentOption?.name ?? value?.modelId ?? null;
+  const currentBrandIcon = useResolvedModelBrandIcon(
+    value
+      ? {
+          provider: value.provider,
+          providerName: currentOption?.providerName,
+          modelId: value.modelId,
+          name: currentModelName,
+        }
+      : null,
+  );
+  const brandIconsRegistry = useModelBrandIconsRegistry();
+  const listHasBrandIcons = useMemo(
+    () => filteredOptions.some((option) => resolveModelBrandIcon(option, brandIconsRegistry) !== null),
+    [filteredOptions, brandIconsRegistry],
+  );
   const currentName = selectedLabel ?? (value && currentModelName
     ? variant === "toolbar" ? `${truncateMiddle(value.provider, 18)}/${currentModelName}` : currentModelName
     : emptyLabel ?? (modelOptions.length > 0 ? "Select model" : "No models"));
@@ -306,7 +324,7 @@ export const ModelPicker = memo(function ModelPicker({
         }}
         title={busy ? "Switching model" : locked ? currentName : modelOptions.length > 0 || onClear ? "Change model" : "No available models"}
       >
-        {busy ? <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" style={{ animation: "spin 0.8s linear infinite", flexShrink: 0 }} aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36" /></svg> : <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        {busy ? <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" style={{ animation: "spin 0.8s linear infinite", flexShrink: 0 }} aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36" /></svg> : currentBrandIcon ? <ModelBrandIcon resolved={currentBrandIcon} size={14} /> : <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}>
           <rect x="4" y="4" width="16" height="16" rx="2" /><rect x="9" y="9" width="6" height="6" />
           <line x1="9" y1="1" x2="9" y2="4" /><line x1="15" y1="1" x2="15" y2="4" />
           <line x1="9" y1="20" x2="9" y2="23" /><line x1="15" y1="20" x2="15" y2="23" />
@@ -373,7 +391,8 @@ export const ModelPicker = memo(function ModelPicker({
                   {groups.length > 1 && <div style={{ padding: "6px 12px 4px", fontSize: 10, fontWeight: 600, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.07em", borderTop: groupIndex > 0 ? "1px solid var(--border)" : "none" }}>{group.options[0]?.providerName ?? group.provider}</div>}
                   {group.options.map((option) => {
                     const active = option.modelId === value?.modelId && option.provider === value?.provider;
-                    return <ModelOptionButton key={`${option.provider}:${option.modelId}`} active={active} label={option.name} onClick={() => { setOpen(false); setFilter(""); if (!active || isAutoSelection) onChange(option.provider, option.modelId); else onReselect?.(option.provider, option.modelId); }} />;
+                    const brandIcon = resolveModelBrandIcon(option, brandIconsRegistry);
+                    return <ModelOptionButton key={`${option.provider}:${option.modelId}`} active={active} label={option.name} brandIcon={brandIcon} reserveIconSlot={listHasBrandIcons} onClick={() => { setOpen(false); setFilter(""); if (!active || isAutoSelection) onChange(option.provider, option.modelId); else onReselect?.(option.provider, option.modelId); }} />;
                   })}
                 </div>
               ))}
@@ -384,12 +403,13 @@ export const ModelPicker = memo(function ModelPicker({
   );
 });
 
-function ModelOptionButton({ active, label, onClick }: { active: boolean; label: string; onClick: () => void }) {
+function ModelOptionButton({ active, label, brandIcon, reserveIconSlot = false, onClick }: { active: boolean; label: string; brandIcon?: ReturnType<typeof resolveModelBrandIcon>; reserveIconSlot?: boolean; onClick: () => void }) {
   return <button type="button" role="option" aria-selected={active} onClick={onClick}
     style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "7px 12px", background: active ? "var(--bg-selected)" : "none", border: "none", color: active ? "var(--text)" : "var(--text-muted)", cursor: "pointer", fontSize: 12, textAlign: "left", fontWeight: active ? 600 : 400, whiteSpace: "nowrap" }}
     onMouseEnter={(event) => { if (!active) event.currentTarget.style.background = "var(--bg-hover)"; }}
     onMouseLeave={(event) => { if (!active) event.currentTarget.style.background = "none"; }}>
     {active ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-hidden="true"><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg> : <span style={{ width: 10, flexShrink: 0 }} />}
+    {brandIcon ? <ModelBrandIcon resolved={brandIcon} size={14} /> : reserveIconSlot ? <span style={{ width: 14, flexShrink: 0 }} aria-hidden="true" /> : null}
     <span title={label} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{label}</span>
   </button>;
 }

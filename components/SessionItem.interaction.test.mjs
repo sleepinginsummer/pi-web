@@ -126,3 +126,36 @@ test("独立置顶按钮与项目目录元数据行正确渲染", () => {
   assert.ok(runningIndicator);
   assert.ok(runningIndicator.compareDocumentPosition(projectTag) & Node.DOCUMENT_POSITION_FOLLOWING);
 });
+
+
+test("会话记录了模型时在标题最前面渲染品牌图标，未记录时不占位", () => {
+  const { rerender } = render(React.createElement(
+    I18nProvider,
+    null,
+    React.createElement(SessionItem, {
+      session: { ...session, model: { provider: "deepseek", modelId: "deepseek-reasoner" } },
+      status: { isSelected: false, isRunning: false, isUnread: false, isPinned: false },
+      mobile: { enabled: false, swipeOpen: false, onSwipeOpenChange() {} },
+      actions: { onClick() {}, onTogglePinned() {} },
+    }),
+  ));
+
+  const row = document.querySelector("[data-session-row]");
+  assert.ok(row);
+  const icon = row.querySelector('[data-model-brand-icon="deepseek"]');
+  assert.ok(icon);
+  assert.match(icon.getAttribute("title") ?? "", /DeepSeek/);
+
+  rerender(React.createElement(
+    I18nProvider,
+    null,
+    React.createElement(SessionItem, {
+      session,
+      status: { isSelected: false, isRunning: false, isUnread: false, isPinned: false },
+      mobile: { enabled: false, swipeOpen: false, onSwipeOpenChange() {} },
+      actions: { onClick() {}, onTogglePinned() {} },
+    }),
+  ));
+
+  assert.equal(document.querySelector("[data-model-brand-icon]"), null);
+});

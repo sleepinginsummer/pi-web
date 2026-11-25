@@ -4,6 +4,8 @@ import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { SelectorRow } from "./SelectorRow";
+import { resolveModelBrandIcon, type ResolvedModelBrandIcon } from "@/lib/model-brand-icon";
+import { ModelBrandIcon, useModelBrandIconsRegistry, useResolvedModelBrandIcon } from "./ModelBrandIcon";
 
 export interface ModelSelectorOption {
   provider: string;
@@ -121,9 +123,24 @@ export function ModelSelector({
   };
   const modelsByProvider = groupModelOptions(filteredOptions);
 
+  const currentOption = value ? (isListed(options, value) ?? isListed(allOptions, value)) : undefined;
   const currentName = selectedLabel ?? (value
-    ? (isListed(options, value) ?? isListed(allOptions, value))?.name ?? value.modelId
+    ? currentOption?.name ?? value.modelId
     : emptyLabel ?? (options.length > 0 ? t("chat.selectModel") : t("chat.noModels")));
+  const currentBrandIcon = useResolvedModelBrandIcon(
+    value
+      ? {
+          provider: value.provider,
+          providerName: currentOption?.providerName,
+          modelId: value.modelId,
+          name: currentOption?.name ?? value.modelId,
+        }
+      : null,
+  );
+  const brandIconsRegistry = useModelBrandIconsRegistry();
+  const listHasBrandIcons = filteredOptions.some(
+    (option) => resolveModelBrandIcon(option, brandIconsRegistry) !== null,
+  );
 
   useEffect(() => {
     const handleOutsideClick = (event: MouseEvent) => {
@@ -273,6 +290,8 @@ export function ModelSelector({
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" style={{ animation: "spin 0.8s linear infinite", flexShrink: 0 }} aria-hidden="true">
             <path d="M21 12a9 9 0 1 1-2.64-6.36" />
           </svg>
+        ) : currentBrandIcon ? (
+          <ModelBrandIcon resolved={currentBrandIcon} size={14} />
         ) : (
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}>
             <rect x="4" y="4" width="16" height="16" rx="2" />
@@ -416,6 +435,7 @@ export function ModelSelector({
                     </div>
                   )}
                   {group.options.map((option) => {
+                    const brandIcon = resolveModelBrandIcon(option, brandIconsRegistry);
                     return (
                       <SelectorRow
                         key={`${option.provider}:${option.modelId}`}
@@ -429,7 +449,7 @@ export function ModelSelector({
                           onSave: () => saveDefault(option),
                         } : undefined}
                       >
-                        <OptionLabel label={option.name} />
+                        <OptionLabel label={option.name} brandIcon={brandIcon} reserveIconSlot={listHasBrandIcons} />
                       </SelectorRow>
                     );
                   })}
@@ -443,6 +463,19 @@ export function ModelSelector({
   );
 }
 
-function OptionLabel({ label }: { label: string }) {
-  return <span title={label} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{label}</span>;
+function OptionLabel({
+  label,
+  brandIcon,
+  reserveIconSlot = false,
+}: {
+  label: string;
+  brandIcon?: ResolvedModelBrandIcon | null;
+  reserveIconSlot?: boolean;
+}) {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, minWidth: 0, overflow: "hidden" }}>
+      {brandIcon ? <ModelBrandIcon resolved={brandIcon} size={14} /> : reserveIconSlot ? <span style={{ width: 14, flexShrink: 0 }} aria-hidden="true" /> : null}
+      <span title={label} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{label}</span>
+    </span>
+  );
 }

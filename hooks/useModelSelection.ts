@@ -3,6 +3,7 @@
 import { missingCwdFromBody } from "@/lib/missing-cwd";
 import { useCallback, useMemo, useReducer, useRef } from "react";
 import { parseModelsData } from "@/lib/model-data-schema";
+import { registerModelDisplayNames } from "@/lib/model-brand-icon-store";
 import type { SelectedModel } from "@/lib/model-types";
 import type { ModelSelectionState } from "@/lib/model-selection-types";
 import { LatestRequestGate } from "@/lib/latest-request-gate";
@@ -189,6 +190,7 @@ export function useModelSelection() {
       const defaultModel = displayModel ? { provider: displayModel.provider, modelId: displayModel.id } : null;
 
       if (!loadGateRef.current.isLatest("models", modelsGeneration)) return undefined;
+      registerModelDisplayNames(data.models);
       dispatch({
         type: "modelsLoaded",
         applyNewSessionDefaults: initializeNewSession,

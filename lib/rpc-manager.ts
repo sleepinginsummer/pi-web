@@ -4813,6 +4813,29 @@ export function getRpcSessionInfos(options: { includeTransient?: boolean } = {})
       if (activityMs !== undefined) lastActivityMs = Math.max(lastActivityMs, activityMs);
     }
 
+    let runtimeModel: { provider: string; modelId: string } | undefined;
+    const liveModel = session.inner?.model;
+    if (liveModel && typeof liveModel.provider === "string" && liveModel.provider.trim() && typeof liveModel.id === "string" && liveModel.id.trim()) {
+      runtimeModel = { provider: liveModel.provider.trim(), modelId: liveModel.id.trim() };
+    } else {
+      const activeBranch = (typeof manager.getBranch === "function" ? manager.getBranch() : entries) as unknown as Array<{
+        type?: string;
+        provider?: unknown;
+        modelId?: unknown;
+        message?: { role?: unknown; provider?: unknown; model?: unknown };
+      }>;
+      let modelChange: { provider: string; modelId: string } | undefined;
+      let responseModel: { provider: string; modelId: string } | undefined;
+      for (let i = activeBranch.length - 1; i >= 0 && modelChange === undefined; i -= 1) {
+        const entry = activeBranch[i];
+        if (entry.type === "model_change" && typeof entry.provider === "string" && entry.provider.trim() && typeof entry.modelId === "string" && entry.modelId.trim()) {
+          modelChange = { provider: entry.provider.trim(), modelId: entry.modelId.trim() };
+        } else if (responseModel === undefined && entry.type === "message" && entry.message?.role === "assistant" && typeof entry.message.provider === "string" && entry.message.provider.trim() && typeof entry.message.model === "string" && entry.message.model.trim()) {
+          responseModel = { provider: entry.message.provider.trim(), modelId: entry.message.model.trim() };
+        }
+      }
+      runtimeModel = modelChange ?? responseModel;
+    }
     sessions.push({
       path: sessionFile ?? "",
       id: header?.id ?? session.sessionId,
@@ -4836,6 +4859,7 @@ export function getRpcSessionInfos(options: { includeTransient?: boolean } = {})
         relation: { kind: "side" as const, ...side },
       } : {}),
       transient: !persisted,
+      ...(runtimeModel ? { model: runtimeModel } : {}),
     });
   }
   return sessions;

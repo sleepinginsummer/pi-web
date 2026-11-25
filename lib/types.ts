@@ -414,6 +414,8 @@ export interface SessionInfo {
   /** cwd 是否为 linked worktree 的顶层目录 */
   isWorktree?: boolean;
   transient?: boolean;
+  /** 会话最后使用的模型（来自 model_change 或助手回复）。 */
+  model?: { provider: string; modelId: string };
 }
 
 /** /api/worktrees 返回的 worktree 数据。 */

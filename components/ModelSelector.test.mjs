@@ -59,3 +59,19 @@ test("names a current model outside the scope from the loaded full list", () => 
 
   assert.match(html, /GPT-6 Luna/);
 });
+
+test("renders brand icon on trigger button for known models and falls back to chip icon for unknown models", () => {
+  const knownHtml = render({
+    options: [{ provider: "magpie", modelId: "opaque-gpt", name: "GPT-6.2 Astra · sub2api" }],
+    value: { provider: "magpie", modelId: "opaque-gpt" },
+  });
+  assert.match(knownHtml, /data-model-brand-icon="openai"/);
+  assert.match(knownHtml, /\/provider-icons\.svg#openai/);
+
+  const unknownHtml = render({
+    options: [{ provider: "acme", modelId: "custom-one", name: "Custom One" }],
+    value: { provider: "acme", modelId: "custom-one" },
+  });
+  assert.doesNotMatch(unknownHtml, /data-model-brand-icon=/);
+  assert.match(unknownHtml, /<rect x="4" y="4" width="16" height="16" rx="2"/);
+});

@@ -147,3 +147,93 @@ test("内部 auto 时用界面显示的档位兜底，并按新模型限幅", as
   assert.equal(resolveDisplayedThinkingLevel({ level: "auto", fallback: "max", supported: ["off", "low", "medium", "high"] }), "high");
   assert.equal(resolvePreferredThinkingLevel({ current: "high", supported: ["off", "low", "medium", "high", "max"] }), "high");
 });
+
+
+test("过期的模型列表响应不会覆盖共享展示名缓存", async () => {
+  const source = await readFile(new URL("./useModelSelection.ts", import.meta.url), "utf8");
+  const loader = source.slice(source.indexOf("const load = useCallback"), source.indexOf("const selectNewSessionModel"));
+  const guardIndex = loader.indexOf('if (!loadGateRef.current.isLatest("models", modelsGeneration)) return undefined;');
+  const registerIndex = loader.indexOf("registerModelDisplayNames(data.models);");
+  assert.ok(guardIndex >= 0 && registerIndex > guardIndex, "registerModelDisplayNames 必须位于 generation 守卫之后");
+
+  // 真实执行重叠请求：旧响应后到达时，不能覆盖新响应登记的展示名。
+  const { JSDOM } = await import("jsdom");
+  const React = await import("react");
+  const { act } = React;
+  const { render, cleanup } = await import("@testing-library/react");
+  const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost/" });
+  const prevWindow = globalThis.window;
+  const prevDocument = globalThis.document;
+  const prevNavigator = globalThis.navigator;
+  const prevFetch = globalThis.fetch;
+  globalThis.window = dom.window;
+  globalThis.document = dom.window.document;
+  Object.defineProperty(globalThis, "navigator", { value: dom.window.navigator, configurable: true });
+
+  const { useModelSelection } = await jiti.import("./useModelSelection.ts");
+  const { lookupModelDisplayName } = await jiti.import("@/lib/model-brand-icon-store");
+
+  const resolvers = [];
+  globalThis.fetch = (url) => {
+    if (String(url).startsWith("/api/models")) {
+      return new Promise((resolve) => {
+        resolvers.push(resolve);
+      });
+    }
+    return Promise.resolve({ ok: false, status: 404, json: async () => ({}) });
+  };
+
+  let api;
+  function Harness() {
+    api = useModelSelection({ selectedSessionId: null });
+    return null;
+  }
+
+  try {
+    render(React.createElement(Harness));
+    const key = "magpie:stale-guard-test-model";
+    const req1 = api.modelActions.load({ cwd: "/repo-a", initializeNewSession: false, applyPinnedThinking: false });
+    const req2 = api.modelActions.load({ cwd: "/repo-b", initializeNewSession: false, applyPinnedThinking: false });
+    assert.equal(resolvers.length, 2);
+
+    // 第二个（更新的）请求先返回
+    resolvers[1]({
+      ok: true,
+      json: async () => ({
+        models: { [key]: "GPT Fresh Name" },
+        modelList: [{ id: "stale-guard-test-model", name: "GPT Fresh Name", provider: "magpie", fastAvailable: false }],
+        defaultModel: { provider: "magpie", modelId: "stale-guard-test-model" },
+        thinkingLevels: {},
+        thinkingLevelMaps: {},
+        thinkingLevelPins: {},
+      }),
+    });
+    await act(async () => {
+      await req2;
+    });
+    assert.equal(lookupModelDisplayName("magpie", "stale-guard-test-model"), "GPT Fresh Name");
+
+    // 第一个（过期的）请求后返回，不应覆盖共享展示名缓存
+    resolvers[0]({
+      ok: true,
+      json: async () => ({
+        models: { [key]: "Claude Stale Name" },
+        modelList: [{ id: "stale-guard-test-model", name: "Claude Stale Name", provider: "magpie", fastAvailable: false }],
+        defaultModel: { provider: "magpie", modelId: "stale-guard-test-model" },
+        thinkingLevels: {},
+        thinkingLevelMaps: {},
+        thinkingLevelPins: {},
+      }),
+    });
+    await act(async () => {
+      await req1;
+    });
+    assert.equal(lookupModelDisplayName("magpie", "stale-guard-test-model"), "GPT Fresh Name");
+  } finally {
+    cleanup();
+    globalThis.window = prevWindow;
+    globalThis.document = prevDocument;
+    Object.defineProperty(globalThis, "navigator", { value: prevNavigator, configurable: true });
+    globalThis.fetch = prevFetch;
+  }
+});

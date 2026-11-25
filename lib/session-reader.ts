@@ -193,7 +193,14 @@ export function mergeSessionLists(
   const byId = new Map(supplementalSessions.map((session) => [session.id, session]));
   // A disk scan is authoritative once the JSONL exists. In particular, this
   // replaces a transient registry snapshot without briefly rendering two rows.
-  for (const session of persistedSessions) byId.set(session.id, session);
+  // 若内存里的活跃运行时刚切换了模型且尚未被磁盘列表缓存看到，保留运行时的最新模型。
+  for (const session of persistedSessions) {
+    const runtime = byId.get(session.id);
+    const runtimeModel = runtime?.model;
+    const differsFromPersisted = runtimeModel
+      && (!session.model || session.model.provider !== runtimeModel.provider || session.model.modelId !== runtimeModel.modelId);
+    byId.set(session.id, differsFromPersisted ? { ...session, model: runtimeModel } : session);
+  }
   return [...byId.values()].sort((a, b) => b.modified.localeCompare(a.modified));
 }
 
@@ -279,6 +286,7 @@ function mapScannedSession(
           ? { relation: { kind: "fork" as const, ...(originSessionId ? { originSessionId } : {}) } }
           : {}),
     transient: false,
+    ...(scanned.model ? { model: scanned.model } : {}),
     ...(detailsPending ? { detailsPending: true } : {}),
   };
 }

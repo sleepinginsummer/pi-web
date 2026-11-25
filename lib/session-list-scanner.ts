@@ -32,6 +32,8 @@ export interface ScannedSessionInfo {
 	parentSessionPath?: string;
 	/** True when only header/stat metadata was available for this listing. */
 	detailsPending?: boolean;
+	/** 会话最后使用的模型（来自 model_change 或助手回复）。 */
+	model?: { provider: string; modelId: string };
 }
 
 interface Fingerprint {
@@ -50,6 +52,16 @@ const SUMMARY_HEADER_MAX_BYTES = 64 * 1024;
  * catches a file replaced by a rename (sed -i, editors, git checkout, a backup
  * restored), whatever its bytes.
  */
+interface SessionModelRef {
+	provider: string;
+	modelId: string;
+}
+
+interface BranchModelState {
+	modelChange?: SessionModelRef;
+	responseModel?: SessionModelRef;
+}
+
 interface ResumePoint {
 	ino: number;
 	offset: number;
@@ -58,6 +70,12 @@ interface ResumePoint {
 	/** False while no user message had text: the row shows "(no messages)". */
 	hasFirstMessage: boolean;
 	lastActivityTime?: number;
+	/** 上一次扫描结束时的活动叶子 id，用于校验续读是否仍在当前分支上。 */
+	leafId?: string;
+	/** 活动叶子祖先链上最近一次 model_change。 */
+	modelChange?: SessionModelRef;
+	/** 活动叶子祖先链上最近一次助手回复模型。 */
+	responseModel?: SessionModelRef;
 }
 
 interface IndexEntry {
@@ -74,7 +92,7 @@ function isRecord(value: unknown): value is RawEntry {
 
 // Bump on any change to what foldEntry() counts: a resumed scan adds to totals
 // counted under the rules its prefix was scanned with.
-const INDEX_FORMAT_VERSION = 2;
+const INDEX_FORMAT_VERSION = 4;
 /** A trailing throttle: a run's rescans rewrite the index once per window. */
 const INDEX_PERSIST_DELAY_MS = 5_000;
 const RESUME_SAMPLE_BYTES = 512;
@@ -223,6 +241,13 @@ interface ScanTotals {
 	messageCount: number;
 	firstMessage: string;
 	lastActivityTime?: number;
+	leafId?: string;
+	branchModel: BranchModelState;
+	/** 单次扫描期间记录各 entry.id 对应的祖先链模型状态，扫描结束后释放。 */
+	branchModelsById: Map<string, BranchModelState>;
+	/** 处于增量续读时若遇到指向历史旧分支的 parentId，回退到 byte 0 全量重扫。 */
+	isResumed: boolean;
+	needsFullRescan: boolean;
 }
 
 function readHeader(entry: RawEntry, head: Buffer | undefined): SessionHeader {
@@ -241,14 +266,88 @@ function readHeader(entry: RawEntry, head: Buffer | undefined): SessionHeader {
 
 // Uses the SDK's buildSessionInfo() semantics for displayed metadata. A change
 // to these rules must bump INDEX_FORMAT_VERSION (resumed totals keep the old ones).
-function foldEntry(totals: ScanTotals, entry: RawEntry): void {
+function readModelRef(provider: unknown, modelId: unknown): SessionModelRef | undefined {
+	if (typeof provider !== "string" || typeof modelId !== "string") return undefined;
+	const cleanProvider = provider.trim();
+	const cleanModelId = modelId.trim();
+	if (!cleanProvider || !cleanModelId) return undefined;
+	return { provider: cleanProvider, modelId: cleanModelId };
+}
+
+function readPersistedModelRef(value: unknown): SessionModelRef | null | undefined {
+	if (value === undefined) return undefined;
+	if (!isRecord(value)) return null;
+	return readModelRef(value.provider, value.modelId) ?? null;
+}
+
+/**
+ * 沿树形 parentId 传播当前活动分支的模型状态（与 getSessionSettings 一致：
+ * 祖先链上 model_change 优先，其次回退到最近一条助手回复的 provider/model）。
+ * 返回 false 表示增量续读遇到了指向历史分支的 parentId，需要回退全量重扫。
+ */
+function updateBranchModel(totals: ScanTotals, entry: RawEntry): boolean {
+	const ownModelChange = entry.type === "model_change"
+		? readModelRef(entry.provider, entry.modelId)
+		: undefined;
+	const message = entry.type === "message" ? (entry.message as RawEntry | undefined) : undefined;
+	const ownResponseModel = message && message.role === "assistant"
+		? readModelRef(message.provider, message.model)
+		: undefined;
+
+	const id = typeof entry.id === "string" && entry.id ? entry.id : undefined;
+	const parentId = typeof entry.parentId === "string" && entry.parentId ? entry.parentId : null;
+
+	if (!id) {
+		if (ownModelChange || ownResponseModel) {
+			totals.branchModel = {
+				...(ownModelChange ? { modelChange: ownModelChange } : totals.branchModel.modelChange ? { modelChange: totals.branchModel.modelChange } : {}),
+				...(ownResponseModel ? { responseModel: ownResponseModel } : totals.branchModel.responseModel ? { responseModel: totals.branchModel.responseModel } : {}),
+			};
+		}
+		return true;
+	}
+
+	let parentState: BranchModelState;
+	if (parentId === null) {
+		parentState = {};
+	} else {
+		const knownParent = totals.branchModelsById.get(parentId);
+		if (knownParent !== undefined) {
+			parentState = knownParent;
+		} else if (parentId === totals.leafId) {
+			parentState = totals.branchModel;
+		} else if (totals.isResumed) {
+			totals.needsFullRescan = true;
+			return false;
+		} else {
+			parentState = {};
+		}
+	}
+
+	const nextState: BranchModelState = ownModelChange || ownResponseModel
+		? {
+				...(ownModelChange ? { modelChange: ownModelChange } : parentState.modelChange ? { modelChange: parentState.modelChange } : {}),
+				...(ownResponseModel ? { responseModel: ownResponseModel } : parentState.responseModel ? { responseModel: parentState.responseModel } : {}),
+			}
+		: parentState;
+
+	totals.branchModelsById.set(id, nextState);
+	totals.leafId = id;
+	totals.branchModel = nextState;
+	return true;
+}
+
+function foldEntry(totals: ScanTotals, entry: RawEntry): boolean {
+	if (!updateBranchModel(totals, entry)) return false;
+
 	if (entry.type === "session_info") {
 		totals.name =
 			typeof entry.name === "string" && entry.name.trim()
 				? entry.name.trim()
 				: undefined;
+		return true;
 	}
-	if (entry.type !== "message") return;
+	if (entry.type !== "message") return true;
 	totals.messageCount++;
 
 	const activityTime = activityTimeOf(entry);
@@ -256,16 +355,17 @@ function foldEntry(totals: ScanTotals, entry: RawEntry): void {
 		totals.lastActivityTime = Math.max(totals.lastActivityTime ?? 0, activityTime);
 	}
 
-	if (totals.firstMessage) return;
+	if (totals.firstMessage) return true;
 	const message = entry.message as RawEntry | undefined;
 	if (
 		!message ||
 		typeof message.role !== "string" ||
 		!("content" in message)
 	)
-		return;
-	if (message.role !== "user") return;
+		return true;
+	if (message.role !== "user") return true;
 	totals.firstMessage = extractTextContent(message);
+	return true;
 }
 
 function sampleCheck(head: Buffer, tail: Buffer): string {
@@ -387,7 +487,14 @@ async function scanSessionFile(
 		let headerEnd = 0;
 		let start = 0;
 		let sample: Buffer = Buffer.alloc(0);
-		const totals: ScanTotals = { messageCount: 0, firstMessage: "" };
+		const totals: ScanTotals = {
+			messageCount: 0,
+			firstMessage: "",
+			branchModel: {},
+			branchModelsById: new Map(),
+			isResumed: Boolean(previous?.resume && resumed),
+			needsFullRescan: false,
+		};
 		if (previous?.resume && resumed) {
 			const { info, resume } = previous;
 			start = resume.offset;
@@ -406,6 +513,11 @@ async function scanSessionFile(
 			totals.messageCount = info.messageCount;
 			totals.firstMessage = resume.hasFirstMessage ? info.firstMessage : "";
 			totals.lastActivityTime = resume.lastActivityTime;
+			totals.leafId = resume.leafId;
+			totals.branchModel = {
+				...(resume.modelChange ? { modelChange: resume.modelChange } : {}),
+				...(resume.responseModel ? { responseModel: resume.responseModel } : {}),
+			};
 		}
 
 		let restCounted = false;
@@ -422,15 +534,22 @@ async function scanSessionFile(
 					headerEnd = firstLine ? end : 0;
 					continue;
 				}
-				foldEntry(totals, entry);
+				if (!foldEntry(totals, entry)) return false;
 			}
 			return true;
 		};
 
 		const scan = await readLines(filePath, start, sample, parseLines);
+		if (totals.needsFullRescan) {
+			return scanSessionFile(filePath);
+		}
 		// The unterminated rest counts for this listing, as it did when the scan
 		// read lines with readline; a resume point is kept only when it changed nothing.
-		if (!scan || (scan.rest.length > 0 && !parseLines(scan.rest, null))) return null;
+		if (!scan) return null;
+		if (scan.rest.length > 0 && !parseLines(scan.rest, null)) {
+			if (totals.needsFullRescan) return scanSessionFile(filePath);
+			return null;
+		}
 		if (!header) return null;
 		const { id, cwd, requiresTeamRebuildCommit, created, parentSessionPath, time, head } = header;
 
@@ -453,6 +572,9 @@ async function scanSessionFile(
 				modified,
 				messageCount: totals.messageCount,
 				firstMessage: totals.firstMessage || "(no messages)",
+				...(totals.branchModel.modelChange ?? totals.branchModel.responseModel
+					? { model: totals.branchModel.modelChange ?? totals.branchModel.responseModel }
+					: {}),
 			},
 			// An inode of 0 (no stable one on this filesystem) never resumes.
 			resume: head && headerEnd > 0 && !restCounted && stats.ino > 0
@@ -463,6 +585,9 @@ async function scanSessionFile(
 					check: sampleCheck(head, scan.sample),
 					hasFirstMessage: totals.firstMessage !== "",
 					...(totals.lastActivityTime !== undefined ? { lastActivityTime: totals.lastActivityTime } : {}),
+					...(totals.leafId !== undefined ? { leafId: totals.leafId } : {}),
+					...(totals.branchModel.modelChange ? { modelChange: totals.branchModel.modelChange } : {}),
+					...(totals.branchModel.responseModel ? { responseModel: totals.branchModel.responseModel } : {}),
 				}
 				: undefined,
 		};
@@ -529,14 +654,19 @@ function indexFilePath(agentDir = getAgentDir()): string {
 /** A persisted resume point, or undefined when it is missing or malformed (the entry stays). */
 function readResumePoint(value: unknown): ResumePoint | undefined {
 	if (!isRecord(value)) return undefined;
-	const { ino, offset, headerEnd, check, hasFirstMessage, lastActivityTime } = value;
+	const { ino, offset, headerEnd, check, hasFirstMessage, lastActivityTime, leafId, modelChange, responseModel } = value;
+	const parsedModelChange = readPersistedModelRef(modelChange);
+	const parsedResponseModel = readPersistedModelRef(responseModel);
 	if (
 		typeof ino !== "number" || !Number.isFinite(ino) || ino <= 0 ||
 		typeof headerEnd !== "number" || !Number.isSafeInteger(headerEnd) || headerEnd <= 0 ||
 		typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < headerEnd ||
 		typeof check !== "string" ||
 		typeof hasFirstMessage !== "boolean" ||
-		(lastActivityTime !== undefined && (typeof lastActivityTime !== "number" || !Number.isFinite(lastActivityTime)))
+		(lastActivityTime !== undefined && (typeof lastActivityTime !== "number" || !Number.isFinite(lastActivityTime))) ||
+		(leafId !== undefined && (typeof leafId !== "string" || !leafId)) ||
+		parsedModelChange === null ||
+		parsedResponseModel === null
 	) return undefined;
 	return {
 		ino,
@@ -545,6 +675,9 @@ function readResumePoint(value: unknown): ResumePoint | undefined {
 		check,
 		hasFirstMessage,
 		...(lastActivityTime !== undefined ? { lastActivityTime } : {}),
+		...(leafId !== undefined ? { leafId } : {}),
+		...(parsedModelChange ? { modelChange: parsedModelChange } : {}),
+		...(parsedResponseModel ? { responseModel: parsedResponseModel } : {}),
 	};
 }
 
@@ -575,6 +708,12 @@ function loadPersistedIndex(): void {
 			const created = new Date(info.created);
 			const modified = new Date(info.modified);
 			if (!Number.isFinite(created.getTime()) || !Number.isFinite(modified.getTime())) continue;
+			const persistedModel = info.model === undefined
+				? undefined
+				: isRecord(info.model)
+					? readModelRef(info.model.provider, info.model.modelId)
+					: null;
+			if (persistedModel === null) continue;
 			index.set(pathKey, {
 				fp: { size: fp.size, mtimeMs: fp.mtimeMs },
 				info: {
@@ -588,6 +727,7 @@ function loadPersistedIndex(): void {
 					messageCount: info.messageCount,
 					created,
 					modified,
+					...(persistedModel ? { model: persistedModel } : {}),
 				},
 				// Entries from before resume points get one full scan when they change.
 				resume: readResumePoint(entry.resume),
