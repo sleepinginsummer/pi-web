@@ -4,6 +4,9 @@ import test, { afterEach } from "node:test";
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { JSDOM } from "jsdom";
 import ts from "typescript";
+import { createJiti } from "jiti";
+
+const { findChatScrollRestoreTarget } = await createJiti(import.meta.url).import("../lib/chat-scroll-position.ts");
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost" });
 Object.defineProperties(globalThis, {
@@ -32,6 +35,7 @@ const useAnchorEffects = new Function("scope", `
     restoreLoadPositionRef, prevScrollDistanceRef, historyCursor, searchTarget, loadingEarlierMessages,
     entryIds, setRenderWindow, renderWindowKey, MAX_MOUNTED_HISTORY_GROUPS, hasEarlierMessages,
     scrollToLatest, loadEarlierMessages, messages, messageContentRef, scrollToElement, visibleCount,
+    findChatScrollRestoreTarget,
   } = scope;
   ${compiled}
 `);
@@ -58,6 +62,7 @@ test("压缩改变活动 leaf 时先挂载本次卡片，再定位；旧 leaf �
       MAX_MOUNTED_HISTORY_GROUPS: maxWindow, hasEarlierMessages: false, scrollToLatest, loadEarlierMessages,
       messages: entryIds.map((id) => ({ role: "custom", customType: "compaction", id })),
       messageContentRef, scrollToElement, visibleCount: renderWindow.count,
+      findChatScrollRestoreTarget,
     });
     const visibleIds = renderWindow.count === 1 ? entryIds.slice(-1) : entryIds;
     return React.createElement("div", { ref: messageContentRef }, visibleIds.map((id) => (
