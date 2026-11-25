@@ -24,6 +24,7 @@ import {
 } from "./system-prompt-addon";
 import { isThinkingLevel, type ThinkingLevel } from "./thinking-levels";
 import {
+  DEFAULT_TEAM_LEADER_PROMPT,
   TEAM_MEMBER_ENTRY_TYPE,
   type Team,
   type TeamCard,
@@ -34,6 +35,8 @@ import {
   createTeam,
   deleteTeam,
   getTeam,
+  rebuildTeam,
+  TeamEditConflictError,
   removeTeamMember,
   resolveMember,
   updateTeamMember,
@@ -283,10 +286,11 @@ function initMemberRolePromptAddon(sessionId: string, prompt?: string): void {
 export async function provisionTeam(input: ProvisionTeamInput): Promise<Team> {
   const leaderName = input.leaderName?.trim() || "leader";
   const leaderTitle = input.leaderTitle?.trim() || "Leader";
+  const leaderPrompt = input.leaderPrompt ?? DEFAULT_TEAM_LEADER_PROMPT;
   validateTeamDraft({
     name: input.name,
     prompt: input.prompt,
-    leader: { name: leaderName, title: leaderTitle, prompt: input.leaderPrompt },
+    leader: { name: leaderName, title: leaderTitle, prompt: leaderPrompt },
   });
   const { sessionId, sessionFile } = createTeamMemberSessionFile({
     cwd: input.cwd,
@@ -296,7 +300,7 @@ export async function provisionTeam(input: ProvisionTeamInput): Promise<Team> {
     thinkingLevel: input.thinkingLevel,
   });
   try {
-    initMemberRolePromptAddon(sessionId, input.leaderPrompt);
+    initMemberRolePromptAddon(sessionId, leaderPrompt);
     return await createTeam({
       name: input.name,
       prompt: input.prompt,
@@ -304,13 +308,61 @@ export async function provisionTeam(input: ProvisionTeamInput): Promise<Team> {
         sessionId,
         name: leaderName,
         title: leaderTitle,
-        prompt: input.leaderPrompt,
+        prompt: leaderPrompt,
         cwd: input.cwd.trim(),
       },
     });
   } catch (error) {
     removeSessionSystemPromptAddon(sessionId);
     cleanupOrphanSessionFile(sessionFile);
+    throw error;
+  }
+}
+
+/** 编辑后重建 leader；旧成员会话转为普通会话，团队角色快照与团队记录一起提交或回滚。 */
+export async function rebuildTeamWithCleanup(
+  teamId: string,
+  input: ProvisionTeamInput & { expectedUpdatedAt: number },
+): Promise<Team> {
+  const previous = getTeam(teamId);
+  if (!previous) throw new Error("团队不存在");
+  if (previous.updatedAt !== input.expectedUpdatedAt) throw new TeamEditConflictError();
+  const leader = previous.members.find((member) => member.role === "leader");
+  const inherited = leader ? await readSessionModelConfig(leader.sessionId, leader.cwd) : {};
+  const leaderName = input.leaderName?.trim() || "leader";
+  const leaderTitle = input.leaderTitle?.trim() ?? leader?.title ?? "Leader";
+  const created = createTeamMemberSessionFile({
+    cwd: input.cwd,
+    displayName: `${input.name.trim()} · ${leaderName}`,
+    teamId,
+    memberName: leaderName,
+    model: input.model ?? inherited.model,
+    thinkingLevel: input.thinkingLevel ?? inherited.thinkingLevel,
+  });
+  try {
+    initMemberRolePromptAddon(created.sessionId, input.leaderPrompt);
+    return await rebuildTeam(teamId, {
+      name: input.name,
+      prompt: input.prompt,
+      expectedUpdatedAt: input.expectedUpdatedAt,
+      leader: { sessionId: created.sessionId, name: leaderName, title: leaderTitle, prompt: input.leaderPrompt, cwd: input.cwd.trim() },
+    }, undefined, {
+      aroundSave: async (current, commitTeams) => {
+        await withSessionSystemPromptAddonLocks(current.members.map((member) => member.sessionId), () => {
+          const rollbacks: Array<() => void> = [];
+          try {
+            for (const member of current.members) rollbacks.push(cleanupTeamRoleSystemPromptAddon(member.sessionId));
+            commitTeams();
+          } catch (error) {
+            for (const rollback of rollbacks.reverse()) rollback();
+            throw error;
+          }
+        });
+      },
+    });
+  } catch (error) {
+    removeSessionSystemPromptAddon(created.sessionId);
+    cleanupOrphanSessionFile(created.sessionFile);
     throw error;
   }
 }

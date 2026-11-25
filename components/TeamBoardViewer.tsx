@@ -10,6 +10,8 @@ import {
   type TeamMember,
 } from "@/lib/team-types";
 
+import { TeamDirectoryLabel } from "./TeamDirectoryLabel";
+
 const POLL_MS = 2_500;
 
 interface Props {
@@ -157,6 +159,7 @@ export function TeamBoardViewer({ teamId, fallbackLabel, onOpenMemberSession }: 
           <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {team?.name ?? fallbackLabel}
           </span>
+          {team && <TeamDirectoryLabel cwd={team.members.find((member) => member.role === "leader")?.cwd ?? ""} />}
           {team && (
             <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
               {team.members.length} · {team.cards.length}

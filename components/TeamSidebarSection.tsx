@@ -2,10 +2,11 @@
 
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useI18n } from "@/hooks/useI18n";
-import type { Team, TeamMember } from "@/lib/team-types";
+import { DEFAULT_TEAM_LEADER_PROMPT, type Team, type TeamMember } from "@/lib/team-types";
 import type { TeamRolePreset } from "@/lib/team-role-presets";
 import { THINKING_LEVELS } from "@/lib/thinking-levels";
 import { DirectoryPicker } from "./DirectoryPicker";
+import { TeamDirectoryLabel } from "./TeamDirectoryLabel";
 
 interface ModelOption {
   id: string;
@@ -106,6 +107,7 @@ export function TeamSidebarSection({
   const { t } = useI18n();
   const [collapsedTeamIds, setCollapsedTeamIds] = useState<Set<string>>(new Set());
   const [createOpen, setCreateOpen] = useState(false);
+  const [editTeam, setEditTeam] = useState<Team | null>(null);
   const [presetsOpen, setPresetsOpen] = useState(false);
   const [syncedPresets, setSyncedPresets] = useState<TeamRolePreset[] | null>(null);
   const [addMemberTeam, setAddMemberTeam] = useState<Team | null>(null);
@@ -194,6 +196,7 @@ export function TeamSidebarSection({
           {teams.map((team) => {
             const collapsed = collapsedTeamIds.has(team.id);
             const sortedMembers = [...team.members].sort((a, b) => (a.role === "leader" ? -1 : b.role === "leader" ? 1 : a.createdAt - b.createdAt));
+            const teamCwd = team.members.find((member) => member.role === "leader")?.cwd ?? "";
             return (
               <div key={team.id} data-team-id={team.id}>
                 <div
@@ -214,7 +217,7 @@ export function TeamSidebarSection({
                       display: "flex",
                       alignItems: "center",
                       gap: 5,
-                      flex: 1,
+                      flex: "0 1 auto",
                       minWidth: 0,
                       border: "none",
                       background: "transparent",
@@ -240,66 +243,23 @@ export function TeamSidebarSection({
                     <span style={{ fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                       {team.name}
                     </span>
-                    <span style={{ fontSize: 10, color: "var(--text-dim)", flexShrink: 0 }}>
-                      {team.members.length}
-                    </span>
                   </button>
-                  <button
-                    type="button"
-                    title={t("teams.board")}
-                    aria-label={`${team.name} ${t("teams.board")}`}
-                    onClick={() => onOpenBoard(team.id, team.name)}
-                    style={{
-                      border: "none",
-                      background: "transparent",
-                      color: "var(--text-muted)",
-                      cursor: "pointer",
-                      padding: "2px 4px",
-                      borderRadius: 4,
-                      fontSize: 11,
-                      flexShrink: 0,
-                    }}
-                  >
-                    {t("teams.board")}
-                  </button>
-                  <button
-                    type="button"
-                    title={t("teams.addMember")}
-                    aria-label={t("teams.addMember")}
-                    onClick={() => setAddMemberTeam(team)}
-                    style={{
-                      border: "none",
-                      background: "transparent",
-                      color: "var(--text-muted)",
-                      cursor: "pointer",
-                      padding: "0 4px",
-                      borderRadius: 4,
-                      fontSize: 13,
-                      lineHeight: 1,
-                      flexShrink: 0,
-                    }}
-                  >
-                    +
-                  </button>
-                  <button
-                    type="button"
-                    title={t("teams.delete")}
-                    aria-label={t("teams.delete")}
-                    onClick={() => setDeleteTarget(team)}
-                    style={{
-                      border: "none",
-                      background: "transparent",
-                      color: "var(--text-dim)",
-                      cursor: "pointer",
-                      padding: "0 3px",
-                      borderRadius: 4,
-                      fontSize: 12,
-                      lineHeight: 1,
-                      flexShrink: 0,
-                    }}
-                  >
-                    ×
-                  </button>
+                  <TeamDirectoryLabel cwd={teamCwd} />
+                  <span style={{ fontSize: 10, color: "var(--text-dim)", flexShrink: 0 }}>{team.members.length}</span>
+                  <div style={{ display: "flex", alignItems: "center", gap: 2, marginLeft: "auto", flexShrink: 0 }}>
+                    <button type="button" aria-label={`${team.name} ${t("teams.edit")}`} title={t("teams.edit")} onClick={() => setEditTeam(team)} style={{ border: "none", background: "transparent", color: "var(--text-muted)", cursor: "pointer", padding: "2px 4px", fontSize: 11, whiteSpace: "nowrap" }}>
+                      {t("teams.edit")}
+                    </button>
+                    <button type="button" aria-label={`${team.name} ${t("teams.board")}`} title={t("teams.board")} onClick={() => onOpenBoard(team.id, team.name)} style={{ border: "none", background: "transparent", color: "var(--text-muted)", cursor: "pointer", padding: "2px 4px", fontSize: 11, whiteSpace: "nowrap" }}>
+                      {t("teams.board")}
+                    </button>
+                    <button type="button" aria-label={t("teams.addMember")} title={t("teams.addMember")} onClick={() => setAddMemberTeam(team)} style={{ border: "none", background: "transparent", color: "var(--text-muted)", cursor: "pointer", padding: "2px 4px", fontSize: 11, whiteSpace: "nowrap" }}>
+                      {t("teams.addMember")}
+                    </button>
+                    <button type="button" aria-label={t("teams.delete")} title={t("teams.delete")} onClick={() => setDeleteTarget(team)} style={{ border: "none", background: "transparent", color: "var(--text-dim)", cursor: "pointer", padding: "2px 4px", fontSize: 11, whiteSpace: "nowrap" }}>
+                      {t("teams.delete")}
+                    </button>
+                  </div>
                 </div>
 
                 {!collapsed && (
@@ -314,6 +274,7 @@ export function TeamSidebarSection({
                           key={member.id}
                           type="button"
                           onClick={() => onSelectMemberSession(member.sessionId, member.cwd)}
+                          title={member.cwd}
                           style={{
                             display: "flex",
                             alignItems: "center",
@@ -370,6 +331,19 @@ export function TeamSidebarSection({
           onCreated={(team) => {
             setCreateOpen(false);
             const leader = team.members.find((m) => m.role === "leader") ?? team.members[0];
+            onTeamsChanged(leader ? { sessionId: leader.sessionId, cwd: leader.cwd } : undefined);
+          }}
+        />
+      )}
+
+      {editTeam && (
+        <CreateTeamModal
+          team={editTeam}
+          defaultCwd={editTeam.members.find((member) => member.role === "leader")?.cwd ?? defaultCwd ?? ""}
+          onClose={() => setEditTeam(null)}
+          onCreated={(updated) => {
+            setEditTeam(null);
+            const leader = updated.members.find((member) => member.role === "leader");
             onTeamsChanged(leader ? { sessionId: leader.sessionId, cwd: leader.cwd } : undefined);
           }}
         />
@@ -763,19 +737,23 @@ function RolePresetsModal({
 }
 
 function CreateTeamModal({
+  team,
   defaultCwd,
   onClose,
   onCreated,
 }: {
+  team?: Team;
   defaultCwd: string;
   onClose: () => void;
   onCreated: (team: Team) => void;
 }) {
   const { t } = useI18n();
-  const [name, setName] = useState("");
-  const [prompt, setPrompt] = useState("");
-  const [leaderName, setLeaderName] = useState("leader");
-  const [leaderPrompt, setLeaderPrompt] = useState("");
+  const leader = team?.members.find((member) => member.role === "leader");
+  const [name, setName] = useState(team?.name ?? "");
+  const [prompt, setPrompt] = useState(team?.prompt ?? "");
+  const [leaderName, setLeaderName] = useState(leader?.name ?? "leader");
+  const [leaderPrompt, setLeaderPrompt] = useState(leader?.prompt ?? (team ? "" : DEFAULT_TEAM_LEADER_PROMPT));
+  const [confirming, setConfirming] = useState(false);
   const [cwd, setCwd] = useState(defaultCwd);
   const cwdSeqRef = useRef(0);
   const [modelsRefreshNonce, setModelsRefreshNonce] = useState(0);
@@ -786,6 +764,14 @@ function CreateTeamModal({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const titleId = useId();
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    // 目录选择器通过 portal 打开；临时让出原生模态顶层，返回后恢复编辑草稿。
+    if (!dirPickerOpen) dialog?.showModal();
+    return () => { dialog?.close(); };
+  }, [dirPickerOpen]);
   const effectiveModelKey = modelKey && models.some((m) => `${m.provider}:${m.id}` === modelKey)
     ? modelKey
     : "";
@@ -799,12 +785,16 @@ function CreateTeamModal({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (busy) return;
+    if (team && !confirming) {
+      setConfirming(true);
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
       const [provider, ...rest] = effectiveModelKey ? effectiveModelKey.split(":") : [];
       const modelId = rest.join(":");
-      const res = await fetch("/api/teams", {
+      const res = await fetch(team ? `/api/teams/${encodeURIComponent(team.id)}` : "/api/teams", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -812,6 +802,7 @@ function CreateTeamModal({
           prompt,
           leaderName,
           leaderPrompt,
+          ...(team ? { confirmRebuild: true, expectedUpdatedAt: team.updatedAt } : {}),
           cwd,
           ...(provider && modelId ? { provider, modelId } : {}),
           ...(thinkingLevel !== "auto" ? { thinkingLevel } : {}),
@@ -829,73 +820,74 @@ function CreateTeamModal({
 
   return (
     <>
-      <div
-        role="dialog"
-        aria-modal="true"
-        style={{ position: "fixed", inset: 0, zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, background: "rgba(0,0,0,0.42)" }}
-        onClick={(e) => { if (e.target === e.currentTarget && !busy) onClose(); }}
+      <dialog
+        ref={dialogRef}
+        aria-labelledby={titleId}
+        onCancel={(e) => { e.preventDefault(); if (!busy) onClose(); }}
+        style={{ padding: 0, border: 0, width: 440, maxWidth: "calc(100vw - 32px)", maxHeight: "calc(var(--app-viewport-height, 100dvh) - 32px)", background: "transparent", color: "var(--text)" }}
       >
         <form
           onSubmit={(e) => void handleSubmit(e)}
-          style={{ width: 440, maxWidth: "100%", maxHeight: "88vh", overflowY: "auto", padding: 18, border: "1px solid var(--border)", borderRadius: 8, background: "var(--bg)", boxShadow: "0 16px 48px rgba(0,0,0,0.28)", display: "flex", flexDirection: "column", gap: 12 }}
+          style={{ width: 440, maxWidth: "100%", maxHeight: "calc(var(--app-viewport-height, 100dvh) - 32px)", overflowY: "auto", padding: 18, border: "1px solid var(--border)", borderRadius: 8, background: "var(--bg)", boxShadow: "0 16px 48px rgba(0,0,0,0.28)", display: "flex", flexDirection: "column", gap: 12 }}
         >
-          <h3 style={{ margin: 0, fontSize: 15, color: "var(--text)" }}>{t("teams.createTitle")}</h3>
+          <h3 id={titleId} style={{ margin: 0, fontSize: 15, color: "var(--text)" }}>{team ? t("teams.editTitle") : t("teams.createTitle")}</h3>
           {error && <div style={{ fontSize: 12, color: "#f87171" }}>{error}</div>}
-          <div>
-            <label style={LABEL_STYLE}>{t("teams.teamName")}</label>
-            <input required value={name} onChange={(e) => setName(e.target.value)} style={INPUT_STYLE} placeholder="例如：支付重构组" />
-          </div>
-          <div>
-            <label style={LABEL_STYLE}>{t("teams.teamPrompt")}</label>
-            <textarea rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} style={{ ...INPUT_STYLE, resize: "vertical" }} placeholder={t("teams.teamPromptPlaceholder")} />
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <fieldset disabled={busy || confirming} style={{ border: 0, padding: 0, margin: 0, minWidth: 0, display: "flex", flexDirection: "column", gap: 12 }}>
+            <div>
+              <label style={LABEL_STYLE}>{t("teams.teamName")}</label>
+              <input required value={name} onChange={(e) => setName(e.target.value)} style={INPUT_STYLE} placeholder="例如：支付重构组" />
+            </div>
+            <div>
+              <label style={LABEL_STYLE}>{t("teams.teamPrompt")}</label>
+              <textarea rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} style={{ ...INPUT_STYLE, resize: "vertical" }} placeholder={t("teams.teamPromptPlaceholder")} />
+            </div>
             <div>
               <label style={LABEL_STYLE}>{t("teams.leaderName")}</label>
               <input required value={leaderName} onChange={(e) => setLeaderName(e.target.value)} style={INPUT_STYLE} />
             </div>
             <div>
+              <label style={LABEL_STYLE}>{t("teams.cwd")}</label>
+              <div style={{ display: "flex", gap: 6 }}>
+                <input required value={cwd} onChange={(e) => { cwdSeqRef.current += 1; setCwd(e.target.value); }} style={{ ...INPUT_STYLE, flex: 1 }} placeholder="/path/to/project" />
+                <button type="button" onClick={() => setDirPickerOpen(true)} style={{ padding: "0 10px", fontSize: 12, borderRadius: 6, border: "1px solid var(--border)", background: "transparent", color: "var(--text)", cursor: "pointer", flexShrink: 0 }}>
+                  {t("teams.cwdBrowse")}
+                </button>
+              </div>
+            </div>
+            <div>
+              <label style={LABEL_STYLE}>{t("teams.model")}</label>
+              <select value={effectiveModelKey} onChange={(e) => setModelKey(e.target.value)} style={INPUT_STYLE}>
+                <option value="">{team ? t("teams.keepCurrent") : t("teams.modelDefault")}</option>
+                {models.map((m) => (
+                  <option key={`${m.provider}:${m.id}`} value={`${m.provider}:${m.id}`}>
+                    {m.providerName ?? m.provider} / {m.name || m.id}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
               <label style={LABEL_STYLE}>{t("teams.thinking")}</label>
               <select value={thinkingLevel} onChange={(e) => setThinkingLevel(e.target.value)} style={INPUT_STYLE}>
-                <option value="auto">{t("teams.thinkingAuto")}</option>
+                <option value="auto">{team ? t("teams.keepCurrent") : t("teams.thinkingAuto")}</option>
                 {THINKING_LEVELS.map((lvl) => <option key={lvl} value={lvl}>{lvl}</option>)}
               </select>
             </div>
-          </div>
-          <div>
-            <label style={LABEL_STYLE}>{t("teams.cwd")}</label>
-            <div style={{ display: "flex", gap: 6 }}>
-              <input required value={cwd} onChange={(e) => { cwdSeqRef.current += 1; setCwd(e.target.value); }} style={{ ...INPUT_STYLE, flex: 1 }} placeholder="/path/to/project" />
-              <button type="button" onClick={() => setDirPickerOpen(true)} style={{ padding: "0 10px", fontSize: 12, borderRadius: 6, border: "1px solid var(--border)", background: "transparent", color: "var(--text)", cursor: "pointer", flexShrink: 0 }}>
-                {t("teams.cwdBrowse")}
-              </button>
+            <div>
+              <label style={LABEL_STYLE}>{t("teams.leaderPrompt")}</label>
+              <textarea rows={6} value={leaderPrompt} onChange={(e) => setLeaderPrompt(e.target.value)} style={{ ...INPUT_STYLE, resize: "vertical" }} />
             </div>
-          </div>
-          <div>
-            <label style={LABEL_STYLE}>{t("teams.model")}</label>
-            <select value={effectiveModelKey} onChange={(e) => setModelKey(e.target.value)} style={INPUT_STYLE}>
-              <option value="">{t("teams.modelDefault")}</option>
-              {models.map((m) => (
-                <option key={`${m.provider}:${m.id}`} value={`${m.provider}:${m.id}`}>
-                  {m.providerName ?? m.provider} / {m.name || m.id}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label style={LABEL_STYLE}>{t("teams.leaderPrompt")}</label>
-            <textarea rows={2} value={leaderPrompt} onChange={(e) => setLeaderPrompt(e.target.value)} style={{ ...INPUT_STYLE, resize: "vertical" }} />
-          </div>
+          </fieldset>
+          {confirming && team && <div role="alert" style={{ fontSize: 12, color: "var(--text)", lineHeight: 1.6 }}>{t("teams.rebuildConfirm", { count: team.members.length })}</div>}
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
-            <button type="button" disabled={busy} onClick={onClose} style={{ padding: "6px 12px", fontSize: 12, borderRadius: 6, border: "1px solid var(--border)", background: "transparent", color: "var(--text)", cursor: "pointer" }}>
-              {t("common.cancel")}
+            <button type="button" disabled={busy} onClick={() => confirming ? setConfirming(false) : onClose()} style={{ padding: "6px 12px", fontSize: 12, borderRadius: 6, border: "1px solid var(--border)", background: "transparent", color: "var(--text)", cursor: "pointer" }}>
+              {confirming ? t("teams.backToEdit") : t("common.cancel")}
             </button>
             <button type="submit" disabled={busy} style={{ padding: "6px 14px", fontSize: 12, borderRadius: 6, border: "none", background: "var(--accent, #2563eb)", color: "#fff", cursor: "pointer" }}>
-              {t("teams.submitCreate")}
+              {busy ? t("teams.saving") : team ? confirming ? t("teams.confirmRebuild") : t("teams.save") : t("teams.submitCreate")}
             </button>
           </div>
         </form>
-      </div>
+      </dialog>
       {dirPickerOpen && (
         <DirectoryPicker
           initialPath={cwd || undefined}

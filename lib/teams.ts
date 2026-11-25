@@ -142,7 +142,8 @@ async function mutateTeam<T>(
   return mutate((teams) => {
     const index = teams.findIndex((team) => team.id === teamId);
     if (index < 0) throw new Error(`团队 ${teamId} 不存在`);
-    const ts = now ?? Date.now();
+    // 团队编辑用这个版本核对成员基线，同毫秒的连续操作也必须让旧编辑失效。
+    const ts = Math.max(now ?? Date.now(), teams[index].updatedAt + 1);
     const { team, result, aroundWrite } = operation(teams[index], ts);
     const next = [...teams];
     next[index] = { ...team, updatedAt: ts };
@@ -269,6 +270,43 @@ export async function updateTeam(teamId: string, patch: { name?: string; prompt?
     };
     return { team: next, result: next };
   }, path, now);
+}
+
+export class TeamEditConflictError extends Error {
+  constructor() {
+    super("团队已发生变化，请关闭编辑窗口后重新打开，核对最新成员与配置");
+    this.name = "TeamEditConflictError";
+  }
+}
+
+/** 在同一把团队文件锁内替换成员，保留团队身份与看板，清除指向旧成员的指派。 */
+export async function rebuildTeam(
+  teamId: string,
+  input: { name: string; prompt?: string; leader: TeamMemberInput; expectedUpdatedAt: number },
+  path = getTeamsPath(),
+  options?: { aroundSave: (previous: Team, commitTeams: () => void) => void | Promise<void> },
+): Promise<Team> {
+  return mutateTeam(teamId, (previous, now) => {
+    if (previous.updatedAt !== input.expectedUpdatedAt) throw new TeamEditConflictError();
+    const team: Team = {
+      ...previous,
+      name: checkText("团队名", input.name, MAX_TITLE_LENGTH, true),
+      prompt: checkText("团队定义", input.prompt, MAX_PROMPT_LENGTH),
+      members: [buildMember(undefined, input.leader, "leader", now)],
+      cards: previous.cards.map((card) => ({
+        ...card,
+        assigneeId: undefined,
+        reviewerId: undefined,
+        updatedAt: nextCardUpdatedAt(card.updatedAt, now),
+      })),
+      updatedAt: now,
+    };
+    return {
+      team,
+      result: team,
+      ...(options ? { aroundWrite: (commitTeams: () => void) => options.aroundSave(previous, commitTeams) } : {}),
+    };
+  }, path);
 }
 
 /** 只删除团队记录；成员会话保留为普通会话。 */
