@@ -29,6 +29,10 @@ function isMissing(error: unknown): boolean {
  * whole server, since the read is synchronous.
  */
 export function readRegularFileText(path: string, maxBytes?: number): string | undefined {
+  return readRegularFileBytes(path, maxBytes)?.toString("utf8");
+}
+
+export function readRegularFileBytes(path: string, maxBytes?: number): Buffer | undefined {
   let fd: number;
   try {
     fd = openSync(path, OPEN_FLAGS);
@@ -39,7 +43,7 @@ export function readRegularFileText(path: string, maxBytes?: number): string | u
   try {
     const stats = fstatSync(fd);
     if (!stats.isFile()) throw new Error(`${path} is not a regular file`);
-    if (maxBytes === undefined) return readFileSync(fd, "utf8");
+    if (maxBytes === undefined) return readFileSync(fd);
     if (stats.size > maxBytes) throw new Error(`${path} is larger than ${maxBytes} bytes`);
     // One byte past the limit: a file still growing past it is refused rather than cut short.
     const limit = maxBytes + 1;
@@ -53,7 +57,7 @@ export function readRegularFileText(path: string, maxBytes?: number): string | u
       length += read;
     }
     if (length > maxBytes) throw new Error(`${path} is larger than ${maxBytes} bytes`);
-    return Buffer.concat(chunks, length).toString("utf8");
+    return Buffer.concat(chunks, length);
   } finally {
     closeSync(fd);
   }

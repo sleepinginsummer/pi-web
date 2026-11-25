@@ -59,6 +59,35 @@ export function ProjectSection({ project, labels, actions, treeProps }: ProjectS
   );
 }
 
+function ProjectIcon({ path, collapsed }: { path: string; collapsed: boolean }) {
+  const [status, setStatus] = useState<"loading" | "ready" | "failed">("loading");
+  const FolderIcon = collapsed ? Folder : FolderOpen;
+  const query = new URLSearchParams({ project: path });
+
+  return (
+    <span aria-hidden="true" style={{ position: "relative", width: 16, height: 16, flexShrink: 0 }}>
+      {status !== "ready" && (
+        <FolderIcon size={16} strokeWidth={1.7} data-project-folder-icon={collapsed ? "closed" : "open"} />
+      )}
+      {status !== "failed" && (
+        // 项目图标来自已授权的本地文件，无需交给 Next.js 的图片优化服务。
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={`/api/project-icon?${query}`}
+          alt=""
+          width={16}
+          height={16}
+          loading="lazy"
+          draggable={false}
+          onLoad={() => setStatus("ready")}
+          onError={() => setStatus("failed")}
+          style={{ position: "absolute", inset: 0, objectFit: "contain", opacity: status === "ready" ? 1 : 0 }}
+        />
+      )}
+    </span>
+  );
+}
+
 function ProjectHeader({
   project,
   labels,
@@ -113,9 +142,7 @@ function ProjectHeader({
           textAlign: "left",
         }}
       >
-        {project.collapsed
-          ? <Folder size={16} strokeWidth={1.7} aria-hidden="true" data-project-folder-icon="closed" style={{ flexShrink: 0 }} />
-          : <FolderOpen size={16} strokeWidth={1.7} aria-hidden="true" data-project-folder-icon="open" style={{ flexShrink: 0 }} />}
+        <ProjectIcon key={project.path} path={project.path} collapsed={project.collapsed} />
         <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 13, fontWeight: 600 }}>{project.name}</span>
         {project.activity}
       </button>

@@ -217,6 +217,27 @@ test("项目折叠与展开使用闭合/打开文件夹图标表示，不渲染�
   assert.equal(collapsedView.container.querySelector('[data-project-folder-icon="open"]'), null);
 });
 
+test("侧栏项目图标加载成功后替换文件夹，加载失败时保留文件夹", () => {
+  const projectPath = "/repo with spaces";
+  const first = renderProject(createProps({ project: { path: projectPath } }));
+  const icon = first.container.querySelector("img");
+  assert.ok(icon);
+  assert.equal(new URL(icon.src).searchParams.get("project"), projectPath);
+  assert.equal(icon.draggable, false);
+  assert.ok(first.container.querySelector('[data-project-folder-icon="open"]'));
+  fireEvent.load(icon);
+  assert.equal(icon.style.opacity, "1");
+  assert.equal(first.container.querySelector("[data-project-folder-icon]"), null);
+  first.unmount();
+
+  const second = renderProject(createProps({ project: { collapsed: true } }));
+  const brokenIcon = second.container.querySelector("img");
+  assert.ok(brokenIcon);
+  fireEvent.error(brokenIcon);
+  assert.equal(second.container.querySelector("img"), null);
+  assert.ok(second.container.querySelector('[data-project-folder-icon="closed"]'));
+});
+
 test("PinnedSessionsSection 按置顶顺序渲染会话并在元数据行展示项目目录", () => {
   const s1 = {
     path: "/sessions/1.jsonl",
