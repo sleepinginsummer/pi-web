@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { withPrivateFileLock, writePrivateFileAtomicSync } from "./atomic-file";
+import { hasTeamRebuildSessionCommit, persistTeamRebuildSessionCommit } from "./team-rebuild-session-commit";
 import {
   TEAM_CARD_STATUSES,
   type Team,
@@ -32,6 +33,46 @@ interface StoreFile {
   version: 1;
   teams: Team[];
   committedRebuildSessions?: string[];
+}
+
+interface RebuildJournal {
+  version: 1;
+  committedSessionIds: string[];
+  pendingStore?: StoreFile;
+}
+
+function rebuildJournalPath(path: string): string {
+  return `${path}.rebuild-journal`;
+}
+
+function readRebuildJournal(path: string): RebuildJournal {
+  let contents: string;
+  try {
+    contents = readFileSync(rebuildJournalPath(path), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { version: 1, committedSessionIds: [] };
+    throw error;
+  }
+  const journal = JSON.parse(contents) as Partial<RebuildJournal> | null;
+  if (journal?.version !== 1 || !Array.isArray(journal.committedSessionIds)
+    || !journal.committedSessionIds.every((id) => typeof id === "string")
+    || (journal.pendingStore !== undefined && (journal.pendingStore?.version !== 1 || !Array.isArray(journal.pendingStore.teams)))) {
+    throw new Error("团队重建恢复记录格式无效");
+  }
+  return journal as RebuildJournal;
+}
+
+function readRebuildJournalForQuery(path: string): RebuildJournal | undefined {
+  try {
+    return readRebuildJournal(path);
+  } catch (error) {
+    console.warn("[pi-web] 读取团队重建恢复记录失败", { path, error });
+    return undefined;
+  }
+}
+
+function writeRebuildJournal(path: string, journal: RebuildJournal): void {
+  writePrivateFileAtomicSync(rebuildJournalPath(path), JSON.stringify(journal));
 }
 
 export function getTeamsPath(agentDir = getAgentDir()): string {
@@ -104,16 +145,44 @@ function readTeamStore(path: string, recoverOnCorrupt = false): StoreFile {
 }
 
 function readTeams(path: string): Team[] {
-  return readTeamStore(path).teams;
+  return readRebuildJournalForQuery(path)?.pendingStore?.teams ?? readTeamStore(path).teams;
 }
 
 export function readCommittedTeamRebuildSessions(path = getTeamsPath()): Set<string> {
-  return new Set(readTeamStore(path).committedRebuildSessions);
+  const journal = readRebuildJournalForQuery(path);
+  const committed = new Set(journal?.committedSessionIds);
+  for (const id of (journal?.pendingStore ?? readTeamStore(path)).committedRebuildSessions ?? []) committed.add(id);
+  return committed;
 }
 
 function writeTeams(path: string, store: StoreFile): void {
   mkdirSync(dirname(path), { recursive: true });
   writePrivateFileAtomicSync(path, JSON.stringify(store, null, 2));
+}
+
+/** 持团队锁重放。清除待发布快照时保留提交证明，供团队文件损坏恢复后使用。 */
+function replayTeamRebuild(path: string, journal: RebuildJournal): RebuildJournal {
+  if (!journal.pendingStore) return journal;
+  writeTeams(path, journal.pendingStore);
+  const finalized: RebuildJournal = { version: 1, committedSessionIds: journal.committedSessionIds };
+  writeRebuildJournal(path, finalized);
+  return finalized;
+}
+
+/** 服务启动时迁移旧版提交证明，无需等待文件浏览请求。 */
+export async function recoverTeamRebuildCommits(path = getTeamsPath()): Promise<void> {
+  if (!existsSync(path) && !existsSync(rebuildJournalPath(path))) return;
+  await withPrivateFileLock(path, () => {
+    const journal = replayTeamRebuild(path, readRebuildJournal(path));
+    const committed = new Set(journal.committedSessionIds);
+    for (const id of readTeamStore(path).committedRebuildSessions ?? []) committed.add(id);
+    if (committed.size > journal.committedSessionIds.length) {
+      writeRebuildJournal(path, { version: 1, committedSessionIds: [...committed] });
+    }
+    for (const id of committed) {
+      if (!hasTeamRebuildSessionCommit(id)) persistTeamRebuildSessionCommit(id);
+    }
+  });
 }
 
 async function mutate<T>(
@@ -126,6 +195,7 @@ async function mutate<T>(
   path: string,
 ): Promise<T> {
   return withPrivateFileLock(path, async () => {
+    const journal = replayTeamRebuild(path, readRebuildJournal(path));
     const previous = readTeamStore(path, true);
     const { teams, result, aroundWrite, rebuiltLeaderSessionId } = operation(previous.teams);
     // 与团队同一次落盘。之后 leader 转为普通会话时仍能凭原提交授权。
@@ -133,7 +203,25 @@ async function mutate<T>(
     if (rebuiltLeaderSessionId && !committedRebuildSessions?.includes(rebuiltLeaderSessionId)) {
       committedRebuildSessions = [...(committedRebuildSessions ?? []), rebuiltLeaderSessionId];
     }
-    const commitTeams = () => writeTeams(path, { ...previous, teams, committedRebuildSessions });
+    const commitTeams = () => {
+      const next = { ...previous, teams, committedRebuildSessions };
+      if (!rebuiltLeaderSessionId) {
+        writeTeams(path, next);
+        return;
+      }
+      // 恢复记录是重建的提交点。原子写入前可回滚，写入后只能重放。
+      const committed: RebuildJournal = {
+        version: 1,
+        committedSessionIds: [...new Set([...journal.committedSessionIds, ...(committedRebuildSessions ?? [])])],
+        pendingStore: next,
+      };
+      writeRebuildJournal(path, committed);
+      try {
+        replayTeamRebuild(path, committed);
+      } catch (error) {
+        console.warn("[pi-web] 团队重建已提交，等待重放团队文件", { path, error });
+      }
+    };
     if (aroundWrite) {
       await aroundWrite(commitTeams);
     } else {

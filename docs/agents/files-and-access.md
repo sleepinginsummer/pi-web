@@ -18,7 +18,7 @@
 
 ## File access allow-list
 
-- 团队重建为新 Leader 写入带提交要求的会话。团队记录与会话 ID 一起原子提交后，在 `<agentDir>/pi-web-team-rebuild-commits/` 写入会话自己的凭据。授权检查只有核对到团队提交记录才会补写缺失的凭据。会话凭据在 Leader 转成普通会话或团队存储恢复为空后继续有效。
+- 团队重建会话的工作目录等到重建提交成功后才可授权。`pi-web-teams.json.rebuild-journal` 原子保存团队重建结果和会话 ID，进程中断时持团队锁重放待发布的团队文件。发布完成后保留会话 ID，供团队存储损坏重置后恢复授权。启动时将旧团队文件中的提交 ID 迁入恢复记录，并补写 `<agentDir>/pi-web-team-rebuild-commits/` 下的会话凭据。
 - `/api/files` is not a general filesystem browser. Allowed roots: session cwds, their resolved project roots, and roots added with `allowFileRoot()`, which `/api/cwd/validate` and `/api/worktrees` call when they make a location browsable. "Use default directory" too: `/api/default-cwd` only creates `~/pi-cwd/YYYYMMDD`, and the sidebar selects it through `/api/cwd/validate`.
 - `isPathWithinRoots()` (`lib/path-security.ts`) is the single implementation behind `isFilePathAllowed()` and is the security boundary: keep it the only one. It re-resolves and case-folds both sides, so either path form authorizes; roots are stored slash-normalized only as a Set-key convention.
 - `isExistingPathWithinRoots()` refuses any path with a `..` segment (`hasParentDirectorySegment()`: authorization collapses `..` before following links, the filesystem after). Query-string and body paths reach that check verbatim. In `/api/files/[...path]` URL parsing drops literal `..` segments, and the route itself refuses an encoded slash inside a segment (`link%2F..%2Fx`), because a session-referenced file skips the existing-path check.

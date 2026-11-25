@@ -2,7 +2,7 @@ import { configureHttpDispatcher, readHttpIdleTimeoutMs } from "@/lib/http-dispa
 import { closeAllAgentEventStreams } from "@/lib/agent-event-stream";
 import { applyCodemodeWorkerDefault } from "@/lib/codemode-workers";
 
-export function registerNodeInstrumentation(): void {
+export async function registerNodeInstrumentation(): Promise<void> {
   // Before any session can run a codemode script (lib/codemode-workers.ts).
   applyCodemodeWorkerDefault();
 
@@ -11,6 +11,13 @@ export function registerNodeInstrumentation(): void {
   // configured. Without it the built-in five minutes aborts a provider stream
   // that stays quiet for longer, which a CLI session tolerates.
   configureHttpDispatcher(readHttpIdleTimeoutMs());
+
+  try {
+    const { recoverTeamRebuildCommits } = await import("@/lib/teams");
+    await recoverTeamRebuildCommits();
+  } catch (error) {
+    console.warn("[pi-web] 恢复团队重建提交凭据失败", error);
+  }
 
   // In production Next 16 answers SIGINT/SIGTERM with server.close() and waits
   // for every connection to end, without a timeout. SSE streams only end when
