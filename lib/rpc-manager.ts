@@ -27,6 +27,8 @@ import { isShadowMindSource, restoreShadowSessionSettingSafely, ShadowSessionSet
 import { parseShadowMindToggleCommand, SHADOW_MIND_SESSION_STATE } from "./shadow-session-protocol";
 import { createClonedSession, createForkedSession } from "./session-fork";
 import { generateTitleForSessionFile } from "./session-file-title";
+import { recordSessionArtifactTargets } from "./session-artifact-targets";
+import { extractWrittenPathsFromToolExecution } from "./session-artifacts";
 import { findDeferredModel, findDeferredStartupModel, rememberProviderModels } from "./deferred-provider-models";
 import { ObserverContextOverflow, observerModelTools, SessionObserver } from "./session-observer";
 import { createObserverChecklistExtension } from "./observer-checklist-extension";
@@ -569,6 +571,8 @@ export class AgentSessionWrapper {
   // The extension commands pi is running right now, by their submitted text: they start no run, so
   // nothing else tells the composer what occupies the session (see get_state / abort).
   private runningCommands: string[] = [];
+  /** `agent_start` 已发、`agent_settled` 尚未到达：SDK 可能正在等异步结算钩子，此时 `prompt()` 只登记延迟执行并立刻返回。 */
+  private awaitingAgentSettled = false;
   private sessionReplacement: "fork" | "clone" | null = null;
   // Whether the last run ended because it was stopped (pi 1.1's `agent_settled.aborted`), not finished.
   private lastRunAborted = false;
@@ -1209,11 +1213,24 @@ export class AgentSessionWrapper {
       ) {
         this.persistPendingSession();
       }
+      if (event.type === "message_end" && (event.message as { role?: string } | undefined)?.role === "toolResult") {
+        const toolResult = event.message as { toolName?: unknown; isError?: unknown; nestedCalls?: unknown };
+        if (toolResult.isError !== true && toolResult.nestedCalls && typeof toolResult.toolName === "string") {
+          const writtenPaths = extractWrittenPathsFromToolExecution(toolResult.toolName, {}, toolResult, this.cwd);
+          if (writtenPaths.length > 0) {
+            void recordSessionArtifactTargets(this.sessionId, writtenPaths).catch(() => {});
+          }
+        }
+      }
       if (event.type === "agent_start") {
+        this.awaitingAgentSettled = true;
         this.lastRunAborted = false;
         forgetSessionCompletionSummary(this.sessionId);
       }
-      if (event.type === "agent_settled") this.lastRunAborted = event.aborted === true;
+      if (event.type === "agent_settled") {
+        this.awaitingAgentSettled = false;
+        this.lastRunAborted = event.aborted === true;
+      }
       if (event.type === "turn_end" && !this.aborting) {
         const message = event.message as { role?: string; stopReason?: string } | undefined;
         if (message?.role === "assistant" && message.stopReason !== "error" && message.stopReason !== "aborted") {
@@ -1397,6 +1414,18 @@ export class AgentSessionWrapper {
       const active = this.activeToolEvents.get(toolCallId);
       if (active) active.update = event;
     } else if (event.type === "tool_execution_end") {
+      const active = this.activeToolEvents.get(toolCallId);
+      if (event.isError !== true && typeof event.toolName === "string") {
+        const writtenPaths = extractWrittenPathsFromToolExecution(
+          event.toolName,
+          active?.start?.args,
+          event.result,
+          this.cwd,
+        );
+        if (writtenPaths.length > 0) {
+          void recordSessionArtifactTargets(this.sessionId, writtenPaths).catch(() => {});
+        }
+      }
       this.activeToolEvents.delete(toolCallId);
       const nestedPrefix = `${toolCallId}/`;
       for (const id of this.activeToolEvents.keys()) {
@@ -1556,15 +1585,16 @@ export class AgentSessionWrapper {
 
   private async deliverFirstPrompt(entry: ParkedPrompt, prepare: () => Promise<void>): Promise<void> {
     const fail = (error: unknown) => {
-      // 没发出去就留作队列行，用户可以移回，绝不静默丢弃。Stop 拒绝的那一条没有发出过：
-      // 标成只等「移回」，否则下一轮结束的 flush 会替用户把它发出去。
-      if (isStoppedBeforeDispatchError(error)) entry.recallOnly = true;
+      // 没发出去就留作队列行，用户可以移回，绝不静默丢弃。标成只等「移回」：
+      // 既不会在下一次 flush 时未经用户处理就重发失败的首条消息，也不挡住排在它后面的队列项。
+      entry.recallOnly = true;
       entry.delivering = false;
       if (!this.parkedDuringCompaction.includes(entry)) this.parkedDuringCompaction.push(entry);
       this.emitQueueUpdate();
       this.settleParked(entry);
       this.emit({ type: "prompt_error", errorMessage: error instanceof Error ? error.message : String(error) });
       this.emit(this.promptDoneEvent());
+      if (this.runningCommands.length === 0) this.flushParkedWhenIdle();
     };
     try {
       // 不设期限：扩展可能在等用户审批或建索引，这里没有等待中的请求。
@@ -1584,6 +1614,9 @@ export class AgentSessionWrapper {
     try {
       await this.send({ type: "prompt", message: entry.message, ...(entry.images?.length ? { images: entry.images } : {}) });
       this.settleParked(entry);
+      // 首条消息若被扩展 `input` 钩子直接处理而未开启回合，没有 `agent_settled` 可驱动后续队列；
+      // 会话已空闲且无运行中命令时在这里接力派发。
+      if (this.runningCommands.length === 0) this.flushParkedWhenIdle();
     } catch (error) {
       fail(error);
     }
@@ -1601,10 +1634,17 @@ export class AgentSessionWrapper {
    * 仍在队列里等着的令牌，才会把一条卡在预检的提交当成「被停掉的工作」，而失败后重新入队、
    * 已经结算的旧行也不会抵消它。
    */
-  private parkDuringCompaction(entry: ParkedPrompt): void {
+  private parkDuringCompaction(entry: ParkedPrompt, { beforeFollowUp = false }: { beforeFollowUp?: boolean } = {}): void {
     // 重新入队时恢复登记：只有仍占着令牌的项算队列行，已结算的项令牌已置空。
     if (entry.token) this.parkedPromptTokens.add(entry.token);
-    this.parkedDuringCompaction.push(entry);
+    if (beforeFollowUp) {
+      // 结算空窗期收到的「引导」/直接提交保留优先级，排在所有「后续」项之前。
+      const firstFollowUp = this.parkedDuringCompaction.findIndex((item) => item.streamingBehavior === "followUp");
+      if (firstFollowUp === -1) this.parkedDuringCompaction.push(entry);
+      else this.parkedDuringCompaction.splice(firstFollowUp, 0, entry);
+    } else {
+      this.parkedDuringCompaction.push(entry);
+    }
     this.emitQueueUpdate();
   }
 
@@ -1663,7 +1703,7 @@ export class AgentSessionWrapper {
    */
   private flushParkedWhenIdle(): void {
     if (this.parkedDuringCompaction.length === 0) return;
-    if (this.inner.isStreaming || this.inner.isCompacting) return;
+    if (this.inner.isStreaming || this.awaitingAgentSettled || this.inner.isCompacting) return;
     this.flushParkedPrompts();
   }
 
@@ -1726,13 +1766,33 @@ export class AgentSessionWrapper {
       let commandText: string;
       try {
         multiSkill = expandMultiSkillCommand(entry.message, this.inner.resourceLoader?.getSkills().skills ?? []);
+      } catch (error) {
+        // 这条消息引用的技能文件已不存在或不可读：标为仅等「移回」并结算令牌，
+        // 保留取回能力，同时不再挡住排在它后面的「后续」消息或命令。
+        console.error("[pi-web] parked prompt skill expansion failed:", error instanceof Error ? error.message : error);
+        entry.recallOnly = true;
+        this.settleParked(entry);
+        this.emit({
+          type: "prompt_error",
+          errorMessage: error instanceof Error ? error.message : String(error),
+        });
+        return;
+      }
+      try {
         commandText = !multiSkill.expanded && this.isExtensionCommandPrompt(multiSkill.text)
           ? multiSkill.text.trim()
           : "";
-        // 等待条件按这一项再判一次：压缩结束的 flush 不经过 flushParkedWhenIdle，普通消息不能借它
-        // 绕过还在跑的扩展命令；命令自己（`/review cancel`）反而必须放行——它在回合结束后就该进
-        // 处理器，不能被仍在跑的命令挡住。留在队列里，等下一次 flush（命令返回时就会来一次）。
+        // 等待条件按这一项再判一次：
+        // 1. 回合已停但 `agent_settled` 还没到时，SDK 正在等异步结算钩子，此时调 `prompt()` 只会登记
+        //    延迟执行并立刻返回，提前清掉队列和运行状态；必须留到 `agent_settled` 到达后再派发。
+        // 2. 压缩结束的 flush 不经过 flushParkedWhenIdle，普通消息不能借它绕过还在跑的扩展命令；
+        //    「后续」扩展命令要等当前回合与在跑命令都结束后再串行派发；排在未派发项后面的「后续」
+        //    也不能越过前面的项提前进入 SDK 队列。「引导」/直接提交的命令（如 `/review cancel`）
+        //    与「引导」消息仍不受阻挡。
+        if (this.isSettlingAgentRun()) return;
         if (!commandText && this.runningCommands.length > 0) return;
+        if (commandText && entry.streamingBehavior === "followUp" && (this.inner.isStreaming || this.runningCommands.length > 0)) return;
+        if (entry.streamingBehavior === "followUp" && this.hasEarlierActiveParkedEntry(index)) return;
         // 消息可能在命令后等了几分钟：别的进程此时若追加过记录，沿内存里的旧分支末端写会把这条
         // 消息接到过期的会话上。派发前查一次文件版本，冲突就留在队列里交给用户（移回），不硬写。
         if (this.diskFreshness() !== "current") {
@@ -2182,6 +2242,24 @@ export class AgentSessionWrapper {
   private hasParkedUserMessage(): boolean {
     // 只等「移回」的行不会自己派发，新提交不必排到它后面。
     return this.parkedDuringCompaction.some((entry) => entry.command !== true && entry.recallOnly !== true);
+  }
+
+  /** 回合已停但 `agent_settled` 尚未到达：SDK 可能处于 `_isEmittingAgentSettled`，此时 `prompt()` 只会延迟登记并立刻返回。 */
+  private isSettlingAgentRun(): boolean {
+    return !this.inner.isStreaming && this.awaitingAgentSettled;
+  }
+
+  /** 停放队列里是否仍有待派发（非仅移回）的项。 */
+  private hasActiveParkedEntry(): boolean {
+    return this.parkedDuringCompaction.some((entry) => entry.recallOnly !== true);
+  }
+
+  /** 当前项之前是否仍有未派发（非仅移回）的停放项，供「后续」保持 FIFO 顺序。 */
+  private hasEarlierActiveParkedEntry(index: number): boolean {
+    for (let i = 0; i < index; i += 1) {
+      if (this.parkedDuringCompaction[i]?.recallOnly !== true) return true;
+    }
+    return false;
   }
 
   /** Defer out of the extension callback, including session_start, before awaiting binding. */
@@ -2681,16 +2759,14 @@ export class AgentSessionWrapper {
             // for it. A dispatch to a registered command is the acceptance itself.
             dispatchesCommand = !multiSkill.expanded && this.isExtensionCommandPrompt(multiSkill.text);
             commandText = dispatchesCommand ? multiSkill.text.trim() : "";
-            // pi never queues an extension command: it runs one the moment it arrives, mid-run too.
-            // The composer's follow-up button means "after this turn", so hold the command here — it
-            // becomes a queue row, the run's end delivers it (flushParkedPrompts), and Stop or Recall
-            // hands it back. The same parked list takes compaction's refusals. A command already
-            // running changes nothing: still wait for this turn, whose settle is what flushes the
-            // queue (delivery no longer holds prompt admission for the command's lifetime).
+            // pi 不会对扩展命令排队，收到就会立刻执行。界面上的「后续」表示等当前工作结束再跑：
+            // 无论当前是在模型回合中，还是已有扩展命令（如 `/review`）在运行，都先停放成队列行，
+            // 等回合与前序命令都结束后再串行派发，Stop / 移回照常可用；而「引导」或直接回车
+            // （如 `/review cancel`）仍立刻直达处理器。
             // Stop 也可能落在拿到提交锁之后、这条提交真正派发之前（例如它在等 MCP 连接）：
             // 它同样是 Stop 之前发的，排队等于替用户把消息留到命令结束再发出去。
             if (this.stopEpoch !== stopEpochAtArrival) throw new StoppedBeforeDispatchError();
-            if (commandText && streamingBehavior === "followUp" && this.inner.isStreaming) {
+            if (commandText && streamingBehavior === "followUp" && (this.inner.isStreaming || this.awaitingAgentSettled || this.runningCommands.length > 0 || this.hasActiveParkedEntry())) {
               this.parkDuringCompaction({
                 message: command.message as string,
                 images: promptImages,
@@ -2699,6 +2775,22 @@ export class AgentSessionWrapper {
                 token: promptToken,
                 settle: finishPrompt,
               });
+              // 若等提交锁期间会话已变为空闲，主动补一次派发，让排在前面的项先走、本项紧随其后。
+              if (this.runningCommands.length === 0) this.flushParkedWhenIdle();
+              return { queued: true };
+            }
+            if (commandText && this.isSettlingAgentRun()) {
+              // SDK 正在等异步 `agent_settled` 钩子：此时调 `inner.prompt()` 会只登记延迟执行并立刻返回，
+              // 导致 wrapper 提前清除 `runningCommands`。由 wrapper 暂存并保留「引导」优先级，
+              // 等 `agent_settled` 到达后再真正派发并跟踪到处理器返回。
+              this.parkDuringCompaction({
+                message: command.message as string,
+                images: promptImages,
+                streamingBehavior,
+                command: true,
+                token: promptToken,
+                settle: finishPrompt,
+              }, { beforeFollowUp: true });
               return { queued: true };
             }
             // 扩展命令没有回合（`/review` 能跑几分钟），这期间发来的消息哪里都不该去：没有回合可
@@ -2706,10 +2798,13 @@ export class AgentSessionWrapper {
             // 两种情形都排进「等命令结束」的队列，命令返回时由 forgetRunningCommand 派发，
             // Stop / 移回照常可用。命令本身从不排队——`/review cancel` 必须立刻到达处理器。
             // 回合还在跑、队列里又有没派发的普通消息时，新提交也排到它们后面：直接进 pi 的队列
-            // 会被这一轮先消费，后发的 B 会先于仍在等待的 A（派发是 FIFO 的）。只在回合进行中
-            // 才这样排队：没有回合也没有命令时没有即将到来的派发点，排进去反而会一起卡住。
+            // 会被这一轮先消费，后发的 B 会先于仍在等待的 A（派发是 FIFO 的）。「后续」提交只要
+            // 前面还有任意未派发项也一律追加到队尾，防止等提交锁时抢在已排队项前面执行。
             if (!commandText
-              && (this.runningCommands.length > 0 || (this.inner.isStreaming && this.hasParkedUserMessage()))) {
+              && (this.runningCommands.length > 0
+                || this.isSettlingAgentRun()
+                || (streamingBehavior === "followUp" && this.hasActiveParkedEntry())
+                || ((this.inner.isStreaming || this.awaitingAgentSettled) && this.hasParkedUserMessage()))) {
               this.parkDuringCompaction({
                 message: command.message as string,
                 images: promptImages,
@@ -2717,7 +2812,8 @@ export class AgentSessionWrapper {
                 command: false,
                 token: promptToken,
                 settle: finishPrompt,
-              });
+              }, { beforeFollowUp: this.isSettlingAgentRun() && streamingBehavior !== "followUp" });
+              if (this.runningCommands.length === 0) this.flushParkedWhenIdle();
               return { queued: true };
             }
           } catch (error) {
