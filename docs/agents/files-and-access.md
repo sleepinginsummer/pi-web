@@ -18,7 +18,7 @@
 
 ## File access allow-list
 
-- 团队重建为新 Leader 写入带提交要求的会话。只有团队存储原子提交时一并写入的会话 ID 才能解锁这个会话的 cwd 与项目根授权。该凭据在 Leader 转成普通会话后继续有效。
+- 团队重建为新 Leader 写入带提交要求的会话。团队记录与会话 ID 一起原子提交后，在 `<agentDir>/pi-web-team-rebuild-commits/` 写入会话自己的凭据。授权检查只有核对到团队提交记录才会补写缺失的凭据。会话凭据在 Leader 转成普通会话或团队存储恢复为空后继续有效。
 - `/api/files` is not a general filesystem browser. Allowed roots: session cwds, their resolved project roots, and roots added with `allowFileRoot()`, which `/api/cwd/validate` and `/api/worktrees` call when they make a location browsable. "Use default directory" too: `/api/default-cwd` only creates `~/pi-cwd/YYYYMMDD`, and the sidebar selects it through `/api/cwd/validate`.
 - `isPathWithinRoots()` (`lib/path-security.ts`) is the single implementation behind `isFilePathAllowed()` and is the security boundary: keep it the only one. It re-resolves and case-folds both sides, so either path form authorizes; roots are stored slash-normalized only as a Set-key convention.
 - `isExistingPathWithinRoots()` refuses any path with a `..` segment (`hasParentDirectorySegment()`: authorization collapses `..` before following links, the filesystem after). Query-string and body paths reach that check verbatim. In `/api/files/[...path]` URL parsing drops literal `..` segments, and the route itself refuses an encoded slash inside a segment (`link%2F..%2Fx`), because a session-referenced file skips the existing-path check.

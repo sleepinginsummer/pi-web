@@ -7,6 +7,7 @@ import { llamaCppExtension } from "./pi-sdk-internals";
 import { projectTrustReloadOptions } from "./project-trust";
 import { writePrivateFileCreateAtomicSync } from "./atomic-file";
 import { allowFileRoot } from "./file-access";
+import { persistTeamRebuildSessionCommit } from "./team-rebuild-session-commit";
 import { getRpcSession, getRunningRpcSessionIds } from "./rpc-manager";
 import {
   getLatestModelChange,
@@ -378,6 +379,7 @@ export async function rebuildTeamWithCleanup(
             for (const rollback of rollbacks.reverse()) rollback();
             throw error;
           }
+          persistTeamRebuildSessionCommit(created.sessionId);
           allowFileRoot(created.cwd);
         });
       },

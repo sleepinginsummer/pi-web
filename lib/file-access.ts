@@ -1,6 +1,7 @@
 import { getAdditionalAllowedRoots, normalizeSlashes } from "./allowed-roots";
 import { isExistingPathWithinRoots, isPathWithinRoots } from "./path-security";
 import { listAllSessions } from "./session-reader";
+import { hasTeamRebuildSessionCommit, persistTeamRebuildSessionCommit } from "./team-rebuild-session-commit";
 import { readCommittedTeamRebuildSessions } from "./teams";
 export { allowFileRoot, normalizeSlashes } from "./allowed-roots";
 export { isWindowsAbsolutePath } from "./paths";
@@ -24,10 +25,11 @@ export async function getAllowedFileRoots(): Promise<Set<string>> {
   const roots = new Set<string>();
   let committedRebuilds: Set<string> | undefined;
   for (const s of sessions) {
-    // 另一进程可能已经看到会话文件，但团队原子写入是授权的提交点。
-    if (s.requiresTeamRebuildCommit) {
+    if (s.requiresTeamRebuildCommit && !hasTeamRebuildSessionCommit(s.id)) {
+      // 团队提交是授权的提交点，也能补写旧会话或提交后中断时缺失的凭据。
       committedRebuilds ??= readCommittedTeamRebuildSessions();
       if (!committedRebuilds.has(s.id)) continue;
+      persistTeamRebuildSessionCommit(s.id);
     }
     if (s.cwd) roots.add(normalizeSlashes(s.cwd));
     // The project root (main repo shared by all worktrees) is browsable too —
