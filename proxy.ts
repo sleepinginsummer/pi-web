@@ -18,6 +18,7 @@ const PUBLIC_PATHS = new Set([
   "/sw.js",
   "/offline.html",
   "/favicon.ico",
+  "/provider-icons.svg",
 ]);
 
 function isApiPath(pathname: string): boolean {

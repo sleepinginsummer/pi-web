@@ -159,3 +159,69 @@ test("会话记录了模型时在标题最前面渲染品牌图标，未记录�
 
   assert.equal(document.querySelector("[data-model-brand-icon]"), null);
 });
+
+test("品牌图标精灵表加载完成后，新挂载的会话行直接同步复用页内 symbol，不再重复请求", async () => {
+  const {
+    PROVIDER_ICON_SYMBOL_PREFIX,
+    ensureProviderIconSpriteLoaded,
+    resetProviderIconSpriteForTests,
+  } = await jiti.import("@/lib/provider-icon-sprite");
+  const originalFetch = globalThis.fetch;
+  const originalDOMParser = globalThis.DOMParser;
+  Object.defineProperty(globalThis, "DOMParser", { configurable: true, value: dom.window.DOMParser });
+  resetProviderIconSpriteForTests();
+
+  let fetchCount = 0;
+  globalThis.fetch = async (url) => {
+    if (String(url).startsWith("/provider-icons.svg")) {
+      fetchCount += 1;
+      return new Response(
+        '<svg xmlns="http://www.w3.org/2000/svg"><symbol id="openai" viewBox="0 0 24 24"><path d="M0 0h24v24H0z"/></symbol></svg>',
+        { status: 200, headers: { "Content-Type": "image/svg+xml" } },
+      );
+    }
+    return new Response("{}", { status: 404 });
+  };
+
+  try {
+    await ensureProviderIconSpriteLoaded();
+    assert.equal(fetchCount, 1);
+
+    // 模拟虚拟滚动先后挂载两行 OpenAI 会话
+    const first = render(React.createElement(
+      I18nProvider,
+      null,
+      React.createElement(SessionItem, {
+        session: { ...session, id: "openai-1", model: { provider: "openai", modelId: "gpt-5.2" } },
+        status: { isSelected: false, isRunning: false, isUnread: false, isPinned: false },
+        mobile: { enabled: false, swipeOpen: false, onSwipeOpenChange() {} },
+        actions: { onClick() {}, onTogglePinned() {} },
+      }),
+    ));
+    assert.equal(
+      first.container.querySelector('[data-model-brand-icon="openai"] use')?.getAttribute("href"),
+      `#${PROVIDER_ICON_SYMBOL_PREFIX}openai`,
+    );
+
+    const second = render(React.createElement(
+      I18nProvider,
+      null,
+      React.createElement(SessionItem, {
+        session: { ...session, id: "openai-2", model: { provider: "openai", modelId: "gpt-5.2-codex" } },
+        status: { isSelected: false, isRunning: false, isUnread: false, isPinned: false },
+        mobile: { enabled: false, swipeOpen: false, onSwipeOpenChange() {} },
+        actions: { onClick() {}, onTogglePinned() {} },
+      }),
+    ));
+    assert.equal(
+      second.container.querySelector('[data-model-brand-icon="openai"] use')?.getAttribute("href"),
+      `#${PROVIDER_ICON_SYMBOL_PREFIX}openai`,
+    );
+    assert.equal(fetchCount, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalDOMParser === undefined) delete globalThis.DOMParser;
+    else Object.defineProperty(globalThis, "DOMParser", { configurable: true, value: originalDOMParser });
+    resetProviderIconSpriteForTests();
+  }
+});

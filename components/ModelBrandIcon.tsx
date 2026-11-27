@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useSyncExternalStore, type CSSProperties } from "react";
+import { useProviderIconHref } from "@/hooks/useProviderIconHref";
 import {
   resolveModelBrandIcon,
   type CompiledModelBrandIcons,
@@ -69,6 +70,7 @@ export function ModelBrandIcon({
   const icon = resolved !== undefined
     ? resolved
     : resolveModelBrandIcon({ provider, providerName, modelId, name: resolvedName }, compiled);
+  const symbolHref = useProviderIconHref(icon?.symbol);
 
   if (!icon) return null;
 
@@ -100,7 +102,7 @@ export function ModelBrandIcon({
           fill={icon.color ? undefined : "currentColor"}
           style={{ display: "block", flexShrink: 0 }}
         >
-          <use href={`/provider-icons.svg#${icon.symbol}`} />
+          {symbolHref ? <use href={symbolHref} /> : null}
         </svg>
       </span>
     );

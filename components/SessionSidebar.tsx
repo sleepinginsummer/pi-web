@@ -28,6 +28,7 @@ import { TrashPanel } from "./TrashPanel";
 import { SessionSearch } from "./SessionSearch";
 import { TeamSidebarSection } from "./TeamSidebarSection";
 import type { Team } from "@/lib/team-types";
+import { ensureProviderIconSpriteLoaded } from "@/lib/provider-icon-sprite";
 
 // Fixed row height for the session list. SessionItem renders at exactly this
 // height, so the list can be windowed (only the visible slice is mounted).
@@ -512,6 +513,11 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
     };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
+  // 与会话列表并行预热品牌图标精灵表，首屏会话行挂载时即可同步复用页内符号。
+  useEffect(() => {
+    void ensureProviderIconSpriteLoaded();
   }, []);
 
   useEffect(() => {

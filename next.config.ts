@@ -96,6 +96,17 @@ const nextConfig: NextConfig = {
           { key: "Cache-Control", value: "public, max-age=0, must-revalidate" },
         ],
       },
+      {
+        source: "/provider-icons.svg",
+        headers: [
+          {
+            key: "Cache-Control",
+            value: process.env.NODE_ENV === "production"
+              ? "public, max-age=86400, stale-while-revalidate=604800"
+              : "public, max-age=0, must-revalidate",
+          },
+        ],
+      },
     ];
   },
   env: {

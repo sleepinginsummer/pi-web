@@ -1,3 +1,7 @@
+"use client";
+
+import { useProviderIconHref } from "@/hooks/useProviderIconHref";
+
 const PROVIDER_ICONS: Record<string, { symbol: string; color: boolean }> = {
   anthropic: { symbol: "anthropic", color: false },
   openai: { symbol: "openai", color: false },
@@ -47,6 +51,7 @@ const PROVIDER_ICONS: Record<string, { symbol: string; color: boolean }> = {
 
 export function ProviderIcon({ id, size }: { id: string; size: number }) {
   const icon = PROVIDER_ICONS[id];
+  const symbolHref = useProviderIconHref(icon?.symbol);
   if (icon) {
     return (
       <svg
@@ -57,7 +62,7 @@ export function ProviderIcon({ id, size }: { id: string; size: number }) {
         fill={icon.color ? undefined : "currentColor"}
         style={{ color: "var(--text-muted)", flexShrink: 0 }}
       >
-        <use href={`/provider-icons.svg#${icon.symbol}`} />
+        {symbolHref ? <use href={symbolHref} /> : null}
       </svg>
     );
   }

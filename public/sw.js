@@ -119,6 +119,7 @@ self.addEventListener("fetch", (event) => {
 
   const isStaticAsset =
     url.pathname.startsWith("/_next/static/") ||
+    url.pathname === "/provider-icons.svg" ||
     PRECACHE_URLS.includes(url.pathname);
 
   if (isStaticAsset) {

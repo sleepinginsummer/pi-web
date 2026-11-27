@@ -283,3 +283,27 @@ test("a response that arrives in time is not cut off mid-stream", async () => {
     mock.timers.reset();
   }
 });
+
+test("provider-icons.svg is served cache-first so brand icons do not revalidate on reload", async () => {
+  const cached = new Response("<svg><symbol id='openai'/></svg>", {
+    status: 200,
+    headers: { "Content-Type": "image/svg+xml" },
+  });
+  let cacheHits = 0;
+  globalThis.caches = {
+    match: async (request) => {
+      if (new URL(request.url).pathname === "/provider-icons.svg") {
+        cacheHits += 1;
+        return cached.clone();
+      }
+      return undefined;
+    },
+    open: async () => ({ put: async () => {} }),
+  };
+  globalThis.fetch = async () => assert.fail("cached provider-icons.svg should not hit the network");
+
+  const { pending } = dispatchFetch("https://pi.test/provider-icons.svg?v=0.17.0-merge.63");
+  const response = await pending;
+  assert.equal(cacheHits, 1);
+  assert.match(await response.text(), /symbol id='openai'/);
+});
