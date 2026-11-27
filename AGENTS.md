@@ -15,7 +15,7 @@ Lint: `npm run lint`
 - 代码天然分开：正式服务只跑 `~/.local/share/pi-web-runtime/current -> releases/<version>/node_modules/@agegr/pi-web`，本仓库只是源码目录，两者没有软链或 npm link。
 - 用户数据默认共用 `~/.pi/agent`（会话、登录、模型、扩展、侧栏项目）。开发检出通过 `.env.local` 的 `PI_CODING_AGENT_DIR=~/.pi-dev/agent` 使用独立副本，端口仍是 30141；正式服务由 `service.env` 启动、监听 8081。`.env.local` 在 `.gitignore` 里，发布包的 `files` 也不含它。
 - 会话文件格式只向前兼容：新版开发版改写过的会话，旧版正式版可能读不了。要让开发版碰正式会话，先复制到 `~/.pi-dev/agent/sessions` 再打开，不要两边同时打开同一个 `.jsonl`（会触发 `409 session_external_write`）。
-- `scripts/macos-service.sh` 的 `assert_installed_package()` 拒绝在 git 检出里 `start`/`restart`：校验在 `stop` 之前执行，所以误执行不会先停掉正式进程。安装包里的同一文件逐字相同，靠是否存在 `.git` 区分。
+- `scripts/macos-service.sh` 的 `assert_installed_package()` 拒绝在 git 检出里 `start`/`restart`：校验在 `stop` 之前执行，所以误执行不会先停掉正式进程。`restart` 在 `stop_service` 之前还要过 `preflight_start`（构建产物、`service.env`、密码、解析 node）：`launchctl submit` 的作业只有 `/usr/bin:/bin:/usr/sbin:/sbin`，缺 node 时若先停机再失败，一次失败的更新就会连带停掉健康实例。安装包里的同一文件逐字相同，靠是否存在 `.git` 区分。
 
 ### Dev server troubleshooting
 

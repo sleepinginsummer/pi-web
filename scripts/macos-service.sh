@@ -53,9 +53,31 @@ stop_service() {
   return 1
 }
 
-start_service() {
+# start / restart 共用的启动预检：先确认这次真的能启动，再去动正在跑的服务。
+# restart 若先 stop 再发现 node 或配置缺失，用户就会失去一个本来健康的实例。
+preflight_start() {
   [ -f "$PACKAGE_ROOT/.next/BUILD_ID" ] || { echo "安装包缺少构建产物。" >&2; return 1; }
   [ -f "$SERVICE_CONFIG" ] || { echo "请先创建 ${SERVICE_CONFIG}。" >&2; return 1; }
+
+  # 配置来自用户自己的私有文件；保持登录密码、代理与允许域名在运行时设置。
+  set -a
+  source "$SERVICE_CONFIG"
+  set +a
+  [ -n "${PI_WEB_PASSWORD:-}" ] || { echo "service.env 中 PI_WEB_PASSWORD 不能为空。" >&2; return 1; }
+
+  # 找不到 node 也要说清楚：service.env 可以自定义 PATH，所以要在 source 之后再解析；
+  # launchctl submit 的作业只有 /usr/bin:/bin:/usr/sbin:/sbin，裸赋值在 `set -e` 下会静默退出 1，
+  # 调用方（更新脚本、回滚）只看到"启动失败"却没有任何原因。
+  NODE_BINARY=$(command -v node) || {
+    echo "PATH 中找不到 node（当前 PATH：$PATH）。" >&2
+    echo "请从带 node 的环境执行，或把 node 所在目录加入 PATH。" >&2
+    return 1
+  }
+}
+
+# 前置条件：调用方（start / restart）已经跑过 preflight_start，配置与 node 都已就绪。
+# 这里只做端口、注册和健康检查，不再重新解析配置。
+start_service() {
   if launchctl list "$SERVICE_LABEL" >/dev/null 2>&1; then
     echo "pi-web 作业已存在；需要重新加载版本或配置时请使用 restart。" >&2
     return 1
@@ -65,14 +87,6 @@ start_service() {
     lsof -nP -iTCP:"$SERVICE_PORT" -sTCP:LISTEN >&2 || true
     return 1
   fi
-
-  # 配置来自用户自己的私有文件；保持登录密码、代理与允许域名在运行时设置。
-  set -a
-  source "$SERVICE_CONFIG"
-  set +a
-  [ -n "${PI_WEB_PASSWORD:-}" ] || { echo "service.env 中 PI_WEB_PASSWORD 不能为空。" >&2; return 1; }
-  local node_binary
-  node_binary=$(command -v node)
   mkdir -p "$RUNTIME_ROOT"
   if [ -s "$SERVICE_LOG" ]; then mv -f "$SERVICE_LOG" "$SERVICE_LOG.1"; fi
 
@@ -82,7 +96,7 @@ start_service() {
     printf 'export PATH=%q\n' "$HOME/.local/bin:$PATH"
     printf 'set -a\nsource %q\nset +a\n' "$SERVICE_CONFIG"
     printf 'cd %q\n' "$PACKAGE_ROOT"
-    printf 'exec %q %q -H 0.0.0.0 -p %q --no-open\n' "$node_binary" "$PACKAGE_ROOT/bin/pi-web.js" "$SERVICE_PORT"
+    printf 'exec %q %q -H 0.0.0.0 -p %q --no-open\n' "$NODE_BINARY" "$PACKAGE_ROOT/bin/pi-web.js" "$SERVICE_PORT"
   } > "$RUNTIME_ROOT/run.sh"
   chmod 700 "$RUNTIME_ROOT/run.sh"
   launchctl submit -l "$SERVICE_LABEL" -o "$SERVICE_LOG" -e "$SERVICE_LOG" -- /bin/bash "$RUNTIME_ROOT/run.sh"
@@ -96,7 +110,7 @@ start_service() {
       -H "Host: $health_host" "http://127.0.0.1:$SERVICE_PORT/login"; then
       printf '%s\n' "$service_pid" > "$RUNTIME_ROOT/prod.pid"
       echo "pi-web 已启动，监听 PID：${service_pid}，端口：${SERVICE_PORT}"
-      "$node_binary" -p "require(process.argv[1]).version" "$PACKAGE_ROOT/package.json"
+      "$NODE_BINARY" -p "require(process.argv[1]).version" "$PACKAGE_ROOT/package.json"
       echo "日志：$SERVICE_LOG"
       return 0
     fi
@@ -109,9 +123,10 @@ start_service() {
 
 case "$ACTION" in
   # 校验必须在 stop 之前：否则 restart 会先停掉正式进程再因为不是发布包而失败。
-  start) assert_installed_package; start_service ;;
+  # 启动预检（配置、密码、node）同理：精简 PATH 下缺 node 时，重启不能先把健康实例停掉。
+  start) assert_installed_package; preflight_start; start_service ;;
   stop) stop_service ;;
-  restart) assert_installed_package; stop_service; start_service ;;
+  restart) assert_installed_package; preflight_start; stop_service; start_service ;;
   status)
     if launchctl list "$SERVICE_LABEL" >/dev/null 2>&1; then
       echo "launchctl 作业已注册。"
