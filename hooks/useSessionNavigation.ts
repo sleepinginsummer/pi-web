@@ -16,6 +16,7 @@ import {
   type PendingNewSessionEvent,
 } from "@/lib/pending-new-session";
 import type { SessionInfo } from "@/lib/types";
+import { portablePathIdentity } from "@/lib/path-equality";
 
 interface UseSessionNavigationOptions {
   initialSessionId: string | null;
@@ -23,9 +24,10 @@ interface UseSessionNavigationOptions {
   onMobileSelect: () => void;
   onRefresh: () => void;
   resetSessionViews: () => void;
+  onAutoTopPinSession?: (sessionId: string) => void;
 }
 
-export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelect, onRefresh, resetSessionViews }: UseSessionNavigationOptions) {
+export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelect, onRefresh, resetSessionViews, onAutoTopPinSession }: UseSessionNavigationOptions) {
   const router = useRouter();
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
   // DELETE 可能在用户切走后才完成；回调需读取最新选择，而非点击删除时捕获的旧值。
@@ -44,6 +46,10 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
   const activeWorkspaceKeyRef = useRef<string | null>(null);
   const workspaceRestoreTokenRef = useRef(0);
   const suppressCwdBumpRef = useRef(false);
+  // 草稿级、已启动在途、已绑定 sessionId 三段隔离，防止并发普通新建清除正在创建的置顶意图。
+  const draftAutoTopPinCwdsRef = useRef<Set<string>>(new Set());
+  const inFlightAutoTopPinCwdsRef = useRef<Map<string, { restoreDraftOnFail: boolean }>>(new Map());
+  const autoTopPinSessionIdsRef = useRef<Set<string>>(new Set());
 
   // 导航事件先同步推进代次，再等待 React 提交新界面。旧 ChatWindow 即使仍处于事件队列中，
   // 也会在真正提交消息前发现自己已经失效。
@@ -120,7 +126,15 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
     invalidateNotificationNavigation();
     applySessionSelection(session, isRestore);
   }, [applySessionSelection, invalidateNotificationNavigation, invalidateWorkspaceRestore]);
-  const newSession = useCallback((_sessionId: string, cwd: string) => {
+  const newSession = useCallback((_sessionId: string, cwd: string, options?: { topPinOnCreate?: boolean }) => {
+    const pathKey = portablePathIdentity(cwd);
+    if (options?.topPinOnCreate) {
+      draftAutoTopPinCwdsRef.current.add(pathKey);
+    } else {
+      draftAutoTopPinCwdsRef.current.delete(pathKey);
+      const inFlight = inFlightAutoTopPinCwdsRef.current.get(pathKey);
+      if (inFlight) inFlight.restoreDraftOnFail = false;
+    }
     invalidateWorkspaceRestore();
     invalidateNotificationNavigation();
     activeSessionIdRef.current = null;
@@ -140,6 +154,14 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
     window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
   }, [bumpSessionKey, invalidateNotificationNavigation, invalidateWorkspaceRestore, isMobile, onMobileSelect, pendingNewSessions, resetSessionViews]);
 
+  const consumeAutoTopPin = useCallback((session: SessionInfo) => {
+    const pathKey = portablePathIdentity(session.cwd);
+    const shouldPin = autoTopPinSessionIdsRef.current.delete(session.id)
+      || inFlightAutoTopPinCwdsRef.current.delete(pathKey)
+      || draftAutoTopPinCwdsRef.current.delete(pathKey);
+    if (!shouldPin) return;
+    onAutoTopPinSession?.(session.id);
+  }, [onAutoTopPinSession]);
   const sessionCreated = useCallback((session: SessionInfo, options?: { preserveDraft?: boolean }) => {
     invalidateWorkspaceRestore();
     invalidateNotificationNavigation();
@@ -155,13 +177,14 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
       return next;
     });
     clearPendingNewSessionControl(session.cwd);
+    consumeAutoTopPin(session);
     setSelectedSession(session);
     requestSidebarLocate(session.id);
     setTabOpenSession(session.id);
     onRefresh();
     hydrateSelectedSession(session.id);
     replaceSessionUrl(session.id);
-  }, [hydrateSelectedSession, invalidateNotificationNavigation, invalidateWorkspaceRestore, onRefresh, requestSidebarLocate]);
+  }, [consumeAutoTopPin, hydrateSelectedSession, invalidateNotificationNavigation, invalidateWorkspaceRestore, onRefresh, requestSidebarLocate]);
 
   /** 发送途中用户已切走：只收尾和刷新侧栏；如果又回到了这个目录的新会话页，才进入该会话。 */
   const sessionCreatedInBackground = useCallback((session: SessionInfo) => {
@@ -173,13 +196,14 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
       return next;
     });
     clearPendingNewSessionControl(session.cwd);
+    consumeAutoTopPin(session);
     onRefresh();
     if (newSessionCwdRef.current !== session.cwd || activeSessionIdRef.current !== null) return;
     invalidateWorkspaceRestore();
     invalidateNotificationNavigation();
     applySessionSelection(session);
     hydrateSelectedSession(session.id);
-  }, [applySessionSelection, hydrateSelectedSession, invalidateNotificationNavigation, invalidateWorkspaceRestore, onRefresh]);
+  }, [applySessionSelection, consumeAutoTopPin, hydrateSelectedSession, invalidateNotificationNavigation, invalidateWorkspaceRestore, onRefresh]);
 
   const sessionForked = useCallback((newSessionId: string) => {
     invalidateWorkspaceRestore();
@@ -218,6 +242,25 @@ export function useSessionNavigation({ initialSessionId, isMobile, onMobileSelec
     // 等着，它读不到 state；而 state 的提交时机不确定，切模任务结算与它同在一个微任务链里，
     // 按 state 归约可能接在还没提交的上一份后面。镜像同步推进，两边读到的是同一份。
     const previous = latestPendingNewSessionControl(cwd) ?? DEFAULT_PENDING_NEW_SESSION_CONTROL;
+    const pathKey = portablePathIdentity(cwd);
+    if (event.type === "START") {
+      if (draftAutoTopPinCwdsRef.current.delete(pathKey)) {
+        inFlightAutoTopPinCwdsRef.current.set(pathKey, { restoreDraftOnFail: true });
+      }
+    } else if (event.type === "RUNTIME_CREATED") {
+      if (inFlightAutoTopPinCwdsRef.current.delete(pathKey) || draftAutoTopPinCwdsRef.current.delete(pathKey)) {
+        autoTopPinSessionIdsRef.current.add(event.sessionId);
+      }
+    } else if (event.type === "REQUEST_FAIL") {
+      const inFlight = inFlightAutoTopPinCwdsRef.current.get(pathKey);
+      if (inFlight) {
+        inFlightAutoTopPinCwdsRef.current.delete(pathKey);
+        if (inFlight.restoreDraftOnFail) draftAutoTopPinCwdsRef.current.add(pathKey);
+      }
+    } else if (event.type === "DISCARD") {
+      inFlightAutoTopPinCwdsRef.current.delete(pathKey);
+      if ("sessionId" in previous) autoTopPinSessionIdsRef.current.delete(previous.sessionId);
+    }
     const control = reducePendingNewSession(previous, event);
     mirrorPendingNewSessionControl(cwd, control);
     if (control === previous) return;

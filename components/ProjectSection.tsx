@@ -215,11 +215,15 @@ export function PinnedSessionsSection({
   sessions,
   sessionOrder,
   treeProps,
+  onNewSession,
+  formatNewSessionLabel,
 }: {
   title: string;
   sessions: SessionInfo[];
   sessionOrder: string[];
   treeProps: SessionTreeSharedProps;
+  onNewSession?: (path: string) => void;
+  formatNewSessionLabel?: (name: string) => string;
 }) {
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
   const handledGroupLocateRevisionRef = useRef(0);
@@ -259,6 +263,8 @@ export function PinnedSessionsSection({
           key={group.identity}
           group={group}
           treeProps={treeProps}
+          onNewSession={onNewSession}
+          formatNewSessionLabel={formatNewSessionLabel}
           layoutVersion={collapsedGroups}
           collapsed={collapsedGroups.has(group.identity)}
           onToggleGroup={(identity) => setCollapsedGroups((current) => {
@@ -276,12 +282,16 @@ export function PinnedSessionsSection({
 function PinnedProjectGroupSection({
   group,
   treeProps,
+  onNewSession,
+  formatNewSessionLabel,
   layoutVersion,
   collapsed,
   onToggleGroup,
 }: {
   group: PinnedProjectGroup;
   treeProps: SessionTreeSharedProps;
+  onNewSession?: (path: string) => void;
+  formatNewSessionLabel?: (name: string) => string;
   layoutVersion: ReadonlySet<string>;
   collapsed: boolean;
   onToggleGroup: (identity: string) => void;
@@ -313,36 +323,75 @@ function PinnedProjectGroupSection({
   return (
     <div data-pinned-group={group.path || undefined}>
       {group.path !== "" && (
-        <button
-          type="button"
-          onClick={() => onToggleGroup(group.identity)}
-          title={group.path}
-          aria-expanded={!collapsed}
+        <div
           style={{
             display: "flex",
             alignItems: "center",
-            gap: 7,
-            width: "100%",
-            height: 30,
-            padding: "0 6px",
-            border: 0,
+            minHeight: 30,
             borderRadius: 6,
-            background: "transparent",
-            color: "var(--text-muted)",
-            cursor: "pointer",
-            textAlign: "left",
           }}
         >
-          <ChevronRight
-            size={12}
-            strokeWidth={2.2}
-            aria-hidden="true"
-            style={{ flexShrink: 0, transform: collapsed ? "none" : "rotate(90deg)", transition: "transform 120ms ease" }}
-          />
-          <ProjectMark path={group.path} name={group.name} size={16} />
-          <span data-pinned-group-name style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12, fontWeight: 600 }}>{group.name}</span>
-          <span data-pinned-group-count style={{ flexShrink: 0, color: "var(--text-dim)", fontSize: 11, fontWeight: 500 }}>{group.tree.length}</span>
-        </button>
+          <button
+            type="button"
+            onClick={() => onToggleGroup(group.identity)}
+            title={group.path}
+            aria-expanded={!collapsed}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 7,
+              flex: 1,
+              minWidth: 0,
+              height: 30,
+              padding: "0 4px 0 6px",
+              border: 0,
+              borderRadius: 6,
+              background: "transparent",
+              color: "var(--text-muted)",
+              cursor: "pointer",
+              textAlign: "left",
+            }}
+          >
+            <ChevronRight
+              size={12}
+              strokeWidth={2.2}
+              aria-hidden="true"
+              style={{ flexShrink: 0, transform: collapsed ? "none" : "rotate(90deg)", transition: "transform 120ms ease" }}
+            />
+            <ProjectMark path={group.path} name={group.name} size={16} />
+            <span data-pinned-group-name style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12, fontWeight: 600 }}>{group.name}</span>
+            <span data-pinned-group-count style={{ flexShrink: 0, color: "var(--text-dim)", fontSize: 11, fontWeight: 500 }}>{group.tree.length}</span>
+          </button>
+          {onNewSession && (
+            <button
+              type="button"
+              data-pinned-group-new-session
+              onClick={() => onNewSession(group.path)}
+              title={formatNewSessionLabel ? formatNewSessionLabel(group.name) : group.name}
+              aria-label={formatNewSessionLabel ? formatNewSessionLabel(group.name) : group.name}
+              style={{
+                width: 26,
+                height: 26,
+                padding: 0,
+                marginRight: 2,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                border: 0,
+                borderRadius: 5,
+                background: "transparent",
+                color: "var(--text-dim)",
+                cursor: "pointer",
+                flexShrink: 0,
+              }}
+            >
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
+                <line x1="6" y1="1" x2="6" y2="11" />
+                <line x1="1" y1="6" x2="11" y2="6" />
+              </svg>
+            </button>
+          )}
+        </div>
       )}
       {!collapsed && (
         <div style={{ paddingLeft: group.path === "" ? 0 : 16 }}>
@@ -357,6 +406,8 @@ function PinnedProjectGroupSection({
               key={worktree.identity}
               group={worktree}
               treeProps={treeProps}
+              onNewSession={onNewSession}
+              formatNewSessionLabel={formatNewSessionLabel}
               layoutVersion={layoutVersion}
               collapsed={layoutVersion.has(worktree.identity)}
               onToggleGroup={onToggleGroup}

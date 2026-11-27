@@ -130,7 +130,9 @@ interface Props {
   selectedSession?: SessionInfo | null;
   onSelectSession: (session: SessionInfo, isRestore?: boolean, entryId?: string, blockIndex?: number) => void;
   onSelectSideChat: (session: SessionInfo, entryId?: string, blockIndex?: number) => void;
-  onNewSession?: (sessionId: string, cwd: string) => void;
+  onNewSession?: (sessionId: string, cwd: string, options?: { topPinOnCreate?: boolean }) => void;
+  autoTopPinSessionIds?: readonly string[];
+  onConsumeAutoTopPinSessions?: (sessionIds: readonly string[]) => void;
   initialSessionId?: string | null;
   skipInitialProjectSelection?: boolean;
   onInitialRestoreDone?: () => void;
@@ -297,7 +299,7 @@ function PiWebTitle() {
 }
 const EMPTY_SESSION_ID_SET: ReadonlySet<string> = new Set();
 
-export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, selectedSession, onSelectSession, onSelectSideChat, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, runningSessionIds, awaitingInputSessionIds = EMPTY_SESSION_ID_SET, backgroundActivity, startingSessions, runningSessionTransitions, readAt, getUnreadMarkTime, locateSessionRequest, selectedCwd: selectedCwdProp, onCwdChange, worktreeState = null, onOpenFile, onOpenTerminal, onOpenTeamBoard, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onSessionsChange }: Props) {
+export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, selectedSession, onSelectSession, onSelectSideChat, onNewSession, autoTopPinSessionIds, onConsumeAutoTopPinSessions, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, runningSessionIds, awaitingInputSessionIds = EMPTY_SESSION_ID_SET, backgroundActivity, startingSessions, runningSessionTransitions, readAt, getUnreadMarkTime, locateSessionRequest, selectedCwd: selectedCwdProp, onCwdChange, worktreeState = null, onOpenFile, onOpenTerminal, onOpenTeamBoard, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onSessionsChange }: Props) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
   const {
@@ -311,13 +313,13 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
   const {
     sessionOrder,
     pinnedSessionIds: pinnedIds,
-    topPinnedSessionIds,
-    topPinnedSessionIdSet,
+    rawTopPinnedSessionIds,
     sessionPinColors,
     getProjectOrder,
     moveSession,
     toggleSessionPinned: togglePinned,
     toggleSessionTopPinned,
+    setSessionTopPinned,
     moveTopPinnedSession,
     setSessionPinColor,
     moveProject,
@@ -325,6 +327,13 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
     addProject,
     removeProject,
   } = useSidebarNavigation(allSessions, !loading && !error);
+  useEffect(() => {
+    if (!autoTopPinSessionIds || autoTopPinSessionIds.length === 0) return;
+    for (const sessionId of autoTopPinSessionIds) {
+      setSessionTopPinned(sessionId, true);
+    }
+    onConsumeAutoTopPinSessions?.(autoTopPinSessionIds);
+  }, [autoTopPinSessionIds, onConsumeAutoTopPinSessions, setSessionTopPinned]);
   const [selectedCwd, setSelectedCwd] = useState<string | null>(null);
   const [teams, setTeams] = useState<Team[]>([]);
   const loadTeams = useCallback(async () => {
@@ -699,9 +708,9 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
     onSelectSession(s, false, entryId, blockIndex);
   }, [onSelectSession, selectedSessionId]);
 
-  const handleNewSession = useCallback((cwd: string) => {
+  const handleNewSession = useCallback((cwd: string, options?: { topPinOnCreate?: boolean }) => {
     setSelectedCwd(cwd);
-    onNewSession?.(cwd, cwd);
+    onNewSession?.(cwd, cwd, options);
   }, [onNewSession]);
 
   const visibleSessions = useMemo(
@@ -715,9 +724,18 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
     () => reconcileSessionPreferenceOrder(visibleSessions, sessionOrder),
     [sessionOrder, visibleSessions],
   );
+  // 新建置顶会话在列表接口收录前也要归入置顶区，避免先闪到普通项目列表。
+  const visibleTopPinnedSessionIds = useMemo(() => {
+    const existing = new Set(visibleSessions.map((session) => session.id));
+    return rawTopPinnedSessionIds.filter((id) => existing.has(id));
+  }, [rawTopPinnedSessionIds, visibleSessions]);
+  const visibleTopPinnedSessionIdSet = useMemo(
+    () => new Set(visibleTopPinnedSessionIds),
+    [visibleTopPinnedSessionIds],
+  );
   const topPinnedSectionIds = useMemo(
-    () => collectTopPinnedSessionIds(visibleSessions, topPinnedSessionIdSet),
-    [topPinnedSessionIdSet, visibleSessions],
+    () => collectTopPinnedSessionIds(visibleSessions, visibleTopPinnedSessionIdSet),
+    [visibleTopPinnedSessionIdSet, visibleSessions],
   );
   const topPinnedSessions = useMemo(
     () => (topPinnedSectionIds.size > 0 ? visibleSessions.filter((session) => topPinnedSectionIds.has(session.id)) : []),
@@ -984,7 +1002,7 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
             startingSessions,
             unreadSessionIds,
             pinnedSessionIds: pinnedIds,
-            topPinnedSessionIds: topPinnedSessionIdSet,
+            topPinnedSessionIds: visibleTopPinnedSessionIdSet,
             sessionPinColors,
             locateSessionRequest,
             isMobile,
@@ -1104,7 +1122,9 @@ export function SessionSidebar({ hiddenFinishedSessionIds, selectedSessionId, se
               <PinnedSessionsSection
                 title={t("sidebar.pinned")}
                 sessions={topPinnedSessions}
-                sessionOrder={topPinnedSessionIds}
+                sessionOrder={visibleTopPinnedSessionIds}
+                onNewSession={(path) => handleNewSession(path, { topPinOnCreate: true })}
+                formatNewSessionLabel={(name) => t("sidebar.newPinnedSessionInProject", { name })}
                 treeProps={{
                   ...sharedTreeProps,
                   onMoveSession: moveTopPinnedSession,

@@ -36,3 +36,9 @@ test("旧浏览器偏好只在服务端迁移未完成时提交", () => {
   assert.match(source, /if \(snapshot\.legacyMigrationCompleted\) clearLegacySidebarPreferences\(\)/);
   assert.match(source, /operationChainRef\.current = operationChainRef\.current\.then\(loadAndMigrate\)/);
 });
+
+test("toggleSessionTopPinned 读取最新偏好 ref，未进列表的新置顶会话也可立即取消置顶", () => {
+  assert.match(source, /const isTopPinned = preferencesRef\.current\.topPinnedSessionIds\.includes\(sessionId\);/);
+  assert.match(source, /enqueue\(\{ type: "set_session_top_pinned", sessionId, topPinned: !isTopPinned \}\);/);
+  assert.doesNotMatch(source, /!topPinnedSessionIdSet\.has\(sessionId\)/);
+});

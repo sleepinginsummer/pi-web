@@ -873,6 +873,7 @@ export const enLocale: LocalePlugin = {
     "sidebar.showLess": "Show less",
     "sidebar.openOtherProject": "Open another project…",
     "sidebar.newSessionInProject": "New session in {name}",
+    "sidebar.newPinnedSessionInProject": "New pinned session in {name}",
     "sidebar.projectActions": "{name} actions",
     "sidebar.archiveOlderThanWeek": "Archive sessions older than 7 days · {count}",
     "sidebar.openInFilesTab": "Open in Files",

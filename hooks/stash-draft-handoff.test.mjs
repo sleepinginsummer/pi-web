@@ -41,6 +41,8 @@ for (const edited of [false, true]) test(`前台暂存首发${edited ? "保留�
     releaseNewSessionMaterialization: noOp, setNewSessionCwd: noOp, setPendingNewSessions: noOp,
     clearPendingNewSessionControl: noOp, setSelectedSession: noOp, requestSidebarLocate: noOp,
     setTabOpenSession: noOp, onRefresh: noOp, hydrateSelectedSession: noOp, replaceSessionUrl: noOp,
+    // sessionCreated 会顺带消费「新建即置顶」的待办；本用例只关心草稿交接，桩掉即可。
+    consumeAutoTopPin: noOp,
     onSessionCreatedInBackground: () => assert.fail("前台确认不应走后台"),
   });
   const prepareNode = find(asts[2], node => ts.isMethodDeclaration(node) && node.name.getText(asts[2]) === "prepareDraftKeyChange");

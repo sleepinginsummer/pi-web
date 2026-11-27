@@ -666,3 +666,35 @@ test("Windows 当前 worktree 收起父组后再次定位，按等价路径展�
   fireEvent.click(screen.getByText("Locate worktree"));
   assert.equal(screen.getByTitle(groups[0].path).getAttribute("aria-expanded"), "true");
 });
+
+test("PinnedSessionsSection 置顶分组与 worktree 子分组支持直接新建会话且不触发折叠", () => {
+  const main = { id: "s-main", path: "/s/main.jsonl", cwd: "/repo", projectRoot: "/repo", isWorktree: false, created: "", modified: "2026-04-01T00:00:00Z", messageCount: 1, firstMessage: "主仓库" };
+  const wt = { id: "s-wt", path: "/s/wt.jsonl", cwd: "/repo-worktrees/feat", projectRoot: "/repo", isWorktree: true, created: "", modified: "2026-04-02T00:00:00Z", messageCount: 1, firstMessage: "分支" };
+  const createdCwds = [];
+  const treeProps = {
+    ...createProps().treeProps,
+    topPinnedSessionIds: new Set(["s-main", "s-wt"]),
+    resolveProject: (session) => ({ name: session.cwd.split("/").pop(), path: session.cwd }),
+  };
+
+  render(React.createElement(I18nProvider, null, React.createElement(PinnedSessionsSection, {
+    title: "置顶",
+    sessions: [main, wt],
+    sessionOrder: ["s-main", "s-wt"],
+    onNewSession: (path) => createdCwds.push(path),
+    formatNewSessionLabel: (name) => `在 ${name} 新建置顶会话`,
+    treeProps,
+  })));
+
+  const mainToggle = screen.getByTitle("/repo");
+  const wtToggle = screen.getByTitle("/repo-worktrees/feat");
+  const mainNewBtn = screen.getByRole("button", { name: "在 repo 新建置顶会话" });
+  const wtNewBtn = screen.getByRole("button", { name: "在 feat 新建置顶会话" });
+
+  fireEvent.click(mainNewBtn);
+  fireEvent.click(wtNewBtn);
+
+  assert.deepEqual(createdCwds, ["/repo", "/repo-worktrees/feat"]);
+  assert.equal(mainToggle.getAttribute("aria-expanded"), "true");
+  assert.equal(wtToggle.getAttribute("aria-expanded"), "true");
+});

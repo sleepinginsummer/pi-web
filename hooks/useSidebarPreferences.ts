@@ -148,8 +148,13 @@ export function useSidebarPreferences(sessions: SessionInfo[], sessionsReady: bo
   }, [enqueue, pinnedSessionIds]);
 
   const toggleSessionTopPinned = useCallback((sessionId: string) => {
-    enqueue({ type: "set_session_top_pinned", sessionId, topPinned: !topPinnedSessionIdSet.has(sessionId) });
-  }, [enqueue, topPinnedSessionIdSet]);
+    const isTopPinned = preferencesRef.current.topPinnedSessionIds.includes(sessionId);
+    enqueue({ type: "set_session_top_pinned", sessionId, topPinned: !isTopPinned });
+  }, [enqueue]);
+
+  const setSessionTopPinned = useCallback((sessionId: string, topPinned: boolean) => {
+    enqueue({ type: "set_session_top_pinned", sessionId, topPinned });
+  }, [enqueue]);
 
   const moveTopPinnedSession = useCallback((source: string, target: string) => {
     enqueue({ type: "move_top_pinned_session", source, target, visibleIds: topPinnedSessionIds });
@@ -182,12 +187,14 @@ export function useSidebarPreferences(sessions: SessionInfo[], sessionsReady: bo
     sessionOrder,
     pinnedSessionIds,
     topPinnedSessionIds,
+    rawTopPinnedSessionIds: preferences.topPinnedSessionIds,
     topPinnedSessionIdSet,
     sessionPinColors,
     getProjectOrder,
     moveSession,
     toggleSessionPinned,
     toggleSessionTopPinned,
+    setSessionTopPinned,
     moveTopPinnedSession,
     setSessionPinColor,
     moveProject,

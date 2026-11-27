@@ -419,6 +419,15 @@ export function AppShell() {
     updateStatsTitle,
   } = useSessionPresentation({ closeTopPanel });
   const refreshSessions = useCallback(() => setRefreshKey((key) => key + 1), []);
+  const [autoTopPinSessionIds, setAutoTopPinSessionIds] = useState<string[]>([]);
+  const handleAutoTopPinSession = useCallback((sessionId: string) => {
+    setAutoTopPinSessionIds((current) => (current.includes(sessionId) ? current : [...current, sessionId]));
+  }, []);
+  const handleConsumeAutoTopPinSessions = useCallback((sessionIds: readonly string[]) => {
+    if (sessionIds.length === 0) return;
+    const consumed = new Set(sessionIds);
+    setAutoTopPinSessionIds((current) => current.filter((id) => !consumed.has(id)));
+  }, []);
   const {
     applyGeneratedTitle,
     beginInitialCwd,
@@ -451,6 +460,7 @@ export function AppShell() {
     onMobileSelect: closeMobileSidebar,
     onRefresh: refreshSessions,
     resetSessionViews,
+    onAutoTopPinSession: handleAutoTopPinSession,
   });
   // 会话记忆只在挂载后读取，避免 SSR 和客户端首帧因 sessionStorage 不同而水合失败。
   useLayoutEffect(() => {
@@ -1079,6 +1089,8 @@ export function AppShell() {
         onSelectSession={handleSidebarSelectSession}
         onSelectSideChat={handleSelectSideChat}
         onNewSession={handleNewSession}
+        autoTopPinSessionIds={autoTopPinSessionIds}
+        onConsumeAutoTopPinSessions={handleConsumeAutoTopPinSessions}
         initialSessionId={initialNavigation.sessionId}
         skipInitialProjectSelection={initialNavigation.requestedCwd !== null}
         onInitialRestoreDone={handleInitialRestoreDone}

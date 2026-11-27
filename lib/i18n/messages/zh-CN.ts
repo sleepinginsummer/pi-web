@@ -875,6 +875,7 @@ export const zhCNLocale: LocalePlugin = {
     "sidebar.showLess": "收起",
     "sidebar.openOtherProject": "打开其他项目…",
     "sidebar.newSessionInProject": "在 {name} 新建会话",
+    "sidebar.newPinnedSessionInProject": "在 {name} 新建置顶会话",
     "sidebar.projectActions": "{name} 的操作",
     "sidebar.archiveOlderThanWeek": "归档 7 天前的会话 · {count}",
     "sidebar.openInFilesTab": "在文件中打开",
